@@ -39,16 +39,47 @@ pub enum FlowStopMode {
     Graceful { timeout: Duration },
 }
 
-/// Pipeline stop intent.
-///
-/// This is an internal representation of externally-requested stop state that
-/// accompanies the pipeline FSM.
-#[derive(Clone, Debug, Default)]
+/// Runtime's admitted stop state. This is a live observation, not a journal fact
+/// or an acknowledgement that a queued request has been admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FlowStopStatus {
+    NotRequested,
+    Graceful {
+        deadline: std::time::Instant,
+    },
+    Cancelling {
+        admitted_at: std::time::Instant,
+        cause: FlowCancelCause,
+        graceful_deadline: Option<std::time::Instant>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlowCancelCause {
+    Requested,
+    GracefulTimeout,
+}
+
+/// The single reducer for handle requests, raw events and Runtime timeouts.
+#[derive(Clone, Debug)]
 pub(crate) struct StopIntent {
     pub(crate) requested: bool,
     pub(crate) mode: Option<FlowStopMode>,
     pub(crate) reason: Option<String>,
     pub(crate) deadline: Option<std::time::Instant>,
+    status: tokio::sync::watch::Sender<FlowStopStatus>,
+}
+
+impl Default for StopIntent {
+    fn default() -> Self {
+        Self {
+            requested: false,
+            mode: None,
+            reason: None,
+            deadline: None,
+            status: tokio::sync::watch::channel(FlowStopStatus::NotRequested).0,
+        }
+    }
 }
 
 pub(crate) enum StopRequestOutcome {
@@ -56,54 +87,81 @@ pub(crate) enum StopRequestOutcome {
         mode: FlowStopMode,
         reason_label: String,
     },
-    IgnoredAlreadyCancelled,
+    Ignored,
 }
 
 impl StopIntent {
+    pub(crate) fn status_receiver(&self) -> tokio::sync::watch::Receiver<FlowStopStatus> {
+        self.status.subscribe()
+    }
+
+    pub(crate) fn timeout_due(&self) -> bool {
+        matches!(self.mode, Some(FlowStopMode::Graceful { .. }))
+            && self
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    }
+
+    fn cleanup_deadline(&self) -> std::time::Instant {
+        if let Some(deadline) = self.deadline {
+            return deadline;
+        }
+        match *self.status.borrow() {
+            FlowStopStatus::Cancelling { admitted_at, .. } => admitted_at + stop_drain_timeout(),
+            _ => std::time::Instant::now() + stop_drain_timeout(),
+        }
+    }
+
     pub(crate) fn apply_request(
         &mut self,
         mode: FlowStopMode,
         reason: Option<String>,
     ) -> StopRequestOutcome {
-        if let Some(incoming) = reason {
-            let should_set = incoming == STOP_REASON_TIMEOUT || self.reason.is_none();
-            if should_set {
-                self.reason = Some(incoming);
-            }
+        if matches!(self.mode, Some(FlowStopMode::Cancel))
+            || matches!(
+                (&self.mode, &mode),
+                (
+                    Some(FlowStopMode::Graceful { .. }),
+                    FlowStopMode::Graceful { .. }
+                )
+            )
+        {
+            return StopRequestOutcome::Ignored;
         }
-
+        let timeout = reason.as_deref() == Some(STOP_REASON_TIMEOUT);
+        if timeout && (!matches!(mode, FlowStopMode::Cancel) || !self.timeout_due()) {
+            return StopRequestOutcome::Ignored;
+        }
+        let now = std::time::Instant::now();
         self.requested = true;
-        if self.reason.is_none() {
-            self.reason = Some(STOP_REASON_USER_STOP.to_string());
-        }
-
-        match mode.clone() {
+        self.reason = Some(reason.unwrap_or_else(|| STOP_REASON_USER_STOP.to_string()));
+        self.mode = Some(mode.clone());
+        let status = match mode {
+            FlowStopMode::Graceful { timeout } => {
+                let deadline = now + timeout;
+                self.deadline = Some(deadline);
+                FlowStopStatus::Graceful { deadline }
+            }
             FlowStopMode::Cancel => {
-                self.mode = Some(FlowStopMode::Cancel);
-                // A stop-timeout escalation is still governed by the original
-                // graceful-stop deadline. Preserve that absolute deadline so
-                // cleanup cannot start a fresh shutdown budget after the
-                // operator's requested bound has already expired.
-                if self.reason.as_deref() != Some(STOP_REASON_TIMEOUT) {
+                if !timeout {
                     self.deadline = None;
                 }
-                StopRequestOutcome::Applied {
-                    mode,
-                    reason_label: self.reason_label(),
+                FlowStopStatus::Cancelling {
+                    admitted_at: now,
+                    cause: if timeout {
+                        FlowCancelCause::GracefulTimeout
+                    } else {
+                        FlowCancelCause::Requested
+                    },
+                    graceful_deadline: self.deadline,
                 }
             }
-            FlowStopMode::Graceful { timeout } => {
-                if matches!(self.mode, Some(FlowStopMode::Cancel)) {
-                    return StopRequestOutcome::IgnoredAlreadyCancelled;
-                }
-
-                self.mode = Some(FlowStopMode::Graceful { timeout });
-                self.deadline = Some(std::time::Instant::now() + timeout);
-                StopRequestOutcome::Applied {
-                    mode,
-                    reason_label: self.reason_label(),
-                }
-            }
+        };
+        // Publish at admission, before potentially blocking journal/control actions.
+        self.status.send_replace(status);
+        StopRequestOutcome::Applied {
+            mode,
+            reason_label: self.reason_label(),
         }
     }
 
@@ -284,11 +342,11 @@ pub(crate) struct PipelineContext {
 
     /// Stage supervisors by ID (non-sources only)
     pub(crate) stage_supervisors:
-        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
+        HashMap<StageId, Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
 
     /// Source supervisors by ID (sources only)
     pub(crate) source_supervisors:
-        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
+        HashMap<StageId, Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
 
     /// Completed stages tracking
     pub(crate) completed_stages: Vec<StageId>,
@@ -336,6 +394,8 @@ pub(crate) struct PipelineContext {
 
     pub(crate) stop_intent: StopIntent,
 
+    pub(crate) termination: super::termination::TerminationState,
+
     /// FLOWIP-010: build-resolved `contracts.source_contract_strict_mode`.
     pub(crate) source_contract_strict: crate::pipeline::supervisor::SourceContractStrictMode,
 
@@ -344,6 +404,26 @@ pub(crate) struct PipelineContext {
 }
 
 impl PipelineContext {
+    /// Legacy timeout errors retain the existing admission gate. Every other
+    /// error selects a failure without manufacturing an external stop intent.
+    fn record_error(
+        &mut self,
+        message: &str,
+    ) -> Option<obzenflow_core::event::types::ViolationCause> {
+        if message == STOP_REASON_TIMEOUT {
+            let outcome = self
+                .stop_intent
+                .apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_string()));
+            if matches!(outcome, StopRequestOutcome::Applied { .. }) {
+                return Some(obzenflow_core::event::types::ViolationCause::Other(
+                    message.into(),
+                ));
+            }
+        }
+        self.termination.fail(message.to_string(), None);
+        None
+    }
+
     pub(crate) fn contract_keys_for_stage_pair(
         &self,
         upstream: StageId,
@@ -811,7 +891,17 @@ impl FsmAction for PipelineAction {
                         "Requesting source begin_drain for StopRequested"
                     );
 
-                    if let Err(e) = source.begin_drain().await {
+                    let deadline = context
+                        .stop_intent
+                        .deadline
+                        .expect("graceful stop admitted before stopping sources");
+                    let result =
+                        tokio::time::timeout_at(deadline.into(), source.begin_drain()).await;
+                    let Ok(result) = result else {
+                        tracing::warn!("Graceful deadline expired while requesting source drain");
+                        break;
+                    };
+                    if let Err(e) = result {
                         tracing::warn!(
                             source_stage_id = %stage_id,
                             source_stage_name = %source.stage_name(),
@@ -853,13 +943,10 @@ impl FsmAction for PipelineAction {
                 // Graceful stop owns one absolute deadline across draining and
                 // cleanup. Other termination paths retain the configured
                 // cleanup budget.
-                let cleanup_deadline = context
-                    .stop_intent
-                    .deadline
-                    .unwrap_or_else(|| Instant::now() + stop_drain_timeout());
+                let cleanup_deadline = context.stop_intent.cleanup_deadline();
                 async fn signal_handle_until_deadline(
                     stage_id: StageId,
-                    handle: &crate::stages::common::stage_handle::BoxedStageHandle,
+                    handle: &Arc<dyn crate::stages::common::stage_handle::StageHandle>,
                     deadline: Instant,
                     kind: &'static str,
                 ) -> bool {
@@ -934,7 +1021,7 @@ impl FsmAction for PipelineAction {
                 // Wait on one handle using the shared absolute cleanup deadline.
                 async fn wait_handle_until_deadline(
                     stage_id: StageId,
-                    handle: &crate::stages::common::stage_handle::BoxedStageHandle,
+                    handle: &Arc<dyn crate::stages::common::stage_handle::StageHandle>,
                     deadline: Instant,
                 ) {
                     let now = Instant::now();
@@ -1534,10 +1621,11 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 })
             };
 
-            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
+                        ctx.termination.fail(message.clone(), None);
                         Ok(Transition {
                             next_state: PipelineState::Failed { reason: message, failure_cause: None },
                             actions: vec![
@@ -1554,6 +1642,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
             };
 
             on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let state = _state.clone();
                 let event = event.clone();
                 Box::pin(async move {
                     let (mode, reason) = match event {
@@ -1564,7 +1653,9 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                     let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
                     let reason_label = match outcome {
                         StopRequestOutcome::Applied { reason_label, .. } => reason_label,
-                        StopRequestOutcome::IgnoredAlreadyCancelled => ctx.stop_intent.reason_label(),
+                        StopRequestOutcome::Ignored => return Ok(Transition {
+                            next_state: state, actions: vec![],
+                        }),
                     };
 
                     Ok(Transition {
@@ -1625,20 +1716,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        if message == STOP_REASON_TIMEOUT {
-                            ctx.stop_intent.apply_request(
-                                FlowStopMode::Cancel,
-                                Some(STOP_REASON_TIMEOUT.to_string()),
-                            );
-                        }
-
-                        let failure_cause = if message == STOP_REASON_TIMEOUT {
-                            Some(obzenflow_core::event::types::ViolationCause::Other(
-                                STOP_REASON_TIMEOUT.into(),
-                            ))
-                        } else {
-                            None
-                        };
+                        let failure_cause = ctx.record_error(&message);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -1656,6 +1734,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
             };
 
             on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let state = _state.clone();
                 let event = event.clone();
                 Box::pin(async move {
                     let (mode, reason) = match event {
@@ -1666,7 +1745,9 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                     let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
                     let reason_label = match outcome {
                         StopRequestOutcome::Applied { reason_label, .. } => reason_label,
-                        StopRequestOutcome::IgnoredAlreadyCancelled => ctx.stop_intent.reason_label(),
+                        StopRequestOutcome::Ignored => return Ok(Transition {
+                            next_state: state, actions: vec![],
+                        }),
                     };
 
                     Ok(Transition {
@@ -1701,20 +1782,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        if message == STOP_REASON_TIMEOUT {
-                            ctx.stop_intent.apply_request(
-                                FlowStopMode::Cancel,
-                                Some(STOP_REASON_TIMEOUT.to_string()),
-                            );
-                        }
-
-                        let failure_cause = if message == STOP_REASON_TIMEOUT {
-                            Some(obzenflow_core::event::types::ViolationCause::Other(
-                                STOP_REASON_TIMEOUT.into(),
-                            ))
-                        } else {
-                            None
-                        };
+                        let failure_cause = ctx.record_error(&message);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -1732,6 +1800,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
             };
 
             on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let state = _state.clone();
                 let event = event.clone();
                 Box::pin(async move {
                     let (mode, reason) = match event {
@@ -1742,7 +1811,9 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                     let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
                     let reason_label = match outcome {
                         StopRequestOutcome::Applied { reason_label, .. } => reason_label,
-                        StopRequestOutcome::IgnoredAlreadyCancelled => ctx.stop_intent.reason_label(),
+                        StopRequestOutcome::Ignored => return Ok(Transition {
+                            next_state: state, actions: vec![],
+                        }),
                     };
 
                     Ok(Transition {
@@ -1841,7 +1912,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
 
                     let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
                     match outcome {
-                        StopRequestOutcome::IgnoredAlreadyCancelled => Ok(Transition {
+                        StopRequestOutcome::Ignored => Ok(Transition {
                             next_state: PipelineState::Running,
                             actions: vec![],
                         }),
@@ -1888,10 +1959,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        ctx.stop_intent.apply_request(
-                            FlowStopMode::Cancel,
-                            Some(message.clone()),
-                        );
+                        ctx.termination.fail(message.clone(), None);
                         Ok(Transition {
                             next_state: PipelineState::Failed {
                                 reason: message,
@@ -1963,7 +2031,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
 
                     let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
                     match outcome {
-                        StopRequestOutcome::IgnoredAlreadyCancelled => Ok(Transition {
+                        StopRequestOutcome::Ignored => Ok(Transition {
                             next_state: PipelineState::SourceCompleted,
                             actions: vec![],
                         }),
@@ -2009,10 +2077,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        ctx.stop_intent.apply_request(
-                            FlowStopMode::Cancel,
-                            Some(message.clone()),
-                        );
+                        ctx.termination.fail(message.clone(), None);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -2118,7 +2183,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
 
                     let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
                     match outcome {
-                        StopRequestOutcome::IgnoredAlreadyCancelled => Ok(Transition {
+                        StopRequestOutcome::Ignored => Ok(Transition {
                             next_state: PipelineState::Draining,
                             actions: vec![],
                         }),
@@ -2164,20 +2229,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
-                        if message == STOP_REASON_TIMEOUT {
-                            ctx.stop_intent.apply_request(
-                                FlowStopMode::Cancel,
-                                Some(STOP_REASON_TIMEOUT.to_string()),
-                            );
-                        }
-
-                        let failure_cause = if message == STOP_REASON_TIMEOUT {
-                            Some(obzenflow_core::event::types::ViolationCause::Other(
-                                STOP_REASON_TIMEOUT.into(),
-                            ))
-                        } else {
-                            None
-                        };
+                        let failure_cause = ctx.record_error(&message);
 
                         Ok(Transition {
                             next_state: PipelineState::Failed {
@@ -2211,7 +2263,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 })
             };
 
-            on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                 let event = event.clone();
                 let state = state.clone();
                 Box::pin(async move {
@@ -2220,6 +2272,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                             PipelineState::AbortRequested { reason: abort_reason, .. },
                             PipelineEvent::Error { message },
                         ) => {
+                            ctx.termination.fail(message.clone(), Some(abort_reason.clone()));
                             Ok(Transition {
                                 next_state: PipelineState::Failed {
                                     reason: message,
@@ -2418,7 +2471,7 @@ mod tests {
             StopRequestOutcome::Applied { reason_label, .. } => {
                 assert_eq!(reason_label, STOP_REASON_USER_STOP);
             }
-            StopRequestOutcome::IgnoredAlreadyCancelled => {
+            StopRequestOutcome::Ignored => {
                 panic!("cancel request should never be ignored");
             }
         }
@@ -2474,20 +2527,17 @@ mod tests {
             None,
         );
 
-        assert!(matches!(
-            outcome,
-            StopRequestOutcome::IgnoredAlreadyCancelled
-        ));
+        assert!(matches!(outcome, StopRequestOutcome::Ignored));
         assert!(matches!(intent.mode, Some(FlowStopMode::Cancel)));
         assert!(intent.deadline.is_none());
     }
 
     #[test]
-    fn stop_intent_timeout_reason_overrides_existing_reason() {
+    fn stop_intent_expired_timeout_preserves_deadline() {
         let mut intent = StopIntent::default();
         let _ = intent.apply_request(
             FlowStopMode::Graceful {
-                timeout: Duration::from_secs(1),
+                timeout: Duration::ZERO,
             },
             Some("first_reason".to_string()),
         );
@@ -2500,6 +2550,85 @@ mod tests {
             intent.deadline, original_deadline,
             "timeout escalation must preserve the graceful-stop deadline"
         );
+    }
+
+    #[test]
+    fn first_graceful_deadline_wins_in_both_duration_orders() {
+        for (first, second) in [(1, 60), (60, 1)] {
+            let mut intent = StopIntent::default();
+            let mut observed = intent.status_receiver();
+            intent.apply_request(
+                FlowStopMode::Graceful {
+                    timeout: Duration::from_secs(first),
+                },
+                Some("first".into()),
+            );
+            let first_status = observed.borrow_and_update().clone();
+            let first_deadline = intent.deadline;
+            assert!(matches!(
+                intent.apply_request(
+                    FlowStopMode::Graceful {
+                        timeout: Duration::from_secs(second)
+                    },
+                    Some("second".into()),
+                ),
+                StopRequestOutcome::Ignored
+            ));
+            assert_eq!(intent.deadline, first_deadline);
+            assert_eq!(intent.reason.as_deref(), Some("first"));
+            assert_eq!(*observed.borrow(), first_status);
+            assert!(!observed.has_changed().unwrap());
+            assert_eq!(*intent.status_receiver().borrow(), first_status);
+        }
+    }
+
+    #[test]
+    fn cancel_is_absorbing_including_reason_and_admission_time() {
+        let mut intent = StopIntent::default();
+        intent.apply_request(FlowStopMode::Cancel, Some("explicit_cancel".into()));
+        let mut observed = intent.status_receiver();
+        let admitted = observed.borrow_and_update().clone();
+        for (mode, reason) in [
+            (FlowStopMode::Cancel, "duplicate"),
+            (FlowStopMode::Cancel, STOP_REASON_TIMEOUT),
+            (
+                FlowStopMode::Graceful {
+                    timeout: Duration::ZERO,
+                },
+                "late_grace",
+            ),
+        ] {
+            assert!(matches!(
+                intent.apply_request(mode, Some(reason.into())),
+                StopRequestOutcome::Ignored
+            ));
+            assert_eq!(*observed.borrow(), admitted);
+            assert!(!observed.has_changed().unwrap());
+            assert_eq!(intent.reason.as_deref(), Some("explicit_cancel"));
+        }
+    }
+
+    #[test]
+    fn timeout_cancel_requires_an_expired_graceful_stop() {
+        let mut intent = StopIntent::default();
+        assert!(matches!(
+            intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.into())),
+            StopRequestOutcome::Ignored
+        ));
+        assert!(!intent.requested);
+        intent.apply_request(
+            FlowStopMode::Graceful {
+                timeout: Duration::from_secs(60),
+            },
+            None,
+        );
+        let deadline = intent.deadline;
+        assert!(matches!(
+            intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.into())),
+            StopRequestOutcome::Ignored
+        ));
+        assert_eq!(intent.deadline, deadline);
+        assert!(matches!(intent.mode, Some(FlowStopMode::Graceful { .. })));
     }
 
     #[test]

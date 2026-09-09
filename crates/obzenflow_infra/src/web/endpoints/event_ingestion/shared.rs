@@ -10,7 +10,7 @@ use obzenflow_core::ingress::{
     IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind,
 };
 use obzenflow_core::journal::Journal;
-use obzenflow_core::web::{ManagedResponse, Response, WebError};
+use obzenflow_core::web::{EndpointError, ManagedResponse, Response};
 use obzenflow_runtime::pipeline::PipelineState;
 use serde_json::json;
 use std::fmt;
@@ -278,7 +278,7 @@ impl IngestionState {
         attempt: &IngressAttemptContext,
         http_status: u16,
         retry_after: Option<Duration>,
-    ) -> Result<Option<ManagedResponse>, WebError> {
+    ) -> Result<Option<ManagedResponse>, EndpointError> {
         match self
             .record_refusal(reason, attempt, http_status, retry_after)
             .await
@@ -292,9 +292,8 @@ impl IngestionState {
                 let response = Response::new(503)
                     .with_header("Retry-After".to_string(), "1".to_string())
                     .with_json(&json!({"error": "listener unavailable"}))
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
+                    .map_err(|err| {
+                        EndpointError::with_source("Serialising endpoint response", err)
                     })?;
                 Ok(Some(response.into()))
             }

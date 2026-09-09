@@ -42,6 +42,137 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
+fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::context::FlowContext {
+    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+        "contract_flow",
+        "contract_run",
+        "consumer",
+        stage_id,
+        obzenflow_core::event::context::StageType::Join,
+    )
+}
+
+fn assert_contract_owner(event: &ChainEvent, owner: &obzenflow_core::event::context::FlowContext) {
+    assert_eq!(event.writer_id, WriterId::from(owner.stage_id));
+    assert_eq!(
+        serde_json::to_value(&event.flow_context).unwrap(),
+        serde_json::to_value(owner).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
+    let upstream_a = StageId::new();
+    let upstream_b = StageId::new();
+    let upstreams = [upstream_a, upstream_b].map(|id| {
+        (
+            id,
+            id.to_string(),
+            Arc::new(TestJournal::new(JournalOwner::stage(id))) as Arc<dyn Journal<ChainEvent>>,
+        )
+    });
+    let owner = contract_flow_context(StageId::new());
+    let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(ControlledJournal::new(
+        JournalOwner::stage(owner.stage_id),
+        Arc::new(|_: &ChainEvent, call| call == 0),
+    ));
+    let mut sub = UpstreamSubscription::new_with_names("consumer", &upstreams)
+        .await
+        .unwrap()
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(owner.stage_id),
+            contract_journal: journal.clone(),
+            config: ContractConfig::default(),
+            system_journal: None,
+            reader_stage: Some(owner.stage_id),
+            control_plane: Arc::new(NoControlPlane),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .with_contract_flow_context(owner.clone());
+    let mut progress = [
+        ReaderProgress::new(upstream_a),
+        ReaderProgress::new(upstream_b),
+    ];
+    progress[0].reader_seq = SeqNo(1);
+    progress[1].reader_seq = SeqNo(2);
+    assert!(matches!(
+        sub.check_contracts(&mut progress).await,
+        ContractStatus::ProgressEmitted
+    ));
+    assert_eq!(progress[0].last_progress_seq, SeqNo(0));
+    assert_eq!(progress[1].last_progress_seq, SeqNo(2));
+    assert!(matches!(
+        sub.check_contracts(&mut progress).await,
+        ContractStatus::ProgressEmitted
+    ));
+    assert_eq!(progress[0].last_progress_seq, SeqNo(1));
+    assert_eq!(progress[1].last_progress_seq, SeqNo(2));
+    let events = journal.read_causally_ordered().await.unwrap();
+    assert_eq!(events.len(), 2);
+    let mut observed = HashMap::new();
+    for env in events {
+        assert_contract_owner(&env.event, &owner);
+        let ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+            reader_index,
+            reader_path,
+            reader_seq,
+            ..
+        }) = env.event.content
+        else {
+            panic!("expected progress")
+        };
+        observed.insert(reader_index.0, (reader_path.0, reader_seq));
+    }
+    assert_eq!(observed.get(&0), Some(&(upstream_a.to_string(), SeqNo(1))));
+    assert_eq!(observed.get(&1), Some(&(upstream_b.to_string(), SeqNo(2))));
+}
+
+#[tokio::test]
+async fn contract_owner_context_covers_both_gap_paths_violation_and_final() {
+    for legacy in [false, true] {
+        let (mut sub, journal, _, upstream, consumer) =
+            build_upstream_with_seq_divergence(Arc::new(NoControlPlane)).await;
+        let owner = contract_flow_context(consumer);
+        sub = sub.with_contract_flow_context(owner.clone());
+        if legacy {
+            sub.contract_chains.clear();
+        }
+        let mut progress = [ReaderProgress::new(upstream)];
+        drive_subscription_to_eof(&mut sub, &mut progress).await;
+        assert!(matches!(
+            sub.check_contracts(&mut progress).await,
+            ContractStatus::Violated { .. }
+        ));
+        let events = journal.read_causally_ordered().await.unwrap();
+        let (mut gap, mut violation, mut final_record) = (false, false, false);
+        for env in events {
+            assert_contract_owner(&env.event, &owner);
+            match env.event.content {
+                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => {
+                    gap = true
+                }
+                ChainEventContent::FlowControl(FlowControlPayload::AtLeastOnceViolation {
+                    upstream: id,
+                    ..
+                }) => {
+                    assert_eq!(id, upstream);
+                    violation = true;
+                }
+                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+                    pass,
+                    ..
+                }) => {
+                    assert!(!pass);
+                    final_record = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(gap && violation && final_record, "legacy={legacy}");
+    }
+}
+
 /// Minimal in-memory journal implementation for tests.
 struct TestJournal<T: JournalEvent> {
     id: JournalId,
@@ -954,6 +1085,9 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         cycle_guard_config: None,
     });
 
+    let owner = contract_flow_context(contract_stage);
+    subscription = subscription.with_contract_flow_context(owner.clone());
+
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].last_read_instant = Some(Instant::now());
     reader_progress[0].last_progress_instant = Some(Instant::now());
@@ -983,6 +1117,9 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         .read_causally_ordered()
         .await
         .expect("read contract journal");
+    for env in &envelopes {
+        assert_contract_owner(&env.event, &owner);
+    }
     let stalled_count = envelopes
         .iter()
         .filter(|e| {

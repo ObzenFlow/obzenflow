@@ -210,6 +210,8 @@ pub(crate) struct ResolvedStartupConfig {
 }
 
 #[derive(Debug, Clone)]
+// Configuration is parsed and validated even in builds without the managed host.
+#[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
 pub(crate) struct ResolvedServerConfig {
     pub enabled: bool,
     pub host: String,

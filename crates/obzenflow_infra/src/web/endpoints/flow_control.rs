@@ -9,7 +9,9 @@
 //! restarting the process.
 
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
+};
 use obzenflow_runtime::errors::FlowError;
 use obzenflow_runtime::pipeline::{FlowHandle, FlowStartControlOutcome, PipelineState};
 use serde::{Deserialize, Serialize};
@@ -114,7 +116,7 @@ impl HttpEndpoint for FlowControlEndpoint {
         &[HttpMethod::Post]
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         // Parse JSON body
         let req: FlowControlRequest = match serde_json::from_slice(&request.body) {
             Ok(r) => r,
@@ -126,10 +128,7 @@ impl HttpEndpoint for FlowControlEndpoint {
                 };
                 return Response::new(400)
                     .with_json(&resp)
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
-                    })
+                    .map_err(|err| EndpointError::with_source("Serialising endpoint response", err))
                     .map(Into::into);
             }
         };
@@ -245,13 +244,10 @@ impl HttpEndpoint for FlowControlEndpoint {
     }
 }
 
-fn ok_json_response(body: FlowControlResponse) -> Result<ManagedResponse, WebError> {
+fn ok_json_response(body: FlowControlResponse) -> Result<ManagedResponse, EndpointError> {
     Response::ok()
         .with_json(&body)
-        .map_err(|e| WebError::RequestHandlingFailed {
-            message: e.to_string(),
-            source: None,
-        })
+        .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))
         .map(Into::into)
 }
 

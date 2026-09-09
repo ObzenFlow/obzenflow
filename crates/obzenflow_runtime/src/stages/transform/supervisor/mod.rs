@@ -462,6 +462,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     pub(super) async fn forward_control_event_guarded(
         &mut self,
         envelope: &EventEnvelope<ChainEvent>,
+        stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let should_forward = self
             .cycle_guard
@@ -470,7 +471,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             .unwrap_or(true);
 
         if should_forward {
-            self.forward_control_event(envelope).await?;
+            self.forward_control_event(envelope, stage_name).await?;
         }
 
         Ok(())
@@ -543,7 +544,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             "Cycle entry point releasing buffered terminal signal (SCC quiescent)"
         );
 
-        self.forward_control_event_guarded(&buffered).await?;
+        self.forward_control_event_guarded(&buffered, &ctx.stage_name)
+            .await?;
         Ok(Some(EventLoopDirective::Transition(
             TransformEvent::ReceivedEOF,
         )))
@@ -553,11 +555,12 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     pub(super) async fn forward_control_event(
         &self,
         envelope: &EventEnvelope<ChainEvent>,
+        stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = forward_control_event_helper(
             envelope,
             self.stage_id,
-            &format!("{}", self.stage_id),
+            stage_name,
             obzenflow_core::event::context::StageType::Transform,
             &self.data_journal,
         )

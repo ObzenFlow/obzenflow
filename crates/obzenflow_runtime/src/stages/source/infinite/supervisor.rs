@@ -90,6 +90,8 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
         &self,
         initial_state: Self::State,
     ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        // Construction starts in Created. Entry hooks mirror the engine-assigned
+        // state before the supervisor executes any transition actions.
         fsm! {
             state:   InfiniteSourceState<H>;
             event:   InfiniteSourceEvent<H>;
@@ -128,6 +130,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Initialized {
+                on_entry |state: &InfiniteSourceState<H>, ctx: &mut InfiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on InfiniteSourceEvent::Ready => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -158,6 +167,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::WaitingForGun {
+                on_entry |state: &InfiniteSourceState<H>, ctx: &mut InfiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on InfiniteSourceEvent::Start => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -188,6 +204,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Running {
+                on_entry |state: &InfiniteSourceState<H>, ctx: &mut InfiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on InfiniteSourceEvent::BeginDrain => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -218,6 +241,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Draining {
+                on_entry |state: &InfiniteSourceState<H>, ctx: &mut InfiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on InfiniteSourceEvent::Completed => |_state: &InfiniteSourceState<H>, _event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -252,6 +282,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Drained {
+                on_entry |state: &InfiniteSourceState<H>, ctx: &mut InfiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on InfiniteSourceEvent::Error => |_state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
@@ -273,6 +310,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             }
 
             state InfiniteSourceState::Failed {
+                on_entry |state: &InfiniteSourceState<H>, ctx: &mut InfiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on InfiniteSourceEvent::Error => |state: &InfiniteSourceState<H>, event: &InfiniteSourceEvent<H>, _ctx: &mut InfiniteSourceContext<H>| {
                     let state = state.clone();
                     let event = event.clone();
@@ -365,7 +409,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                 Ok(EventLoopDirective::Continue)
             }
 
-            InfiniteSourceState::Running => {
+            InfiniteSourceState::Running | InfiniteSourceState::Draining => {
                 // Drain any pending outputs first so backpressure doesn't let sources
                 // accumulate unbounded in-memory batches.
                 let flow_id = ctx.flow_id.to_string();
@@ -395,6 +439,21 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                 .await?
                 {
                     return Ok(EventLoopDirective::Continue);
+                }
+
+                // Graceful stop must publish already-polled output before EOF.
+                // Reuse the running path's bounded, control-aware credit drain.
+                if matches!(state, InfiniteSourceState::Draining) {
+                    if let Some(error) = self.pending_boundary_error.take() {
+                        return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                            error,
+                        )));
+                    }
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                    return Ok(EventLoopDirective::Transition(
+                        InfiniteSourceEvent::Completed,
+                    ));
                 }
 
                 if let Some(error) = self.pending_boundary_error.take() {
@@ -849,15 +908,6 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                         },
                     }
                 }
-            }
-
-            InfiniteSourceState::Draining => {
-                self.idle_backoff.reset();
-                self.pending_idle_delay = None;
-                // Draining state - prepare to send EOF
-                Ok(EventLoopDirective::Transition(
-                    InfiniteSourceEvent::Completed,
-                ))
             }
 
             InfiniteSourceState::Drained => {

@@ -10,7 +10,9 @@ use obzenflow_core::ingress::{
     EventSubmission, IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
     IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind, SubmissionResponse,
 };
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
+};
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
@@ -37,7 +39,7 @@ impl HttpEndpoint for SingleEventEndpoint {
         &[HttpMethod::Post]
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         // FLOWIP-115d: one attempt sequence per submission, allocated up front so
         // a refusal fact and the accepted row (if admitted) share it. Request and
         // accepted totals are projected from journal facts (refusal facts here,
@@ -55,10 +57,7 @@ impl HttpEndpoint for SingleEventEndpoint {
         if request.body.len() > self.state.config.max_body_size {
             let response = Response::new(413)
                 .with_json(&json!({"error": "payload too large"}))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
             return Ok(response.into());
         }
 
@@ -66,9 +65,8 @@ impl HttpEndpoint for SingleEventEndpoint {
             if let Err(e) = authorize_request(auth, &request) {
                 let response = Response::new(401)
                     .with_json(&json!({"error": e.to_string()}))
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
+                    .map_err(|err| {
+                        EndpointError::with_source("Serialising endpoint response", err)
                     })?;
                 return Ok(response.into());
             }
@@ -91,10 +89,7 @@ impl HttpEndpoint for SingleEventEndpoint {
             let response = Response::new(503)
                 .with_header("Retry-After".to_string(), "1".to_string())
                 .with_json(&json!({"error": "not ready"}))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
             return Ok(response.into());
         }
 
@@ -103,9 +98,8 @@ impl HttpEndpoint for SingleEventEndpoint {
             Err(e) => {
                 let response = Response::new(400)
                     .with_json(&json!({"error": format!("invalid request body: {e}")}))
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
+                    .map_err(|err| {
+                        EndpointError::with_source("Serialising endpoint response", err)
                     })?;
                 return Ok(response.into());
             }
@@ -130,9 +124,8 @@ impl HttpEndpoint for SingleEventEndpoint {
                 }
                 let response = Response::new(400)
                     .with_json(&json!({"error": e.to_message()}))
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
+                    .map_err(|err| {
+                        EndpointError::with_source("Serialising endpoint response", err)
                     })?;
                 return Ok(response.into());
             }
@@ -166,9 +159,8 @@ impl HttpEndpoint for SingleEventEndpoint {
                             let response = Response::new(429)
                                 .with_header("Retry-After".to_string(), retry_secs.to_string())
                                 .with_json(&json!({"error": "rate limited"}))
-                                .map_err(|e| WebError::RequestHandlingFailed {
-                                    message: e.to_string(),
-                                    source: None,
+                                .map_err(|e| {
+                                    EndpointError::with_source("Serialising endpoint response", e)
                                 })?;
                             return Ok(response.into());
                         }
@@ -196,9 +188,8 @@ impl HttpEndpoint for SingleEventEndpoint {
                             let response = Response::new(503)
                                 .with_header("Retry-After".to_string(), retry_secs.to_string())
                                 .with_json(&json!({"error": "overloaded"}))
-                                .map_err(|e| WebError::RequestHandlingFailed {
-                                    message: e.to_string(),
-                                    source: None,
+                                .map_err(|e| {
+                                    EndpointError::with_source("Serialising endpoint response", e)
                                 })?;
                             return Ok(response.into());
                         }
@@ -223,10 +214,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                         rejected: 0,
                         errors: Vec::new(),
                     })
-                    .map_err(|e| WebError::RequestHandlingFailed {
-                        message: e.to_string(),
-                        source: None,
-                    })?;
+                    .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
                 Ok(response.into())
             }
             Err(TrySendError::Full(_)) => {
@@ -245,10 +233,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 let response = Response::new(503)
                     .with_header("Retry-After".to_string(), "1".to_string())
                     .with_json(&json!({"error": "buffer full"}))
-                    .map_err(|e| WebError::RequestHandlingFailed {
-                        message: e.to_string(),
-                        source: None,
-                    })?;
+                    .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
                 Ok(response.into())
             }
             Err(TrySendError::Closed(_)) => {
@@ -266,10 +251,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 }
                 let response = Response::internal_error()
                     .with_json(&json!({"error": "ingestion channel closed"}))
-                    .map_err(|e| WebError::RequestHandlingFailed {
-                        message: e.to_string(),
-                        source: None,
-                    })?;
+                    .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
                 Ok(response.into())
             }
         }

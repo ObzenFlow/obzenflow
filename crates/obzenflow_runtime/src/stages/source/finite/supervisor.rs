@@ -94,6 +94,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         &self,
         initial_state: Self::State,
     ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        // Construction starts in Created. Entry hooks mirror the engine-assigned
+        // state before the supervisor executes any transition actions.
         fsm! {
             state:   FiniteSourceState<H>;
             event:   FiniteSourceEvent<H>;
@@ -132,6 +134,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Initialized {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on FiniteSourceEvent::Ready => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -162,6 +171,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::WaitingForGun {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on FiniteSourceEvent::Start => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -192,6 +208,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Running {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -231,6 +254,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Draining {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -265,6 +295,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Drained {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
@@ -286,6 +323,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             }
 
             state FiniteSourceState::Failed {
+                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on FiniteSourceEvent::Error => |state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
                     let state = state.clone();
                     let event = event.clone();
@@ -374,7 +418,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                 Ok(EventLoopDirective::Continue)
             }
 
-            FiniteSourceState::Running => {
+            FiniteSourceState::Running | FiniteSourceState::Draining => {
                 // Drain any pending outputs first so backpressure doesn't let sources
                 // accumulate unbounded in-memory batches.
                 let flow_id = ctx.flow_id.to_string();
@@ -404,6 +448,19 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                 .await?
                 {
                     return Ok(EventLoopDirective::Continue);
+                }
+
+                // Graceful stop must publish already-polled output before EOF.
+                // Reuse the running path's bounded, control-aware credit drain.
+                if matches!(state, FiniteSourceState::Draining) {
+                    if let Some(error) = self.pending_boundary_error.take() {
+                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                            error,
+                        )));
+                    }
+                    self.idle_backoff.reset();
+                    self.pending_idle_delay = None;
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                 }
 
                 if self.pending_boundary_eof {
@@ -772,13 +829,6 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         },
                     }
                 }
-            }
-
-            FiniteSourceState::Draining => {
-                self.idle_backoff.reset();
-                self.pending_idle_delay = None;
-                // Draining state - prepare to send EOF
-                Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
             }
 
             FiniteSourceState::Drained => {

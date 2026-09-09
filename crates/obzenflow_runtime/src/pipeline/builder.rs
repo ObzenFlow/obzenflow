@@ -215,14 +215,20 @@ impl SupervisorBuilder for PipelineBuilder {
         let mut stage_map = HashMap::new();
         for stage in self.stages {
             let stage_id = stage.stage_id();
-            stage_map.insert(stage_id, stage);
+            stage_map.insert(
+                stage_id,
+                Arc::<dyn crate::stages::common::stage_handle::StageHandle>::from(stage),
+            );
         }
 
         // Prepare source supervisors map
         let mut source_map = HashMap::new();
         for source in self.sources {
             let stage_id = source.stage_id();
-            source_map.insert(stage_id, source);
+            source_map.insert(
+                stage_id,
+                Arc::<dyn crate::stages::common::stage_handle::StageHandle>::from(source),
+            );
         }
 
         // Create pipeline context with all mutable state
@@ -317,6 +323,13 @@ impl SupervisorBuilder for PipelineBuilder {
             .clone()
             .unwrap_or_else(|| "unnamed_flow".to_string());
 
+        // Retain the existing stage teardown handles for emergency cleanup if
+        // the pipeline supervisor itself must be aborted during publication.
+        let stage_cleanup = stage_map
+            .values()
+            .chain(source_map.values())
+            .cloned()
+            .collect();
         let pipeline_context = PipelineContext {
             system_id,
             topology: self.topology.clone(),
@@ -341,6 +354,7 @@ impl SupervisorBuilder for PipelineBuilder {
             flow_start_time: None,
             last_system_event_id_seen: None,
             stop_intent: Default::default(),
+            termination: Default::default(),
             // FLOWIP-010: global knobs from the build-resolved effective
             // config; registry defaults when no snapshot is threaded (tests).
             source_contract_strict: self
@@ -358,6 +372,9 @@ impl SupervisorBuilder for PipelineBuilder {
                 .map(|cfg| cfg.metrics_drain_timeout_ms())
                 .unwrap_or(5_000),
         };
+
+        let stop_status = pipeline_context.stop_intent.status_receiver();
+        let published_outcome = pipeline_context.termination.published.clone();
 
         // Create channels using the common infrastructure
         let (event_sender, event_receiver, state_watcher) =
@@ -444,6 +461,9 @@ impl SupervisorBuilder for PipelineBuilder {
         Ok(FlowHandle::new(
             standard_handle,
             FlowHandleExtras {
+                stage_cleanup,
+                stop_status,
+                published_outcome,
                 topology,
                 flow_name,
                 contract_attachments,

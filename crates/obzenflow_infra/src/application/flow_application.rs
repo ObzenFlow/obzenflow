@@ -16,16 +16,22 @@ use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
     WebSurfaceWiringContext,
 };
-use crate::application::config::{CorsModeArg, OnTerminalArg, ResolvedStartupConfig, StartupMode};
+#[cfg(feature = "warp-server")]
+use crate::application::config::CorsModeArg;
+use crate::application::config::ResolvedStartupConfig;
 use crate::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder, IngressHandle};
 #[cfg(feature = "warp-server")]
+use crate::web::host_config::{HostConfig, HostCorsConfig, HostCorsMode};
+#[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
+#[cfg(feature = "warp-server")]
 use crate::web::RuntimeInstanceId;
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
-use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
+use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
+use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::journal::CurrentRunLocator;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -33,7 +39,7 @@ use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::task::JoinHandle;
 
 type FlowHandleHook =
@@ -108,8 +114,16 @@ struct LaunchParams {
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "warp-server"))]
     test_shutdown_signal: Option<tokio::sync::oneshot::Receiver<ShutdownSignal>>,
+    #[cfg(all(test, feature = "warp-server"))]
+    test_host_task: Option<(
+        futures::future::BoxFuture<
+            'static,
+            Result<(), crate::web::host_error::ManagedWebHostError>,
+        >,
+        bool,
+    )>,
 }
 
 impl LaunchParams {
@@ -126,7 +140,7 @@ impl LaunchParams {
 struct HostLifecycle {
     runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
     instance_id: RuntimeInstanceId,
-    shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 #[cfg(all(test, feature = "warp-server"))]
@@ -146,6 +160,8 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
+
+    include!("managed_lifecycle_tests.rs");
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct IdlePayload;
@@ -310,7 +326,133 @@ enabled = false
             !handle.is_running(),
             "failed admission must stop the waiting supervisor"
         );
-        assert!(matches!(handle.current_state(), PipelineState::ReadyForRun));
+        assert!(handle.current_state().is_terminal());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn occupied_port_prevents_automatic_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Debug)]
+        struct CountingSource(Arc<AtomicUsize>);
+        impl TypedInfiniteSourceHandler for CountingSource {
+            type Output = IdlePayload;
+            fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("obzenflow.toml");
+        let journal_dir = dir.path().join("journals");
+        let flow_journal_dir = journal_dir.clone();
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {}
+startup_mode = "auto"
+[metrics]
+enabled = false
+"#,
+                occupied.local_addr().unwrap().port()
+            ),
+        )
+        .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source_calls = calls.clone();
+        let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+        let hook_observed = observed.clone();
+        let definition = FlowDefinition::new(move |context| async move {
+            let source = CountingSource(source_calls);
+            let sink = NoopSink;
+            let handle = flow! {
+                name: "bind_admission_no_automatic_run",
+                journals: disk_journals(flow_journal_dir),
+                stages: {
+                    src = infinite_source!(IdlePayload => source);
+                    sink = sink!(IdlePayload => sink);
+                },
+                topology: { src |> sink; }
+            }
+            .build(context)
+            .await?;
+            handle
+                .wait_for_ready()
+                .await
+                .expect("pipeline reaches readiness");
+            assert!(matches!(handle.current_state(), PipelineState::ReadyForRun));
+            Ok(handle)
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            FlowApplication::launch(
+                definition,
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    cli_args: Some(vec![
+                        "obzenflow".into(),
+                        "--config".into(),
+                        config_path.into_os_string(),
+                    ]),
+                    flow_handle_hooks: vec![Box::new(move |handle| {
+                        *hook_observed.lock().unwrap() = Some(handle.clone());
+                        Ok(tokio::spawn(async {}))
+                    })],
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("bind admission must return promptly");
+        assert!(matches!(
+            result,
+            Err(ApplicationError::ServerStartFailed(_))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let handle = observed.lock().unwrap().take().unwrap();
+        assert!(
+            !handle.is_running(),
+            "failed admission must stop the waiting supervisor"
+        );
+        assert!(handle.current_state().is_terminal());
+        let run_dir = std::fs::read_dir(journal_dir.join("flows"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        let export = dir.path().join("occupied-port.jsonl");
+        crate::journal::disk::inspect::export_jsonl(&run_dir, Some(&export)).unwrap();
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(export)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            !records.is_empty(),
+            "the negative witness must inspect actual committed records"
+        );
+        for record in records {
+            let event = &record["event"];
+            assert_ne!(
+                event["pipeline_event"], "running",
+                "failed bind cannot publish Running"
+            );
+            assert_ne!(
+                event["content"]["content_type"], "data",
+                "failed bind cannot commit source data or effect records"
+            );
+            assert_ne!(
+                event["content"]["content_type"], "delivery",
+                "failed bind cannot commit sink receipts"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -690,8 +832,9 @@ shutdown_timeout_secs = 2
     }
 }
 
+#[cfg(feature = "warp-server")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShutdownSignal {
+pub(super) enum ShutdownSignal {
     Sigint,
     Sigterm,
 }
@@ -930,8 +1073,10 @@ impl FlowApplicationBuilder {
                 flow_handle_hooks,
                 presentation,
                 cli_args,
-                #[cfg(test)]
+                #[cfg(all(test, feature = "warp-server"))]
                 test_shutdown_signal: None,
+                #[cfg(all(test, feature = "warp-server"))]
+                test_host_task: None,
             },
         ))
     }
@@ -965,8 +1110,10 @@ impl FlowApplicationBuilder {
                 flow_handle_hooks,
                 presentation,
                 cli_args,
-                #[cfg(test)]
+                #[cfg(all(test, feature = "warp-server"))]
                 test_shutdown_signal: None,
+                #[cfg(all(test, feature = "warp-server"))]
+                test_host_task: None,
             },
         )
         .await
@@ -1189,8 +1336,10 @@ impl FlowApplication {
             flow_handle_hooks,
             presentation,
             cli_args,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "warp-server"))]
             test_shutdown_signal,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_host_task,
         } = params;
 
         // Best-effort tracing initialization when the builder isn't used.
@@ -1241,7 +1390,7 @@ impl FlowApplication {
 
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
-        let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+        let mut managed_tasks: Vec<ApplicationTask> = Vec::new();
         let metrics_model = (cfg!(feature = "prometheus") && config.metrics.enabled)
             .then(|| Arc::new(MetricsReadModel::default()));
         let metrics_exporter = metrics_model
@@ -1252,7 +1401,7 @@ impl FlowApplication {
         // `managed_tasks` so the shutdown sequence can join its fenced deregistration
         // before the generic managed-task abort would cancel the in-flight DELETE.
         #[cfg(feature = "studio-registration")]
-        let mut heartbeat_task: Option<JoinHandle<()>> = None;
+        let mut heartbeat_task: Option<ApplicationTask> = None;
         #[cfg(feature = "warp-server")]
         let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
@@ -1277,8 +1426,6 @@ impl FlowApplication {
                 );
             }
 
-            let control_plane_auth = config.server.control_plane_auth.clone();
-
             // FLOWIP-120u: the host opens the replay/resume input archive and the
             // bootstrap snapshot carries it; the build consumes it without the
             // factory opening anything. A bad archive fails here, before any
@@ -1286,8 +1433,8 @@ impl FlowApplication {
             let bootstrap_config = {
                 let mut bootstrap_config = config.bootstrap_config();
                 if config.server.enabled {
-                    // The host releases automatic Run only after authentication
-                    // admission succeeds. The supervisor must not race ahead.
+                    // The host releases automatic Run only after policy admission
+                    // and a real socket bind. The supervisor must not race ahead.
                     bootstrap_config.startup_mode =
                         obzenflow_runtime::bootstrap::StartupMode::Manual;
                 }
@@ -1324,6 +1471,16 @@ impl FlowApplication {
             // the tokio runtime is created for console_subscriber to work properly
 
             tracing::info!("🚀 Starting FlowApplication");
+
+            #[cfg(not(feature = "warp-server"))]
+            if config.server.enabled {
+                break 'run (
+                    Err(ApplicationError::FeatureNotEnabled("web-host".into())),
+                    None,
+                    None,
+                    false,
+                );
+            }
 
             // Build the flow (this executes the flow! macro) against the
             // explicit per-run context (FLOWIP-010 §7): the host owns the
@@ -1366,8 +1523,11 @@ impl FlowApplication {
 
             for hook in &flow_handle_hooks {
                 match hook(&flow_handle) {
-                    Ok(task) => managed_tasks.push(task),
-                    Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_state, false),
+                    Ok(task) => managed_tasks.push(ApplicationTask(task)),
+                    Err(err) => {
+                        Self::stop_before_run(&flow_handle, grace_timeout).await;
+                        break 'run (Err(err), Some(flow_name.clone()), run_state, false);
+                    }
                 }
             }
 
@@ -1398,7 +1558,9 @@ impl FlowApplication {
                     (surface_metrics_collector.clone(), system_journal)
                 {
                     let emitter = HttpSurfaceMetricsEmitter::new(collector, system_journal);
-                    managed_tasks.push(emitter.spawn_periodic(surface_metrics_interval));
+                    managed_tasks.push(ApplicationTask(
+                        emitter.spawn_periodic(surface_metrics_interval),
+                    ));
                     surface_metrics_emitter = Some(emitter);
                 }
 
@@ -1414,6 +1576,7 @@ impl FlowApplication {
                 // silently running without its configured ingress identity.
                 if let Some(slot) = ingress_slot {
                     if !slot.is_filled() {
+                        Self::stop_before_run(&flow_handle, grace_timeout).await;
                         break 'run (
                             Err(ApplicationError::FlowBuildFailed(format!(
                                 "hosted ingress surface '{surface_name}' (ingress key '{}') was \
@@ -1438,456 +1601,138 @@ impl FlowApplication {
                         // refusal recording enabled fails startup here if it is None.
                         system_journal: flow_handle.system_journal(),
                     }) {
-                        Ok(wired) => managed_tasks.extend(wired.tasks),
+                        Ok(wired) => {
+                            managed_tasks.extend(wired.tasks.into_iter().map(ApplicationTask))
+                        }
                         Err(err) => {
-                            break 'run (Err(err), Some(flow_name.clone()), run_state, false)
+                            Self::stop_before_run(&flow_handle, grace_timeout).await;
+                            break 'run (Err(err), Some(flow_name.clone()), run_state, false);
                         }
                     }
                 }
                 tracing::debug!(surface = %surface_name, "Web surface attached");
             }
 
-            // FLOWIP-114d: per-process incarnation identity (stamped into the
-            // SSE bootstrap event and every registration) and the terminal-
-            // gated listener-close signal (gap 8).
-            let runtime_instance_id = RuntimeInstanceId::new();
-            let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
-
-            // Start server if --server flag present
-            let server_handle = if config.server.enabled {
+            #[cfg(feature = "warp-server")]
+            if config.server.enabled {
+                let runtime_instance_id = RuntimeInstanceId::new();
+                let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
                 let cors_mode = match config.server.cors_mode {
-                    CorsModeArg::AllowAnyOrigin => CorsMode::AllowAnyOrigin,
+                    CorsModeArg::AllowAnyOrigin => HostCorsMode::AllowAnyOrigin,
                     CorsModeArg::AllowList => {
-                        CorsMode::AllowList(config.server.cors_allow_origin.clone())
+                        HostCorsMode::AllowList(config.server.cors_allow_origin.clone())
                     }
-                    CorsModeArg::SameOrigin => CorsMode::SameOrigin,
+                    CorsModeArg::SameOrigin => HostCorsMode::SameOrigin,
                 };
                 let mut server_config =
-                    ServerConfig::new(config.server.host.clone(), config.server.port);
-                server_config.cors = Some(CorsConfig { mode: cors_mode });
+                    HostConfig::new(config.server.host.clone(), config.server.port);
+                server_config.cors = Some(HostCorsConfig { mode: cors_mode });
                 server_config.max_body_size = Some(config.server.max_body_size_bytes);
                 server_config.request_timeout_secs = Some(config.server.request_timeout_secs);
-                server_config.control_plane_auth = control_plane_auth;
-
-                let start_result = {
-                    #[cfg(feature = "warp-server")]
-                    {
-                        Self::start_server(
-                            &flow_handle,
-                            server_config,
-                            all_extra_endpoints,
-                            surface_metrics_collector,
-                            #[cfg(feature = "prometheus")]
-                            metrics_model.as_ref().map(|model| {
-                                crate::web::endpoints::PrometheusMetricsEndpoint::new(model.clone())
-                            }),
-                            HostLifecycle {
-                                runtime_config: config.runtime_config.clone(),
-                                instance_id: runtime_instance_id.clone(),
-                                shutdown: server_shutdown_rx.clone(),
-                            },
-                        )
-                        .await
-                    }
-
-                    #[cfg(not(feature = "warp-server"))]
-                    {
-                        Self::start_server(
-                            &flow_handle,
-                            server_config,
-                            all_extra_endpoints,
-                            runtime_instance_id.clone(),
-                            server_shutdown_rx.clone(),
-                        )
-                        .await
+                server_config.control_plane_auth = config.server.control_plane_auth.clone();
+                let mut host = match Self::start_server(
+                    &flow_handle,
+                    server_config,
+                    all_extra_endpoints,
+                    surface_metrics_collector,
+                    #[cfg(feature = "prometheus")]
+                    metrics_model.as_ref().map(|model| {
+                        crate::web::endpoints::PrometheusMetricsEndpoint::new(model.clone())
+                    }),
+                    HostLifecycle {
+                        runtime_config: config.runtime_config.clone(),
+                        instance_id: runtime_instance_id.clone(),
+                        shutdown: server_shutdown_tx,
+                    },
+                )
+                .await
+                {
+                    Ok(host) => host,
+                    Err(error) => {
+                        Self::stop_before_run(&flow_handle, grace_timeout).await;
+                        break 'run (Err(error), Some(flow_name), run_state, false);
                     }
                 };
 
-                match start_result {
-                    Ok(server_handle) => server_handle,
-                    Err(err) => {
-                        use obzenflow_runtime::supervised_base::SupervisorHandle;
-                        // Stop the waiting supervisor before dropping the bootstrap
-                        // guard, which restores the process's automatic-start default.
-                        if let Err(cleanup_error) = flow_handle.abort_and_wait().await {
-                            tracing::warn!(%cleanup_error, "Failed to stop pipeline after web admission failure");
-                        }
-                        break 'run (Err(err), Some(flow_name), run_state, false);
-                    }
+                #[cfg(test)]
+                if let Some((future, complete_before_run)) = test_host_task {
+                    host.replace_serving_for_test(future, complete_before_run)
+                        .await;
                 }
-            } else {
-                None
-            };
 
-            // FLOWIP-114d: registration heartbeat as a managed task.
-            // Deregistration is exit-tied through the shutdown signal in both
-            // on_terminal modes; park keeps renewing with the terminal phase.
-            #[cfg(feature = "studio-registration")]
-            if let Some(studio) = config.studio.clone() {
-                if server_handle.is_some() {
+                #[cfg(not(feature = "studio-registration"))]
+                let initial_failure = None;
+                #[cfg(not(feature = "studio-registration"))]
+                let _ = server_shutdown_rx;
+                #[cfg(feature = "studio-registration")]
+                let mut initial_failure = None;
+                #[cfg(feature = "studio-registration")]
+                if let Some(studio) = config.studio.clone() {
                     if let Some(system_journal) = flow_handle.system_journal() {
-                        let presence =
-                            crate::web::studio_presence::RuntimePresenceProjection::open(
-                                system_journal,
-                                flow_handle.pipeline_writer_id(),
-                            )
-                            .await;
-                        heartbeat_task = Some(crate::web::studio_registration::spawn_heartbeat(
-                            crate::web::studio_registration::HeartbeatContext {
-                                studio,
-                                runtime_instance_id: runtime_instance_id.clone(),
-                                flow_name: flow_name.clone(),
-                                startup_mode: config.server.startup_mode,
-                                probe_base_url: format!(
-                                    "http://{}:{}",
-                                    config.server.host, config.server.port
-                                ),
-                            },
-                            presence,
-                            server_shutdown_rx.clone(),
-                        ));
-                    } else {
-                        tracing::warn!(
-                            "Studio registration disabled: flow has no system journal for presence projection"
-                        );
-                    }
-                }
-            }
-
-            if config.server.enabled {
-                if server_handle.is_none() {
-                    break 'run (
-                        Err(ApplicationError::ServerStartFailed(
-                            "Enabled web host did not start".into(),
-                        )),
-                        Some(flow_name),
-                        run_state,
-                        false,
-                    );
-                }
-
-                // Server mode: lifecycle is controlled via HTTP (and optionally startup_mode).
-                match config.server.startup_mode {
-                    StartupMode::Auto => {
-                        tracing::info!("▶️  Starting flow execution (startup_mode=auto)");
-                        if let Err(err) = flow_handle
-                            .start()
-                            .await
-                            .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))
-                        {
-                            break 'run (Err(err), Some(flow_name), run_state, false);
-                        }
-                    }
-                    StartupMode::Manual => {
-                        tracing::info!(
-                            "⏸️  startup_mode=manual; waiting for Play via /api/flow/control"
-                        );
-                    }
-                }
-
-                if let Some(server_task) = server_handle {
-                    tracing::info!(
-                        "📊 Server running on http://{}:{}",
-                        config.server.host,
-                        config.server.port
-                    );
-                    tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
-
-                    #[cfg(unix)]
-                    let mut sigterm_stream = match tokio::signal::unix::signal(
-                        tokio::signal::unix::SignalKind::terminate(),
-                    ) {
-                        Ok(stream) => stream,
-                        Err(err) => {
-                            break 'run (
-                                Err(ApplicationError::from(err)),
-                                Some(flow_name),
-                                run_state,
-                                false,
-                            );
-                        }
-                    };
-
-                    // FLOWIP-114d gap 9: on_terminal=exit adds a terminal arm to
-                    // the wait, so a finished flow closes and exits instead of
-                    // parking until a signal.
-                    enum ServeOutcome {
-                        Signal(ShutdownSignal),
-                        FlowTerminal,
-                    }
-
-                    let exit_on_terminal = config.server.on_terminal == OnTerminalArg::Exit;
-                    let mut terminal_rx = flow_handle.state_receiver();
-                    let wait_terminal = async move {
-                        loop {
-                            if terminal_rx.borrow().is_terminal() {
-                                break;
-                            }
-                            if terminal_rx.changed().await.is_err() {
-                                break;
-                            }
-                        }
-                    };
-
-                    // Wait for the first shutdown trigger:
-                    // - SIGINT (Ctrl+C) => Cancel
-                    // - SIGTERM => GracefulStop(timeout=GRACE)
-                    // - terminal pipeline state (on_terminal=exit) => close and exit
-                    #[cfg(test)]
-                    let outcome = if let Some(test_shutdown_signal) = test_shutdown_signal {
-                        ServeOutcome::Signal(
-                            test_shutdown_signal.await.unwrap_or(ShutdownSignal::Sigint),
-                        )
-                    } else {
-                        #[cfg(unix)]
-                        {
-                            tokio::select! {
-                                _ = tokio::signal::ctrl_c() => ServeOutcome::Signal(ShutdownSignal::Sigint),
-                                _ = sigterm_stream.recv() => ServeOutcome::Signal(ShutdownSignal::Sigterm),
-                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
-                            }
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            tokio::select! {
-                                signal = tokio::signal::ctrl_c() => {
-                                    if let Err(err) = signal {
-                                        break 'run (
-                                            Err(ApplicationError::from(err)),
-                                            Some(flow_name),
-                                            run_state,
-                                            false,
-                                        );
-                                    }
-                                    ServeOutcome::Signal(ShutdownSignal::Sigint)
-                                }
-                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
-                            }
-                        }
-                    };
-
-                    #[cfg(not(test))]
-                    let outcome = {
-                        #[cfg(unix)]
-                        {
-                            tokio::select! {
-                                _ = tokio::signal::ctrl_c() => ServeOutcome::Signal(ShutdownSignal::Sigint),
-                                _ = sigterm_stream.recv() => ServeOutcome::Signal(ShutdownSignal::Sigterm),
-                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
-                            }
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            tokio::select! {
-                                signal = tokio::signal::ctrl_c() => {
-                                    if let Err(err) = signal {
-                                        break 'run (
-                                            Err(ApplicationError::from(err)),
-                                            Some(flow_name),
-                                            run_state,
-                                            false,
-                                        );
-                                    }
-                                    ServeOutcome::Signal(ShutdownSignal::Sigint)
-                                }
-                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
-                            }
-                        }
-                    };
-
-                    // FLOWIP-114d gap 8: the web surface keeps serving through
-                    // the drain. Observation stays live; Play is refused by the
-                    // FSM guard and push ingress refuses via admission. The
-                    // listener closes only after the terminal state.
-                    let signal_phase = match outcome {
-                        ServeOutcome::Signal(first_signal) => {
-                            tracing::info!(
-                                ?first_signal,
-                                "👋 Shutting down; web surface serves through the drain"
-                            );
-                            // Best-effort: stop the flow before tearing down the runtime.
-                            //
-                            // We avoid force-aborting here because it can cancel in-flight disk journal
-                            // writes (spawn_blocking), which then surfaces as "Background writer task was
-                            // cancelled/panicked" errors inside stage supervisors.
-                            match first_signal {
-                                ShutdownSignal::Sigint => {
-                                    if let Err(e) = flow_handle.stop_cancel().await {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
-                                        );
-                                    }
-                                }
-                                ShutdownSignal::Sigterm => {
-                                    if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
-                                        );
-                                    }
-                                }
-                            }
-                            Some(first_signal)
-                        }
-                        ServeOutcome::FlowTerminal => {
-                            tracing::info!(
-                                "🏁 Flow reached a terminal state (on_terminal=exit); closing"
-                            );
-                            None
-                        }
-                    };
-
-                    if let Some(first_signal) = signal_phase {
-                        let mut phase = first_signal;
-                        let mut phase_deadline = match first_signal {
-                            ShutdownSignal::Sigint => Instant::now() + grace_timeout,
-                            ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
+                        let presence = tokio::select! {
+                            biased;
+                            error = host.failure() => { initial_failure = Some(error); None },
+                            presence = crate::web::studio_presence::RuntimePresenceProjection::open(
+                                system_journal, flow_handle.pipeline_writer_id(),
+                            ) => Some(presence),
                         };
-
-                        while flow_handle.is_running() {
-                            if Instant::now() >= phase_deadline {
-                                if phase == ShutdownSignal::Sigterm {
-                                    tracing::warn!(
-                                        grace_secs = grace_timeout.as_secs(),
-                                        "Graceful stop timeout expired; escalating to cancel"
-                                    );
-                                    if let Err(e) = flow_handle.stop_cancel_timeout().await {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "Failed to request flow cancel during escalation; continuing shutdown"
-                                        );
-                                    }
-                                    phase = ShutdownSignal::Sigint;
-                                    phase_deadline = Instant::now() + grace_timeout;
-                                    continue;
-                                }
-
-                                tracing::warn!(
-                                shutdown_timeout_secs = grace_timeout.as_secs(),
-                                "Flow did not terminate within shutdown timeout; exiting anyway"
-                            );
-                                break;
-                            }
-
-                            if phase == ShutdownSignal::Sigterm {
-                                #[cfg(unix)]
-                                {
-                                    tokio::select! {
-                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                        _ = tokio::signal::ctrl_c() => {
-                                            tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                            let _ = flow_handle.stop_cancel().await;
-                                            phase = ShutdownSignal::Sigint;
-                                            phase_deadline = Instant::now() + grace_timeout;
-                                        }
-                                        _ = sigterm_stream.recv() => {
-                                            tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
-                                            let _ = flow_handle.stop_cancel().await;
-                                            phase = ShutdownSignal::Sigint;
-                                            phase_deadline = Instant::now() + grace_timeout;
-                                        }
-                                    }
-                                }
-                                #[cfg(not(unix))]
-                                {
-                                    tokio::select! {
-                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                        _ = tokio::signal::ctrl_c() => {
-                                            tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                            let _ = flow_handle.stop_cancel().await;
-                                            phase = ShutdownSignal::Sigint;
-                                            phase_deadline = Instant::now() + grace_timeout;
-                                        }
-                                    }
-                                }
-                            } else {
-                                tokio::time::sleep(Duration::from_millis(50)).await;
-                            }
+                        if let Some(presence) = presence {
+                            heartbeat_task = Some(ApplicationTask(
+                                crate::web::studio_registration::spawn_heartbeat(
+                                    crate::web::studio_registration::HeartbeatContext {
+                                        studio,
+                                        runtime_instance_id,
+                                        flow_name: flow_name.clone(),
+                                        startup_mode: config.server.startup_mode,
+                                        probe_base_url: format!("http://{}", host.address()),
+                                    },
+                                    presence,
+                                    server_shutdown_rx,
+                                ),
+                            ));
                         }
                     }
+                }
 
-                    if signal_phase.is_none() {
-                        let terminal_deadline = Instant::now() + grace_timeout;
-                        while flow_handle.is_running() {
-                            if Instant::now() >= terminal_deadline {
-                                tracing::warn!(
-                                    shutdown_timeout_secs = grace_timeout.as_secs(),
-                                    "Pipeline supervisor did not finish terminal dispatch within shutdown timeout; closing server anyway"
-                                );
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(10)).await;
+                let mut result = super::managed_lifecycle::supervise(
+                    &mut host,
+                    &flow_handle,
+                    config.server.startup_mode,
+                    config.server.on_terminal,
+                    grace_timeout,
+                    initial_failure,
+                    #[cfg(test)]
+                    test_shutdown_signal,
+                )
+                .await;
+                if let Some(task) = metrics_collector.take() {
+                    task.stop().await;
+                }
+                if let Err(error) = host.close().await {
+                    let has_host_failure = matches!(&result, Err(ApplicationError::Other(primary))
+                        if primary.is::<crate::web::host_error::ManagedWebHostError>());
+                    if has_host_failure {
+                        tracing::warn!(%error, "Managed host close also failed");
+                    } else {
+                        if let Err(secondary) = result {
+                            tracing::warn!(%secondary, "Flow cleanup also failed before managed host close");
                         }
+                        result = Err(ApplicationError::Other(Box::new(error)));
                     }
-
-                    // Terminal state reached (or the shutdown timeout expired).
-                    // The heartbeat deregisters and SSE producers flush the
-                    // terminal event on this signal; the listener close carries
-                    // a bounded deadline with abort as the escalation backstop,
-                    // mirroring the flow's own graceful-to-cancel ladder.
-                    if let Some(task) = metrics_collector.take() {
-                        task.stop().await;
-                    }
-                    let _ = server_shutdown_tx.send(true);
-                    const SERVER_CLOSE_GRACE: Duration = Duration::from_secs(5);
-                    let mut server_task = server_task;
-                    if tokio::time::timeout(SERVER_CLOSE_GRACE, &mut server_task)
+                }
+                #[cfg(feature = "studio-registration")]
+                if let Some(mut heartbeat) = heartbeat_task.take() {
+                    const DEREGISTER_GRACE: Duration = Duration::from_secs(5);
+                    if tokio::time::timeout(DEREGISTER_GRACE, &mut heartbeat.0)
                         .await
                         .is_err()
                     {
-                        tracing::warn!(
-                            close_grace_secs = SERVER_CLOSE_GRACE.as_secs(),
-                            "Web server did not close within the grace period; aborting listener"
-                        );
-                        server_task.abort();
-                        let _ = server_task.await;
-                    }
-
-                    // FLOWIP-114d gap 24: join the heartbeat so its fenced
-                    // DELETE lands before the generic managed-task abort below
-                    // could cancel it mid-flight. It reacts to the same signal
-                    // and runs concurrently with the listener close above, so
-                    // it has usually already deregistered by now; the deadline
-                    // bounds a slow phonebook, after which lease expiry is the
-                    // fallback.
-                    #[cfg(feature = "studio-registration")]
-                    if let Some(mut heartbeat) = heartbeat_task.take() {
-                        const DEREGISTER_GRACE: Duration = Duration::from_secs(5);
-                        if tokio::time::timeout(DEREGISTER_GRACE, &mut heartbeat)
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                deregister_grace_secs = DEREGISTER_GRACE.as_secs(),
-                                "Studio deregistration did not complete within the grace period; aborting heartbeat (lease will expire instead)"
-                            );
-                            heartbeat.abort();
-                            let _ = heartbeat.await;
-                        }
-                    }
-
-                    // FLOWIP-114d gap 9: truthful exit codes. A flow that
-                    // failed on its own must not exit zero; an operator stop
-                    // is deliberate and exits zero even when cancel semantics
-                    // land the FSM in Failed{user_stop}.
-                    if signal_phase.is_none() {
-                        let final_state = flow_handle.current_state();
-                        if let obzenflow_runtime::pipeline::PipelineState::Failed {
-                            reason, ..
-                        } = &final_state
-                        {
-                            break 'run (
-                                Err(ApplicationError::FlowExecutionFailed(reason.clone())),
-                                Some(flow_name),
-                                run_state,
-                                true,
-                            );
-                        }
+                        tracing::warn!("Studio deregistration deadline expired; lease expiry will remove the registration");
+                        heartbeat.0.abort();
+                        let _ = (&mut heartbeat.0).await;
                     }
                 }
-
-                break 'run (Ok(()), Some(flow_name), run_state, true);
+                break 'run (result, Some(flow_name), run_state, true);
             }
 
             // Non-server mode: preserve existing behaviour (run to completion, no HTTP server)
@@ -1935,8 +1780,7 @@ impl FlowApplication {
         // outlive FlowApplication; lease expiry covers deregistration here.
         #[cfg(feature = "studio-registration")]
         if let Some(heartbeat) = heartbeat_task.take() {
-            heartbeat.abort();
-            let _ = tokio::time::timeout(grace_timeout, heartbeat).await;
+            let _ = tokio::time::timeout(grace_timeout, heartbeat.stop()).await;
         }
 
         // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
@@ -2073,18 +1917,18 @@ impl FlowApplication {
         }
     }
 
-    async fn cancel_and_join_tasks(tasks: Vec<JoinHandle<()>>, timeout: Duration) {
+    async fn cancel_and_join_tasks(tasks: Vec<ApplicationTask>, timeout: Duration) {
         if tasks.is_empty() {
             return;
         }
 
         for task in &tasks {
-            task.abort();
+            task.0.abort();
         }
 
         let _ = tokio::time::timeout(timeout, async move {
             for task in tasks {
-                let _ = task.await;
+                task.stop().await;
             }
         })
         .await;
@@ -2153,16 +1997,15 @@ impl FlowApplication {
     #[cfg(feature = "warp-server")]
     async fn start_server(
         _flow_handle: &Arc<FlowHandle>,
-        _server_config: ServerConfig,
+        _server_config: HostConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
         #[cfg(feature = "prometheus")] metrics_endpoint: Option<
             crate::web::endpoints::PrometheusMetricsEndpoint,
         >,
         lifecycle: HostLifecycle,
-    ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
-        use crate::web::start_web_server_with_config;
-        use crate::web::web_server::WebServerResources;
+    ) -> Result<crate::web::managed_host::ManagedWebHost, ApplicationError> {
+        use crate::web::web_server::{bind_managed_host, ManagedHostInput};
 
         // Every flow has a topology - it's required to run
         let topology = _flow_handle.topology().ok_or_else(|| {
@@ -2172,32 +2015,31 @@ impl FlowApplication {
         })?;
         #[cfg(feature = "prometheus")]
         let has_metrics = metrics_endpoint.is_some();
-        let addr = _server_config.address();
 
         // FLOWIP-114b: stage typing, join metadata, middleware, and
         // subgraph annotations live on the canonical `Topology` directly,
         // so only the contract side map needs to be threaded through.
         let contract_attachments = _flow_handle.contract_attachments();
 
-        let handle = start_web_server_with_config(
-            WebServerResources {
+        let handle = bind_managed_host(
+            ManagedHostInput {
                 topology,
                 contract_attachments,
                 #[cfg(feature = "prometheus")]
                 metrics_endpoint,
-                flow_handle: Some(_flow_handle.clone()),
+                flow_handle: _flow_handle.clone(),
                 extra_endpoints,
                 surface_metrics,
-                runtime_config: Some(lifecycle.runtime_config),
-                runtime_instance_id: Some(lifecycle.instance_id),
-                shutdown: Some(lifecycle.shutdown),
+                runtime_config: lifecycle.runtime_config,
+                runtime_instance_id: lifecycle.instance_id,
+                shutdown: lifecycle.shutdown,
             },
             _server_config,
         )
         .await
         .map_err(|e| ApplicationError::ServerStartFailed(e.to_string()))?;
 
-        tracing::info!("📊 Web server started on http://{}", addr);
+        tracing::info!("📊 Web server started on http://{}", handle.address());
         tracing::info!("   /api/topology  - Flow structure");
         tracing::info!("   /api/config    - Resolved configuration (read-only)");
         #[cfg(feature = "prometheus")]
@@ -2207,19 +2049,27 @@ impl FlowApplication {
         tracing::info!("   /health        - Health status");
         tracing::info!("   /ready         - Readiness status");
 
-        Ok(Some(handle))
+        Ok(handle)
     }
 
-    /// Internal: Start the web server with all endpoints
-    #[cfg(not(feature = "warp-server"))]
-    async fn start_server(
-        _flow_handle: &Arc<FlowHandle>,
-        _server_config: ServerConfig,
-        extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
-        _runtime_instance_id: RuntimeInstanceId,
-        _shutdown: tokio::sync::watch::Receiver<bool>,
-    ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
-        let _ = extra_endpoints;
-        Err(ApplicationError::FeatureNotEnabled("web-host".to_string()))
+    /// Stop a materialised pipeline before the bootstrap guard can restore auto-run.
+    async fn stop_before_run(flow: &FlowHandle, grace: Duration) {
+        use obzenflow_runtime::supervised_base::SupervisorHandle;
+        let cleanup = async {
+            if flow.is_running() && !flow.current_state().is_terminal() {
+                flow.stop_cancel().await?;
+            }
+            lifecycle::wait(flow).await
+        };
+        match tokio::time::timeout(grace + grace, cleanup).await {
+            Ok(Ok(())) => {}
+            result => {
+                tracing::warn!(
+                    ?result,
+                    "Pre-run pipeline cleanup did not complete normally"
+                );
+                let _ = flow.abort_and_wait().await;
+            }
+        }
     }
 }

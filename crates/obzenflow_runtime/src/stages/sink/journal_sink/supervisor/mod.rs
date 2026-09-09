@@ -49,6 +49,8 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
         &self,
         initial_state: Self::State,
     ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        // Construction starts in Created. Entry hooks mirror the engine-assigned
+        // state before the supervisor executes any transition actions.
         fsm! {
             state:   JournalSinkState<H>;
             event:   JournalSinkEvent<H>;
@@ -86,6 +88,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             }
 
             state JournalSinkState::Initialized {
+                on_entry |state: &JournalSinkState<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         Ok(Transition {
@@ -115,6 +124,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             }
 
             state JournalSinkState::Running {
+                on_entry |state: &JournalSinkState<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JournalSinkSupervisor: received Ready in Running; treating as no-op");
@@ -173,6 +189,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             }
 
             state JournalSinkState::Flushing {
+                on_entry |state: &JournalSinkState<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JournalSinkSupervisor: received Ready in Flushing; treating as no-op");
@@ -216,6 +239,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             }
 
             state JournalSinkState::Draining {
+                on_entry |state: &JournalSinkState<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on JournalSinkEvent::Ready => |_state: &JournalSinkState<H>, _event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     Box::pin(async move {
                         tracing::info!("JournalSinkSupervisor: received Ready in Draining; treating as no-op");
@@ -264,6 +294,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             }
 
             state JournalSinkState::Drained {
+                on_entry |state: &JournalSinkState<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on JournalSinkEvent::Error => |_state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
@@ -284,6 +321,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             }
 
             state JournalSinkState::Failed {
+                on_entry |state: &JournalSinkState<H>, ctx: &mut JournalSinkContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state(state.variant_name());
+                        Ok(vec![])
+                    })
+                };
+
                 on JournalSinkEvent::Error => |state: &JournalSinkState<H>, event: &JournalSinkEvent<H>, _ctx: &mut JournalSinkContext<H>| {
                     let state = state.clone();
                     let event = event.clone();

@@ -192,38 +192,51 @@ fn main() -> Result<()> {
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
-        .run_blocking(FlowDefinition::materialize(move |_runtime_config| {
-            let high_volume_source_handler = sources::finite_from_fn(move |index| {
-                if index >= total_events {
-                    println!("🏁 Source complete: Generated {index} total events");
-                    return None;
+        .run_blocking(flow_definition(
+            total_events,
+            std::path::PathBuf::from("target/prometheus_demo_journal"),
+        ))?;
+
+    Ok(())
+}
+
+/// The example's flow, also exercised by its journal integration test.
+pub(crate) fn flow_definition(
+    total_events: usize,
+    journal_root: std::path::PathBuf,
+) -> FlowDefinition {
+    FlowDefinition::materialize(move |_runtime_config| {
+        let high_volume_source_handler = sources::finite_from_fn(move |index| {
+            if index >= total_events {
+                println!("🏁 Source complete: Generated {index} total events");
+                return None;
+            }
+
+            let current_id = index;
+            let next_count = index + 1;
+
+            if next_count.is_multiple_of(10_000) {
+                println!("📊 Generated {next_count} events...");
+            }
+
+            Some(DataRequest {
+                id: current_id,
+                should_fail: current_id % 100 == 0,
+                batch: current_id / 100,
+            })
+        });
+        let error_processor_handler = error_prone_transform();
+        let event_counter_handler = stateful::reduce(
+            EventCountState::default(),
+            |state: &mut EventCountState, _event: &ProcessedEvent| {
+                state.event_count += 1;
+                if state.event_count.is_multiple_of(10_000) {
+                    println!("📊 Counted {} events so far...", state.event_count);
                 }
-
-                let current_id = index;
-                let next_count = index + 1;
-
-                if next_count.is_multiple_of(10_000) {
-                    println!("📊 Generated {next_count} events...");
-                }
-
-                Some(DataRequest {
-                    id: current_id,
-                    should_fail: current_id % 100 == 0,
-                    batch: current_id / 100,
-                })
-            });
-            let error_processor_handler = error_prone_transform();
-            let event_counter_handler = stateful::reduce(
-                EventCountState::default(),
-                |state: &mut EventCountState, _event: &ProcessedEvent| {
-                    state.event_count += 1;
-                    if state.event_count.is_multiple_of(10_000) {
-                        println!("📊 Counted {} events so far...", state.event_count);
-                    }
-                },
-            )
-            .emit_on_eof();
-            let summary_sink_handler = SinkTyped::new(move |summary: EventCountState| async move {
+            },
+        )
+        .emit_on_eof();
+        let summary_sink_handler = SinkTyped::new(move |summary: EventCountState| async move {
                     let count = summary.event_count;
                     let errors = total_events.saturating_sub(count);
 
@@ -243,31 +256,29 @@ fn main() -> Result<()> {
                     println!("=====================================");
                 })
                 .idempotent();
-            let completion_sink_handler = CompletionSink::new();
+        let completion_sink_handler = CompletionSink::new();
 
-            Ok(flow! {
-                name: "prometheus_demo",
-                journals: disk_journals(std::path::PathBuf::from("target/prometheus_demo_journal")),
+        Ok(flow! {
+            name: "prometheus_demo",
+            journals: disk_journals(journal_root),
 
-                stages: {
-                    // Source intake is the live I/O boundary where rate limiting belongs.
-                    high_volume_source = source!(DataRequest => high_volume_source_handler with [
-                        RateLimiterBuilder::new(1000.0).build()
-                    ]);
-                    error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
-                    event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
-                    summary_sink = sink!(EventCountState => summary_sink_handler);
-                    completion_sink = sink!(ProcessedEvent => completion_sink_handler);
-                },
+            stages: {
+                // Source intake is the live I/O boundary where rate limiting belongs.
+                high_volume_source = source!(DataRequest => high_volume_source_handler with [
+                    RateLimiterBuilder::new(1000.0).build()
+                ]);
+                error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);
+                event_counter = stateful!(ProcessedEvent -> EventCountState => event_counter_handler);
+                summary_sink = sink!(EventCountState => summary_sink_handler);
+                completion_sink = sink!(ProcessedEvent => completion_sink_handler);
+            },
 
-                topology: {
-                    high_volume_source |> error_processor;
-                    error_processor |> event_counter;
-                    error_processor |> completion_sink;
-                    event_counter |> summary_sink;
-                }
-            })
-        }))?;
-
-    Ok(())
+            topology: {
+                high_volume_source |> error_processor;
+                error_processor |> event_counter;
+                error_processor |> completion_sink;
+                event_counter |> summary_sink;
+            }
+        })
+    })
 }

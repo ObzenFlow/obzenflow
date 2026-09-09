@@ -25,6 +25,7 @@ impl TypedPayload for LifecycleEvent {
     const EVENT_TYPE: &'static str = "stateful.lifecycle_event";
 }
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -61,11 +62,12 @@ impl InlineSink for NoopSink {
 #[derive(Clone, Debug)]
 struct SlowSink {
     sleep: Duration,
+    entered: Arc<tokio::sync::Notify>,
 }
 
 impl SlowSink {
-    fn new(sleep: Duration) -> Self {
-        Self { sleep }
+    fn new(sleep: Duration, entered: Arc<tokio::sync::Notify>) -> Self {
+        Self { sleep, entered }
     }
 }
 
@@ -82,6 +84,7 @@ impl InlineSink for SlowSink {
         _event: LifecycleEvent,
         _context: SinkWriteContext,
     ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+        self.entered.notify_one();
         tokio::time::sleep(self.sleep).await;
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("Noop".to_string()),
@@ -169,22 +172,6 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     })
     .await
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
-}
-
-async fn wait_for_draining(handle: &FlowHandle) -> Result<()> {
-    let mut rx = handle.state_receiver();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(*rx.borrow(), PipelineState::Draining) {
-                return Ok(());
-            }
-            rx.changed()
-                .await
-                .map_err(|_| anyhow!("pipeline state channel closed"))?;
-        }
-    })
-    .await
-    .map_err(|_| anyhow!("timeout waiting for pipeline to reach Draining"))?
 }
 
 async fn terminal_lifecycle_event(
@@ -330,13 +317,91 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
 }
 
 #[tokio::test]
-async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
+async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input() -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone, Debug)]
+    struct GatedSink {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        delivered: Arc<AtomicU64>,
+    }
+    #[async_trait]
+    impl InlineSink for GatedSink {
+        type Input = LifecycleEvent;
+        fn describe(&self) -> SinkDescription {
+            SinkDescription::unspecified()
+        }
+        async fn write(
+            &mut self,
+            _: LifecycleEvent,
+            _: SinkWriteContext,
+        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+            if self.delivered.load(Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.delivered.fetch_add(1, Ordering::SeqCst);
+            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
+                DeliveryMethod::Custom("GatedSink".into()),
+                None,
+            )))
+        }
+    }
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let delivered = Arc::new(AtomicU64::new(0));
+    let sink = GatedSink {
+        entered: entered.clone(),
+        release: release.clone(),
+        delivered: delivered.clone(),
+    };
+    let handle = FlowDefinition::materialize(move |_| {
+        let source = SlowFiniteSource::new(10_000, Duration::from_millis(5));
+        Ok(flow! {
+            name: "graceful_finite_admitted_work", journals: disk_journals(journal_root.clone()),
+            stages: { src = source!(LifecycleEvent => source); snk = sink!(LifecycleEvent => sink); },
+            topology: { src |> snk; }
+        })
+    }).build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()).await?;
+    let journal = handle.system_journal().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+    let mut stop = lifecycle::observe_stop(&handle);
+    handle.stop_graceful(Duration::from_secs(2)).await?;
+    while matches!(stop.snapshot(), FlowStopStatus::NotRequested) {
+        stop.changed().await?;
+    }
+    assert!(matches!(stop.snapshot(), FlowStopStatus::Graceful { .. }));
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), lifecycle::wait(&handle)).await??;
+    match terminal_lifecycle_event(journal).await? {
+        Some(PipelineLifecycleEvent::Completed { metrics, .. }) => {
+            assert!(metrics.events_in_total > 0 && metrics.events_in_total < 10_000);
+            assert_eq!(metrics.events_in_total, metrics.events_out_total);
+            assert_eq!(metrics.events_out_total, delivered.load(Ordering::SeqCst));
+            assert_eq!(metrics.errors_total, 0);
+        }
+        terminal => {
+            return Err(anyhow!(
+                "expected completed admitted work, got {terminal:?}"
+            ))
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn graceful_timeout_is_admitted_once_with_runtime_and_handle_contenders() -> Result<()> {
+    let dir = tempdir()?;
+    let journal_root = dir.path().join("journals");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let sink_entered = entered.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
         let source_handler = SlowInfiniteSource::new(Duration::from_millis(1));
-        let sink_handler = SlowSink::new(Duration::from_millis(250));
+        let sink_handler = SlowSink::new(Duration::from_secs(1), sink_entered);
 
         Ok(flow! {
             name: "stateful_stop_cancel_timeout_reason",
@@ -362,18 +427,37 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
 
     wait_for_running(&handle).await?;
 
-    // First request a graceful stop so the pipeline records stop intent as user_stop.
-    handle.stop_graceful(Duration::from_secs(60)).await?;
-    wait_for_draining(&handle).await?;
-
-    // Then simulate a process-level timeout escalation and ensure the terminal lifecycle reason
-    // reflects stop_timeout (not user_stop).
-    handle.stop_cancel_timeout().await?;
+    // Ensure real work is pending before establishing a short graceful deadline.
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+    let mut stop = lifecycle::observe_stop(&handle);
+    handle.stop_graceful(Duration::from_millis(50)).await?;
+    let deadline = loop {
+        match stop.snapshot() {
+            FlowStopStatus::Graceful { deadline }
+            | FlowStopStatus::Cancelling {
+                graceful_deadline: Some(deadline),
+                ..
+            } => break deadline,
+            _ => {}
+        }
+        stop.changed().await?;
+    };
+    tokio::time::sleep_until(deadline.into()).await;
+    // Runtime may win this race and terminate first; both contenders use the reducer.
+    let _ = lifecycle::cancel_after_timeout(&handle).await;
 
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
 
+    let facts = system_journal.read_all_unordered().await?;
+    let cancel_facts = facts.iter().filter(|fact| matches!(&fact.event.event,
+        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopRequested { mode, .. }) if mode == "cancel"
+    )).count();
+    assert_eq!(
+        cancel_facts, 1,
+        "timeout cancellation must be admitted once"
+    );
     let terminal = terminal_lifecycle_event(system_journal).await?;
     match terminal {
         Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "stop_timeout" => {

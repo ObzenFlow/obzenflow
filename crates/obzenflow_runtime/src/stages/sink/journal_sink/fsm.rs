@@ -17,6 +17,7 @@ use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
@@ -441,7 +442,14 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to create subscription: {e}"
                         ))
-                    })?;
+                    })?
+                    .with_contract_flow_context(make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        StageType::Sink,
+                    ));
 
                 ctx.subscription = Some(subscription);
 
@@ -1009,10 +1017,210 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
 #[cfg(test)]
 mod tests {
     use super::apply_terminal_eof_audit_gate;
+    use super::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
     use crate::stages::common::handlers::{CommitReceipt, SinkLifecycleReport};
+    use crate::stages::sink::journal_sink::supervisor::JournalSinkSupervisor;
+    use crate::stages::source::finite::fsm::tests::TestJournal;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::EventId;
+
+    #[derive(Debug)]
+    struct AuditSink;
+
+    #[async_trait::async_trait]
+    impl crate::stages::common::handlers::SinkHandler for AuditSink {
+        async fn consume(
+            &mut self,
+            _event: obzenflow_core::ChainEvent,
+        ) -> Result<DeliveryPayload, crate::stages::common::handler_error::HandlerError> {
+            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+        }
+
+        async fn flush(
+            &mut self,
+        ) -> Result<Option<DeliveryPayload>, crate::stages::common::handler_error::HandlerError>
+        {
+            Ok(Some(DeliveryPayload::success(DeliveryMethod::Noop, None)))
+        }
+    }
+
+    #[tokio::test]
+    async fn sink_state_projection_precedes_flush_and_terminal_actions() {
+        use crate::metrics::instrumentation::StageInstrumentation;
+        use crate::stages::resources_builder::SubscriptionFactory;
+        use crate::supervised_base::base::Supervisor;
+        use obzenflow_core::journal::journal_owner::JournalOwner;
+        use obzenflow_core::{FlowId, StageId};
+        use obzenflow_fsm::{FsmAction, StateVariant};
+        use std::{
+            collections::HashMap,
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+
+        let stage_id = StageId::new();
+        let mut ctx = JournalSinkContext {
+            handler: AuditSink,
+            stage_id,
+            stage_name: "audit_sink".into(),
+            receipt_destination: "audit_sink".into(),
+            default_delivery_method: None,
+            flow_name: "projection_flow".into(),
+            flow_id: FlowId::new(),
+            data_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            system_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            effect_history: None,
+            runtime_execution: crate::execution::RuntimeExecution::new(
+                crate::execution::RuntimeMode::Live,
+                None,
+            ),
+            effect_ports: Default::default(),
+            effect_declarations: Vec::new(),
+            bus: Arc::new(crate::message_bus::FsmMessageBus::new()),
+            writer_id: None,
+            lineage_policy: Default::default(),
+            subscription: None,
+            contract_state: Vec::new(),
+            terminal_eof_kind: None,
+            last_contract_check: None,
+            instrumentation: Arc::new(StageInstrumentation::new()),
+            upstream_subscription_factory: SubscriptionFactory::new(HashMap::new()).bind(&[]),
+            control_strategy: Arc::new(
+                crate::stages::common::control_strategies::JonestownSignalStrategy,
+            ),
+            sink_delivery_boundary: None,
+            observers: Default::default(),
+            processing_context: Default::default(),
+            backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+            backpressure_readers: HashMap::new(),
+            heartbeat: None,
+            catch_up_flip: None,
+            failure_lifecycle_recorded: false,
+            failure_causal_event_id: None,
+        };
+        let supervisor = JournalSinkSupervisor::<AuditSink> {
+            name: "sink_audit_sink".into(),
+            stage_id,
+            subscription: None,
+            _marker: std::marker::PhantomData,
+        };
+        let mut fsm = supervisor.build_state_machine(JournalSinkState::Created);
+        for (event, destination) in [
+            (JournalSinkEvent::Initialize, "Initialized"),
+            (JournalSinkEvent::Ready, "Running"),
+            (JournalSinkEvent::BeginFlush, "Flushing"),
+            (JournalSinkEvent::FlushComplete, "Draining"),
+            (JournalSinkEvent::BeginDrain, "Drained"),
+        ] {
+            let actions = fsm.handle(event, &mut ctx).await.unwrap();
+            assert_eq!(ctx.instrumentation.snapshot().fsm_state, destination);
+            assert_eq!(fsm.state().variant_name(), destination);
+            for action in actions {
+                action.execute(&mut ctx).await.unwrap();
+            }
+        }
+        let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+        let flush = rows.iter().find(|env| {
+            env.event
+                .runtime_context
+                .as_ref()
+                .is_some_and(|runtime| runtime.fsm_state == "Flushing")
+        });
+        assert!(
+            flush.is_some(),
+            "flush action must snapshot its accepted Flushing state"
+        );
+
+        // EOF transitions directly to Drained, before flushing has happened.
+        ctx.instrumentation.transition_to_state("Running");
+        let mut fsm = supervisor.build_state_machine(JournalSinkState::Running);
+        let before = ctx
+            .data_journal
+            .read_causally_ordered()
+            .await
+            .unwrap()
+            .len();
+        let actions = fsm
+            .handle(JournalSinkEvent::ReceivedEOF, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Drained");
+        assert_eq!(
+            ctx.data_journal
+                .read_causally_ordered()
+                .await
+                .unwrap()
+                .len(),
+            before
+        );
+        for action in actions {
+            action.execute(&mut ctx).await.unwrap();
+        }
+        let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+        let snapshots: Vec<_> = rows[before..]
+            .iter()
+            .filter_map(|env| env.event.runtime_context.as_ref())
+            .collect();
+        assert!(!snapshots.is_empty());
+        assert!(snapshots
+            .iter()
+            .all(|runtime| runtime.fsm_state == "Drained"));
+
+        for initial in [
+            JournalSinkState::Running,
+            JournalSinkState::Flushing,
+            JournalSinkState::Draining,
+        ] {
+            ctx.instrumentation
+                .transition_to_state(initial.variant_name());
+            let entered = Instant::now() - Duration::from_secs(60);
+            *ctx.instrumentation.state_entered_at.write().unwrap() = entered;
+            let mut fsm = supervisor.build_state_machine(initial);
+            assert!(fsm
+                .handle(JournalSinkEvent::Ready, &mut ctx)
+                .await
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                *ctx.instrumentation.state_entered_at.read().unwrap(),
+                entered
+            );
+            assert!(ctx.instrumentation.snapshot().time_in_state_ms >= 60_000);
+        }
+        for initial in [
+            JournalSinkState::Created,
+            JournalSinkState::Initialized,
+            JournalSinkState::Running,
+            JournalSinkState::Flushing,
+            JournalSinkState::Draining,
+            JournalSinkState::Drained,
+            JournalSinkState::Failed("first".into()),
+        ] {
+            ctx.instrumentation
+                .transition_to_state(initial.variant_name());
+            let entered = Instant::now() - Duration::from_secs(60);
+            *ctx.instrumentation.state_entered_at.write().unwrap() = entered;
+            let repeated = matches!(initial, JournalSinkState::Failed(_));
+            let mut fsm = supervisor.build_state_machine(initial);
+            let actions = fsm
+                .handle(JournalSinkEvent::Error("failure".into()), &mut ctx)
+                .await
+                .unwrap();
+            let expected_reason = if repeated { "first" } else { "failure" };
+            assert_eq!(
+                fsm.state(),
+                &JournalSinkState::Failed(expected_reason.into())
+            );
+            assert_eq!(actions.is_empty(), repeated);
+            assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Failed");
+            assert_eq!(
+                *ctx.instrumentation.state_entered_at.read().unwrap() == entered,
+                repeated
+            );
+        }
+    }
 
     fn lifecycle_report(parent_event_id: EventId) -> SinkLifecycleReport {
         let mut report = SinkLifecycleReport::default();

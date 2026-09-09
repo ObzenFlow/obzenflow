@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
+use super::fsm::{FlowStopMode, FlowStopStatus, PipelineEvent, PipelineState};
+use super::termination::{execution_result, PublishedOutcome};
+use crate::__private::lifecycle::StopObserver;
 use crate::errors::FlowError;
 use crate::journal::RunSubstrateState;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
@@ -21,6 +23,9 @@ use std::time::Duration;
 type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
 pub(crate) struct FlowHandleExtras {
+    pub stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
+    pub stop_status: tokio::sync::watch::Receiver<FlowStopStatus>,
+    pub published_outcome: PublishedOutcome,
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
@@ -84,6 +89,9 @@ pub enum FlowStartControlOutcome {
 /// This is the only supervisor handle that gets exposed to DSL users,
 /// so it needs to provide all functionality they might need.
 pub struct FlowHandle {
+    stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
+    stop_status: tokio::sync::watch::Receiver<FlowStopStatus>,
+    published_outcome: PublishedOutcome,
     /// The standard handle for FSM control
     handle: StandardHandle<PipelineEvent, PipelineState>,
 
@@ -125,6 +133,9 @@ impl FlowHandle {
         extras: FlowHandleExtras,
     ) -> Self {
         let FlowHandleExtras {
+            stage_cleanup,
+            stop_status,
+            published_outcome,
             topology,
             flow_name,
             contract_attachments,
@@ -136,6 +147,9 @@ impl FlowHandle {
         } = extras;
 
         Self {
+            stage_cleanup,
+            stop_status,
+            published_outcome,
             handle,
             topology,
             flow_name,
@@ -146,6 +160,20 @@ impl FlowHandle {
             run_substrate,
             flow_effective_config,
         }
+    }
+
+    pub(crate) fn observe_stop(&self) -> StopObserver {
+        StopObserver::new(self.stop_status.clone())
+    }
+
+    /// Every flow completion path joins first, then interprets the same
+    /// acknowledged execution outcome. Task failure takes precedence.
+    pub(crate) async fn wait_for_execution(&self) -> Result<(), FlowError> {
+        self.handle
+            .join()
+            .await
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))?;
+        execution_result(&self.published_outcome)
     }
 
     /// The run substrate selected at composition: durable with its current-run
@@ -243,8 +271,8 @@ impl FlowHandle {
     /// command.
     ///
     /// If a finite flow reaches a terminal state before the post-readiness state
-    /// check can send `Run`, this returns an error. Use `run()` or
-    /// `run()` for finite flows that should be driven to completion.
+    /// check can send `Run`, this returns an error. Use `run()` for finite
+    /// flows that should be driven to completion.
     /// Intended for long-running/server flows where lifecycle is driven
     /// externally (e.g. via HTTP control API) rather than by awaiting
     /// `run()` to completion.
@@ -288,51 +316,18 @@ impl FlowHandle {
     /// This waits for `ReadyForRun` before sending `Run`. If the pipeline is
     /// already `Running`, it waits for completion without sending another `Run`.
     /// This is the primary method users should call after creating a flow.
+    ///
+    /// Like `SupervisorHandle::wait_for_completion`, this joins the supervisor
+    /// and reports the acknowledged execution result, including when the flow
+    /// has already finished. Intentional cancellation succeeds; execution or
+    /// task failure and missing terminal publication return an error.
     pub async fn run(self) -> Result<(), FlowError> {
-        if let Err(error) = self.wait_for_ready().await {
-            let _ = self.wait_for_completion().await;
-            return Err(error);
-        }
-        let current_state = self.current_state();
-        tracing::debug!(
-            "FlowHandle::run() - Current pipeline state: {:?}",
-            current_state
-        );
-        if matches!(current_state, PipelineState::ReadyForRun) {
-            tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
-            if let Err(error) = self.send_event(PipelineEvent::Run).await {
-                let _ = self.wait_for_completion().await;
-                return Err(error);
-            }
-        }
-        tracing::debug!("FlowHandle::run() - Waiting for completion");
-
-        // Capture state receiver before consuming self so we can inspect the terminal state
-        let state_rx = self.state_receiver();
-
-        // Now wait for it to complete
-        let result = self.wait_for_completion().await;
-        tracing::debug!(
-            "FlowHandle::run() - wait_for_completion returned: {:?}",
-            result
-        );
-
-        // Surface aborts/failures instead of letting the example print success on error
-        if let Err(e) = result {
-            tracing::error!("FlowHandle::run() failed: {}", e);
-            return Err(e);
-        }
-
-        // Inspect final state to fail fast on pipeline aborts
-        let final_state = state_rx.borrow().clone();
-        match final_state {
-            PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
-                io::Error::other(reason),
-            ))),
-            PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
-                Box::new(io::Error::other(format!("{reason:?}"))),
-            )),
-            _ => Ok(()),
+        // Completion also observes a supervisor that fails before readiness.
+        // A missed readiness window or closed command channel cannot replace
+        // the joined execution result with an admission diagnostic.
+        tokio::select! {
+            result = self.wait_for_execution() => result,
+            _ = self.start() => self.wait_for_execution().await,
         }
     }
 
@@ -359,13 +354,7 @@ impl FlowHandle {
         .await
     }
 
-    /// Cancel due to a graceful stop timeout escalation (`stop_timeout`).
-    ///
-    /// This is primarily intended for process-level shutdown coordinators
-    /// (e.g. SIGTERM handlers) that enforce a deadline and need terminal
-    /// lifecycle observability to reflect that timeout.
-    #[doc(hidden)]
-    pub async fn stop_cancel_timeout(&self) -> Result<(), FlowError> {
+    pub(crate) async fn cancel_after_timeout(&self) -> Result<(), FlowError> {
         if !self.is_running() {
             return Ok(());
         }
@@ -488,37 +477,29 @@ impl SupervisorHandle for FlowHandle {
         self.handle.current_state()
     }
 
+    /// Join the supervisor and report the acknowledged execution result.
+    /// Intentional cancellation succeeds; execution failure does not.
     async fn wait_for_completion(self) -> Result<(), Self::Error> {
-        self.handle
-            .wait_for_completion()
-            .await
-            .map_err(|e| match e {
-                HandleError::SupervisorNotRunning => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        "Pipeline supervisor is not running",
-                    )))
-                }
-                HandleError::SupervisorFailed(msg) => {
-                    FlowError::ExecutionFailed(Box::new(std::io::Error::other(msg)))
-                }
-                HandleError::SupervisorPanicked(msg) => FlowError::ExecutionFailed(Box::new(
-                    std::io::Error::other(format!("Task panicked: {msg}")),
-                )),
-                _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
-            })
+        self.wait_for_execution().await
     }
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
-        self.handle.abort_and_wait().await.map_err(|error| {
+        let result = self.handle.abort_and_wait().await.map_err(|error| {
             FlowError::ExecutionFailed(Box::new(std::io::Error::other(error.to_string())))
-        })
+        });
+        for stage in &self.stage_cleanup {
+            if let Err(error) = stage.abort_and_join().await {
+                tracing::warn!(stage = stage.stage_name(), %error, "Emergency stage teardown failed");
+            }
+        }
+        result
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::__private::lifecycle;
     use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
     use obzenflow_core::event::types::ViolationCause;
     use std::error::Error;
@@ -526,6 +507,9 @@ mod tests {
 
     fn empty_extras() -> FlowHandleExtras {
         FlowHandleExtras {
+            stage_cleanup: Vec::new(),
+            stop_status: super::super::fsm::StopIntent::default().status_receiver(),
+            published_outcome: Default::default(),
             topology: None,
             flow_name: "test_flow".to_string(),
             contract_attachments: None,
@@ -544,9 +528,36 @@ mod tests {
                 .build(PipelineState::ReadyForRun);
 
         let state_watcher_for_task = state_watcher.clone();
+        let extras = empty_extras();
+        let published = extras.published_outcome.clone();
         let task = tokio::spawn(async move {
             match event_receiver.recv().await {
                 Some(PipelineEvent::Run) => {
+                    use super::super::termination::{
+                        ExecutionFailure, ExecutionOutcome, PublishedTermination,
+                    };
+                    let outcome = match &final_state {
+                        PipelineState::Failed {
+                            reason,
+                            failure_cause,
+                        } => ExecutionOutcome::Failed(ExecutionFailure {
+                            reason: reason.clone(),
+                            cause: failure_cause.clone(),
+                        }),
+                        PipelineState::AbortRequested { reason, .. } => {
+                            ExecutionOutcome::Failed(ExecutionFailure {
+                                reason: format!("{reason:?}"),
+                                cause: Some(reason.clone()),
+                            })
+                        }
+                        _ => ExecutionOutcome::Completed,
+                    };
+                    published
+                        .set(PublishedTermination {
+                            outcome,
+                            event_id: Some(obzenflow_core::EventId::new()),
+                        })
+                        .unwrap();
                     state_watcher_for_task
                         .update(final_state)
                         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
@@ -564,7 +575,7 @@ mod tests {
             .build_standard()
             .expect("standard handle should build");
 
-        FlowHandle::new(handle, empty_extras())
+        FlowHandle::new(handle, extras)
     }
 
     fn flow_handle_for_start_admission(
@@ -751,6 +762,183 @@ mod tests {
             source.to_string().contains("abort requested"),
             "unexpected source error: {source}"
         );
+    }
+
+    #[tokio::test]
+    async fn all_flow_completion_paths_report_execution_and_task_failures_consistently() {
+        use super::super::termination::{ExecutionFailure, ExecutionOutcome, PublishedTermination};
+
+        #[derive(Clone, Copy)]
+        enum Exit {
+            Returned,
+            Failed,
+            Panicked,
+            Aborted,
+        }
+        let failed = PipelineState::Failed {
+            reason: "FSM cleanup state is not the execution result".into(),
+            failure_cause: None,
+        };
+        let cases = [
+            (
+                PipelineState::Drained,
+                Some(ExecutionOutcome::Completed),
+                Exit::Returned,
+                None,
+            ),
+            (
+                failed.clone(),
+                Some(ExecutionOutcome::Cancelled {
+                    reason: "operator stop".into(),
+                }),
+                Exit::Returned,
+                None,
+            ),
+            (
+                failed.clone(),
+                Some(ExecutionOutcome::Cancelled {
+                    reason: STOP_REASON_TIMEOUT.into(),
+                }),
+                Exit::Returned,
+                None,
+            ),
+            (
+                PipelineState::ReadyForRun,
+                Some(ExecutionOutcome::NotStarted),
+                Exit::Returned,
+                None,
+            ),
+            (
+                failed,
+                Some(ExecutionOutcome::Failed(ExecutionFailure {
+                    reason: "acknowledged failure".into(),
+                    cause: None,
+                })),
+                Exit::Returned,
+                Some("acknowledged failure"),
+            ),
+            (
+                PipelineState::Drained,
+                None,
+                Exit::Returned,
+                Some("without an acknowledged terminal outcome"),
+            ),
+            (
+                PipelineState::Created,
+                None,
+                Exit::Failed,
+                Some("task failed before readiness"),
+            ),
+            (
+                PipelineState::Drained,
+                Some(ExecutionOutcome::Completed),
+                Exit::Panicked,
+                Some("failure after publication"),
+            ),
+            (
+                PipelineState::Created,
+                None,
+                Exit::Aborted,
+                Some("Supervisor task was aborted"),
+            ),
+        ];
+        for (state, outcome, exit, expected) in cases {
+            for use_run in [false, true] {
+                let (sender, _receiver, watcher) =
+                    ChannelBuilder::<PipelineEvent, PipelineState>::new().build(state.clone());
+                let extras = empty_extras();
+                let published = extras.published_outcome.clone();
+                let outcome = outcome.clone();
+                let task = tokio::spawn(async move {
+                    if let Some(outcome) = outcome {
+                        let event_id = (!matches!(outcome, ExecutionOutcome::NotStarted))
+                            .then(obzenflow_core::EventId::new);
+                        published
+                            .set(PublishedTermination { outcome, event_id })
+                            .unwrap();
+                    }
+                    match exit {
+                        Exit::Returned => Ok(()),
+                        Exit::Failed => Err("task failed before readiness".into()),
+                        Exit::Panicked => panic!("failure after publication"),
+                        Exit::Aborted => std::future::pending().await,
+                    }
+                });
+                if matches!(exit, Exit::Aborted) {
+                    task.abort();
+                }
+                let handle = FlowHandle::new(
+                    HandleBuilder::new()
+                        .with_event_sender(sender)
+                        .with_state_watcher(watcher)
+                        .with_supervisor_task(task)
+                        .build_standard()
+                        .unwrap(),
+                    extras,
+                );
+                let first = lifecycle::wait(&handle).await;
+                let repeated = lifecycle::wait(&handle).await;
+                let consumed = if use_run {
+                    tokio::time::timeout(Duration::from_secs(1), handle.run())
+                        .await
+                        .expect("completion must not hang waiting for readiness")
+                } else {
+                    handle.wait_for_completion().await
+                };
+                let diagnostic = |result: Result<(), FlowError>| {
+                    result.map_err(|error| error.source().unwrap().to_string())
+                };
+                let first = diagnostic(first);
+                assert_eq!(first, diagnostic(repeated));
+                assert_eq!(first, diagnostic(consumed));
+                match expected {
+                    Some(message) => assert!(first.unwrap_err().contains(message)),
+                    None => first.unwrap(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn framework_waits_do_not_consume_completion_or_skip_the_physical_join() {
+        use super::super::termination::{ExecutionOutcome, PublishedTermination};
+        let (sender, _receiver, watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Drained);
+        let extras = empty_extras();
+        extras
+            .published_outcome
+            .set(PublishedTermination {
+                outcome: ExecutionOutcome::Completed,
+                event_id: Some(obzenflow_core::EventId::new()),
+            })
+            .unwrap();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            gate.await.unwrap();
+            Ok(())
+        });
+        let handle = FlowHandle::new(
+            HandleBuilder::new()
+                .with_event_sender(sender)
+                .with_state_watcher(watcher)
+                .with_supervisor_task(task)
+                .build_standard()
+                .unwrap(),
+            extras,
+        );
+        let mut parked = Box::pin(lifecycle::wait(&handle));
+        assert!(
+            futures::poll!(&mut parked).is_pending(),
+            "publication alone is not completion"
+        );
+        let mut dropped = Box::pin(lifecycle::wait(&handle));
+        assert!(futures::poll!(&mut dropped).is_pending());
+        drop(dropped);
+        release.send(()).unwrap();
+        lifecycle::wait(&handle).await.unwrap();
+        parked.await.unwrap();
+        lifecycle::wait(&handle).await.unwrap();
+        handle.wait_for_completion().await.unwrap();
     }
 
     #[tokio::test]

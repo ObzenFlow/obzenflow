@@ -127,7 +127,7 @@ fn protected_surface_policy_matrix() {
             Some(expected) => assert_eq!(result.unwrap(), expected),
             None => assert!(matches!(
                 result,
-                Err(WebError::EndpointRegistrationFailed { .. })
+                Err(ManagedWebHostError::EndpointRegistrationFailed { .. })
             )),
         }
     }
@@ -259,7 +259,7 @@ impl HttpEndpoint for CountingEndpoint {
     fn managed_route(&self) -> Option<ManagedRouteInfo> {
         self.policy.clone()
     }
-    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(Response::ok().into())
     }
@@ -269,7 +269,7 @@ impl HttpEndpoint for CountingEndpoint {
 async fn admitted_routes_enforce_their_own_credentials_before_handlers() {
     if !with_auth_env("web::warp::warp_server::auth_tests::admitted_routes_enforce_their_own_credentials_before_handlers") { return; }
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut server = WarpServer::new();
+    let mut server = WarpWebHost::new();
     for (path, policy) in [
         ("/reports/new", Some(managed(Some(api_key(KEY_A)), None))),
         ("/reports/health", Some(managed(Some(api_key(KEY_A)), None))),
@@ -289,9 +289,9 @@ async fn admitted_routes_enforce_their_own_credentials_before_handlers() {
             }))
             .unwrap();
     }
-    let config = ServerConfig {
+    let config = HostConfig {
         control_plane_auth: Some(api_key(KEY_A)),
-        ..ServerConfig::localhost(0)
+        ..HostConfig::localhost(0)
     };
     let filter = server
         .build_filter(build_host_policy(&config, &server.endpoints, false).unwrap())
@@ -346,7 +346,7 @@ async fn admitted_routes_enforce_their_own_credentials_before_handlers() {
 #[tokio::test]
 async fn sse_rejects_invalid_current_material_before_opening_a_stream() {
     if !with_auth_env("web::warp::warp_server::auth_tests::sse_rejects_invalid_current_material_before_opening_a_stream") { return; }
-    let mut server = WarpServer::new();
+    let mut server = WarpWebHost::new();
     server.with_system_journal(Arc::new(crate::journal::MemoryJournal::<SystemEvent>::new()));
     // Exercise the request boundary directly; production admission rejects this policy earlier.
     let filter = server
@@ -370,7 +370,6 @@ async fn sse_rejects_invalid_current_material_before_opening_a_stream() {
 #[tokio::test]
 async fn invalid_authentication_reaches_the_startup_caller_before_spawn() {
     if !with_auth_env("web::warp::warp_server::auth_tests::invalid_authentication_reaches_the_startup_caller_before_spawn") { return; }
-    use crate::web::web_server::{start_web_server_with_config, WebServerResources};
     let cases = [
         (Some(api_key(EMPTY)), None, false),
         (Some(hmac(MISSING)), None, false),
@@ -388,38 +387,30 @@ async fn invalid_authentication_reaches_the_startup_caller_before_spawn() {
         ),
     ];
     for (control_plane_auth, policy, conflict) in cases {
-        let resources = WebServerResources {
-            topology: Arc::new(
-                obzenflow_topology::TopologyBuilder::new()
-                    .build_unchecked()
-                    .unwrap(),
-            ),
-            contract_attachments: None,
-            #[cfg(feature = "prometheus")]
-            metrics_endpoint: None,
-            flow_handle: None,
-            extra_endpoints: vec![Box::new(CountingEndpoint {
-                path: "/reports",
-                policy,
-                calls: Arc::new(AtomicUsize::new(0)),
-            })],
-            surface_metrics: None,
-            runtime_config: None,
-            runtime_instance_id: None,
-            shutdown: None,
-        };
+        let mut host = WarpWebHost::new();
+        host.register_endpoint(Box::new(CountingEndpoint {
+            path: "/reports",
+            policy,
+            calls: Arc::new(AtomicUsize::new(0)),
+        }))
+        .unwrap();
         // Auth admission returns an error directly, without a background handle.
-        let config = ServerConfig {
+        let config = HostConfig {
             control_plane_auth,
-            ..ServerConfig::localhost(0)
+            ..HostConfig::localhost(0)
         };
-        let error = start_web_server_with_config(resources, config)
+        let error = host
+            .bind(config, tokio::sync::watch::channel(false).0)
             .await
-            .unwrap_err();
+            .err()
+            .expect("invalid authentication must fail before binding");
         if conflict {
-            assert!(matches!(error, WebError::EndpointRegistrationFailed { .. }));
+            assert!(matches!(
+                error,
+                ManagedWebHostError::EndpointRegistrationFailed { .. }
+            ));
         } else {
-            assert!(matches!(error, WebError::StartupFailed { .. }));
+            assert!(matches!(error, ManagedWebHostError::StartupFailed { .. }));
         }
     }
 }

@@ -405,6 +405,51 @@ fn facts(events: &[EventEnvelope<ChainEvent>]) -> Vec<JoinedFact> {
 }
 
 fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>]) {
+    let manifest = archive_manifest(run_dir);
+    let join_writer = stage_writer(run_dir, "joined");
+    let mut finals = 0;
+    let mut progress_paths = std::collections::HashSet::new();
+    for envelope in events {
+        if envelope.event.writer_id != join_writer {
+            continue;
+        }
+        let (is_contract, reader_path) = match &envelope.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+                reader_path,
+                ..
+            }) => (true, Some(reader_path.0.clone())),
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => {
+                finals += 1;
+                (true, None)
+            }
+            _ => (false, None),
+        };
+        if !is_contract {
+            continue;
+        }
+        if let Some(path) = reader_path {
+            progress_paths.insert(path);
+        }
+        let context = &envelope.event.flow_context;
+        assert_eq!(context.stage_name, "joined");
+        assert_eq!(WriterId::from(context.stage_id), join_writer);
+        assert_eq!(
+            context.stage_type,
+            obzenflow_core::event::context::StageType::Join
+        );
+        assert_eq!(context.flow_name, manifest["flow_name"].as_str().unwrap());
+        assert_eq!(context.flow_id, manifest["flow_id"].as_str().unwrap());
+    }
+    assert_eq!(
+        finals, 2,
+        "both join subscriptions must author final contracts"
+    );
+    for upstream in ["reference_validate", "stream_validate"] {
+        assert!(
+            progress_paths.contains(manifest["stages"][upstream]["stage_id"].as_str().unwrap()),
+            "missing {upstream} progress from the join subscription"
+        );
+    }
     let expected = vec![
         JoinedFact {
             phase: "stream".to_string(),
@@ -501,6 +546,13 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
     let live = latest_run_dir(&journal_base);
     let live_join = read_stage_appended(&live, "joined").await;
     assert_journal_contract(&live, &live_join);
+    let manifest = archive_manifest(&live);
+    let archived_join_path = live.join(
+        manifest["stages"]["joined"]["data_journal_file"]
+            .as_str()
+            .unwrap(),
+    );
+    let archived_join_bytes = std::fs::read(&archived_join_path).unwrap();
 
     let validator_rows = read_stage_appended(&live, "stream_validate").await;
     let validator_writer = stage_writer(&live, "stream_validate");
@@ -575,5 +627,12 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
         transport_signature(&live, &live_join),
         transport_signature(&replay, &replay_join),
         "fan-in transport order is replay-stable"
+    );
+    // Reopening a DiskJournal creates a fresh journal_writer_id on its reader
+    // envelopes. Compare the persisted bytes for immutability; decoded records
+    // above remain the oracle for context, causal identity, and replay behavior.
+    assert!(
+        std::fs::read(&archived_join_path).unwrap() == archived_join_bytes,
+        "replay must not rewrite archived records or contexts"
     );
 }

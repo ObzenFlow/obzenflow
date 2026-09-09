@@ -11,7 +11,6 @@ use crate::id_conversions::StageIdExt;
 use crate::messaging::SubscriptionPoller;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::supervised_base::EventLoopDirective;
-use std::time::Instant;
 
 pub(super) async fn dispatch_draining(
     supervisor: &mut PipelineSupervisor,
@@ -20,22 +19,13 @@ pub(super) async fn dispatch_draining(
     // If Stop initiated this drain, enforce a bounded timeout so the
     // pipeline terminates deterministically even if some stage never
     // reports completion.
-    if let Some(deadline) = context.stop_intent.deadline {
-        if Instant::now() >= deadline {
-            tracing::warn!(
-                pipeline = %supervisor.name,
-                "Graceful stop timeout expired; escalating to cancel"
-            );
-            context
-                .stop_intent
-                .apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_string()));
-            return Ok(EventLoopDirective::Transition(
-                PipelineEvent::StopRequested {
-                    mode: FlowStopMode::Cancel,
-                    reason: Some(STOP_REASON_TIMEOUT.to_string()),
-                },
-            ));
-        }
+    if context.stop_intent.timeout_due() {
+        return Ok(EventLoopDirective::Transition(
+            PipelineEvent::StopRequested {
+                mode: FlowStopMode::Cancel,
+                reason: Some(STOP_REASON_TIMEOUT.to_string()),
+            },
+        ));
     }
 
     // Continue polling for completion events during drain.

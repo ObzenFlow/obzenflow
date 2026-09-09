@@ -10,7 +10,9 @@ use obzenflow_core::ingress::{
     BatchSubmission, IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
     IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind, SubmissionResponse,
 };
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
+};
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
@@ -43,7 +45,7 @@ impl HttpEndpoint for BatchEventEndpoint {
         &[HttpMethod::Post]
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         // FLOWIP-115d: one attempt sequence for the whole batch, allocated up
         // front. Accepted rows share it (ordered by batch_index); refusal facts
         // carry it as the cross-journal merge key.
@@ -55,10 +57,7 @@ impl HttpEndpoint for BatchEventEndpoint {
         if request.body.len() > self.state.config.max_body_size {
             let response = Response::new(413)
                 .with_json(&json!({"error": "payload too large"}))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
             return Ok(response.into());
         }
 
@@ -66,9 +65,8 @@ impl HttpEndpoint for BatchEventEndpoint {
             if let Err(e) = authorize_request(auth, &request) {
                 let response = Response::new(401)
                     .with_json(&json!({"error": e.to_string()}))
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
+                    .map_err(|err| {
+                        EndpointError::with_source("Serialising endpoint response", err)
                     })?;
                 return Ok(response.into());
             }
@@ -98,10 +96,7 @@ impl HttpEndpoint for BatchEventEndpoint {
             let response = Response::new(503)
                 .with_header("Retry-After".to_string(), "1".to_string())
                 .with_json(&json!({"error": "not ready"}))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
             return Ok(response.into());
         }
 
@@ -110,9 +105,8 @@ impl HttpEndpoint for BatchEventEndpoint {
             Err(e) => {
                 let response = Response::new(400)
                     .with_json(&json!({"error": format!("invalid request body: {e}")}))
-                    .map_err(|err| WebError::RequestHandlingFailed {
-                        message: err.to_string(),
-                        source: None,
+                    .map_err(|err| {
+                        EndpointError::with_source("Serialising endpoint response", err)
                     })?;
                 return Ok(response.into());
             }
@@ -127,10 +121,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                         self.state.config.max_batch_size
                     )
                 }))
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
             return Ok(response.into());
         }
 
@@ -184,10 +175,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                     rejected,
                     errors,
                 })
-                .map_err(|e| WebError::RequestHandlingFailed {
-                    message: e.to_string(),
-                    source: None,
-                })?;
+                .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
             return Ok(response.into());
         }
 
@@ -221,9 +209,8 @@ impl HttpEndpoint for BatchEventEndpoint {
                     let response = Response::new(503)
                         .with_header("Retry-After".to_string(), "1".to_string())
                         .with_json(&json!({"error": "buffer full"}))
-                        .map_err(|e| WebError::RequestHandlingFailed {
-                            message: e.to_string(),
-                            source: None,
+                        .map_err(|e| {
+                            EndpointError::with_source("Serialising endpoint response", e)
                         })?;
                     return Ok(response.into());
                 }
@@ -242,9 +229,8 @@ impl HttpEndpoint for BatchEventEndpoint {
                     }
                     let response = Response::internal_error()
                         .with_json(&json!({"error": "ingestion channel closed"}))
-                        .map_err(|e| WebError::RequestHandlingFailed {
-                            message: e.to_string(),
-                            source: None,
+                        .map_err(|e| {
+                            EndpointError::with_source("Serialising endpoint response", e)
                         })?;
                     return Ok(response.into());
                 }
@@ -287,9 +273,8 @@ impl HttpEndpoint for BatchEventEndpoint {
                             rejected: rejected + accepted,
                             errors,
                         })
-                        .map_err(|e| WebError::RequestHandlingFailed {
-                            message: e.to_string(),
-                            source: None,
+                        .map_err(|e| {
+                            EndpointError::with_source("Serialising endpoint response", e)
                         })?;
                     return Ok(response.into());
                 }
@@ -318,9 +303,8 @@ impl HttpEndpoint for BatchEventEndpoint {
                             rejected: rejected + accepted,
                             errors,
                         })
-                        .map_err(|e| WebError::RequestHandlingFailed {
-                            message: e.to_string(),
-                            source: None,
+                        .map_err(|e| {
+                            EndpointError::with_source("Serialising endpoint response", e)
                         })?;
                     return Ok(response.into());
                 }
@@ -351,10 +335,7 @@ impl HttpEndpoint for BatchEventEndpoint {
                 rejected,
                 errors,
             })
-            .map_err(|e| WebError::RequestHandlingFailed {
-                message: e.to_string(),
-                source: None,
-            })?;
+            .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
         Ok(response.into())
     }
 }

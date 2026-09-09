@@ -269,6 +269,13 @@ impl StageInstrumentation {
 
     /// Create a snapshot for event injection
     pub fn snapshot(&self) -> RuntimeContext {
+        // State and its age describe one transition. Use the same lock order as
+        // transition_to_state, then release both before reading other metrics.
+        let (fsm_state, time_in_state_ms) = {
+            let state = self.current_state.read().unwrap();
+            let entered_at = self.state_entered_at.read().unwrap();
+            (state.clone(), entered_at.elapsed().as_millis() as u64)
+        };
         let histogram = self.processing_time_histogram.read().unwrap();
 
         RuntimeContext {
@@ -357,8 +364,8 @@ impl StageInstrumentation {
             failures_total: self.failures_total.load(Ordering::Relaxed),
 
             // FSM state
-            fsm_state: self.current_state.read().unwrap().clone(),
-            time_in_state_ms: self.state_entered_at.read().unwrap().elapsed().as_millis() as u64,
+            fsm_state,
+            time_in_state_ms,
 
             // Event loop metrics
             event_loops_total: self.event_loops_total.load(Ordering::Relaxed),
@@ -636,10 +643,15 @@ impl StageInstrumentation {
         )
     }
 
-    /// Track FSM state transition
+    /// Update the state label used in runtime snapshots, without driving the FSM.
+    /// Re-observing the same state preserves its original entry time.
     pub fn transition_to_state(&self, new_state: &str) {
-        *self.current_state.write().unwrap() = new_state.to_string();
-        *self.state_entered_at.write().unwrap() = Instant::now();
+        let mut state = self.current_state.write().unwrap();
+        let mut entered_at = self.state_entered_at.write().unwrap();
+        if state.as_str() != new_state {
+            *state = new_state.to_string();
+            *entered_at = Instant::now();
+        }
     }
 
     /// Check if a duration is an anomaly (outlier)
@@ -802,6 +814,25 @@ mod tests {
     use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{EventEnvelope, EventId, EventType, JournalId, StageId, WriterId};
+
+    #[test]
+    fn repeated_state_observation_preserves_state_age() {
+        use std::time::{Duration, Instant};
+
+        let instrumentation = StageInstrumentation::new();
+        let entered = Instant::now() - Duration::from_secs(60);
+        *instrumentation.state_entered_at.write().unwrap() = entered;
+        instrumentation.transition_to_state("Created");
+        assert_eq!(*instrumentation.state_entered_at.read().unwrap(), entered);
+        let snapshot = instrumentation.snapshot();
+        assert_eq!(snapshot.fsm_state, "Created");
+        assert!(snapshot.time_in_state_ms >= 60_000);
+
+        let before_transition = Instant::now();
+        instrumentation.transition_to_state("Running");
+        assert!(*instrumentation.state_entered_at.read().unwrap() >= before_transition);
+        assert_eq!(instrumentation.snapshot().fsm_state, "Running");
+    }
 
     #[test]
     fn record_error_updates_totals_and_by_kind() {

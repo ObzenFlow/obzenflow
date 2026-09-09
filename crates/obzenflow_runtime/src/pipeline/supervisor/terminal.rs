@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{BoxError, PipelineContext, PipelineEvent, PipelineSupervisor};
+use super::{BoxError, FlowStopMode, PipelineContext, PipelineEvent, PipelineSupervisor};
+use crate::pipeline::termination::{ExecutionFailure, ExecutionOutcome};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::types::{DurationMs, ViolationCause};
 
@@ -10,73 +11,30 @@ pub(super) async fn dispatch_drained(
     supervisor: &mut PipelineSupervisor,
     context: &mut PipelineContext,
 ) -> Result<EventLoopDirective<PipelineEvent>, BoxError> {
-    // Terminal: write pipeline_completed (natural completion) or pipeline_cancelled
-    // (intentional stop), then terminate. We also keep the lighter-weight
-    // "drained" marker in write_completion_event().
-
-    // Best-effort reconciliation with tail system events to ensure we have
-    // the latest wide lifecycle snapshots before computing the rollup.
-    if let Err(e) = supervisor.reconcile_stage_metrics_from_tail(context).await {
-        tracing::warn!(
-            pipeline = %supervisor.name,
-            error = %e,
-            "Failed to reconcile stage lifecycle metrics from tail before terminal event"
-        );
-    }
-
-    // Compute flow duration (best-effort).
-    let duration_ms = context
-        .flow_start_time
-        .map(|start| start.elapsed().as_millis() as u64)
-        .unwrap_or(0);
-
-    // Compute flow-level lifecycle metrics from per-stage snapshots.
-    let metrics = crate::pipeline::fsm::compute_flow_lifecycle_metrics(context);
-
-    let system_event_factory =
-        obzenflow_core::event::system_event::SystemEventFactory::new(supervisor.system_id);
-
-    if context.stop_intent.requested {
-        let reason = context.stop_intent.reason_label();
-        let cancelled = system_event_factory.pipeline_cancelled(
-            reason.clone(),
-            DurationMs(duration_ms),
-            Some(metrics.clone()),
-            Some(ViolationCause::Other(reason.clone())),
-        );
-
-        if let Err(e) = supervisor.system_journal.append(cancelled, None).await {
-            tracing::error!(
-                pipeline = %supervisor.name,
-                journal_error = %e,
-                "Failed to write pipeline cancelled event"
-            );
-        } else {
-            tracing::info!(
-                pipeline = %supervisor.name,
-                reason = %reason,
-                "Pipeline cancelled event written"
-            );
+    let infinite = context.topology.stages().any(|stage| {
+        matches!(
+            stage.stage_type,
+            obzenflow_topology::StageType::InfiniteSource
+        )
+    });
+    let outcome = if let Some(failure) = &context.termination.failure {
+        ExecutionOutcome::Failed(failure.clone())
+    } else if context.stop_intent.requested
+        && (context.flow_start_time.is_none()
+            || infinite
+            || matches!(context.stop_intent.mode, Some(FlowStopMode::Cancel)))
+    {
+        ExecutionOutcome::Cancelled {
+            reason: context.stop_intent.reason_label(),
         }
     } else if context.flow_start_time.is_some() {
-        let completed = system_event_factory.pipeline_completed(DurationMs(duration_ms), metrics);
-
-        if let Err(e) = supervisor.system_journal.append(completed, None).await {
-            tracing::error!(
-                pipeline = %supervisor.name,
-                journal_error = %e,
-                "Failed to write pipeline completed event"
-            );
-        } else {
-            tracing::info!(
-                pipeline = %supervisor.name,
-                "Pipeline completed event written (success path)"
-            );
-        }
-    }
-
-    tracing::info!("Pipeline drained, terminating");
-    Ok(EventLoopDirective::Terminate)
+        // A successful graceful drain of finite-only sources completes admitted
+        // work. This does not promise exhaustion of unread source input.
+        ExecutionOutcome::Completed
+    } else {
+        ExecutionOutcome::NotStarted
+    };
+    publish_terminal(supervisor, context, outcome).await
 }
 
 pub(super) async fn dispatch_failed(
@@ -85,83 +43,88 @@ pub(super) async fn dispatch_failed(
     reason: &str,
     failure_cause: &Option<ViolationCause>,
 ) -> Result<EventLoopDirective<PipelineEvent>, BoxError> {
-    // Terminal failure: write flow_failed with duration + best-effort rollup metrics.
-    // This snapshot is derived from per-stage lifecycle snapshots
-    // (`stage_lifecycle_metrics`) via `compute_flow_lifecycle_metrics`, after a
-    // best-effort reconciliation of wide lifecycle events from the system
-    // journal tail to capture any completions written after we stopped polling.
-    if let Err(e) = supervisor.reconcile_stage_metrics_from_tail(context).await {
-        tracing::warn!(
-            pipeline = %supervisor.name,
-            error = %e,
-            "Failed to reconcile stage lifecycle metrics from tail before failure"
-        );
-    }
-
-    let duration_ms = context
-        .flow_start_time
-        .map(|start| start.elapsed().as_millis() as u64)
-        .unwrap_or(0);
-
-    let metrics = Some(crate::pipeline::fsm::compute_flow_lifecycle_metrics(
-        context,
-    ));
-
-    let system_event_factory =
-        obzenflow_core::event::system_event::SystemEventFactory::new(supervisor.system_id);
-
-    if context.stop_intent.requested {
-        let reason_label = context
-            .stop_intent
-            .reason
-            .clone()
-            .unwrap_or_else(|| reason.to_string());
-        let cancelled = system_event_factory.pipeline_cancelled(
-            reason_label.clone(),
-            DurationMs(duration_ms),
-            metrics,
-            Some(ViolationCause::Other(reason_label.clone())),
-        );
-
-        if let Err(e) = supervisor.system_journal.append(cancelled, None).await {
-            tracing::error!(
-                pipeline = %supervisor.name,
-                journal_error = %e,
-                "Failed to write pipeline cancelled event"
-            );
-        } else {
-            tracing::info!(
-                pipeline = %supervisor.name,
-                reason = %reason_label,
-                "Pipeline cancelled event written"
-            );
+    // Failed is also the historical FSM teardown state for cancellation. An
+    // accepted execution failure takes precedence over any cleanup stop intent.
+    let outcome = if let Some(failure) = &context.termination.failure {
+        ExecutionOutcome::Failed(failure.clone())
+    } else if context.stop_intent.requested {
+        ExecutionOutcome::Cancelled {
+            reason: context.stop_intent.reason_label(),
         }
-
-        tracing::info!("Pipeline cancelled: {}", reason_label);
     } else {
-        let failed = system_event_factory.pipeline_failed(
-            reason.to_string(),
-            DurationMs(duration_ms),
-            metrics,
-            failure_cause.clone(),
-        );
+        ExecutionOutcome::Failed(ExecutionFailure {
+            reason: reason.to_string(),
+            cause: failure_cause.clone(),
+        })
+    };
+    publish_terminal(supervisor, context, outcome).await
+}
 
-        if let Err(e) = supervisor.system_journal.append(failed, None).await {
-            tracing::error!(
-                pipeline = %supervisor.name,
-                journal_error = %e,
-                "Failed to write pipeline failed event"
-            );
-        } else {
-            tracing::error!(
-                pipeline = %supervisor.name,
-                error = %reason,
-                "Pipeline failed event written (failure path)"
-            );
+async fn publish_terminal(
+    supervisor: &mut PipelineSupervisor,
+    context: &mut PipelineContext,
+    outcome: ExecutionOutcome,
+) -> Result<EventLoopDirective<PipelineEvent>, BoxError> {
+    if matches!(outcome, ExecutionOutcome::NotStarted) {
+        context.termination.retain(outcome, None)?;
+        return Ok(EventLoopDirective::Terminate);
+    }
+    if let Err(error) = supervisor.reconcile_stage_metrics_from_tail(context).await {
+        tracing::warn!(pipeline = %supervisor.name, %error,
+            "Failed to reconcile stage lifecycle metrics before terminal publication");
+    }
+    let duration = DurationMs(
+        context
+            .flow_start_time
+            .map(|start| start.elapsed().as_millis() as u64)
+            .unwrap_or(0),
+    );
+    let metrics = crate::pipeline::fsm::compute_flow_lifecycle_metrics(context);
+    let factory =
+        obzenflow_core::event::system_event::SystemEventFactory::new(supervisor.system_id);
+    let event = match &outcome {
+        ExecutionOutcome::Completed => factory.pipeline_completed(duration, metrics),
+        ExecutionOutcome::Cancelled { reason } => factory.pipeline_cancelled(
+            reason.clone(),
+            duration,
+            Some(metrics),
+            Some(ViolationCause::Other(reason.clone())),
+        ),
+        ExecutionOutcome::Failed(failure) => factory.pipeline_failed(
+            failure.reason.clone(),
+            duration,
+            Some(metrics),
+            failure.cause.clone(),
+        ),
+        ExecutionOutcome::NotStarted => {
+            return Err(std::io::Error::other(
+                "Pre-execution teardown cannot publish an execution terminal fact",
+            )
+            .into())
         }
-
-        // Terminal state.
-        tracing::error!("Pipeline failed: {}", reason);
+    };
+    let event_id = event.id;
+    supervisor.system_journal.append(event, None).await.inspect_err(|error| {
+        tracing::error!(pipeline = %supervisor.name, %error, "Failed to publish pipeline terminal outcome");
+    })?;
+    // No await between acknowledged append and retaining its outcome. State
+    // notifications and task completion alone never establish publication.
+    context.termination.retain(outcome, Some(event_id))?;
+    match &context
+        .termination
+        .published
+        .get()
+        .expect("retained above")
+        .outcome
+    {
+        ExecutionOutcome::Failed(failure) => tracing::error!(
+            pipeline = %supervisor.name, %event_id, reason = %failure.reason,
+            "Pipeline failed event written"
+        ),
+        outcome => tracing::info!(
+            pipeline = %supervisor.name, %event_id, ?outcome,
+            "Pipeline terminal outcome published"
+        ),
     }
     Ok(EventLoopDirective::Terminate)
 }

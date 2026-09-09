@@ -4,7 +4,7 @@
 
 //! HTTP endpoint abstraction
 
-use super::error::WebError;
+use super::error::EndpointError;
 use super::managed::ManagedResponse;
 use super::surface::{RouteKind, RoutePolicy, SurfacePolicy};
 use super::types::{HttpMethod, Request};
@@ -45,15 +45,7 @@ pub trait HttpEndpoint: Send + Sync {
     ///
     /// This method is called when a request matches this endpoint's path and method.
     /// The implementation should process the request and return an appropriate response.
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError>;
-
-    /// Optional method to check if the endpoint is healthy
-    ///
-    /// This can be used for health checks and readiness probes.
-    /// Default implementation always returns true.
-    fn is_healthy(&self) -> bool {
-        true
-    }
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError>;
 
     /// Optional method to get endpoint metadata
     ///

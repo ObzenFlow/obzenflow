@@ -2,28 +2,28 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Web server factory for all flow endpoints
-//!
-//! Provides a simple way to start a web server with topology, metrics, and health endpoints
+//! Assembly of the application-owned managed host.
 
+use crate::web::host_config::HostConfig;
+use crate::web::host_error::ManagedWebHostError;
 use obzenflow_core::composite::{CompositeDefinition, CompositeLifecycleProjection};
 use obzenflow_core::id::{CompositeId, RoleId};
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ServerConfig, WebError, WebServer};
+use obzenflow_core::web::EndpointError;
+use obzenflow_core::web::{HttpEndpoint, HttpMethod};
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::surface_metrics::HttpSurfaceMetricsCollector;
 use super::RuntimeInstanceId;
 
-pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
+pub(crate) type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
-pub struct WebServerResources {
+pub(crate) struct ManagedHostInput {
     /// Canonical topology for this flow. Carries FLOWIP-114b annotations
     /// (stage typing, join metadata, middleware, subgraph membership,
     /// subgraph registry, role, cycle membership, flow name, API version)
@@ -36,23 +36,23 @@ pub struct WebServerResources {
     pub contract_attachments: Option<ContractAttachments>,
     #[cfg(feature = "prometheus")]
     pub metrics_endpoint: Option<super::endpoints::PrometheusMetricsEndpoint>,
-    pub flow_handle: Option<Arc<FlowHandle>>,
+    pub flow_handle: Arc<FlowHandle>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     pub surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
     /// FLOWIP-010: the owned resolved snapshot; presence turns on the seven
     /// read-only `/api/config/*` routes.
-    pub runtime_config: Option<Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>>,
+    pub runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
     /// FLOWIP-114d: per-process incarnation identity, stamped into the SSE
     /// bootstrap event for data-path generation detection.
-    pub runtime_instance_id: Option<RuntimeInstanceId>,
+    pub runtime_instance_id: RuntimeInstanceId,
     /// FLOWIP-114d gap 8: fires after the terminal pipeline state; the
     /// listener then closes gracefully and SSE producers end their streams.
-    pub shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 fn composite_definitions_from_topology(
     topology: &Topology,
-) -> Result<Vec<CompositeDefinition>, WebError> {
+) -> Result<Vec<CompositeDefinition>, ManagedWebHostError> {
     let mut definitions = Vec::with_capacity(topology.subgraphs().len());
 
     for subgraph in topology.subgraphs() {
@@ -61,7 +61,7 @@ fn composite_definitions_from_topology(
             let stage = topology
                 .stages()
                 .find(|stage| stage.id == *member_id)
-                .ok_or_else(|| WebError::Implementation {
+                .ok_or_else(|| ManagedWebHostError::Implementation {
                     message: format!(
                         "composite {} references missing member stage {}",
                         subgraph.subgraph_id, member_id
@@ -72,7 +72,7 @@ fn composite_definitions_from_topology(
                 .subgraph
                 .as_ref()
                 .filter(|membership| membership.subgraph_id == subgraph.subgraph_id)
-                .ok_or_else(|| WebError::Implementation {
+                .ok_or_else(|| ManagedWebHostError::Implementation {
                     message: format!(
                         "composite {} member {} has no matching subgraph membership",
                         subgraph.subgraph_id, member_id
@@ -93,7 +93,7 @@ fn composite_definitions_from_topology(
     }
 
     CompositeLifecycleProjection::new(definitions.clone()).map_err(|error| {
-        WebError::Implementation {
+        ManagedWebHostError::Implementation {
             message: format!("invalid composite lifecycle projection: {error}"),
             source: Some(Box::new(error)),
         }
@@ -117,7 +117,9 @@ fn is_reserved_built_in_path(path: &str) -> bool {
         || path.starts_with("/api/config/")
 }
 
-fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result<(), WebError> {
+fn validate_extra_endpoints(
+    extra_endpoints: &[Box<dyn HttpEndpoint>],
+) -> Result<(), ManagedWebHostError> {
     use super::routing::{matchit_template_to_public, public_template_to_matchit};
     use matchit::Router as MatchItRouter;
 
@@ -135,7 +137,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
     for endpoint in extra_endpoints {
         let path = endpoint.path().to_string();
         if is_reserved_built_in_path(&path) {
-            return Err(WebError::EndpointRegistrationFailed {
+            return Err(ManagedWebHostError::EndpointRegistrationFailed {
                 path,
                 message: "Reserved built-in path; choose a different route".to_string(),
             });
@@ -150,7 +152,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
         for method in claimed_methods {
             let entry = methods_by_template.entry(path.clone()).or_default();
             if !entry.insert(method) {
-                return Err(WebError::EndpointRegistrationFailed {
+                return Err(ManagedWebHostError::EndpointRegistrationFailed {
                     path: path.clone(),
                     message: format!("Duplicate route: {} {}", method.as_str(), path),
                 });
@@ -164,7 +166,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
     let mut router = MatchItRouter::new();
     for template in templates {
         let matchit_path = public_template_to_matchit(&template).map_err(|message| {
-            WebError::EndpointRegistrationFailed {
+            ManagedWebHostError::EndpointRegistrationFailed {
                 path: template.clone(),
                 message,
             }
@@ -178,7 +180,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
                 ),
                 other => other.to_string(),
             };
-            return Err(WebError::EndpointRegistrationFailed {
+            return Err(ManagedWebHostError::EndpointRegistrationFailed {
                 path: template.clone(),
                 message,
             });
@@ -188,49 +190,15 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
     Ok(())
 }
 
-/// Start a web server with all flow endpoints
-///
-/// This function creates a single server with all endpoints:
-/// - `/api/topology` - Flow structure and stage information
-/// - `/metrics` - Prometheus metrics (if metrics endpoint provided)
-/// - `/health` - Health check endpoint
-/// - `/ready` - Readiness check endpoint
-///
-/// # Example
-/// ```ignore
-/// use obzenflow_infra::web::start_web_server;
-///
-/// // Start server with topology and metrics
-/// let handle = start_web_server(WebServerResources {
-///     topology: flow_topology,
-///     contract_attachments: None,
-///     metrics_endpoint: Some(metrics_endpoint),
-///     flow_handle: None,
-///     extra_endpoints: vec![],
-///     surface_metrics: None,
-///     runtime_config: None,
-///     runtime_instance_id: None,
-///     shutdown: None,
-/// }, 9090).await?;
-/// ```
-#[cfg(feature = "warp-server")]
-pub async fn start_web_server(
-    resources: WebServerResources,
-    port: u16,
-) -> Result<tokio::task::JoinHandle<()>, WebError> {
-    start_web_server_with_config(resources, ServerConfig::localhost(port)).await
-}
-
-/// Start a web server with all flow endpoints using an explicit `ServerConfig`.
-#[cfg(feature = "warp-server")]
-pub async fn start_web_server_with_config(
-    resources: WebServerResources,
-    server_config: ServerConfig,
-) -> Result<tokio::task::JoinHandle<()>, WebError> {
+/// Assemble the required application resources and return an already bound host.
+pub(crate) async fn bind_managed_host(
+    resources: ManagedHostInput,
+    server_config: HostConfig,
+) -> Result<super::managed_host::ManagedWebHost, ManagedWebHostError> {
     use super::endpoints::topology::{StageMetadata, StageStatus};
     use super::endpoints::{FlowControlEndpoint, TopologyHttpEndpoint};
 
-    let WebServerResources {
+    let ManagedHostInput {
         topology,
         contract_attachments,
         #[cfg(feature = "prometheus")]
@@ -245,35 +213,14 @@ pub async fn start_web_server_with_config(
 
     validate_extra_endpoints(&extra_endpoints)?;
 
-    let mut server = super::warp::WarpServer::new();
+    let mut server = super::warp::WarpWebHost::new();
     server.with_composite_definitions(composite_definitions_from_topology(&topology)?);
     server.with_contract_boundary_aliases(&topology)?;
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
     }
-    if let Some(runtime_instance_id) = runtime_instance_id {
-        server.with_runtime_instance_id(runtime_instance_id);
-    }
-    if let Some(shutdown) = shutdown {
-        server.with_shutdown(shutdown);
-    }
-    let pipeline_ready = flow_handle.as_ref().map(|handle| {
-        let ready = Arc::new(AtomicBool::new(false));
-        let ready_for_task = ready.clone();
-        let mut state_rx = handle.state_receiver();
-        tokio::spawn(async move {
-            let initial_running = matches!(state_rx.borrow().clone(), PipelineState::Running);
-            ready_for_task.store(initial_running, Ordering::Release);
-            loop {
-                if state_rx.changed().await.is_err() {
-                    break;
-                }
-                let is_running = matches!(state_rx.borrow().clone(), PipelineState::Running);
-                ready_for_task.store(is_running, Ordering::Release);
-            }
-        });
-        ready
-    });
+    server.with_runtime_instance_id(runtime_instance_id);
+    let pipeline_state = flow_handle.state_receiver();
 
     // Initial per-stage runtime status; the canonical topology already
     // carries the structural stage type, so this map only carries status.
@@ -296,16 +243,14 @@ pub async fn start_web_server_with_config(
 
     // FLOWIP-010: the seven read-only config introspection routes, gated on
     // the owned snapshot being threaded (control-plane auth applies).
-    if let Some(snapshot) = runtime_config {
+    {
+        let snapshot = runtime_config;
         use super::endpoints::{ConfigHttpEndpoint, ConfigReadModel, ConfigRoute};
 
-        let flow_name = flow_handle
-            .as_ref()
-            .map(|handle| handle.flow_name().to_string())
-            .unwrap_or_else(|| "unnamed_flow".to_string());
+        let flow_name = flow_handle.flow_name().to_string();
         let flow_id = flow_handle
-            .as_ref()
-            .and_then(|handle| handle.run_substrate().locator())
+            .run_substrate()
+            .locator()
             .and_then(|locator| {
                 locator
                     .path()
@@ -313,9 +258,7 @@ pub async fn start_web_server_with_config(
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .unwrap_or_else(|| flow_name.clone());
-        let flow_effective = flow_handle
-            .as_ref()
-            .and_then(|handle| handle.flow_effective_config().cloned());
+        let flow_effective = flow_handle.flow_effective_config().cloned();
 
         let model = Arc::new(ConfigReadModel::new(
             snapshot,
@@ -330,20 +273,14 @@ pub async fn start_web_server_with_config(
     }
 
     #[cfg(feature = "prometheus")]
-    let has_metrics_endpoint = metrics_endpoint.is_some();
-    #[cfg(feature = "prometheus")]
     if let Some(endpoint) = metrics_endpoint {
         server.register_endpoint(Box::new(endpoint))?;
     }
 
-    // Add flow control endpoint if a handle is available
-    if let Some(handle) = flow_handle {
-        // Configure SSE system journal if available
-        if let Some(journal) = handle.system_journal() {
-            server.with_system_journal(journal);
-        }
-        server.register_endpoint(Box::new(FlowControlEndpoint::new(handle)))?;
+    if let Some(journal) = flow_handle.system_journal() {
+        server.with_system_journal(journal);
     }
+    server.register_endpoint(Box::new(FlowControlEndpoint::new(flow_handle)))?;
 
     for endpoint in extra_endpoints {
         server.register_endpoint(endpoint)?;
@@ -351,32 +288,8 @@ pub async fn start_web_server_with_config(
 
     // Add health and ready endpoints
     server.register_endpoint(Box::new(SimpleHealthEndpoint))?;
-    if let Some(pipeline_ready) = pipeline_ready {
-        server.register_endpoint(Box::new(PipelineReadyEndpoint::new(pipeline_ready)))?;
-    } else {
-        server.register_endpoint(Box::new(SimpleReadyEndpoint))?;
-    }
-
-    // Start server in background
-    let addr = server_config.address();
-    let serving = server.prepare_start(server_config)?;
-    let handle = tokio::spawn(async move {
-        if let Err(e) = serving.await {
-            tracing::error!("Web server failed: {}", e);
-        }
-    });
-
-    // Log available endpoints
-    tracing::info!("📊 Web server started on http://{}", addr);
-    tracing::info!("   /api/topology  - Flow structure");
-    #[cfg(feature = "prometheus")]
-    if has_metrics_endpoint {
-        tracing::info!("   /metrics       - Prometheus metrics");
-    }
-    tracing::info!("   /health        - Health check");
-    tracing::info!("   /ready         - Readiness check");
-
-    Ok(handle)
+    server.register_endpoint(Box::new(PipelineReadyEndpoint::new(pipeline_state)))?;
+    server.bind(server_config, shutdown).await
 }
 
 // Built-in health and readiness endpoints
@@ -396,39 +309,21 @@ impl HttpEndpoint for SimpleHealthEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
         Ok(Response::ok().with_text("OK").into())
-    }
-}
-
-/// Simple ready endpoint
-struct SimpleReadyEndpoint;
-
-#[async_trait]
-impl HttpEndpoint for SimpleReadyEndpoint {
-    fn path(&self) -> &str {
-        "/ready"
-    }
-
-    fn methods(&self) -> &[HttpMethod] {
-        &[HttpMethod::Get]
-    }
-
-    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
-        Ok(Response::ok().with_text("READY").into())
     }
 }
 
 /// Pipeline readiness endpoint.
 ///
-/// If a FlowHandle is available, this reflects pipeline state (Running => 200, otherwise 503).
+/// Reads Runtime's current state directly (Running => 200, otherwise 503).
 struct PipelineReadyEndpoint {
-    ready: Arc<AtomicBool>,
+    state: tokio::sync::watch::Receiver<PipelineState>,
 }
 
 impl PipelineReadyEndpoint {
-    fn new(ready: Arc<AtomicBool>) -> Self {
-        Self { ready }
+    fn new(state: tokio::sync::watch::Receiver<PipelineState>) -> Self {
+        Self { state }
     }
 }
 
@@ -442,8 +337,8 @@ impl HttpEndpoint for PipelineReadyEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
-        if self.ready.load(Ordering::Acquire) {
+    async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
+        if matches!(*self.state.borrow(), PipelineState::Running) {
             Ok(Response::ok().with_text("READY").into())
         } else {
             Ok(Response::new(503).with_text("NOT_READY").into())
@@ -482,7 +377,7 @@ mod tests {
             &self.methods
         }
 
-        async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+        async fn handle(&self, _request: Request) -> Result<ManagedResponse, EndpointError> {
             Ok(Response::ok().into())
         }
     }
@@ -567,7 +462,7 @@ mod tests {
 
         let err = validate_extra_endpoints(&endpoints).unwrap_err();
         match err {
-            WebError::EndpointRegistrationFailed { path, .. } => {
+            ManagedWebHostError::EndpointRegistrationFailed { path, .. } => {
                 // Should fail on the first reserved path encountered.
                 assert_eq!(path, "/metrics");
             }
@@ -584,7 +479,7 @@ mod tests {
 
         let err = validate_extra_endpoints(&endpoints).unwrap_err();
         match err {
-            WebError::EndpointRegistrationFailed { path, message } => {
+            ManagedWebHostError::EndpointRegistrationFailed { path, message } => {
                 assert_eq!(path, "/foo");
                 assert!(
                     message.contains("Duplicate route"),
@@ -615,7 +510,7 @@ mod tests {
 
         let err = validate_extra_endpoints(&endpoints).unwrap_err();
         match err {
-            WebError::EndpointRegistrationFailed { path, message } => {
+            ManagedWebHostError::EndpointRegistrationFailed { path, message } => {
                 assert_eq!(path, "/foo");
                 assert!(
                     message.contains("Duplicate route"),

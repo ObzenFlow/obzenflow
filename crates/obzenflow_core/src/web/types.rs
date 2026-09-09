@@ -4,7 +4,6 @@
 
 //! Core HTTP types used by web abstractions
 
-use super::auth::AuthPolicy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -165,111 +164,4 @@ impl Response {
             .insert("Content-Type".to_string(), "application/json".to_string());
         Ok(self)
     }
-}
-
-/// Server configuration
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    /// Host to bind to (e.g., "0.0.0.0" or "127.0.0.1")
-    pub host: String,
-
-    /// Port to listen on
-    pub port: u16,
-
-    /// Optional TLS configuration
-    pub tls: Option<TlsConfig>,
-
-    /// Maximum request body size in bytes (default: 10MB)
-    pub max_body_size: Option<usize>,
-
-    /// Request timeout in seconds (default: 30)
-    pub request_timeout_secs: Option<u64>,
-
-    /// Number of worker threads (default: number of CPU cores)
-    pub worker_threads: Option<usize>,
-
-    /// Cross-origin request configuration (CORS).
-    ///
-    /// If unset, the web server implementation decides a default.
-    pub cors: Option<CorsConfig>,
-
-    /// Optional auth policy for framework-owned control-plane routes such as
-    /// `/api/flow/*`, `/api/topology`, and `/metrics`.
-    pub control_plane_auth: Option<AuthPolicy>,
-}
-
-/// CORS configuration.
-#[derive(Debug, Clone)]
-pub struct CorsConfig {
-    pub mode: CorsMode,
-}
-
-#[derive(Debug, Clone)]
-pub enum CorsMode {
-    /// Adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
-    ///
-    /// This is convenient for local development but dangerous for production if the API is
-    /// protected only by secrets in headers (e.g. API keys).
-    AllowAnyOrigin,
-    /// Adds CORS headers for the given origin allow-list.
-    AllowList(Vec<String>),
-    /// Do not add CORS headers (browser same-origin policy applies).
-    SameOrigin,
-}
-
-impl Default for CorsConfig {
-    fn default() -> Self {
-        Self {
-            mode: CorsMode::SameOrigin,
-        }
-    }
-}
-
-impl ServerConfig {
-    /// Create a new server configuration
-    pub fn new(host: String, port: u16) -> Self {
-        Self {
-            host,
-            port,
-            tls: None,
-            max_body_size: None,
-            request_timeout_secs: None,
-            worker_threads: None,
-            cors: None,
-            control_plane_auth: None,
-        }
-    }
-
-    /// Create a default configuration for localhost
-    pub fn localhost(port: u16) -> Self {
-        Self::new("127.0.0.1".to_string(), port)
-    }
-
-    /// Get the full address string
-    pub fn address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-/// TLS configuration
-#[derive(Debug, Clone)]
-pub struct TlsConfig {
-    /// Path to certificate file
-    pub cert_path: String,
-
-    /// Path to private key file
-    pub key_path: String,
-
-    /// Optional client certificate verification
-    pub client_auth: Option<ClientAuth>,
-}
-
-/// Client authentication configuration
-#[derive(Debug, Clone)]
-pub struct ClientAuth {
-    /// Path to CA certificate for client verification
-    pub ca_path: String,
-
-    /// Whether client certificates are required
-    pub required: bool,
 }

@@ -7,6 +7,7 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -509,7 +510,14 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                             obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to create subscription: {e}"
                             ))
-                        })?;
+                        })?
+                        .with_contract_flow_context(make_flow_context(
+                            &ctx.flow_name,
+                            &ctx.flow_id.to_string(),
+                            &ctx.stage_name,
+                            ctx.stage_id,
+                            StageType::Stateful,
+                        ));
 
                     ctx.subscription = Some(subscription);
 

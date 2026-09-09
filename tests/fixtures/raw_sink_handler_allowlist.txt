@@ -2,3 +2,5 @@
 #
 # New, moved, or removed entries fail closed until the erasure role is reviewed.
 framework_erasure|crates/obzenflow_runtime/src/stages/common/handlers/sink/typed.rs|SinkWriterAdapter
+# FSM-only unit fixture emits a flush audit to witness pre-action state projection.
+test_harness|crates/obzenflow_runtime/src/stages/sink/journal_sink/fsm.rs|AuditSink

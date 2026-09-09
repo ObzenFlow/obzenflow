@@ -10,7 +10,7 @@ use crate::feed_plan::{FeedKey, FeedRole};
 use crate::id_conversions::StageIdExt;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::PipelineContext;
-use crate::stages::common::stage_handle::{BoxedStageHandle, StageError, StageEvent, StageHandle};
+use crate::stages::common::stage_handle::{StageError, StageEvent, StageHandle};
 use crate::supervised_base::{
     ChannelBuilder, EventSender, SelfSupervisedExt, SelfSupervisedWithExternalEvents, StateWatcher,
 };
@@ -34,6 +34,7 @@ struct MemoryJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
     events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    terminal_append: Option<Arc<TerminalAppendGate>>,
 }
 
 impl<T: JournalEvent> MemoryJournal<T> {
@@ -42,8 +43,15 @@ impl<T: JournalEvent> MemoryJournal<T> {
             id: JournalId::new(),
             owner: Some(owner),
             events: Arc::new(Mutex::new(Vec::new())),
+            terminal_append: None,
         }
     }
+}
+
+struct TerminalAppendGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    fail: bool,
 }
 
 struct MemoryJournalReader<T: JournalEvent> {
@@ -93,6 +101,18 @@ where
         event: T,
         _parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
+        if matches!(
+            event.event_type_name(),
+            "system.pipeline.completed" | "system.pipeline.cancelled" | "system.pipeline.failed"
+        ) {
+            if let Some(gate) = &self.terminal_append {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                if gate.fail {
+                    return Err(JournalError::Full);
+                }
+            }
+        }
         let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
         guard.push(envelope.clone());
@@ -198,6 +218,7 @@ fn test_context(
         flow_start_time: None,
         last_system_event_id_seen: None,
         stop_intent: Default::default(),
+        termination: Default::default(),
         source_contract_strict: Default::default(),
         metrics_drain_timeout_ms: 5_000,
     }
@@ -256,6 +277,7 @@ fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status() {
 }
 
 struct TestPipelineStageHandle {
+    stall_drain: bool,
     id: StageId,
     name: String,
     stage_type: StageType,
@@ -277,8 +299,9 @@ struct ShutdownProbe {
 }
 
 impl TestPipelineStageHandle {
-    fn boxed(id: StageId, name: impl Into<String>, stage_type: StageType) -> BoxedStageHandle {
-        Box::new(Self {
+    fn boxed(id: StageId, name: impl Into<String>, stage_type: StageType) -> Arc<dyn StageHandle> {
+        Arc::new(Self {
+            stall_drain: false,
             id,
             name: name.into(),
             stage_type,
@@ -294,8 +317,9 @@ impl TestPipelineStageHandle {
         entered: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
         count: Arc<AtomicUsize>,
-    ) -> BoxedStageHandle {
-        Box::new(Self {
+    ) -> Arc<dyn StageHandle> {
+        Arc::new(Self {
+            stall_drain: false,
             id,
             name: name.into(),
             stage_type,
@@ -313,8 +337,9 @@ impl TestPipelineStageHandle {
         name: impl Into<String>,
         stage_type: StageType,
         shutdown_probe: ShutdownProbe,
-    ) -> BoxedStageHandle {
-        Box::new(Self {
+    ) -> Arc<dyn StageHandle> {
+        Arc::new(Self {
+            stall_drain: false,
             id,
             name: name.into(),
             stage_type,
@@ -369,6 +394,9 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     async fn begin_drain(&self) -> Result<(), StageError> {
+        if self.stall_drain {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 
@@ -470,6 +498,43 @@ async fn stop_and_join(
         .expect("supervisor should stop")
         .expect("supervisor task should join")
         .expect("supervisor should return ok");
+}
+
+#[tokio::test]
+async fn graceful_deadline_bounds_a_stalled_source_control_send() {
+    use obzenflow_fsm::FsmAction;
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, _) = source_sink_topology();
+    let mut context = test_context(topology, system_id, journal, None);
+    let stage_id = StageId::new();
+    context.source_supervisors.insert(
+        stage_id,
+        Arc::new(TestPipelineStageHandle {
+            id: stage_id,
+            name: "stalled_source_control".into(),
+            stage_type: StageType::FiniteSource,
+            start_gate: None,
+            shutdown_probe: None,
+            stall_drain: true,
+        }),
+    );
+    context.stop_intent.apply_request(
+        FlowStopMode::Graceful {
+            timeout: std::time::Duration::from_millis(20),
+        },
+        None,
+    );
+    let deadline = context.stop_intent.deadline;
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        crate::pipeline::fsm::PipelineAction::StopSources.execute(&mut context),
+    )
+    .await
+    .expect("a full source control queue cannot hold the pipeline beyond its graceful deadline")
+    .unwrap();
+    assert_eq!(context.stop_intent.deadline, deadline);
+    assert!(context.stop_intent.timeout_due());
 }
 
 #[tokio::test]
@@ -936,4 +1001,208 @@ async fn ready_for_run_stage_failure_transitions_to_error_before_run() {
         EventLoopDirective::Transition(PipelineEvent::Error { ref message })
             if message.contains("ready fault")
     ));
+}
+
+#[tokio::test]
+async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_failure() {
+    for terminal in ["completed", "cancelled", "failed"] {
+        for fail in [false, true] {
+            let system_id = SystemId::new();
+            let gate = Arc::new(TerminalAppendGate {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                fail,
+            });
+            let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+            journal.terminal_append = Some(gate.clone());
+            let journal = Arc::new(journal);
+            let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+            context.flow_start_time = Some(std::time::Instant::now());
+            if terminal == "cancelled" {
+                context
+                    .stop_intent
+                    .apply_request(FlowStopMode::Cancel, Some("test_stop".into()));
+            }
+            let published = context.termination.published.clone();
+            let state = PipelineState::Draining;
+            let (sender, receiver, watcher) =
+                ChannelBuilder::<PipelineEvent, PipelineState>::new().build(state.clone());
+            let event = if terminal == "failed" {
+                PipelineEvent::Error {
+                    message: "test_failure".into(),
+                }
+            } else {
+                PipelineEvent::AllStagesCompleted
+            };
+            sender.send(event).await.unwrap();
+            let task = spawn_supervisor_loop(
+                state,
+                test_supervisor(system_id, journal.clone()),
+                context,
+                receiver,
+                watcher,
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.notified())
+                .await
+                .unwrap();
+            assert!(
+                !task.is_finished(),
+                "terminal state alone must not complete the supervisor join"
+            );
+            assert!(
+                published.get().is_none(),
+                "a blocked append is not published"
+            );
+            let event_type = format!("system.pipeline.{terminal}");
+            assert!(!journal
+                .read_all_unordered()
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.event.event_type_name() == event_type));
+            gate.release.notify_one();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result.is_err(),
+                fail,
+                "{terminal} publication error must reach the joining caller"
+            );
+            assert_eq!(published.get().is_some(), !fail);
+            let events = journal.read_all_unordered().await.unwrap();
+            if let Some(retained) = published.get() {
+                assert!(events
+                    .iter()
+                    .any(|event| Some(event.event.id) == retained.event_id));
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event.event_type_name() == event_type)
+                    .count(),
+                usize::from(!fail)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
+    use crate::pipeline::termination::ExecutionOutcome;
+    use obzenflow_fsm::FsmAction;
+    for (state, stopping) in [
+        (PipelineState::Materializing, false),
+        (PipelineState::Materialized, false),
+        (PipelineState::ReadyForRun, false),
+        (PipelineState::Running, false),
+        (PipelineState::SourceCompleted, false),
+        (PipelineState::Draining, false),
+        (PipelineState::Draining, true),
+    ] {
+        let system_id = SystemId::new();
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+        context.flow_start_time = Some(std::time::Instant::now());
+        if stopping {
+            context.stop_intent.apply_request(
+                FlowStopMode::Graceful {
+                    timeout: std::time::Duration::from_secs(60),
+                },
+                None,
+            );
+        }
+        let admitted = context.stop_intent.status_receiver();
+        let original_admission = admitted.borrow().clone();
+        let published = context.termination.published.clone();
+        // Enter the precise handler under test before dispatch. Materializing
+        // and SourceCompleted dispatch can otherwise produce an earlier event.
+        let mut fsm = crate::pipeline::fsm::build_pipeline_fsm_with_initial(state.clone());
+        let actions = fsm
+            .handle(
+                PipelineEvent::Error {
+                    message: "unexpected pipeline failure".into(),
+                },
+                &mut context,
+            )
+            .await
+            .unwrap();
+        for action in actions {
+            action.execute(&mut context).await.unwrap();
+        }
+        let directive = test_supervisor(system_id, journal.clone())
+            .dispatch_state(fsm.state(), &mut context)
+            .await
+            .unwrap();
+        assert!(matches!(directive, EventLoopDirective::Terminate));
+        assert_eq!(
+            *admitted.borrow(),
+            original_admission,
+            "failure must not manufacture or renew a stop"
+        );
+        assert!(
+            matches!(&published.get().unwrap().outcome, ExecutionOutcome::Failed(failure)
+            if failure.reason == "unexpected pipeline failure"),
+            "{state:?}, stopping={stopping}: {:?}",
+            published.get()
+        );
+        let events = journal.read_all_unordered().await.unwrap();
+        let terminal: Vec<_> = events
+            .iter()
+            .map(|event| event.event.event_type_name())
+            .filter(|name| {
+                matches!(
+                    *name,
+                    "system.pipeline.completed"
+                        | "system.pipeline.cancelled"
+                        | "system.pipeline.failed"
+                )
+            })
+            .collect();
+        assert_eq!(terminal, ["system.pipeline.failed"]);
+    }
+}
+
+#[tokio::test]
+async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
+    use crate::pipeline::termination::{execution_result, ExecutionOutcome};
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+    let mut supervisor = test_supervisor(system_id, journal.clone());
+    assert!(
+        execution_result(&context.termination.published).is_err(),
+        "absent evidence cannot mean success"
+    );
+    terminal::dispatch_drained(&mut supervisor, &mut context)
+        .await
+        .unwrap();
+    assert!(matches!(
+        context.termination.published.get().unwrap().outcome,
+        ExecutionOutcome::NotStarted
+    ));
+    assert!(execution_result(&context.termination.published).is_ok());
+    assert!(journal.read_all_unordered().await.unwrap().is_empty());
+
+    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+    context.termination.fail("first failure".into(), None);
+    context.termination.fail("cleanup failure".into(), None);
+    context
+        .stop_intent
+        .apply_request(FlowStopMode::Cancel, None);
+    terminal::dispatch_failed(&mut supervisor, &mut context, "cleanup failure", &None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&context.termination.published.get().unwrap().outcome,
+        ExecutionOutcome::Failed(failure) if failure.reason == "first failure")
+    );
+    assert!(execution_result(&context.termination.published).is_err());
+    assert_eq!(
+        journal.read_all_unordered().await.unwrap()[0]
+            .event
+            .event_type_name(),
+        "system.pipeline.failed"
+    );
 }

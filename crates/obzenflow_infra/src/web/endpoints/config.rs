@@ -14,7 +14,9 @@
 //! FLOWIP-010b owns mutation).
 
 use async_trait::async_trait;
-use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
+use obzenflow_core::web::{
+    EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
+};
 use obzenflow_core::StageKey;
 use obzenflow_runtime::runtime_config::{
     diff, schema_view, FlowEffectiveConfig, ResolvedRuntimeConfig,
@@ -232,11 +234,8 @@ impl HttpEndpoint for ConfigHttpEndpoint {
         &[HttpMethod::Get]
     }
 
-    async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
-        let missing_param = |name: &str| WebError::RequestHandlingFailed {
-            message: format!("missing {name} path parameter"),
-            source: None,
-        };
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
+        let missing_param = |_name: &str| EndpointError::new("Missing matched route parameter");
         let outcome: Result<serde_json::Value, String> = match self.route {
             ConfigRoute::Base => Ok(self.model.base()),
             ConfigRoute::Overlay => Ok(self.model.overlay()),
@@ -268,11 +267,8 @@ impl HttpEndpoint for ConfigHttpEndpoint {
             Err(message) => (Response::not_found(), json!({ "error": message })),
         };
 
-        let json_body =
-            serde_json::to_string(&body).map_err(|e| WebError::RequestHandlingFailed {
-                message: format!("Failed to serialize config response: {e}"),
-                source: None,
-            })?;
+        let json_body = serde_json::to_string(&body)
+            .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))?;
         response
             .headers
             .insert("Content-Type".to_string(), "application/json".to_string());

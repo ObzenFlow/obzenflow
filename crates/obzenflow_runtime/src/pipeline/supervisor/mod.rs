@@ -120,6 +120,17 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
 }
 
 impl ExternalEventPolicy for PipelineSupervisor {
+    fn priority_event(state: &PipelineState, context: &PipelineContext) -> Option<PipelineEvent> {
+        if !state.is_terminal() && context.stop_intent.timeout_due() {
+            Some(PipelineEvent::StopRequested {
+                mode: FlowStopMode::Cancel,
+                reason: Some(crate::stages::common::stage_handle::STOP_REASON_TIMEOUT.to_string()),
+            })
+        } else {
+            None
+        }
+    }
+
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         match state {
             PipelineState::Created => ExternalEventMode::Block,

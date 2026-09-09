@@ -8,6 +8,7 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
@@ -647,7 +648,14 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                         writer_seq: None,   // unknown at start
                         vector_clock: None, // not captured at start
                     },
-                );
+                )
+                .with_flow_context(make_flow_context(
+                    &ctx.flow_name,
+                    &ctx.flow_id.to_string(),
+                    &ctx.stage_name,
+                    ctx.stage_id,
+                    StageType::FiniteSource,
+                ));
 
                 ctx.data_journal.append(contract, None).await.map_err(|e| {
                     obzenflow_fsm::FsmError::HandlerError(format!(
@@ -747,7 +755,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::message_bus::FsmMessageBus;
     use crate::metrics::instrumentation::StageInstrumentation;
@@ -796,14 +804,14 @@ mod tests {
     }
 
     /// Minimal in-memory journal for tests
-    struct TestJournal<T: JournalEvent> {
+    pub(crate) struct TestJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
         events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
     }
 
     impl<T: JournalEvent> TestJournal<T> {
-        fn new(owner: JournalOwner) -> Self {
+        pub(crate) fn new(owner: JournalOwner) -> Self {
             Self {
                 id: JournalId::new(),
                 owner: Some(owner),
@@ -892,6 +900,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
     struct DummySource;
 
     impl TestFiniteSourceHandler for DummySource {
@@ -906,6 +915,188 @@ mod tests {
             Ok(None)
         }
     }
+
+    #[async_trait]
+    impl crate::stages::common::handlers::source::traits::AsyncFiniteSourceHandler for DummySource {
+        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, crate::stages::SourceError> {
+            Ok(None)
+        }
+    }
+
+    impl crate::stages::common::handlers::source::traits::InfiniteSourceHandler for DummySource {
+        fn next(&mut self) -> Result<Vec<ChainEvent>, crate::stages::SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl crate::stages::common::handlers::source::traits::AsyncInfiniteSourceHandler for DummySource {
+        async fn next(&mut self) -> Result<Vec<ChainEvent>, crate::stages::SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    // Exercise both physical supervisors for each source family using the same
+    // existing journal fixture. FSM acceptance is checked before any action runs.
+    macro_rules! source_state_projection_test {
+        ($test:ident, $context:ident, $init:ident, $state:ident, $event:ident,
+         $sync:ident, $async:ident, $finite:literal, {$($extra:ident: $value:expr),* $(,)?}) => {
+            #[tokio::test]
+            async fn $test() {
+                use crate::supervised_base::base::Supervisor;
+                use crate::supervised_base::{ChannelBuilder, idle_backoff::IdleBackoff};
+                use std::time::{Duration, Instant};
+
+                for asynchronous in [false, true] {
+                    let stage_id = CoreStageId::new();
+                    let system_journal: Arc<dyn Journal<SystemEvent>> =
+                        Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+                    let build_fsm = |initial_state| {
+                        if asynchronous {
+                            let (_, external_events, state_watcher) =
+                                ChannelBuilder::new().build($state::<DummySource>::Created);
+                            $async {
+                                name: "source_projection".into(),
+                                handler: DummySource,
+                                system_journal: system_journal.clone(),
+                                stage_id,
+                                poll_timeout: None,
+                                idle_backoff: IdleBackoff::exponential_with_cap(
+                                    Duration::from_millis(1), Duration::from_millis(10)),
+                                pending_idle_delay: None,
+                                external_events,
+                                state_watcher,
+                                last_state: None,
+                                replay_driver: None,
+                                replay_started_at: None,
+                                replay_completion: Default::default(),
+                                source_boundary: None,
+                                pending_boundary_error: None,
+                                live_entered: false,
+                                cleanup_attempted: false,
+                                $($extra: $value,)*
+                            }.build_state_machine(initial_state)
+                        } else {
+                            $sync {
+                                name: "source_projection".into(),
+                                handler: DummySource,
+                                system_journal: system_journal.clone(),
+                                stage_id,
+                                idle_backoff: IdleBackoff::exponential_with_cap(
+                                    Duration::from_millis(1), Duration::from_millis(10)),
+                                pending_idle_delay: None,
+                                replay_driver: None,
+                                replay_started_at: None,
+                                replay_completion: Default::default(),
+                                source_boundary: None,
+                                pending_boundary_error: None,
+                                $($extra: $value,)*
+                            }.build_state_machine(initial_state)
+                        }
+                    };
+                    let mut ctx = $context::<DummySource>::new($init {
+                        stage_id,
+                        stage_name: "source_projection".into(),
+                        observers: Default::default(),
+                        flow_name: "projection_flow".into(),
+                        flow_id: FlowId::new(),
+                        data_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                        error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                        system_journal: system_journal.clone(),
+                        runtime_execution: crate::execution::RuntimeExecution::new(
+                            crate::execution::RuntimeMode::Live, None),
+                        bus: Arc::new(FsmMessageBus::new()),
+                        instrumentation: Arc::new(StageInstrumentation::new()),
+                        control_strategy: Arc::new(crate::stages::source::strategies::JonestownSourceStrategy),
+                        backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+                        output_contract: StageOutputContract::empty(),
+                    });
+                    assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Created");
+                    let mut fsm = build_fsm($state::Created);
+                    for (event, destination) in [
+                        ($event::Initialize, "Initialized"),
+                        ($event::Ready, "WaitingForGun"),
+                        ($event::Start, "Running"),
+                        ($event::BeginDrain, "Draining"),
+                        ($event::Completed, "Drained"),
+                    ] {
+                        let old_entry = Instant::now() - Duration::from_secs(60);
+                        *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
+                        let actions = fsm.handle(event, &mut ctx).await.unwrap();
+                        assert_eq!(fsm.state().variant_name(), destination);
+                        assert_eq!(ctx.instrumentation.snapshot().fsm_state, destination);
+                        assert!(*ctx.instrumentation.state_entered_at.read().unwrap() > old_entry);
+                        for action in actions {
+                            action.execute(&mut ctx).await.unwrap();
+                        }
+                    }
+                    let events = ctx.data_journal.read_causally_ordered().await.unwrap();
+                    assert_eq!(events.iter().filter(|env| matches!(env.event.content,
+                        ChainEventContent::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
+                        usize::from($finite));
+                    let eof = events.iter().find(|env| env.event.is_eof()).expect("authored EOF");
+                    assert_eq!(eof.event.runtime_context.as_ref().unwrap().fsm_state, "Drained");
+                    for env in &events {
+                        if matches!(env.event.content, ChainEventContent::FlowControl(
+                            FlowControlPayload::SourceContract { .. })) {
+                            assert_eq!(env.event.writer_id, WriterId::from(stage_id));
+                            assert_eq!(env.event.flow_context.stage_id, stage_id);
+                            assert_eq!(env.event.flow_context.stage_name, ctx.stage_name);
+                            assert_eq!(env.event.flow_context.stage_type, StageType::FiniteSource);
+                            assert_eq!(env.event.flow_context.flow_name, ctx.flow_name);
+                            assert_eq!(env.event.flow_context.flow_id, ctx.flow_id.to_string());
+                        }
+                    }
+
+                    // Each error edge must project Failed before error actions;
+                    // a repeated failure must not manufacture a new entry time.
+                    for initial in [$state::Created, $state::Initialized, $state::WaitingForGun,
+                        $state::Running, $state::Draining, $state::Drained, $state::Failed("first".into())] {
+                        ctx.instrumentation.transition_to_state(initial.variant_name());
+                        let old_entry = Instant::now() - Duration::from_secs(60);
+                        *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
+                        let repeated = matches!(initial, $state::Failed(_));
+                        let mut fsm = build_fsm(initial);
+                        let actions = fsm.handle($event::Error("failure".into()), &mut ctx).await.unwrap();
+                        let expected_reason = if repeated { "first" } else { "failure" };
+                        assert_eq!(fsm.state(), &$state::Failed(expected_reason.into()));
+                        assert_eq!(actions.is_empty(), repeated);
+                        assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Failed");
+                        assert_eq!(*ctx.instrumentation.state_entered_at.read().unwrap() == old_entry, repeated);
+                    }
+                    if $finite {
+                        ctx.instrumentation.transition_to_state("Running");
+                        let mut fsm = build_fsm($state::Running);
+                        let actions = fsm.handle($event::Completed, &mut ctx).await.unwrap();
+                        assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Draining");
+                        assert!(actions.is_empty());
+                    }
+                }
+            }
+        };
+    }
+
+    use crate::stages::source::finite::{
+        async_supervisor::AsyncFiniteSourceSupervisor, supervisor::FiniteSourceSupervisor,
+    };
+    use crate::stages::source::infinite::{
+        async_supervisor::AsyncInfiniteSourceSupervisor,
+        fsm::{
+            InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceEvent,
+            InfiniteSourceState,
+        },
+        supervisor::InfiniteSourceSupervisor,
+    };
+    use obzenflow_fsm::StateVariant;
+
+    source_state_projection_test!(finite_source_states_precede_actions,
+        FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState, FiniteSourceEvent,
+        FiniteSourceSupervisor, AsyncFiniteSourceSupervisor, true,
+        { pending_boundary_eof: false, pending_boundary_rejected: false });
+    source_state_projection_test!(infinite_source_states_precede_actions,
+        InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState, InfiniteSourceEvent,
+        InfiniteSourceSupervisor, AsyncInfiniteSourceSupervisor, false,
+        { pending_boundary_begin_drain: false });
 
     #[tokio::test]
     async fn send_eof_uses_poison_flag_when_breaker_open() {

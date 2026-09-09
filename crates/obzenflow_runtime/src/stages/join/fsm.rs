@@ -8,6 +8,7 @@
 //! Unlike transforms which have single upstream, joins track two distinct upstreams
 //! (reference and stream) with different behaviors.
 
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
@@ -509,7 +510,14 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                         obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to create reference subscription: {e}"
                         ))
-                    })?;
+                    })?
+                    .with_contract_flow_context(make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        StageType::Join,
+                    ));
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -542,7 +550,14 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                         obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to create stream subscription: {e}"
                         ))
-                    })?;
+                    })?
+                    .with_contract_flow_context(make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        StageType::Join,
+                    ));
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
