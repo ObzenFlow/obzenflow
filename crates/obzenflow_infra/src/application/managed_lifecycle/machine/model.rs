@@ -4,8 +4,8 @@
 
 //! Lifecycle vocabulary and the synchronous command queue consumed by the driver.
 
+use obzenflow_core::event::PipelineStopAdmission;
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
-use obzenflow_runtime::__private::lifecycle::FlowStopStatus;
 use std::time::Duration;
 use tokio::time::Instant as TokioInstant;
 
@@ -40,7 +40,6 @@ pub(in super::super) enum State {
     Active,
     RunningStandalone,
     SettlingFlow(Settlement),
-    AbortingFlow,
     StoppingMetrics,
     ClosingHost,
     Deregistering { deadline: TokioInstant },
@@ -73,13 +72,10 @@ pub(in super::super) enum Event {
     PreparationFailed,
     Started,
     Stop(StopReason, StopInput),
-    Admission(FlowStopStatus),
+    Admission(Option<PipelineStopAdmission>),
     StopSent,
     RepeatedSignal,
-    GracefulExpired,
     PublicationObserved,
-    CompletionExpired,
-    FlowAborted,
     StandaloneReturned,
     MetricsStopped,
     HostClosed { at: TokioInstant },
@@ -99,7 +95,6 @@ pub(in super::super) enum Action {
     RunStandalone,
     SettleFlow(Option<StopCommand>),
     SendStop(StopCommand),
-    AbortFlow,
     StopMetrics,
     CloseHost,
     AwaitDeregistration,

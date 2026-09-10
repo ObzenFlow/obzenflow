@@ -10,7 +10,6 @@
 //! - execute orchestration side effects via FSM actions
 
 mod abort_requested;
-mod common;
 mod created;
 mod draining;
 mod materialized;
@@ -18,26 +17,18 @@ mod materializing;
 mod ready_for_run;
 mod running;
 mod source_completed;
-mod terminal;
 #[cfg(test)]
 mod tests;
 
 use super::fsm::{FlowStopMode, PipelineAction, PipelineContext, PipelineEvent, PipelineState};
 use crate::feed_plan::FeedKey;
 use crate::id_conversions::StageIdExt;
-use crate::supervised_base::{
-    EventLoopDirective, ExternalEventMode, ExternalEventPolicy, SelfSupervised,
-};
+use crate::supervised_base::{EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::types::{SeqNo, ViolationCause};
-use obzenflow_core::event::{SystemEvent, WriterId};
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::WriterId;
 use obzenflow_core::{id::SystemId, StageId};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-const IDLE_BACKOFF_MS: u64 = 10;
 const DRAIN_LIVENESS_MAX_IDLE: u64 = 100;
 
 pub(super) type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -49,9 +40,6 @@ pub(crate) struct PipelineSupervisor {
 
     /// System ID for this pipeline (used for writer_id and lifecycle events)
     pub(crate) system_id: SystemId,
-
-    /// System journal for pipeline orchestration events
-    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
 
     /// Throttled logging for barrier snapshots during drain
     pub(crate) last_barrier_log: Option<Instant>,
@@ -119,38 +107,6 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
     }
 }
 
-impl ExternalEventPolicy for PipelineSupervisor {
-    fn priority_event(state: &PipelineState, context: &PipelineContext) -> Option<PipelineEvent> {
-        if !state.is_terminal() && context.stop_intent.timeout_due() {
-            Some(PipelineEvent::StopRequested {
-                mode: FlowStopMode::Cancel,
-                reason: Some(crate::stages::common::stage_handle::STOP_REASON_TIMEOUT.to_string()),
-            })
-        } else {
-            None
-        }
-    }
-
-    fn external_event_mode(state: &Self::State) -> ExternalEventMode {
-        match state {
-            PipelineState::Created => ExternalEventMode::Block,
-            PipelineState::Materializing => ExternalEventMode::Ignore,
-            PipelineState::Drained | PipelineState::Failed { .. } => ExternalEventMode::Ignore,
-            _ => ExternalEventMode::Poll,
-        }
-    }
-
-    fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event> {
-        if matches!(state, PipelineState::Drained | PipelineState::Failed { .. }) {
-            None
-        } else {
-            Some(PipelineEvent::Error {
-                message: "External control channel closed".to_string(),
-            })
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl SelfSupervised for PipelineSupervisor {
     fn writer_id(&self) -> WriterId {
@@ -162,21 +118,8 @@ impl SelfSupervised for PipelineSupervisor {
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Terminal completion event is written by the FSM via PipelineAction::WritePipelineCompleted.
-        // Here we emit a lightweight "drained" lifecycle marker for observability.
-        let drained = SystemEvent::new(
-            self.writer_id(),
-            obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                obzenflow_core::event::PipelineLifecycleEvent::Drained,
-            ),
-        );
-        if let Err(e) = self.system_journal.append(drained, None).await {
-            tracing::error!(
-                pipeline = %self.name,
-                journal_error = %e,
-                "Failed to write pipeline drained event; continuing without system journal entry"
-            );
-        }
+        // The owned pipeline driver publishes terminal and drained facts in
+        // writer order after the required resource joins.
         Ok(())
     }
 
@@ -199,11 +142,10 @@ impl SelfSupervised for PipelineSupervisor {
                 source_completed::dispatch_source_completed(self, context).await
             }
             PipelineState::Draining => draining::dispatch_draining(self, context).await,
-            PipelineState::Drained => terminal::dispatch_drained(self, context).await,
-            PipelineState::Failed {
-                reason,
-                failure_cause,
-            } => terminal::dispatch_failed(self, context, reason, failure_cause).await,
+            PipelineState::Drained | PipelineState::Failed { .. } => Err(std::io::Error::other(
+                "pipeline terminal settlement belongs to its owned driver",
+            )
+            .into()),
             PipelineState::AbortRequested { reason, upstream } => {
                 abort_requested::dispatch_abort_requested(self, reason, upstream).await
             }
@@ -212,66 +154,6 @@ impl SelfSupervised for PipelineSupervisor {
 }
 
 impl PipelineSupervisor {
-    /// Best-effort reconciliation of per-stage lifecycle metrics using tail system events.
-    ///
-    /// Reads only system events that causally follow the last system event observed via
-    /// the completion subscription and updates `stage_lifecycle_metrics` with any
-    /// terminal wide lifecycle snapshots found there.
-    async fn reconcile_stage_metrics_from_tail(
-        &self,
-        context: &mut PipelineContext,
-    ) -> Result<(), String> {
-        let last_id = match &context.last_system_event_id_seen {
-            Some(id) => *id,
-            None => {
-                // No prior system events recorded; nothing to reconcile.
-                return Ok(());
-            }
-        };
-
-        let tail_events = self
-            .system_journal
-            .read_causally_after(&last_id)
-            .await
-            .map_err(|e| format!("Failed to read tail system events: {e}"))?;
-
-        if tail_events.is_empty() {
-            return Ok(());
-        }
-
-        for envelope in tail_events.iter() {
-            if let obzenflow_core::event::SystemEventType::StageLifecycle { stage_id, event } =
-                &envelope.event.event
-            {
-                match event {
-                    obzenflow_core::event::StageLifecycleEvent::Completed { metrics: Some(m) }
-                    | obzenflow_core::event::StageLifecycleEvent::Cancelled {
-                        metrics: Some(m),
-                        ..
-                    }
-                    | obzenflow_core::event::StageLifecycleEvent::Failed {
-                        metrics: Some(m), ..
-                    } => {
-                        context.stage_lifecycle_metrics.insert(*stage_id, m.clone());
-                    }
-                    obzenflow_core::event::StageLifecycleEvent::Draining { metrics: Some(m) } => {
-                        context
-                            .stage_lifecycle_metrics
-                            .entry(*stage_id)
-                            .or_insert_with(|| m.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if let Some(last_envelope) = tail_events.last() {
-            context.last_system_event_id_seen = Some(last_envelope.event.id);
-        }
-
-        Ok(())
-    }
-
     /// If any contract edge has an explicit failure recorded, return an abort directive.
     fn missing_contract_abort(
         &self,
@@ -347,21 +229,6 @@ impl PipelineSupervisor {
             }
             matches!(seen.get(key), Some(status) if status.is_passed())
         })
-    }
-
-    /// Synthesize and write AllStagesCompleted when we know we are done.
-    async fn write_all_stages_completed(&self, _context: &PipelineContext) -> Result<(), String> {
-        let event = SystemEvent::new(
-            WriterId::from(self.system_id),
-            obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { metrics: None },
-            ),
-        );
-        self.system_journal
-            .append(event, None)
-            .await
-            .map(|_| ())
-            .map_err(|e| format!("Failed to write AllStagesCompleted: {e}"))
     }
 
     /// Snapshot the current drain barrier state for logging/inspection.

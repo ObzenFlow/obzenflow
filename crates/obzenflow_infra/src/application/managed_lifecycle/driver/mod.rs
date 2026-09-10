@@ -12,16 +12,16 @@ use super::machine;
 #[cfg(feature = "warp-server")]
 use super::signals;
 
+use crate::lifecycle_observation::{Feed, Health, Outcome as ObservedOutcome, Progress};
 use futures::future::BoxFuture;
 use machine::{Action, Context, Event, FlowActivity, State, StopCommand, StopInput, StopReason};
 use machine::{FailureOrigin, Outcome};
 use obzenflow_fsm::StateVariant;
 use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::errors::FlowError;
-use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::supervised_base::SupervisorHandle;
+use obzenflow_runtime::pipeline::FlowHandle;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio::time::Instant as TokioInstant;
 
@@ -68,7 +68,6 @@ async fn abort_and_join(tasks: Vec<ApplicationTask>) -> Vec<JoinError> {
 enum Failure {
     Application(ApplicationError),
     Execution(FlowError),
-    CompletionExpired,
 }
 
 impl Failure {
@@ -82,10 +81,6 @@ impl Failure {
                 };
                 ApplicationError::FlowExecutionFailed(message)
             }
-            Self::CompletionExpired => ApplicationError::FlowExecutionFailed(
-                "Pipeline did not finish terminal publication within the admitted shutdown bound"
-                    .into(),
-            ),
         }
     }
 }
@@ -95,7 +90,6 @@ impl std::fmt::Display for Failure {
         match self {
             Self::Application(error) => error.fmt(f),
             Self::Execution(error) => error.fmt(f),
-            Self::CompletionExpired => f.write_str("terminal publication deadline expired"),
         }
     }
 }
@@ -112,7 +106,6 @@ enum Observed {
     Started(Result<(), FlowError>),
     Standalone(Result<(), FlowError>),
     Publication(Result<(), FlowError>),
-    Aborted(Result<(), FlowError>),
     Joined(ResourceGroup, Vec<JoinError>),
     #[cfg(feature = "warp-server")]
     HostClosed(Result<(), ManagedWebHostError>),
@@ -136,7 +129,7 @@ pub(in crate::application) struct ApplicationLifecycle {
     auxiliary_errors: Vec<JoinError>,
     execution_guard: Option<lifecycle::ExecutionGuard>,
     flow: Option<Arc<FlowHandle>>,
-    stop: Option<lifecycle::StopObserver>,
+    stop: Option<Feed>,
     operation: Option<BoxFuture<'static, Observed>>,
     command: Option<BoxFuture<'static, Result<(), FlowError>>>,
     heartbeat_abort: Option<AbortHandle>,
@@ -191,9 +184,8 @@ impl ApplicationLifecycle {
         self.take_result()
     }
 
-    pub async fn run_standalone(&mut self, flow: FlowHandle) -> Result<(), ApplicationError> {
-        self.protect_flow(&flow);
-        self.flow = Some(Arc::new(flow));
+    pub async fn run_standalone(&mut self, flow: Arc<FlowHandle>) -> Result<(), ApplicationError> {
+        self.attach_flow(flow);
         self.drive(
             Event::Standalone,
             #[cfg(feature = "warp-server")]
@@ -262,38 +254,30 @@ impl ApplicationLifecycle {
 
     fn attach_flow(&mut self, flow: Arc<FlowHandle>) {
         self.protect_flow(&flow);
-        // Subscribe before sending; queue success does not supply admission timestamps.
-        self.stop = Some(lifecycle::observe_stop(&flow));
+        if self.stop.is_none() {
+            if let Some(journal) = flow.system_journal() {
+                let (feed, task) = Feed::spawn(journal, flow.pipeline_writer_id());
+                self.stop = Some(feed);
+                self.tasks.push(ApplicationTask(task));
+            }
+        }
         self.flow = Some(flow);
     }
 
     fn stop_input(&mut self) -> StopInput {
-        let flow = self
-            .flow
-            .as_ref()
-            .expect("stop observation requires a flow");
-        let state = flow.current_state();
-        let activity = if !flow.is_running() || state.is_terminal() {
-            FlowActivity::Terminal
-        } else if matches!(
-            state,
-            PipelineState::Created
-                | PipelineState::Materializing
-                | PipelineState::Materialized
-                | PipelineState::ReadyForRun
-        ) {
-            FlowActivity::BeforeRun
-        } else {
-            FlowActivity::Executing
+        let projection = self.stop.as_ref().map(Feed::snapshot);
+        let activity = match projection.as_ref() {
+            Some(projection) if projection.outcome.is_some() => FlowActivity::Terminal,
+            Some(projection)
+                if matches!(projection.progress, Progress::Running | Progress::Draining) =>
+            {
+                FlowActivity::Executing
+            }
+            _ => FlowActivity::BeforeRun,
         };
         StopInput {
             activity,
-            admitted: self
-                .stop
-                .as_mut()
-                .expect("subscribed before stop")
-                .snapshot(),
-            at: Instant::now(),
+            admitted: projection.and_then(|projection| projection.admission),
         }
     }
 
@@ -345,7 +329,6 @@ impl ApplicationLifecycle {
             match command {
                 StopCommand::Graceful => flow.stop_graceful(grace).await,
                 StopCommand::Cancel => flow.stop_cancel().await,
-                StopCommand::Timeout => lifecycle::cancel_after_timeout(&flow).await,
             }
         }));
     }
@@ -360,27 +343,27 @@ impl ApplicationLifecycle {
             Action::StartFlow => {
                 tracing::info!("Starting flow execution (startup_mode=auto)");
                 let flow = self.flow.as_ref().expect("bound host has a flow").clone();
+                let observation = self.stop.clone();
                 self.begin(Box::pin(async move {
                     // A supervisor can exit without publishing another state change.
                     // Completion must win over a stale readiness observation, while
                     // the outer Starting select still gives ready host faults/signals priority.
                     tokio::select! {
                         biased;
-                        result = lifecycle::wait(&flow) => Observed::Publication(result),
+                        result = wait_journal(&flow, observation.as_ref()) => Observed::Publication(result),
                         result = flow.start() => Observed::Started(result),
                     }
                 }));
             }
             Action::RunStandalone => {
-                let flow = self
-                    .flow
-                    .take()
-                    .expect("standalone execution owns its flow");
+                let flow = self.flow.as_ref().expect("standalone flow").clone();
+                let observation = self.stop.clone();
                 self.begin(Box::pin(async move {
-                    let flow = Arc::try_unwrap(flow)
-                        .ok()
-                        .expect("standalone flow is uniquely owned");
-                    Observed::Standalone(flow.run().await)
+                    tokio::select! {
+                        biased;
+                        result = wait_journal(&flow, observation.as_ref()) => Observed::Standalone(result),
+                        _ = flow.start() => Observed::Standalone(wait_journal(&flow, observation.as_ref()).await),
+                    }
                 }));
             }
             Action::SettleFlow(command) => {
@@ -389,29 +372,15 @@ impl ApplicationLifecycle {
                     .as_ref()
                     .expect("settlement requires a flow")
                     .clone();
+                let observation = self.stop.clone();
                 self.begin(Box::pin(async move {
-                    Observed::Publication(lifecycle::wait(&flow).await)
+                    Observed::Publication(wait_journal(&flow, observation.as_ref()).await)
                 }));
                 if let Some(command) = command {
                     self.send_stop(command);
                 }
             }
             Action::SendStop(command) => self.send_stop(command),
-            Action::AbortFlow => {
-                // Drop observers before emergency teardown; Runtime retains the shared join.
-                self.operation = None;
-                self.command = None;
-                self.stop = None;
-                let flow = self
-                    .flow
-                    .as_ref()
-                    .expect("settlement requires a flow")
-                    .clone();
-                self.begin(Box::pin(async move {
-                    // Even an already-exited pipeline can have surviving stage tasks.
-                    Observed::Aborted(flow.abort_and_wait().await)
-                }));
-            }
             Action::StopMetrics => {
                 let tasks = self.metrics_collector.take().into_iter().collect();
                 self.begin(Box::pin(async move {
@@ -532,12 +501,6 @@ impl ApplicationLifecycle {
                 }
                 Event::PublicationObserved
             }
-            Observed::Aborted(result) => {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "Pipeline abort after shutdown deadline failed");
-                }
-                Event::FlowAborted
-            }
             Observed::Joined(group, errors) => {
                 for error in &errors {
                     tracing::warn!(%error, phase = self.machine.state().variant_name(),
@@ -634,23 +597,12 @@ impl ApplicationLifecycle {
                 self.dispatch(event).await;
                 continue;
             }
-            // Like Runtime's observer contract, read the latest admitted status
-            // before testing any deadline. A delayed wake may find both the old
-            // admission-wait bound and a newer admission ready at once.
             if matches!(self.machine.state(), State::SettlingFlow(_)) {
-                if let Some(stop) = &mut self.stop {
-                    let admitted = stop.snapshot();
-                    self.dispatch(Event::Admission(admitted)).await;
+                if let Some(feed) = &self.stop {
+                    self.dispatch(Event::Admission(feed.snapshot().admission))
+                        .await;
                 }
             }
-            let completion = match self.machine.state() {
-                State::SettlingFlow(settlement) => Some(settlement.completion_deadline().into()),
-                _ => None,
-            };
-            let graceful = match self.machine.state() {
-                State::SettlingFlow(settlement) => settlement.graceful_deadline().map(Into::into),
-                _ => None,
-            };
             let auxiliary_deadline = match self.machine.state() {
                 State::Deregistering { deadline } | State::FlushingMetrics { deadline } => {
                     Some(*deadline)
@@ -662,7 +614,6 @@ impl ApplicationLifecycle {
             };
             let terminal = matches!(self.machine.state(), State::Active)
                 && self.context.on_terminal == OnTerminalArg::Exit;
-            let settling = matches!(self.machine.state(), State::SettlingFlow(_));
             let event = tokio::select! {
                 biased;
                 error = async {
@@ -680,14 +631,6 @@ impl ApplicationLifecycle {
                     self.operation = None;
                     self.observe(observed)
                 }
-                _ = sleep_until(completion) => {
-                    self.failure.get_or_insert(Failure::CompletionExpired);
-                    Event::CompletionExpired
-                }
-                changed = stop_changed(&mut self.stop), if settling => {
-                    if changed.is_err() { self.stop = None; continue; }
-                    Event::Admission(self.stop.as_mut().expect("open stop observer").snapshot())
-                }
                 reason = async {
                     #[cfg(feature = "warp-server")]
                     { signals::next(&mut signals).await }
@@ -698,7 +641,7 @@ impl ApplicationLifecycle {
                         Event::Stop(reason, self.stop_input())
                     } else { Event::RepeatedSignal }
                 }
-                _ = terminal_observation(&self.flow), if terminal => {
+                _ = terminal_observation(&self.flow, &self.stop), if terminal => {
                     Event::Stop(StopReason::Graceful, self.stop_input())
                 }
                 result = pending(&mut self.command) => {
@@ -706,7 +649,6 @@ impl ApplicationLifecycle {
                     if let Err(error) = result { self.failure.get_or_insert(Failure::Execution(error)); }
                     Event::StopSent
                 }
-                _ = sleep_until(graceful) => Event::GracefulExpired,
                 _ = sleep_until(auxiliary_deadline) => match self.machine.state() {
                     State::Deregistering { .. } => Event::DeregistrationExpired,
                     State::FlushingMetrics { .. } => {
@@ -738,15 +680,6 @@ async fn sleep_until(deadline: Option<TokioInstant>) {
     }
 }
 
-async fn stop_changed(
-    stop: &mut Option<lifecycle::StopObserver>,
-) -> Result<(), lifecycle::StopObservationClosed> {
-    match stop {
-        Some(stop) => stop.changed().await,
-        None => std::future::pending().await,
-    }
-}
-
 #[cfg(feature = "warp-server")]
 async fn host_failure(host: &mut Option<ManagedWebHost>) -> ApplicationError {
     match host {
@@ -755,16 +688,34 @@ async fn host_failure(host: &mut Option<ManagedWebHost>) -> ApplicationError {
     }
 }
 
-async fn terminal_observation(flow: &Option<Arc<FlowHandle>>) {
+async fn terminal_observation(flow: &Option<Arc<FlowHandle>>, observation: &Option<Feed>) {
     let flow = flow.as_ref().expect("active host has a flow");
-    let mut state = flow.state_receiver();
-    loop {
-        if state.borrow_and_update().is_terminal() || !flow.is_running() {
-            return;
+    let _ = wait_journal(flow, observation.as_ref()).await;
+}
+
+async fn wait_journal(flow: &FlowHandle, observation: Option<&Feed>) -> Result<(), FlowError> {
+    let joined = lifecycle::wait(flow).await;
+    let projection = match observation {
+        Some(feed) => feed.settled().await,
+        None => {
+            return joined.and(Err(FlowError::ExecutionFailed(Box::new(
+                std::io::Error::other("pipeline system journal is unavailable"),
+            ))))
         }
-        tokio::select! {
-            _ = state.changed() => {},
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+    };
+    joined?;
+    let error = match (projection.health, projection.outcome) {
+        (Health::Failed(error), _) => Some(error),
+        (_, Some(ObservedOutcome::Failed(reason))) => Some(reason),
+        (_, Some(_)) => None,
+        (_, None) => {
+            Some("Pipeline supervisor finished without an acknowledged terminal outcome".into())
         }
+    };
+    match error {
+        Some(error) => Err(FlowError::ExecutionFailed(Box::new(std::io::Error::other(
+            error,
+        )))),
+        None => Ok(()),
     }
 }

@@ -3,39 +3,36 @@
 // https://obzenflow.dev
 
 use super::super::machine;
+use super::settlement::Settlement;
 use super::*;
 use crate::application::config::{OnTerminalArg, StartupMode};
+use obzenflow_core::event::types::DurationMs;
+use obzenflow_core::event::{PipelineCancellationCause, PipelineStopAdmission};
 use obzenflow_fsm::StateVariant;
-use obzenflow_runtime::__private::lifecycle::{FlowCancelCause, FlowStopStatus};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::time::Instant as TokioInstant;
 
 #[test]
-fn observer_deadlines_come_from_admission_even_when_observed_late() {
-    let now = Instant::now();
-    let grace = Duration::from_secs(5);
-    let deadline = now + Duration::from_secs(3);
-    let late_observer = now + Duration::from_secs(100);
-    for (status, expected) in [
-        (FlowStopStatus::Graceful { deadline }, deadline + grace),
-        (
-            FlowStopStatus::Cancelling {
-                admitted_at: deadline + Duration::from_secs(2),
-                cause: FlowCancelCause::GracefulTimeout,
-                graceful_deadline: Some(deadline),
-            },
-            deadline + grace,
-        ),
-        (
-            FlowStopStatus::Cancelling {
-                admitted_at: now,
-                cause: FlowCancelCause::Requested,
-                graceful_deadline: None,
-            },
-            now + grace,
-        ),
+fn observed_admission_suppresses_duplicate_stop_requests() {
+    for admission in [
+        PipelineStopAdmission::Graceful {
+            timeout_ms: DurationMs(3_000),
+        },
+        PipelineStopAdmission::Cancel {
+            cause: PipelineCancellationCause::GracefulTimeout,
+        },
+        PipelineStopAdmission::Cancel {
+            cause: PipelineCancellationCause::Requested,
+        },
     ] {
-        assert_eq!(completion_deadline(&status, late_observer, grace), expected);
+        let input = StopInput {
+            activity: FlowActivity::Executing,
+            admitted: Some(admission.clone()),
+        };
+        let (settlement, command) =
+            Settlement::begin(StopReason::Graceful, &input, Duration::from_secs(5));
+        assert_eq!(command, None);
+        assert_eq!(settlement.admitted, Some(admission));
     }
 }
 
@@ -59,14 +56,12 @@ async fn host_error_precedence_survives_cleanup_and_duplicate_failure_observatio
                 StopReason::Graceful,
                 StopInput {
                     activity: FlowActivity::Executing,
-                    admitted: FlowStopStatus::NotRequested,
-                    at: Instant::now(),
+                    admitted: None,
                 },
             ),
             "SettlingFlow",
         ),
-        (Event::PublicationObserved, "AbortingFlow"),
-        (Event::FlowAborted, "StoppingMetrics"),
+        (Event::PublicationObserved, "StoppingMetrics"),
         (Event::MetricsStopped, "ClosingHost"),
         (Event::HostClosed { at }, "Deregistering"),
         (Event::DeregistrationExpired, "JoiningDeregisteredHeartbeat"),
@@ -135,15 +130,13 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                         vec![]
                     }
                 );
-                let at = Instant::now();
                 let actions = machine
                     .handle(
                         Event::Stop(
                             reason,
                             StopInput {
                                 activity,
-                                admitted: FlowStopStatus::NotRequested,
-                                at,
+                                admitted: None,
                             },
                         ),
                         &mut context,
@@ -158,9 +151,11 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                     _ => Some(StopCommand::Graceful),
                 };
                 assert_eq!(actions, [Action::SettleFlow(command)]);
-                let admission = at + Duration::from_secs(2);
+                let admission = Some(PipelineStopAdmission::Graceful {
+                    timeout_ms: DurationMs(2_000),
+                });
                 let awaiting_admission = machine.state().clone();
-                for event in [Event::StopSent, Event::StopSent, Event::GracefulExpired] {
+                for event in [Event::StopSent, Event::StopSent] {
                     assert!(machine
                         .handle(event, &mut context)
                         .await
@@ -171,21 +166,11 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                 let State::SettlingFlow(settlement) = machine.state() else {
                     panic!("must settle")
                 };
-                assert_eq!(
-                    settlement.completion_deadline(),
-                    at + context.grace,
-                    "send is not admission"
-                );
+                assert_eq!(settlement.admitted, None, "send is not admission");
                 machine
-                    .handle(
-                        Event::Admission(FlowStopStatus::Graceful {
-                            deadline: admission,
-                        }),
-                        &mut context,
-                    )
+                    .handle(Event::Admission(admission.clone()), &mut context)
                     .await
                     .unwrap();
-                let bound = admission + context.grace;
                 for repetition in 0..3 {
                     let actions = machine
                         .handle(Event::RepeatedSignal, &mut context)
@@ -200,7 +185,7 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                         }
                     );
                     let cancellation_requested = machine.state().clone();
-                    for event in [Event::StopSent, Event::GracefulExpired] {
+                    for event in [Event::StopSent, Event::StopSent] {
                         assert!(machine
                             .handle(event, &mut context)
                             .await
@@ -209,23 +194,14 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                         assert_eq!(machine.state(), &cancellation_requested);
                     }
                     machine
-                        .handle(
-                            Event::Admission(FlowStopStatus::Graceful {
-                                deadline: admission,
-                            }),
-                            &mut context,
-                        )
+                        .handle(Event::Admission(admission.clone()), &mut context)
                         .await
                         .unwrap();
                     let State::SettlingFlow(settlement) = machine.state() else {
                         panic!("must settle")
                     };
-                    assert_eq!(settlement.completion_deadline(), bound);
-                    assert_eq!(
-                        settlement.graceful_deadline(),
-                        None,
-                        "cancellation request suppresses timeout repetition"
-                    );
+                    assert_eq!(settlement.admitted, admission);
+                    assert_eq!(settlement.requested, Some(StopCommand::Cancel));
                 }
             }
         }
@@ -233,60 +209,37 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
 }
 
 #[tokio::test]
-async fn graceful_expiry_requests_escalation_once_and_preserves_runtime_bound() {
+async fn runtime_timeout_admission_is_observed_without_an_application_timeout_command() {
     let mut machine = machine::new();
     let mut context = context();
-    let at = Instant::now();
-    let deadline = at + Duration::from_secs(2);
     machine
         .handle(
             Event::Stop(
                 StopReason::Graceful,
                 StopInput {
                     activity: FlowActivity::Executing,
-                    admitted: FlowStopStatus::Graceful { deadline },
-                    at,
+                    admitted: Some(PipelineStopAdmission::Graceful {
+                        timeout_ms: DurationMs(2_000),
+                    }),
                 },
             ),
             &mut context,
         )
         .await
         .unwrap();
-    assert_eq!(
-        machine
-            .handle(Event::GracefulExpired, &mut context)
-            .await
-            .unwrap(),
-        [Action::SendStop(StopCommand::Timeout)]
-    );
-    let timeout_requested = machine.state().clone();
-    assert!(machine
-        .handle(Event::GracefulExpired, &mut context)
-        .await
-        .unwrap()
-        .is_empty());
-    assert_eq!(machine.state(), &timeout_requested);
+    let cancellation = Some(PipelineStopAdmission::Cancel {
+        cause: PipelineCancellationCause::GracefulTimeout,
+    });
     machine
-        .handle(
-            Event::Admission(FlowStopStatus::Cancelling {
-                admitted_at: at + Duration::from_secs(20),
-                cause: FlowCancelCause::GracefulTimeout,
-                graceful_deadline: Some(deadline),
-            }),
-            &mut context,
-        )
+        .handle(Event::Admission(cancellation.clone()), &mut context)
         .await
         .unwrap();
     let State::SettlingFlow(settlement) = machine.state() else {
         panic!("must settle")
     };
-    assert_eq!(settlement.completion_deadline(), deadline + context.grace);
+    assert_eq!(settlement.admitted, cancellation);
     let cancelling = machine.state().clone();
-    for event in [
-        Event::RepeatedSignal,
-        Event::GracefulExpired,
-        Event::StopSent,
-    ] {
+    for event in [Event::RepeatedSignal, Event::StopSent] {
         assert!(machine
             .handle(event, &mut context)
             .await
@@ -392,7 +345,7 @@ async fn both_join_budgets_diagnose_once_and_require_their_own_completion() {
 }
 
 #[tokio::test]
-async fn runtime_completion_during_startup_requires_teardown_before_cleanup() {
+async fn joined_journal_observation_during_startup_proceeds_to_application_cleanup() {
     let mut machine = machine::new();
     let mut context = context();
     assert_eq!(
@@ -412,9 +365,9 @@ async fn runtime_completion_during_startup_requires_teardown_before_cleanup() {
             .handle(Event::PublicationObserved, &mut context)
             .await
             .unwrap(),
-        [Action::AbortFlow]
+        [Action::StopMetrics]
     );
-    assert_eq!(*machine.state(), State::AbortingFlow);
+    assert_eq!(*machine.state(), State::StoppingMetrics);
     assert!(machine
         .handle(Event::Started, &mut context)
         .await
@@ -422,15 +375,8 @@ async fn runtime_completion_during_startup_requires_teardown_before_cleanup() {
         .is_empty());
     assert_eq!(
         *machine.state(),
-        State::AbortingFlow,
+        State::StoppingMetrics,
         "late readiness cannot restart execution"
-    );
-    assert_eq!(
-        machine
-            .handle(Event::FlowAborted, &mut context)
-            .await
-            .unwrap(),
-        [Action::StopMetrics]
     );
     assert_eq!(context.outcome, Outcome::ApplicationFailure);
 }

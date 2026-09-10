@@ -9,13 +9,8 @@
 use crate::feed_plan::FeedKey;
 use crate::id_conversions::StageIdExt;
 use crate::messaging::system_subscription::SystemSubscription;
-use crate::metrics::MetricsHandle;
-use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
-use crate::supervised_base::SupervisorHandle;
-use obzenflow_core::event::types::DurationMs;
-use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, SystemEvent, SystemEventFactory, WriterId,
-};
+use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
+use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
@@ -39,47 +34,13 @@ pub enum FlowStopMode {
     Graceful { timeout: Duration },
 }
 
-/// Runtime's admitted stop state. This is a live observation, not a journal fact
-/// or an acknowledgement that a queued request has been admitted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FlowStopStatus {
-    NotRequested,
-    Graceful {
-        deadline: std::time::Instant,
-    },
-    Cancelling {
-        admitted_at: std::time::Instant,
-        cause: FlowCancelCause,
-        graceful_deadline: Option<std::time::Instant>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlowCancelCause {
-    Requested,
-    GracefulTimeout,
-}
-
 /// The single reducer for handle requests, raw events and Runtime timeouts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct StopIntent {
     pub(crate) requested: bool,
     pub(crate) mode: Option<FlowStopMode>,
     pub(crate) reason: Option<String>,
     pub(crate) deadline: Option<std::time::Instant>,
-    status: tokio::sync::watch::Sender<FlowStopStatus>,
-}
-
-impl Default for StopIntent {
-    fn default() -> Self {
-        Self {
-            requested: false,
-            mode: None,
-            reason: None,
-            deadline: None,
-            status: tokio::sync::watch::channel(FlowStopStatus::NotRequested).0,
-        }
-    }
 }
 
 pub(crate) enum StopRequestOutcome {
@@ -91,25 +52,11 @@ pub(crate) enum StopRequestOutcome {
 }
 
 impl StopIntent {
-    pub(crate) fn status_receiver(&self) -> tokio::sync::watch::Receiver<FlowStopStatus> {
-        self.status.subscribe()
-    }
-
     pub(crate) fn timeout_due(&self) -> bool {
         matches!(self.mode, Some(FlowStopMode::Graceful { .. }))
             && self
                 .deadline
                 .is_some_and(|deadline| std::time::Instant::now() >= deadline)
-    }
-
-    fn cleanup_deadline(&self) -> std::time::Instant {
-        if let Some(deadline) = self.deadline {
-            return deadline;
-        }
-        match *self.status.borrow() {
-            FlowStopStatus::Cancelling { admitted_at, .. } => admitted_at + stop_drain_timeout(),
-            _ => std::time::Instant::now() + stop_drain_timeout(),
-        }
     }
 
     pub(crate) fn apply_request(
@@ -136,29 +83,14 @@ impl StopIntent {
         self.requested = true;
         self.reason = Some(reason.unwrap_or_else(|| STOP_REASON_USER_STOP.to_string()));
         self.mode = Some(mode.clone());
-        let status = match mode {
-            FlowStopMode::Graceful { timeout } => {
-                let deadline = now + timeout;
-                self.deadline = Some(deadline);
-                FlowStopStatus::Graceful { deadline }
-            }
+        match mode {
+            FlowStopMode::Graceful { timeout } => self.deadline = Some(now + timeout),
             FlowStopMode::Cancel => {
                 if !timeout {
                     self.deadline = None;
                 }
-                FlowStopStatus::Cancelling {
-                    admitted_at: now,
-                    cause: if timeout {
-                        FlowCancelCause::GracefulTimeout
-                    } else {
-                        FlowCancelCause::Requested
-                    },
-                    graceful_deadline: self.deadline,
-                }
             }
-        };
-        // Publish at admission, before potentially blocking journal/control actions.
-        self.status.send_replace(status);
+        }
         StopRequestOutcome::Applied {
             mode,
             reason_label: self.reason_label(),
@@ -382,7 +314,7 @@ pub(crate) struct PipelineContext {
     pub(crate) expected_sources: Vec<StageId>,
 
     /// Metrics aggregator handle (for coordinated shutdown/drain).
-    pub(crate) metrics_handle: Option<MetricsHandle>,
+    pub(crate) metrics_handle: Option<super::operations::MetricsLease>,
     /// Last known per-stage lifecycle metrics (for flow rollup)
     pub(crate) stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
 
@@ -661,7 +593,7 @@ pub(crate) fn composite_boundaries_from_topology(
     boundaries
 }
 
-fn record_stage_completion(
+pub(super) fn record_stage_completion(
     completed_stages: &mut Vec<StageId>,
     stage_id: StageId,
     total_stages: usize,
@@ -676,903 +608,20 @@ fn record_stage_completion(
     (is_new_completion, all_stages_completed_now)
 }
 
-// Implement FsmAction for PipelineAction
 #[async_trait::async_trait]
 impl FsmAction for PipelineAction {
     type Context = PipelineContext;
-
-    async fn execute(&self, context: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
-        match self {
-            PipelineAction::CreateStages => {
-                tracing::info!("PipelineAction::CreateStages starting");
-                // Stages are already in the stage_supervisors map from the builder
-                // We just need to initialize them
-                let supervisors = &mut context.stage_supervisors;
-
-                tracing::info!("Supervisors count: {}", supervisors.len());
-
-                // Collect stage IDs to avoid borrow issues while initializing
-                let stage_ids: Vec<_> = supervisors.keys().cloned().collect();
-
-                tracing::info!("Stage IDs count: {}", stage_ids.len());
-
-                for stage_id in stage_ids {
-                    if let Some(stage) = supervisors.remove(&stage_id) {
-                        let stage_name = stage.stage_name().to_string();
-
-                        tracing::info!("Initializing stage: {} (id: {:?})", stage_name, stage_id);
-
-                        // Initialize the stage
-                        stage.initialize().await.map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to initialize stage {stage_name}: {e}"
-                            ))
-                        })?;
-
-                        // Put it back
-                        supervisors.insert(stage_id, stage);
-
-                        tracing::info!("Stage {} initialized", stage_name);
-                    }
-                }
-
-                tracing::info!(
-                    "All {} stages initialized successfully, CreateStages complete",
-                    supervisors.len()
-                );
-
-                // Initialize all source supervisors (finite and infinite)
-                let source_supers = &mut context.source_supervisors;
-                tracing::info!("Source supervisors count: {}", source_supers.len());
-                let source_ids: Vec<_> = source_supers.keys().cloned().collect();
-                for source_id in source_ids {
-                    if let Some(source) = source_supers.remove(&source_id) {
-                        let stage_name = source.stage_name().to_string();
-                        tracing::info!("Initializing source: {} (id: {:?})", stage_name, source_id);
-                        source.initialize().await.map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to initialize source {stage_name}: {e}"
-                            ))
-                        })?;
-                        source_supers.insert(source_id, source);
-                        tracing::info!("Source {} initialized", stage_name);
-                    }
-                }
-                tracing::info!(
-                    "All {} sources initialized successfully",
-                    source_supers.len()
-                );
-            }
-
-            PipelineAction::NotifyStagesStart => {
-                // Start all non-source stages (transforms and sinks)
-                let supervisors = &context.stage_supervisors;
-                let non_source_stages: Vec<_> = supervisors
-                    .iter()
-                    .filter(|(stage_id, stage)| {
-                        !context
-                            .topology
-                            .upstream_stages(stage_id.to_topology_id())
-                            .is_empty()
-                            || !stage.stage_type().is_source()
-                    })
-                    .map(|(stage_id, _)| *stage_id)
-                    .collect();
-                // Start each non-source stage
-                let supervisors = &mut context.stage_supervisors;
-                for stage_id in non_source_stages {
-                    if let Some(stage) = supervisors.get_mut(&stage_id) {
-                        tracing::info!(
-                            "Starting non-source stage: {} (id: {:?})",
-                            stage.stage_name(),
-                            stage_id
-                        );
-                        stage.start().await.map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to start stage {}: {}",
-                                stage.stage_name(),
-                                e
-                            ))
-                        })?;
-                    }
-                }
-
-                tracing::debug!("NotifyStagesStart: All non-source stages started");
-            }
-
-            PipelineAction::WritePipelineReadyForRun => {
-                let system_event_factory = SystemEventFactory::new(context.system_id);
-                let stage_count = context.topology.stages().count();
-                let ready_event = system_event_factory.pipeline_ready_for_run(Some(stage_count));
-                context
-                    .system_journal
-                    .append(ready_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline ready_for_run event: {e}"
-                        ))
-                    })?;
-            }
-
-            PipelineAction::NotifySourceStart => {
-                let supervisors = &mut context.source_supervisors;
-                tracing::info!("Starting {} source stages", supervisors.len());
-
-                // Publish initial pipeline lifecycle events so that downstream
-                // consumers (SSE, UI, metrics) can reliably observe that the
-                // flow has started and is running.
-                //
-                // We emit:
-                // - pipeline_starting
-                // - pipeline_running (with optional stage_count via topology)
-                let system_event_factory = SystemEventFactory::new(context.system_id);
-                let starting_event = system_event_factory.pipeline_starting();
-                context
-                    .system_journal
-                    .append(starting_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline starting event: {e}"
-                        ))
-                    })?;
-
-                // Use the topology to derive an optional stage_count for the running event.
-                let stage_count = context.topology.stages().count();
-                let running_event = obzenflow_core::event::SystemEvent::new(
-                    obzenflow_core::event::WriterId::from(context.system_id),
-                    obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                        obzenflow_core::event::PipelineLifecycleEvent::Running {
-                            stage_count: Some(stage_count),
-                        },
-                    ),
-                );
-                context
-                    .system_journal
-                    .append(running_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline running event: {e}"
-                        ))
-                    })?;
-
-                // Record flow start time on first source start
-                if context.flow_start_time.is_none() {
-                    context.flow_start_time = Some(std::time::Instant::now());
-                }
-
-                for (source_id, source) in supervisors.iter_mut() {
-                    tracing::info!(
-                        "Starting source stage: {:?} ({})",
-                        source_id,
-                        source.stage_name()
-                    );
-                    // Ensure source is in WaitingForGun before start
-                    source.ready().await.map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to ready source stage {}: {}",
-                            source.stage_name(),
-                            e
-                        ))
-                    })?;
-                    source.start().await.map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to start source stage {}: {}",
-                            source.stage_name(),
-                            e
-                        ))
-                    })?;
-                }
-                tracing::info!("All sources started");
-            }
-
-            PipelineAction::WritePipelineStopRequested { mode } => {
-                let system_event_factory = SystemEventFactory::new(context.system_id);
-
-                let (mode_label, timeout_ms) = match mode {
-                    FlowStopMode::Cancel => ("cancel".to_string(), None),
-                    FlowStopMode::Graceful { timeout } => (
-                        "graceful".to_string(),
-                        Some(DurationMs(timeout.as_millis() as u64)),
-                    ),
-                };
-
-                let stop_requested =
-                    system_event_factory.pipeline_stop_requested(mode_label, timeout_ms);
-                context
-                    .system_journal
-                    .append(stop_requested, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish pipeline stop requested event: {e}"
-                        ))
-                    })?;
-            }
-
-            PipelineAction::StopSources => {
-                // Best-effort: request that all sources begin draining so they stop
-                // producing and emit authored EOF, allowing downstream stages to
-                // drain deterministically.
-                for (stage_id, source) in context.source_supervisors.iter() {
-                    if source.is_drained() {
-                        continue;
-                    }
-
-                    tracing::info!(
-                        source_stage_id = %stage_id,
-                        source_stage_name = %source.stage_name(),
-                        source_stage_type = %source.stage_type(),
-                        "Requesting source begin_drain for StopRequested"
-                    );
-
-                    let deadline = context
-                        .stop_intent
-                        .deadline
-                        .expect("graceful stop admitted before stopping sources");
-                    let result =
-                        tokio::time::timeout_at(deadline.into(), source.begin_drain()).await;
-                    let Ok(result) = result else {
-                        tracing::warn!("Graceful deadline expired while requesting source drain");
-                        break;
-                    };
-                    if let Err(e) = result {
-                        tracing::warn!(
-                            source_stage_id = %stage_id,
-                            source_stage_name = %source.stage_name(),
-                            source_stage_type = %source.stage_type(),
-                            error = ?e,
-                            "Failed to request source begin_drain during stop; continuing"
-                        );
-                    }
-                }
-            }
-
-            PipelineAction::BeginDrain => {
-                // Publish drain signal to system journal (lifecycle).
-                //
-                // NOTE: Do NOT inject FlowControl::Drain into stage journals here.
-                // For finite flows, EOF propagation through per-stage journals is the
-                // correctness boundary; publishing drain into every stage journal can
-                // cause downstream stages to enter draining before upstream data has
-                // been fully written/consumed, leading to silent data loss.
-                let system_event_factory = SystemEventFactory::new(context.system_id);
-                let drain_system_event = system_event_factory.pipeline_draining();
-                context
-                    .system_journal
-                    .append(drain_system_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish system drain event: {e}"
-                        ))
-                    })?;
-                tracing::info!("Published pipeline draining event to system journal");
-            }
-
-            PipelineAction::Cleanup => {
-                tracing::info!("Pipeline cleanup: signaling stages to shut down");
-
-                use std::time::{Duration, Instant};
-
-                // Graceful stop owns one absolute deadline across draining and
-                // cleanup. Other termination paths retain the configured
-                // cleanup budget.
-                let cleanup_deadline = context.stop_intent.cleanup_deadline();
-                async fn signal_handle_until_deadline(
-                    stage_id: StageId,
-                    handle: &Arc<dyn crate::stages::common::stage_handle::StageHandle>,
-                    deadline: Instant,
-                    kind: &'static str,
-                ) -> bool {
-                    if handle.is_drained() {
-                        return true;
-                    }
-
-                    let now = Instant::now();
-                    if now >= deadline {
-                        tracing::warn!(
-                            stage_id = %stage_id,
-                            "Pipeline cleanup: deadline exhausted before force shutdown"
-                        );
-                        return false;
-                    }
-
-                    let remaining = deadline.saturating_duration_since(now);
-                    match tokio::time::timeout(remaining, handle.force_shutdown()).await {
-                        Ok(Ok(())) => true,
-                        Ok(Err(e)) => {
-                            let supervisor_not_running = matches!(
-                                &e,
-                                StageError::EventSendFailed(msg)
-                                    if msg.contains("SupervisorNotRunning")
-                                        || msg.contains("Supervisor is not running")
-                            );
-                            if supervisor_not_running {
-                                tracing::debug!(
-                                    stage_id = %stage_id,
-                                    error = ?e,
-                                    "force_shutdown skipped: supervisor already stopped"
-                                );
-                            } else {
-                                tracing::warn!(
-                                    stage_id = %stage_id,
-                                    error = ?e,
-                                    kind,
-                                    "Failed to send force_shutdown"
-                                );
-                            }
-                            true
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                stage_id = %stage_id,
-                                kind,
-                                "Pipeline cleanup: deadline expired while sending force shutdown"
-                            );
-                            false
-                        }
-                    }
-                }
-
-                // Signal stages cooperatively while the shared deadline permits.
-                for (stage_id, handle) in context.stage_supervisors.iter() {
-                    if !signal_handle_until_deadline(*stage_id, handle, cleanup_deadline, "stage")
-                        .await
-                    {
-                        break;
-                    }
-                }
-                for (stage_id, handle) in context.source_supervisors.iter() {
-                    if !signal_handle_until_deadline(*stage_id, handle, cleanup_deadline, "source")
-                        .await
-                    {
-                        break;
-                    }
-                }
-
-                tracing::info!("Pipeline cleanup: waiting for stages to complete");
-
-                // Wait on one handle using the shared absolute cleanup deadline.
-                async fn wait_handle_until_deadline(
-                    stage_id: StageId,
-                    handle: &Arc<dyn crate::stages::common::stage_handle::StageHandle>,
-                    deadline: Instant,
-                ) {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        tracing::warn!(
-                            stage_id = %stage_id,
-                            "Pipeline cleanup: deadline exhausted; aborting stage supervisor"
-                        );
-                        match handle.abort_and_join().await {
-                            Ok(()) => tracing::debug!(
-                                stage_id = %stage_id,
-                                "Stage supervisor aborted and joined during cleanup"
-                            ),
-                            Err(error) => tracing::warn!(
-                                stage_id = %stage_id,
-                                error = ?error,
-                                "Stage supervisor abort-and-join failed during cleanup"
-                            ),
-                        }
-                        return;
-                    }
-
-                    let remaining = deadline.saturating_duration_since(now);
-
-                    match tokio::time::timeout(remaining, handle.wait_for_completion()).await {
-                        Ok(Ok(())) => {
-                            tracing::debug!(stage_id = %stage_id, "Stage completed during cleanup");
-                        }
-                        Ok(Err(e)) => {
-                            tracing::warn!(
-                                stage_id = %stage_id,
-                                error = ?e,
-                                "Stage did not complete during shutdown cleanup; aborting supervisor"
-                            );
-                            match handle.abort_and_join().await {
-                                Ok(()) => tracing::debug!(
-                                    stage_id = %stage_id,
-                                    "Stage supervisor aborted and joined during cleanup"
-                                ),
-                                Err(error) => tracing::warn!(
-                                    stage_id = %stage_id,
-                                    error = ?error,
-                                    "Stage supervisor abort-and-join failed during cleanup"
-                                ),
-                            }
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                stage_id = %stage_id,
-                                "Timeout waiting for stage during cleanup; aborting supervisor"
-                            );
-                            match handle.abort_and_join().await {
-                                Ok(()) => tracing::debug!(
-                                    stage_id = %stage_id,
-                                    "Stage supervisor aborted and joined during cleanup"
-                                ),
-                                Err(error) => tracing::warn!(
-                                    stage_id = %stage_id,
-                                    error = ?error,
-                                    "Stage supervisor abort-and-join failed during cleanup"
-                                ),
-                            }
-                        }
-                    }
-                }
-
-                // Wait for non-source stages
-                for (stage_id, handle) in context.stage_supervisors.iter() {
-                    wait_handle_until_deadline(*stage_id, handle, cleanup_deadline).await;
-                }
-
-                // Wait for source stages
-                for (stage_id, handle) in context.source_supervisors.iter() {
-                    wait_handle_until_deadline(*stage_id, handle, cleanup_deadline).await;
-                }
-
-                // Ensure the metrics aggregator is terminated before the pipeline returns.
-                //
-                // This prevents tokio runtime teardown from cancelling in-flight journal writes
-                // from the metrics task (which otherwise produces error log spam on Ctrl+C).
-                if let Some(mut metrics_handle) = context.metrics_handle.take() {
-                    // Retain cancellation after taking the handle out of the context,
-                    // including while either completion wait below is pending.
-                    let _metrics_guard = crate::__private::lifecycle::ExecutionGuard::new(
-                        metrics_handle.abort_handle(),
-                        Vec::new(),
-                    );
-                    let metrics_timeout = Duration::from_secs(2);
-
-                    match metrics_handle
-                        .try_wait_for_completion(metrics_timeout)
-                        .await
-                    {
-                        Ok(true) => {
-                            tracing::debug!("Metrics aggregator completed during pipeline cleanup");
-                        }
-                        Ok(false) => {
-                            tracing::debug!(
-                                "Metrics aggregator still running during cleanup; aborting"
-                            );
-                            metrics_handle.abort();
-                            match tokio::time::timeout(
-                                metrics_timeout,
-                                metrics_handle.wait_for_completion(),
-                            )
-                            .await
-                            {
-                                Ok(Ok(())) => {
-                                    tracing::debug!("Metrics aggregator aborted and joined");
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::debug!(
-                                        error = ?e,
-                                        "Metrics aggregator join returned error after abort"
-                                    );
-                                }
-                                Err(_) => {
-                                    tracing::debug!(
-                                        "Timeout waiting for metrics aggregator to abort; continuing"
-                                    );
-                                }
-                            }
-                        }
-                        Err(crate::supervised_base::HandleError::SupervisorNotRunning) => {
-                            tracing::debug!(
-                                "Metrics aggregator handle was not running during cleanup"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                error = ?e,
-                                "Metrics aggregator finished with error during cleanup"
-                            );
-                        }
-                    }
-                }
-
-                tracing::info!("Pipeline cleanup complete");
-            }
-
-            PipelineAction::StartMetricsAggregator => {
-                tracing::info!("StartMetricsAggregator action triggered");
-                // Avoid double-starting metrics; pipeline only ever wants one aggregator.
-                if context.metrics_handle.is_some() {
-                    tracing::debug!("Metrics aggregator already started, skipping");
-                    return Ok(());
-                }
-
-                // Start the optional aggregator only when a snapshot exporter is supplied.
-                let Some(metrics_exporter) = context.metrics_exporter.clone() else {
-                    tracing::info!(
-                        "No metrics snapshot exporter supplied, skipping metrics aggregator"
-                    );
-                    return Ok(());
-                };
-
-                tracing::info!("Metrics snapshot exporter supplied, starting metrics aggregator");
-
-                // Get stage journals from context
-                let stage_journals = context.stage_data_journals.clone();
-
-                if stage_journals.is_empty() {
-                    tracing::warn!("No stage journals available for metrics aggregator");
-                    return Ok(());
-                }
-
-                tracing::info!(
-                    stage_journal_ids = ?stage_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-                    "Stage journals passed to metrics aggregator"
-                );
-
-                let system_journal = context.system_journal.clone();
-
-                // Build stage metadata from topology and stage supervisors
-                let mut stage_metadata = std::collections::HashMap::new();
-
-                for (stage_id, stage_handle) in context.stage_supervisors.iter() {
-                    if let Some(stage_info) = context
-                        .topology
-                        .stages()
-                        .find(|s| s.id == stage_id.to_topology_id())
-                    {
-                        let metadata = obzenflow_core::metrics::StageMetadata {
-                            name: stage_info.name.clone(),
-                            stage_type: stage_handle.stage_type(),
-                            reference_mode: None,
-                            flow_name: context.flow_name.clone(),
-                            flow_id: Some(context.flow_id),
-                        };
-                        stage_metadata.insert(*stage_id, metadata);
-                    }
-                }
-                // Include sources in metadata
-                for (stage_id, stage_handle) in context.source_supervisors.iter() {
-                    if let Some(stage_info) = context
-                        .topology
-                        .stages()
-                        .find(|s| s.id == stage_id.to_topology_id())
-                    {
-                        let metadata = obzenflow_core::metrics::StageMetadata {
-                            name: stage_info.name.clone(),
-                            stage_type: stage_handle.stage_type(),
-                            reference_mode: None,
-                            flow_name: context.flow_name.clone(),
-                            flow_id: Some(context.flow_id),
-                        };
-                        stage_metadata.insert(*stage_id, metadata);
-                    }
-                }
-                // Get error journals for metrics (FLOWIP-082g)
-                let error_journals = context.stage_error_journals.clone();
-                let backpressure_registry = context.backpressure_registry.clone();
-                if !error_journals.is_empty() {
-                    tracing::info!(
-                        error_journal_ids = ?error_journals.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-                        "Error journals passed to metrics aggregator"
-                    );
-                } else {
-                    tracing::info!("No error journals passed to metrics aggregator");
-                }
-                tracing::info!(
-                        stage_metadata = ?stage_metadata
-                            .iter()
-                        .map(|(id, meta)| (*id, meta.name.clone(), meta.stage_type))
-                        .collect::<Vec<_>>(),
-                    "Stage metadata collected for metrics aggregator"
-                );
-
-                // Best-effort: create a system journal reader so we can optionally wait
-                // for a Ready coordination event. Metrics must not gate pipeline startup.
-                let mut ready_reader = match context.system_journal.reader().await {
-                    Ok(reader) => Some(reader),
-                    Err(e) => {
-                        tracing::warn!(
-                            journal_error = %e,
-                            "Failed to create system journal reader for metrics readiness; continuing without waiting"
-                        );
-                        None
-                    }
-                };
-
-                // Build metrics aggregator using the builder pattern and store the handle
-                // so cancel/cleanup paths can terminate it deterministically.
-                use crate::metrics::{MetricsAggregatorBuilder, MetricsInputs};
-                use crate::supervised_base::SupervisorBuilder;
-
-                // Create MetricsInputs with both data and error journals (FLOWIP-082g)
-                let inputs = MetricsInputs::new(stage_journals, error_journals)
-                    .with_backpressure_registry_opt(backpressure_registry);
-
-                let composite_boundaries = composite_boundaries_from_topology(&context.topology);
-                match MetricsAggregatorBuilder::new(inputs, system_journal, metrics_exporter)
-                    .with_stage_metadata(stage_metadata)
-                    .with_composite_boundaries(composite_boundaries)
-                    .with_export_interval(1) // 10 second interval
-                    .build()
-                    .await
-                {
-                    Ok(handle) => {
-                        context.metrics_handle = Some(handle);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to build metrics aggregator: {}", e);
-                        return Ok(());
-                    }
-                }
-
-                // Best-effort: wait briefly for metrics aggregator readiness.
-                // If it doesn't become ready quickly (or the journal read fails),
-                // continue startup anyway.
-                if let Some(mut ready_reader) = ready_reader.take() {
-                    let deadline =
-                        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-                    loop {
-                        match tokio::time::timeout_at(deadline, ready_reader.next()).await {
-                            Ok(Ok(Some(envelope))) => {
-                                // Check if this is the metrics ready event
-                                if let obzenflow_core::event::SystemEventType::MetricsCoordination(
-                                    obzenflow_core::event::MetricsCoordinationEvent::Ready,
-                                ) = &envelope.event.event
-                                {
-                                    tracing::info!("Metrics aggregator is ready");
-                                    break;
-                                }
-                            }
-                            Ok(Ok(None)) => {
-                                // No events available right now; avoid a tight spin loop.
-                                // Sleep for a bounded duration without overshooting the deadline.
-                                let remaining =
-                                    deadline.saturating_duration_since(tokio::time::Instant::now());
-                                let sleep_for = std::cmp::min(
-                                    remaining,
-                                    tokio::time::Duration::from_millis(10),
-                                );
-                                if sleep_for != tokio::time::Duration::ZERO {
-                                    tokio::time::sleep(sleep_for).await;
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                tracing::warn!(
-                                    journal_error = %e,
-                                    "Failed to read metrics ready event; continuing startup"
-                                );
-                                break;
-                            }
-                            Err(_) => {
-                                tracing::warn!(
-                                    "Timeout waiting for metrics aggregator to be ready; continuing startup"
-                                );
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            PipelineAction::DrainMetrics => {
-                // Metrics draining is only meaningful when the metrics aggregator is running.
-                // Gate on "metrics actually started" (handle present) to avoid pointless waits
-                // during cancel in early states like Materializing.
-                let metrics_running = context
-                    .metrics_handle
-                    .as_ref()
-                    .map(|h| h.is_running())
-                    .unwrap_or(false);
-                if !metrics_running {
-                    tracing::debug!("Skipping metrics drain (metrics aggregator not running)");
-                    return Ok(());
-                }
-
-                tracing::info!("Requesting metrics drain via system journal");
-
-                let writer_id = WriterId::from(context.system_id);
-
-                // Publish drain request to the system journal.
-                // The metrics aggregator watches this event and will publish MetricsCoordination::Drained when complete.
-                let drain_event = obzenflow_core::event::SystemEvent::new(
-                    writer_id,
-                    obzenflow_core::event::SystemEventType::MetricsCoordination(
-                        obzenflow_core::event::MetricsCoordinationEvent::DrainRequested,
-                    ),
-                );
-                if let Err(e) = context.system_journal.append(drain_event, None).await {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to publish metrics drain request to system journal; continuing"
-                    );
-                }
-
-                // Cancel-mode stop should not block waiting for metrics to drain.
-                //
-                // In Cancel, the stage shutdown happens in `Cleanup`; waiting here risks burning the full drain
-                // timeout while stages are still running (and therefore metrics cannot reach FlowTerminal).
-                if matches!(context.stop_intent.mode, Some(FlowStopMode::Cancel)) {
-                    tracing::debug!(
-                        "Skipping metrics drain wait (stop_mode=Cancel); drain will complete best-effort during Cleanup"
-                    );
-                    return Ok(());
-                }
-
-                // 3. Wait for drain completion event from system journal
-                // The metrics aggregator will publish MetricsCoordination::Drained when done.
-                //
-                // Use a tail-scan instead of `reader()` (which starts at the beginning) so we
-                // don't spend the drain timeout parsing unrelated system history.
-                let timeout_ms = context.metrics_drain_timeout_ms;
-                let deadline =
-                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
-
-                const TAIL_SCAN_EVENTS: usize = 256;
-                const POLL_INTERVAL_MS: u64 = 10;
-
-                loop {
-                    match context.system_journal.read_last_n(TAIL_SCAN_EVENTS).await {
-                        Ok(events) => {
-                            if events.iter().any(|envelope| {
-                                matches!(
-                                    &envelope.event.event,
-                                    obzenflow_core::event::SystemEventType::MetricsCoordination(
-                                        obzenflow_core::event::MetricsCoordinationEvent::Drained
-                                    )
-                                )
-                            }) {
-                                tracing::info!("Metrics successfully drained");
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                drain_error = %e,
-                                "Failed to read system journal while awaiting metrics drain completion; proceeding anyway"
-                            );
-                            break;
-                        }
-                    }
-
-                    if tokio::time::Instant::now() >= deadline {
-                        tracing::warn!(
-                            timeout_ms,
-                            "Timeout waiting for metrics drain completion, proceeding anyway"
-                        );
-                        break;
-                    }
-
-                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let sleep_for = std::cmp::min(
-                        remaining,
-                        tokio::time::Duration::from_millis(POLL_INTERVAL_MS),
-                    );
-                    if sleep_for != tokio::time::Duration::ZERO {
-                        tokio::time::sleep(sleep_for).await;
-                    }
-                }
-            }
-
-            PipelineAction::WritePipelineAbort { reason, upstream } => {
-                let writer_id = WriterId::from(context.system_id);
-                let abort_event =
-                    ChainEventFactory::pipeline_abort_event(writer_id, reason.clone(), *upstream);
-                // Publish abort to all stage data journals for visibility
-                let stage_journals = context.stage_data_journals.clone();
-                for (stage_id, journal) in stage_journals {
-                    journal
-                        .append(abort_event.clone(), None)
-                        .await
-                        .map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
-                                "Failed to write pipeline abort event to {stage_id:?}: {e}"
-                            ))
-                        })?;
-                }
-
-                tracing::error!(?reason, ?upstream, "Pipeline abort event written");
-            }
-
-            PipelineAction::AbortTeardown { reason, upstream } => {
-                // Drop subscriptions/readers to stop further polling
-                context.completion_subscription = None;
-                let _ = reason;
-                let _ = upstream;
-            }
-
-            PipelineAction::StartCompletionSubscription => {
-                // Create reader for system journal - will receive system events
-                let reader = context.system_journal.reader().await.map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to create system journal reader: {e:?}"
-                    ))
-                })?;
-
-                // Wrap in SystemSubscription for consistent PollResult handling
-                let subscription =
-                    SystemSubscription::new(reader, "pipeline_supervisor".to_string());
-
-                context.completion_subscription = Some(subscription);
-
-                tracing::info!("Started system subscription for journal events");
-            }
-
-            PipelineAction::HandleStageCompleted { envelope } => {
-                let event = &envelope.event;
-
-                // Extract stage_id from the SystemEvent structure
-                if let obzenflow_core::event::SystemEventType::StageLifecycle {
-                    stage_id,
-                    event: obzenflow_core::event::StageLifecycleEvent::Completed { .. },
-                } = &event.event
-                {
-                    let stage_id = *stage_id;
-
-                    // Get stage name from topology
-                    let stage_name = context
-                        .topology
-                        .stages()
-                        .find(|info| info.id == stage_id.to_topology_id())
-                        .map(|info| info.name.clone())
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    // Check if all expected stages have completed
-                    let expected_stages: std::collections::HashSet<StageId> = context
-                        .topology
-                        .stages()
-                        .map(|info| StageId::from_topology_id(info.id))
-                        .collect();
-                    let total_stages = expected_stages.len();
-
-                    let (is_new_completion, all_stages_completed_now) = record_stage_completion(
-                        &mut context.completed_stages,
-                        stage_id,
-                        total_stages,
-                    );
-
-                    if is_new_completion {
-                        tracing::info!("Stage completed: {} ({})", stage_name, stage_id);
-                    } else {
-                        tracing::debug!(
-                            "Ignoring duplicate stage completion: {} ({})",
-                            stage_name,
-                            stage_id
-                        );
-                    }
-
-                    tracing::debug!(
-                        "Stage completion: {} of {} stages completed",
-                        context.completed_stages.len(),
-                        total_stages
-                    );
-
-                    if all_stages_completed_now {
-                        tracing::info!("All {} stages have completed!", total_stages);
-
-                        // Write a SystemEvent that the pipeline supervisor will pick up
-                        let system_event_factory = SystemEventFactory::new(context.system_id);
-                        let all_stages_completed_event =
-                            system_event_factory.pipeline_all_stages_completed();
-
-                        context
-                            .system_journal
-                            .append(all_stages_completed_event, None)
-                            .await
-                            .map_err(|e| {
-                                obzenflow_fsm::FsmError::HandlerError(format!(
-                                    "Failed to write all stages completed event: {e}"
-                                ))
-                            })?;
-                    }
-                } else {
-                    tracing::warn!(
-                        "HandleStageCompleted called with non-completed stage event: {:?}",
-                        event.event
-                    );
-                }
-            }
-        }
+    async fn execute(&self, context: &mut PipelineContext) -> Result<(), obzenflow_fsm::FsmError> {
+        let operation = super::operations::prepare(
+            self.clone(),
+            context,
+            super::operations::Cancellation::new(),
+            crate::supervised_base::publication::PublicationScope::new(),
+        );
+        let completion = operation
+            .await
+            .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+        completion.apply(context);
         Ok(())
     }
 }
@@ -1604,11 +653,13 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 })
             };
 
-            on PipelineEvent::StopRequested => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                 Box::pin(async move {
+                    let PipelineEvent::StopRequested { mode, reason } = event else { unreachable!() };
+                    ctx.stop_intent.apply_request(mode.clone(), reason.clone());
                     Ok(Transition {
-                        next_state: PipelineState::Created,
-                        actions: vec![],
+                        next_state: PipelineState::Drained,
+                        actions: vec![PipelineAction::WritePipelineStopRequested { mode: mode.clone() }, PipelineAction::Cleanup],
                     })
                 })
             };
@@ -2579,14 +1630,12 @@ mod tests {
     fn first_graceful_deadline_wins_in_both_duration_orders() {
         for (first, second) in [(1, 60), (60, 1)] {
             let mut intent = StopIntent::default();
-            let mut observed = intent.status_receiver();
             intent.apply_request(
                 FlowStopMode::Graceful {
                     timeout: Duration::from_secs(first),
                 },
                 Some("first".into()),
             );
-            let first_status = observed.borrow_and_update().clone();
             let first_deadline = intent.deadline;
             assert!(matches!(
                 intent.apply_request(
@@ -2599,9 +1648,6 @@ mod tests {
             ));
             assert_eq!(intent.deadline, first_deadline);
             assert_eq!(intent.reason.as_deref(), Some("first"));
-            assert_eq!(*observed.borrow(), first_status);
-            assert!(!observed.has_changed().unwrap());
-            assert_eq!(*intent.status_receiver().borrow(), first_status);
         }
     }
 
@@ -2609,8 +1655,6 @@ mod tests {
     fn cancel_is_absorbing_including_reason_and_admission_time() {
         let mut intent = StopIntent::default();
         intent.apply_request(FlowStopMode::Cancel, Some("explicit_cancel".into()));
-        let mut observed = intent.status_receiver();
-        let admitted = observed.borrow_and_update().clone();
         for (mode, reason) in [
             (FlowStopMode::Cancel, "duplicate"),
             (FlowStopMode::Cancel, STOP_REASON_TIMEOUT),
@@ -2625,8 +1669,6 @@ mod tests {
                 intent.apply_request(mode, Some(reason.into())),
                 StopRequestOutcome::Ignored
             ));
-            assert_eq!(*observed.borrow(), admitted);
-            assert!(!observed.has_changed().unwrap());
             assert_eq!(intent.reason.as_deref(), Some("explicit_cancel"));
         }
     }

@@ -2,158 +2,63 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime stop observations and their absolute completion and escalation bounds.
+//! Application stop requests and journal observations. Runtime owns deadlines.
 
-use obzenflow_runtime::__private::lifecycle::{FlowCancelCause, FlowStopStatus};
-use std::time::{Duration, Instant};
+use obzenflow_core::event::PipelineStopAdmission;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum StopCommand {
     Graceful,
     Cancel,
-    Timeout,
 }
-
 #[derive(Clone, Copy, Debug)]
 pub(in super::super) enum StopReason {
     Graceful,
     Cancel,
     BeforeRun,
 }
-
-/// A boundary classification of the current Runtime observation, not execution truth.
 #[derive(Clone, Copy, Debug)]
 pub(in super::super) enum FlowActivity {
     BeforeRun,
     Executing,
     Terminal,
 }
-
 #[derive(Clone, Debug)]
 pub(in super::super) struct StopInput {
     pub activity: FlowActivity,
-    pub admitted: FlowStopStatus,
-    pub at: Instant,
+    pub admitted: Option<PipelineStopAdmission>,
 }
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum CompletionBound {
-    AwaitingAdmission(Instant),
-    Admitted(Instant),
-    BeforeRun(Instant),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Escalation {
-    AwaitingAdmission,
-    Graceful(Instant),
-    Requested(StopCommand),
-    Cancelling,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(in super::super) struct Settlement {
-    pub(super) bound: CompletionBound,
-    pub(super) escalation: Escalation,
+    pub(super) requested: Option<StopCommand>,
+    pub(super) admitted: Option<PipelineStopAdmission>,
 }
-
 impl Settlement {
-    /// Choose the initial request and observation bound from the current Runtime input.
     pub(super) fn begin(
         reason: StopReason,
         input: &StopInput,
-        grace: Duration,
+        _grace: std::time::Duration,
     ) -> (Self, Option<StopCommand>) {
-        let before_run = matches!(reason, StopReason::BeforeRun);
-        let command = if matches!(input.activity, FlowActivity::Terminal) {
-            None
-        } else if before_run {
-            Some(StopCommand::Cancel)
-        } else {
-            match (&input.admitted, reason, input.activity) {
-                (FlowStopStatus::Graceful { .. }, StopReason::Cancel, _) => {
-                    Some(StopCommand::Cancel)
-                }
-                (FlowStopStatus::NotRequested, _, FlowActivity::BeforeRun)
-                | (FlowStopStatus::NotRequested, StopReason::Cancel, _) => {
-                    Some(StopCommand::Cancel)
-                }
-                (FlowStopStatus::NotRequested, _, _) => Some(StopCommand::Graceful),
-                _ => None,
+        let command = match (&input.activity, &input.admitted, reason) {
+            (FlowActivity::Terminal, _, _) | (_, Some(PipelineStopAdmission::Cancel { .. }), _) => {
+                None
             }
+            (_, _, StopReason::Cancel | StopReason::BeforeRun)
+            | (FlowActivity::BeforeRun, _, _) => Some(StopCommand::Cancel),
+            (_, Some(PipelineStopAdmission::Graceful { .. }), _) => None,
+            _ => Some(StopCommand::Graceful),
         };
-        let mut settlement = Self {
-            bound: if before_run {
-                CompletionBound::BeforeRun(input.at + grace + grace)
-            } else {
-                CompletionBound::AwaitingAdmission(input.at + grace)
+        (
+            Self {
+                requested: command,
+                admitted: input.admitted.clone(),
             },
-            escalation: match command {
-                Some(StopCommand::Cancel) => Escalation::Requested(StopCommand::Cancel),
-                _ => Escalation::AwaitingAdmission,
-            },
-        };
-        settlement.observe(&input.admitted, grace);
-        (settlement, command)
+            command,
+        )
     }
-
-    pub fn completion_deadline(&self) -> Instant {
-        match self.bound {
-            CompletionBound::AwaitingAdmission(at)
-            | CompletionBound::Admitted(at)
-            | CompletionBound::BeforeRun(at) => at,
-        }
-    }
-
-    pub fn graceful_deadline(&self) -> Option<Instant> {
-        match self.escalation {
-            Escalation::Graceful(at) => Some(at),
-            _ => None,
-        }
-    }
-
-    pub(super) fn observe(&mut self, status: &FlowStopStatus, grace: Duration) {
-        if matches!(self.bound, CompletionBound::BeforeRun(_)) {
-            return;
-        }
-        if !matches!(status, FlowStopStatus::NotRequested) {
-            self.bound = CompletionBound::Admitted(completion_deadline(
-                status,
-                self.completion_deadline(),
-                grace,
-            ));
-        }
-        match status {
-            FlowStopStatus::Graceful { deadline }
-                if !matches!(self.escalation, Escalation::Requested(_)) =>
-            {
-                self.escalation = Escalation::Graceful(*deadline);
-            }
-            FlowStopStatus::Cancelling { .. } => self.escalation = Escalation::Cancelling,
-            _ => {}
-        }
-    }
-}
-
-/// Derive the outer bound from Runtime admission, never from a repeated request.
-pub(in super::super) fn completion_deadline(
-    status: &FlowStopStatus,
-    not_admitted: Instant,
-    grace: Duration,
-) -> Instant {
-    match status {
-        FlowStopStatus::NotRequested => not_admitted,
-        FlowStopStatus::Graceful { deadline } => *deadline + grace,
-        FlowStopStatus::Cancelling {
-            admitted_at,
-            cause,
-            graceful_deadline,
-        } => {
-            if *cause == FlowCancelCause::GracefulTimeout {
-                graceful_deadline.unwrap_or(*admitted_at) + grace
-            } else {
-                *admitted_at + grace
-            }
+    pub(super) fn observe(&mut self, admission: &Option<PipelineStopAdmission>) {
+        if admission.is_some() {
+            self.admitted = admission.clone();
         }
     }
 }

@@ -959,21 +959,7 @@ impl FlowApplication {
 
             // Non-server mode: preserve existing behaviour (run to completion, no HTTP server)
             tracing::info!("▶️  Starting flow execution (no server)");
-            let handle = match Arc::try_unwrap(flow_handle) {
-                Ok(handle) => handle,
-                Err(flow) => {
-                    let result = application
-                        .fail_before_run(
-                            flow,
-                            ApplicationError::FlowExecutionFailed(
-                                "Failed to unwrap FlowHandle for non-server execution".to_string(),
-                            ),
-                        )
-                        .await;
-                    break 'run (result, Some(flow_name), run_state, false);
-                }
-            };
-            let result = application.run_standalone(handle).await;
+            let result = application.run_standalone(flow_handle).await;
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
                     print_replay_hint(locator);

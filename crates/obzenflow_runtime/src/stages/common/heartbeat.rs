@@ -370,7 +370,7 @@ pub fn new_liveness_snapshots() -> LivenessSnapshots {
 pub struct HeartbeatHandle {
     pub state: Arc<HeartbeatState>,
     cancel: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::AbortHandle,
 }
 
 /// Surface a canonical-merge quiet-input wait through the stage heartbeat
@@ -415,163 +415,175 @@ pub fn spawn_heartbeat(
     let writer_id = WriterId::from(stage_id);
     let state_for_task = state.clone();
 
+    let publications = crate::supervised_base::publication::PublicationScope::current();
+    let owner = publications.clone();
     let task = tokio::spawn(async move {
-        if !config.enabled {
-            return;
-        }
+        let run = async move {
+            if !config.enabled {
+                return;
+            }
 
-        let mut heartbeat_seq = SeqNo(0);
-        let mut prev_stable_states: Vec<EdgeLivenessState> =
-            vec![EdgeLivenessState::Healthy; state_for_task.edges.len()];
+            let mut heartbeat_seq = SeqNo(0);
+            let mut prev_stable_states: Vec<EdgeLivenessState> =
+                vec![EdgeLivenessState::Healthy; state_for_task.edges.len()];
 
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(config.interval) => {
-                    // FLOWIP-120n: DormantUntilLive spawns the task but emits
-                    // nothing; re-query per tick so emission starts once the
-                    // stage's frontier crosses to live.
-                    if runtime_execution.heartbeat_policy_for(stage_id)
-                        != HeartbeatExecutionPolicy::Active
-                    {
-                        continue;
-                    }
-
-                    heartbeat_seq.0 = heartbeat_seq.0.saturating_add(1);
-
-                    let activity = state_for_task.current_activity();
-                    let handler_blocked_ms = state_for_task.handler_blocked_ms();
-                    let processing_upstream = state_for_task.processing_upstream();
-
-                    let stable_state_for_tick = match handler_blocked_ms {
-                        None => None,
-                        Some(ms) => {
-                            let warn_ms = config.handler_warn_threshold.as_millis() as u64;
-                            let stall_ms = config.handler_stall_threshold.as_millis() as u64;
-                            if ms.0 >= stall_ms {
-                                Some(EdgeLivenessState::Stalled)
-                            } else if ms.0 >= warn_ms {
-                                Some(EdgeLivenessState::Suspect)
-                            } else {
-                                None
-                            }
-                        }
-                    };
-
-                    // Update the in-memory registry on every tick.
-                    let processing_below_warn =
-                        handler_blocked_ms.is_some() && stable_state_for_tick.is_none();
-                    let edges_snapshot: Vec<EdgeLivenessSnapshot> = state_for_task
-                        .edges
-                        .iter()
-                        .enumerate()
-                        .map(|(index, edge)| {
-                            let idle_ms = state_for_task.edge_idle_ms(index);
-                            let last_reader_seq = state_for_task.edge_reader_seq(index);
-                            let last_event_id = state_for_task.edge_last_event_id(index);
-
-                            let state_for_registry = if let Some(state) = stable_state_for_tick {
-                                state
-                            } else if processing_below_warn
-                                && processing_upstream.is_some_and(|u| u == edge.upstream)
-                            {
-                                // Keep the active upstream edge healthy while an event is in-flight.
-                                EdgeLivenessState::Healthy
-                            } else if idle_ms.0 >= config.idle_threshold.as_millis() as u64 {
-                                EdgeLivenessState::Idle
-                            } else {
-                                EdgeLivenessState::Healthy
-                            };
-
-                            EdgeLivenessSnapshot {
-                                upstream: edge.upstream,
-                                reader: stage_id,
-                                state: state_for_registry,
-                                idle_ms,
-                                last_reader_seq,
-                                last_event_id,
-                            }
-                        })
-                        .collect();
-
-                    liveness_snapshots.upsert(
-                        stage_id,
-                        StageLivenessSnapshot {
-                            stage_id,
-                            stage_name: stage_name.clone(),
-                            heartbeat_seq,
-                            activity,
-                            handler_blocked_ms,
-                            edges: edges_snapshot.clone(),
-                        },
-                    );
-
-                    // Journal only EdgeLiveness transitions (FLOWIP-063e).
-                    for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
-                        let stable_state = edge_snapshot.state;
-
-                        if prev_stable_states[index] == stable_state {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(config.interval) => {
+                        // FLOWIP-120n: DormantUntilLive spawns the task but emits
+                        // nothing; re-query per tick so emission starts once the
+                        // stage's frontier crosses to live.
+                        if runtime_execution.heartbeat_policy_for(stage_id)
+                            != HeartbeatExecutionPolicy::Active
+                        {
                             continue;
                         }
 
-                        let emitted_state = if stable_state == EdgeLivenessState::Healthy
-                            && prev_stable_states[index] != EdgeLivenessState::Healthy
-                        {
-                            EdgeLivenessState::Recovered
-                        } else {
-                            stable_state
+                        heartbeat_seq.0 = heartbeat_seq.0.saturating_add(1);
+
+                        let activity = state_for_task.current_activity();
+                        let handler_blocked_ms = state_for_task.handler_blocked_ms();
+                        let processing_upstream = state_for_task.processing_upstream();
+
+                        let stable_state_for_tick = match handler_blocked_ms {
+                            None => None,
+                            Some(ms) => {
+                                let warn_ms = config.handler_warn_threshold.as_millis() as u64;
+                                let stall_ms = config.handler_stall_threshold.as_millis() as u64;
+                                if ms.0 >= stall_ms {
+                                    Some(EdgeLivenessState::Stalled)
+                                } else if ms.0 >= warn_ms {
+                                    Some(EdgeLivenessState::Suspect)
+                                } else {
+                                    None
+                                }
+                            }
                         };
 
-                        let system_event = SystemEvent::new(
-                            writer_id,
-                            SystemEventType::EdgeLiveness {
-                                upstream: edge_snapshot.upstream,
-                                reader: stage_id,
-                                state: emitted_state,
-                                idle_ms: edge_snapshot.idle_ms,
-                                last_reader_seq: Some(edge_snapshot.last_reader_seq),
-                                last_event_id: edge_snapshot.last_event_id,
+                        // Update the in-memory registry on every tick.
+                        let processing_below_warn =
+                            handler_blocked_ms.is_some() && stable_state_for_tick.is_none();
+                        let edges_snapshot: Vec<EdgeLivenessSnapshot> = state_for_task
+                            .edges
+                            .iter()
+                            .enumerate()
+                            .map(|(index, edge)| {
+                                let idle_ms = state_for_task.edge_idle_ms(index);
+                                let last_reader_seq = state_for_task.edge_reader_seq(index);
+                                let last_event_id = state_for_task.edge_last_event_id(index);
+
+                                let state_for_registry = if let Some(state) = stable_state_for_tick {
+                                    state
+                                } else if processing_below_warn
+                                    && processing_upstream.is_some_and(|u| u == edge.upstream)
+                                {
+                                    // Keep the active upstream edge healthy while an event is in-flight.
+                                    EdgeLivenessState::Healthy
+                                } else if idle_ms.0 >= config.idle_threshold.as_millis() as u64 {
+                                    EdgeLivenessState::Idle
+                                } else {
+                                    EdgeLivenessState::Healthy
+                                };
+
+                                EdgeLivenessSnapshot {
+                                    upstream: edge.upstream,
+                                    reader: stage_id,
+                                    state: state_for_registry,
+                                    idle_ms,
+                                    last_reader_seq,
+                                    last_event_id,
+                                }
+                            })
+                            .collect();
+
+                        liveness_snapshots.upsert(
+                            stage_id,
+                            StageLivenessSnapshot {
+                                stage_id,
+                                stage_name: stage_name.clone(),
+                                heartbeat_seq,
+                                activity,
+                                handler_blocked_ms,
+                                edges: edges_snapshot.clone(),
                             },
                         );
 
-                        let append_timeout = config.interval * 2;
-                        match tokio::time::timeout(append_timeout, system_journal.append(system_event, None)).await {
-                            Ok(Ok(_)) => {
-                                prev_stable_states[index] = stable_state;
+                        // Journal only EdgeLiveness transitions (FLOWIP-063e).
+                        for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
+                            let stable_state = edge_snapshot.state;
+
+                            if prev_stable_states[index] == stable_state {
+                                continue;
                             }
-                            Ok(Err(e)) => {
-                                tracing::warn!(
-                                    stage_name = %stage_name,
-                                    upstream = ?edge_snapshot.upstream,
-                                    error = %e,
-                                    "Failed to append EdgeLiveness; skipping"
-                                );
-                            }
-                            Err(_) => {
-                                tracing::warn!(
-                                    stage_name = %stage_name,
-                                    upstream = ?edge_snapshot.upstream,
-                                    "EdgeLiveness journal append timed out; skipping"
-                                );
+
+                            let emitted_state = if stable_state == EdgeLivenessState::Healthy
+                                && prev_stable_states[index] != EdgeLivenessState::Healthy
+                            {
+                                EdgeLivenessState::Recovered
+                            } else {
+                                stable_state
+                            };
+
+                            let system_event = SystemEvent::new(
+                                writer_id,
+                                SystemEventType::EdgeLiveness {
+                                    upstream: edge_snapshot.upstream,
+                                    reader: stage_id,
+                                    state: emitted_state,
+                                    idle_ms: edge_snapshot.idle_ms,
+                                    last_reader_seq: Some(edge_snapshot.last_reader_seq),
+                                    last_event_id: edge_snapshot.last_event_id,
+                                },
+                            );
+
+                            let append_timeout = config.interval * 2;
+                            match tokio::time::timeout(append_timeout, crate::supervised_base::publication::append(&system_journal, system_event, None)).await {
+                                Ok(Ok(_)) => {
+                                    prev_stable_states[index] = stable_state;
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::warn!(
+                                        stage_name = %stage_name,
+                                        upstream = ?edge_snapshot.upstream,
+                                        error = %e,
+                                        "Failed to append EdgeLiveness; skipping"
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        stage_name = %stage_name,
+                                        upstream = ?edge_snapshot.upstream,
+                                        "EdgeLiveness journal append timed out; skipping"
+                                    );
+                                }
                             }
                         }
                     }
-                }
-                changed = cancel_rx.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                    if *cancel_rx.borrow() {
-                        break;
+                    changed = cancel_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        if *cancel_rx.borrow() {
+                            break;
+                        }
                     }
                 }
             }
+        };
+        match publications {
+            Some(scope) => scope.enter(run).await,
+            None => run.await,
         }
     });
 
+    let abort = task.abort_handle();
+    if let Some(owner) = owner {
+        owner.retain_auxiliary(task);
+    }
     HeartbeatHandle {
         state,
         cancel,
-        task,
+        task: abort,
     }
 }
 
@@ -612,7 +624,7 @@ mod tests {
         let handle = HeartbeatHandle {
             state: HeartbeatState::new(Vec::new()),
             cancel,
-            task,
+            task: task.abort_handle(),
         };
         started_rx.await.unwrap();
         drop(handle);
@@ -622,6 +634,7 @@ mod tests {
                 .expect("dropping the stage heartbeat must interrupt pending work")
                 .is_err()
         );
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 
     /// Metadata-only archive stub; the resume strategy reads

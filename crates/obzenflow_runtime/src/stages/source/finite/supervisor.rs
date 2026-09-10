@@ -534,7 +534,13 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     source_stages: replay_archive.source_stage_keys(),
                                 }),
                             );
-                            if let Err(e) = self.system_journal.append(started_event, None).await {
+                            if let Err(e) = crate::supervised_base::publication::append(
+                                &self.system_journal,
+                                started_event,
+                                None,
+                            )
+                            .await
+                            {
                                 tracing::error!(
                                     stage_name = %ctx.stage_name,
                                     journal_error = %e,

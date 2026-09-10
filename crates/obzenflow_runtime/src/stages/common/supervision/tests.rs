@@ -527,6 +527,21 @@ struct CreditCheckingJournal {
     writer: BackpressureWriter,
     expected_credit_at_append: u64,
     appended: Mutex<Vec<ChainEvent>>,
+    gate: Option<Arc<CommitGate>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CommitResult {
+    Committed,
+    Rejected,
+    Indeterminate,
+}
+
+#[derive(Debug)]
+struct CommitGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    result: CommitResult,
 }
 
 impl CreditCheckingJournal {
@@ -541,6 +556,7 @@ impl CreditCheckingJournal {
             writer,
             expected_credit_at_append,
             appended: Mutex::new(Vec::new()),
+            gate: None,
         }
     }
 
@@ -562,6 +578,23 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         Some(&self.owner)
     }
 
+    async fn append_group(
+        &self,
+        _group_id: &str,
+        events: Vec<ChainEvent>,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        assert_eq!(
+            self.writer.min_downstream_credit(),
+            self.expected_credit_at_append
+        );
+        self.appended.lock().unwrap().extend(events.clone());
+        Ok(events
+            .into_iter()
+            .map(|event| EventEnvelope::new(JournalWriterId::from(self.id), event))
+            .collect())
+    }
+
     async fn append(
         &self,
         event: ChainEvent,
@@ -569,6 +602,20 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
     ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
         let credit = self.writer.min_downstream_credit();
         assert_eq!(credit, self.expected_credit_at_append);
+
+        if let Some(gate) = &self.gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+            match gate.result {
+                CommitResult::Committed => {}
+                CommitResult::Rejected => return Err(JournalError::Full),
+                CommitResult::Indeterminate => {
+                    return Err(JournalError::CommitIndeterminate {
+                        source: std::io::Error::other("uncertain physical commit").into(),
+                    })
+                }
+            }
+        }
 
         self.appended
             .lock()
@@ -632,6 +679,7 @@ struct NoopJournal<T: JournalEvent> {
     id: JournalId,
     owner: JournalOwner,
     _marker: std::marker::PhantomData<T>,
+    append_gate: Option<Arc<CommitGate>>,
 }
 
 impl<T: JournalEvent> NoopJournal<T> {
@@ -640,6 +688,7 @@ impl<T: JournalEvent> NoopJournal<T> {
             id: JournalId::new(),
             owner,
             _marker: std::marker::PhantomData,
+            append_gate: None,
         }
     }
 }
@@ -659,6 +708,10 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
         event: T,
         _parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
+        if let Some(gate) = &self.append_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
     }
 
@@ -818,6 +871,214 @@ fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
             schema_version: Some(1),
             visibility: FactVisibility::Unrouted,
         }],
+    }
+}
+
+#[tokio::test]
+async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
+    use super::output_committer::{
+        AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
+    };
+    use crate::supervised_base::publication::PublicationScope;
+    use obzenflow_core::event::payloads::observability_payload::{
+        CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+    };
+    use std::sync::atomic::Ordering;
+    let (stage, writer) = make_writer_with_window(NonZeroU64::new(2).unwrap());
+    let journal = Arc::new(CreditCheckingJournal::new(
+        JournalOwner::stage(stage),
+        writer.clone(),
+        0,
+    ));
+    let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
+    let gate = Arc::new(CommitGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        result: CommitResult::Committed,
+    });
+    let mut mirror = NoopJournal::new(JournalOwner::stage(stage));
+    mirror.append_gate = Some(gate.clone());
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(mirror);
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let retained = instrumentation.clone();
+    let scope = PublicationScope::new();
+    let stage_scope = scope.clone();
+    let stage_writer = writer.clone();
+    let caller = tokio::spawn(async move {
+        stage_scope
+            .enter(async move {
+                let flow_context = make_flow_context(
+                    "flow",
+                    "flow_id",
+                    "stage",
+                    stage,
+                    obzenflow_core::event::context::StageType::Transform,
+                );
+                let committer = OutputCommitter {
+                    data_journal: &data_journal,
+                    flow_context: Some(&flow_context),
+                    system_journal: Some(&system_journal),
+                    instrumentation: Some(&retained),
+                    heartbeat_state: None,
+                    output_contract: None,
+                    backpressure_writer: Some(&stage_writer),
+                    observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                };
+                let mut entries = vec![AtomicCommitEntry {
+                    event: ChainEventFactory::observability_event(
+                        stage.into(),
+                        ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                            CircuitBreakerEvent::Closed {
+                                success_count: 1,
+                                recovery_duration_ms: 1,
+                            },
+                        )),
+                    ),
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::FrameworkObservability,
+                }];
+                for n in 0..2 {
+                    entries.push(AtomicCommitEntry {
+                        event: ChainEventFactory::data_event(stage.into(), "x", json!({"n":n})),
+                        options: CommitOptions {
+                            count_output: true,
+                            validate_output_contract: false,
+                        },
+                        intent: StageAppendIntent::NormalStageData,
+                    });
+                }
+                committer
+                    .commit_atomic_group("atomic-accounting", entries, None)
+                    .await
+            })
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(journal.appended().len(), 3);
+    assert_eq!(
+        instrumentation.events_emitted_total.load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(instrumentation.data_writer_seq_by_event_type()["x"].0, 2);
+    assert_eq!(writer.min_downstream_credit(), 0);
+    scope.close();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    let mut abandoned = Box::pin(scope.join());
+    assert!(futures::poll!(abandoned.as_mut()).is_pending());
+    drop(abandoned);
+    gate.release.notify_one();
+    scope.join().await.unwrap();
+    assert_eq!(
+        instrumentation.events_emitted_total.load(Ordering::Relaxed),
+        2
+    );
+}
+
+#[tokio::test]
+async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
+    use crate::supervised_base::publication::{is_indeterminate, PublicationScope};
+    use std::sync::atomic::Ordering;
+    for result in [
+        CommitResult::Committed,
+        CommitResult::Rejected,
+        CommitResult::Indeterminate,
+    ] {
+        let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).unwrap());
+        let gate = Arc::new(CommitGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            result,
+        });
+        let mut journal =
+            CreditCheckingJournal::new(JournalOwner::stage(stage_id), writer.clone(), 0);
+        journal.gate = Some(gate.clone());
+        let journal = Arc::new(journal);
+        let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+        let scope = PublicationScope::new();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let stage_scope = scope.clone();
+        let stage_instrumentation = instrumentation.clone();
+        let stage_writer = writer.clone();
+        let caller = tokio::spawn(async move {
+            stage_scope
+                .enter(async move {
+                    let flow_context = make_flow_context(
+                        "flow",
+                        "flow_id",
+                        "stage",
+                        stage_id,
+                        obzenflow_core::event::context::StageType::Transform,
+                    );
+                    drain_one_pending(
+                        super::backpressure_drain::PendingOutput {
+                            event: ChainEventFactory::data_event(
+                                WriterId::from(stage_id),
+                                "x",
+                                json!({"n":1}),
+                            ),
+                            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                        },
+                        &flow_context,
+                        stage_id,
+                        None,
+                        &data_journal,
+                        &system_journal,
+                        None,
+                        &stage_instrumentation,
+                        &stage_writer,
+                        &mut BackpressureActivityPulse::new(),
+                        &mut None,
+                        Some(&output_contract_for_event_type("x")),
+                        &mut VecDeque::new(),
+                    )
+                    .await
+                })
+                .await
+        });
+        gate.entered.notified().await;
+        scope.close();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(writer.min_downstream_credit(), 0);
+        assert_eq!(
+            instrumentation.events_emitted_total.load(Ordering::Relaxed),
+            0
+        );
+        let mut abandoned_join = Box::pin(scope.join());
+        assert!(futures::poll!(abandoned_join.as_mut()).is_pending());
+        drop(abandoned_join);
+        gate.release.notify_one();
+        let settled = scope.join().await;
+        match result {
+            CommitResult::Committed => {
+                settled.unwrap();
+                assert_eq!(journal.appended().len(), 1);
+                assert_eq!(
+                    instrumentation.events_emitted_total.load(Ordering::Relaxed),
+                    1
+                );
+                assert_eq!(instrumentation.data_writer_seq_by_event_type()["x"].0, 1);
+                assert_eq!(writer.min_downstream_credit(), 0);
+            }
+            CommitResult::Rejected => {
+                assert!(settled.is_err());
+                assert!(journal.appended().is_empty());
+                assert_eq!(writer.min_downstream_credit(), 1);
+            }
+            CommitResult::Indeterminate => {
+                assert!(is_indeterminate(&settled.unwrap_err()));
+                assert_eq!(
+                    writer.min_downstream_credit(),
+                    0,
+                    "uncertain commits cannot refund credit"
+                );
+            }
+        }
     }
 }
 

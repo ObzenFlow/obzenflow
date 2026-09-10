@@ -522,12 +522,15 @@ pub(super) async fn dispatch_accumulating<
                         let error_event = event.mark_as_error(reason, err.kind());
 
                         if route_to_error_journal(&error_event) {
-                            ctx.error_journal
-                                .append(error_event, Some(&envelope))
-                                .await
-                                .map_err(|e| {
-                                    format!("Failed to write stateful accumulate error: {e}")
-                                })?;
+                            crate::supervised_base::publication::append(
+                                &ctx.error_journal,
+                                error_event,
+                                Some(&envelope),
+                            )
+                            .await
+                            .map_err(|e| {
+                                format!("Failed to write stateful accumulate error: {e}")
+                            })?;
                         } else {
                             let flow_id = ctx.flow_id.to_string();
                             let flow_ctx = make_flow_context(
@@ -540,12 +543,15 @@ pub(super) async fn dispatch_accumulating<
                             let enriched_error = error_event
                                 .with_flow_context(flow_ctx)
                                 .with_runtime_context(ctx.instrumentation.snapshot_with_control());
-                            ctx.data_journal
-                                .append(enriched_error, Some(&envelope))
-                                .await
-                                .map_err(|e| {
-                                    format!("Failed to write stateful accumulate error: {e}")
-                                })?;
+                            crate::supervised_base::publication::append(
+                                &ctx.data_journal,
+                                enriched_error,
+                                Some(&envelope),
+                            )
+                            .await
+                            .map_err(|e| {
+                                format!("Failed to write stateful accumulate error: {e}")
+                            })?;
                         }
 
                         if let Some(upstream) = upstream_stage {
@@ -896,17 +902,19 @@ pub(super) async fn dispatch_emitting<
 
                     // Error events are still data for output accounting.
                     if event.is_data() {
-                        ctx.instrumentation
-                            .record_error_journal_output_event(&event);
                         if let Some(subscription) = sup.subscription.as_mut() {
                             subscription.track_output_event();
                         }
                     }
 
-                    ctx.error_journal
-                        .append(event, ctx.last_consumed_envelope.as_ref())
-                        .await
-                        .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
+                    crate::stages::common::supervision::output_committer::commit_error_output(
+                        &ctx.error_journal,
+                        &ctx.instrumentation,
+                        event,
+                        ctx.last_consumed_envelope.as_ref(),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
                 } else {
                     let scope = observer_scope;
                     ctx.pending_outputs.push_back(

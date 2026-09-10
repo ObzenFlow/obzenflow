@@ -317,10 +317,12 @@ async fn finish_success<
                 .record_error(kind.clone().unwrap_or(ErrorKind::Unknown));
         }
         if route_to_error_journal(&event) {
-            if let Err(error) = ctx
-                .error_journal
-                .append(event, Some(&continuation.envelope))
-                .await
+            if let Err(error) = crate::supervised_base::publication::append(
+                &ctx.error_journal,
+                event,
+                Some(&continuation.envelope),
+            )
+            .await
             {
                 return fail(
                     sup,

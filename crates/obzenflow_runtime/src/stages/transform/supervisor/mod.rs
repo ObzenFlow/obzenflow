@@ -437,14 +437,18 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                     .with_flow_context(flow_context)
                     .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
-                ctx.error_journal
-                    .append(error_event, Some(envelope))
-                    .await
-                    .map_err(|e| format!("{write_error_context}: {e}"))?;
-
-                ctx.instrumentation.record_error(
-                    obzenflow_core::event::status::processing_status::ErrorKind::Unknown,
-                );
+                let journal = ctx.error_journal.clone();
+                let parent = envelope.clone();
+                let instrumentation = ctx.instrumentation.clone();
+                crate::supervised_base::publication::commit(async move {
+                    journal.append(error_event, Some(&parent)).await?;
+                    instrumentation.record_error(
+                        obzenflow_core::event::status::processing_status::ErrorKind::Unknown,
+                    );
+                    Ok(())
+                })
+                .await
+                .map_err(|e| format!("{write_error_context}: {e}"))?;
 
                 if let Some(upstream) = upstream {
                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {

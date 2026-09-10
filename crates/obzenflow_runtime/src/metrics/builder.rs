@@ -43,6 +43,7 @@ pub struct MetricsAggregatorBuilder {
     composite_boundaries: Vec<CompositeBoundary>,
 
     export_interval_secs: u64,
+    pipeline_writer: Option<obzenflow_core::event::WriterId>,
 }
 
 impl MetricsAggregatorBuilder {
@@ -58,8 +59,14 @@ impl MetricsAggregatorBuilder {
             metrics_exporter,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
+            pipeline_writer: None,
             export_interval_secs: 10, // Default to 10 seconds
         }
+    }
+
+    pub(crate) fn with_pipeline_writer(mut self, writer: obzenflow_core::event::WriterId) -> Self {
+        self.pipeline_writer = Some(writer);
+        self
     }
 
     /// Set the export interval in seconds
@@ -92,7 +99,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let system_id = obzenflow_core::id::SystemId::new();
 
         // Create metrics context with all mutable state
-        let (metrics_context, metrics_io) = MetricsAggregatorContext::new(
+        let (mut metrics_context, metrics_io) = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
             self.metrics_exporter,
@@ -103,6 +110,8 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         )
         .await
         .map_err(BuilderError::Other)?;
+
+        metrics_context.pipeline_writer = self.pipeline_writer;
 
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels
@@ -121,6 +130,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
             error_subscription: metrics_io.error_subscription,
             system_subscription: Some(metrics_io.system_subscription),
             export_timer: None,
+            next_input: 0,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),
         };

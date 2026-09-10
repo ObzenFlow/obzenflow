@@ -42,7 +42,7 @@ pub(crate) struct CatchUpStage<'a> {
     pub stage_type: StageType,
     pub writer_id: Option<WriterId>,
     pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
-    pub instrumentation: &'a StageInstrumentation,
+    pub instrumentation: &'a Arc<StageInstrumentation>,
 }
 
 /// Run the catch-up flip for `target` (FLOWIP-120n): frontier check, F15
@@ -118,8 +118,13 @@ pub(crate) async fn maybe_flip_caught_up(
             stage.stage_id,
             stage.stage_type,
         );
-        stage.instrumentation.record_emitted(&marker);
-        if let Err(e) = stage.data_journal.append(marker, None).await {
+        if let Err(e) = super::output_committer::commit_control_output(
+            stage.data_journal,
+            stage.instrumentation,
+            marker,
+        )
+        .await
+        {
             return CatchUpDisposition::Failed(format!(
                 "stage '{}' failed to author its catch-up watermark: {e}",
                 stage.stage_name

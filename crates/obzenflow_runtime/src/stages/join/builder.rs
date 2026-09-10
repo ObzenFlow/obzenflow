@@ -138,6 +138,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             stream_subscription_factory.seq_ordered = true;
         }
 
+        let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self
             .resources
@@ -149,15 +150,17 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             None
         } else {
             let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
-            Some(spawn_heartbeat(
-                self.config.stage_id,
-                self.config.stage_name.clone(),
-                self.resources.system_journal.clone(),
-                self.resources.liveness_snapshots.clone(),
-                heartbeat_state,
-                heartbeat_config,
-                self.resources.runtime_execution.clone(),
-            ))
+            Some(publications.enter_sync(|| {
+                spawn_heartbeat(
+                    self.config.stage_id,
+                    self.config.stage_name.clone(),
+                    self.resources.system_journal.clone(),
+                    self.resources.liveness_snapshots.clone(),
+                    heartbeat_state,
+                    heartbeat_config,
+                    self.resources.runtime_execution.clone(),
+                )
+            }))
         };
 
         // Create context with subscription factory from resources.
@@ -235,8 +238,9 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
 
         // Spawn the supervisor task
         let supervisor_name = format!("join_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<JoinSupervisor<H>>::new(&supervisor_name).spawn(
-            move || async move {
+        let task = SupervisorTaskBuilder::<JoinSupervisor<H>>::new(&supervisor_name)
+            .with_publications(publications)
+            .spawn(move || async move {
                 let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
                     supervisor,
                     event_receiver,
@@ -246,8 +250,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 // Run with the wrapper
                 HandlerSupervisedExt::run(supervisor_with_events, JoinState::<H>::Created, context)
                     .await
-            },
-        );
+            });
 
         // Build and return handle
         HandleBuilder::new()

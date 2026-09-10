@@ -608,7 +608,6 @@ mod tests {
 
         let extras = FlowHandleExtras {
             stage_cleanup: Vec::new(),
-            stop_status: crate::pipeline::fsm::StopIntent::default().status_receiver(),
             published_outcome: Default::default(),
             topology: Some(topology),
             flow_name: "dummy".to_string(),

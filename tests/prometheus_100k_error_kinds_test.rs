@@ -433,10 +433,198 @@ mod managed_lifecycle_regressions {
 
     use super::prometheus_demo;
 
+    struct ObservedExporter {
+        application: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
+        observed: Arc<obzenflow_adapters::monitoring::MetricsReadModel>,
+    }
+
+    impl obzenflow_core::metrics::MetricsSnapshotExporter for ObservedExporter {
+        fn publish_app_snapshot(&self, snapshot: obzenflow_core::metrics::AppMetricsSnapshot) {
+            self.application.publish_app_snapshot(snapshot.clone());
+            self.observed.publish_app_snapshot(snapshot);
+        }
+        fn publish_infra_snapshot(&self, snapshot: obzenflow_core::metrics::InfraMetricsSnapshot) {
+            self.application.publish_infra_snapshot(snapshot.clone());
+            self.observed.publish_infra_snapshot(snapshot);
+        }
+    }
+
+    fn observe_exports(
+        definition: obzenflow_dsl::FlowDefinition,
+        observed: Arc<obzenflow_adapters::monitoring::MetricsReadModel>,
+    ) -> obzenflow_dsl::FlowDefinition {
+        obzenflow_dsl::FlowDefinition::new(move |context| async move {
+            let application = context
+                .metrics_exporter()
+                .expect("application metrics are enabled")
+                .clone();
+            definition
+                .build(context.with_metrics_exporter(Arc::new(ObservedExporter {
+                    application,
+                    observed,
+                })))
+                .await
+        })
+    }
+
+    fn assert_final_example_metrics(model: &obzenflow_adapters::monitoring::MetricsReadModel) {
+        let view = model.snapshot();
+        let snapshot = view
+            .app
+            .as_ref()
+            .expect("live aggregator published a snapshot");
+        let id = |name| {
+            *snapshot
+                .stage_metadata
+                .iter()
+                .find(|(_, metadata)| metadata.name == name)
+                .unwrap()
+                .0
+        };
+        assert_eq!(snapshot.pipeline_state, "completed");
+        assert_eq!(
+            snapshot.events_emitted_total[&id("high_volume_source")],
+            100
+        );
+        assert_eq!(snapshot.error_counts[&id("error_processor")], 1);
+        assert_eq!(snapshot.events_accumulated_total[&id("event_counter")], 99);
+        assert_eq!(snapshot.events_emitted_total[&id("event_counter")], 1);
+        let text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
+            .render(&view)
+            .unwrap();
+        assert!(text
+            .lines()
+            .any(|line| line.starts_with("obzenflow_errors_total{")
+                && line.contains("stage=\"error_processor\"")
+                && line.ends_with(" 1")));
+    }
+
     /// FLOWIP-142a: the shipped example, real Play route, supported export and
     /// certified current-build replay all traverse the application lifecycle.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manual_prometheus_example_exports_100_inputs_and_replays_without_a_host() {
+        prometheus_example_journal_and_metrics_proof(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unhosted_prometheus_example_exports_100_inputs_and_replays_with_final_metrics() {
+        prometheus_example_journal_and_metrics_proof(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_prometheus_example_journals_runtime_admission_and_final_metrics() {
+        use obzenflow_core::event::{
+            JournalEvent, PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission,
+            SystemEvent, SystemEventType,
+        };
+        use obzenflow_infra::journal::disk::log_record::LogRecord;
+        use obzenflow_runtime::pipeline::{FlowStopMode, PipelineEvent};
+        use obzenflow_runtime::supervised_base::SupervisorHandle;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir_in("target").unwrap();
+        let config = dir.path().join("stopped.toml");
+        std::fs::write(
+            &config,
+            "[server]\nenabled = false\n[metrics]\nenabled = true\n",
+        )
+        .unwrap();
+        let captured = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+        let capture = captured.clone();
+        let model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+        let application = FlowApplication::builder()
+            .with_config_file(config)
+            .with_cli_args(["prometheus-stopped-proof"])
+            .with_log_level(LogLevel::Error)
+            .with_flow_handle_hook(move |flow| {
+                *capture.lock().unwrap() = Some(flow.clone());
+                let flow = flow.clone();
+                tokio::spawn(async move {
+                    let mut reader = flow.system_journal().unwrap().reader().await.unwrap();
+                    loop {
+                        if let Some(row) = reader.next().await.unwrap() {
+                            if row.event.writer_id == flow.pipeline_writer_id()
+                                && row.event.event_type_name() == "system.pipeline.running"
+                            {
+                                break;
+                            }
+                        } else {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    // A zero budget asks Runtime to expire immediately. This
+                    // witnesses the shipped flow's facts, not elapsed timing.
+                    flow.send_event(PipelineEvent::StopRequested {
+                        mode: FlowStopMode::Graceful {
+                            timeout: Duration::ZERO,
+                        },
+                        reason: None,
+                    })
+                    .await
+                    .unwrap();
+                })
+            })
+            .run_async(observe_exports(
+                prometheus_demo::flow_definition(100_000, dir.path().join("stopped")),
+                model.clone(),
+            ));
+        tokio::time::timeout(Duration::from_secs(10), application)
+            .await
+            .unwrap()
+            .unwrap();
+        let flow = captured.lock().unwrap().take().unwrap();
+        let archive = flow.run_substrate().locator().unwrap().path();
+        let export = dir.path().join("stopped.jsonl");
+        obzenflow_infra::journal::disk::inspect::export_jsonl(archive, Some(&export)).unwrap();
+        let jsonl = std::fs::read_to_string(export).unwrap();
+        let systems: Vec<_> = jsonl
+            .lines()
+            .filter_map(|line| serde_json::from_str::<LogRecord<SystemEvent>>(line).ok())
+            .collect();
+        let admissions: Vec<_> = systems
+            .iter()
+            .filter_map(|row| match &row.event.event {
+                SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
+                    admission,
+                }) => Some(admission),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            admissions,
+            [
+                &PipelineStopAdmission::Graceful {
+                    timeout_ms: obzenflow_core::event::types::DurationMs(0)
+                },
+                &PipelineStopAdmission::Cancel {
+                    cause: PipelineCancellationCause::GracefulTimeout
+                },
+            ]
+        );
+        let terminal = systems
+            .iter()
+            .position(|row| row.event.event_type_name() == "system.pipeline.cancelled")
+            .unwrap();
+        let metrics = systems
+            .iter()
+            .position(|row| row.event.event_type_name() == "system.metrics.drained")
+            .unwrap();
+        let drained = systems
+            .iter()
+            .position(|row| row.event.event_type_name() == "system.pipeline.drained")
+            .unwrap();
+        assert!(terminal < metrics && metrics < drained);
+        assert!(!systems.iter().any(|row| matches!(
+            row.event.event_type_name(),
+            "system.pipeline.completed" | "system.pipeline.failed" | "system.pipeline.not_started"
+        )));
+        assert_eq!(
+            model.snapshot().app.as_ref().unwrap().pipeline_state,
+            "cancelled"
+        );
+    }
+
+    async fn prometheus_example_journal_and_metrics_proof(hosted: bool) {
         use obzenflow_core::event::{chain_event::ChainEventContent, JournalEvent, SystemEvent};
         use obzenflow_infra::journal::disk::log_record::LogRecord;
         use std::collections::BTreeSet;
@@ -446,15 +634,18 @@ mod managed_lifecycle_regressions {
 
         let dir = tempfile::tempdir_in("target").unwrap();
         let config = dir.path().join("hosted.toml");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        let address = if hosted {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        } else {
+            "127.0.0.1:9999".parse().unwrap()
+        };
         std::fs::write(
             &config,
             format!(
                 r#"
 [server]
-enabled = true
+enabled = {hosted}
 host = "127.0.0.1"
 port = {}
 startup_mode = "manual"
@@ -468,6 +659,7 @@ enabled = true
         .unwrap();
         let (flow_tx, flow_rx) = tokio::sync::oneshot::channel();
         let flow_tx = Mutex::new(Some(flow_tx));
+        let model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
         let app = FlowApplication::builder()
             .with_config_file(config)
             .with_cli_args(["prometheus-lifecycle-proof"])
@@ -482,32 +674,41 @@ enabled = true
                     .is_ok());
                 tokio::spawn(async {})
             });
-        let application = tokio::spawn(app.run_async(prometheus_demo::flow_definition(
-            100,
-            dir.path().join("live"),
+        let application = tokio::spawn(app.run_async(observe_exports(
+            prometheus_demo::flow_definition(100, dir.path().join("live")),
+            model.clone(),
         )));
-        let flow = flow_rx.await.unwrap();
-        flow.wait_for_ready().await.unwrap();
-        let mut socket = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Ok(socket) = tokio::net::TcpStream::connect(address).await {
-                    break socket;
+        let flow = match flow_rx.await {
+            Ok(flow) => flow,
+            Err(error) => panic!(
+                "flow construction failed: {error}; application: {:?}",
+                application.await
+            ),
+        };
+        if hosted {
+            flow.wait_for_ready().await.unwrap();
+            let mut socket = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(socket) = tokio::net::TcpStream::connect(address).await {
+                        break socket;
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        socket.write_all(b"POST /api/flow/control HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"action\":\"play\"}").await.unwrap();
-        let mut response = String::new();
-        socket.read_to_string(&mut response).await.unwrap();
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            })
+            .await
+            .unwrap();
+            socket.write_all(b"POST /api/flow/control HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"action\":\"play\"}").await.unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        }
         tokio::time::timeout(Duration::from_secs(10), application)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        let _rebound = std::net::TcpListener::bind(address).unwrap();
+        let _rebound = hosted.then(|| std::net::TcpListener::bind(address).unwrap());
+        assert_final_example_metrics(&model);
         let archive = flow.run_substrate().locator().unwrap().path().to_path_buf();
         let export = dir.path().join("hosted.jsonl");
         obzenflow_infra::journal::disk::inspect::export_jsonl(&archive, Some(&export)).unwrap();
@@ -564,17 +765,31 @@ enabled = true
             row.event.event_type_name(),
             "system.contract.fail" | "system.contract.result.failed"
         )));
+        let position = |name| {
+            systems
+                .iter()
+                .position(|row| row.event.event_type_name() == name)
+                .unwrap()
+        };
+        let terminal = position("system.pipeline.completed");
+        let drained = position("system.metrics.drained");
+        assert!(terminal < drained);
+        assert!(systems[terminal + 1..drained]
+            .iter()
+            .any(|row| row.event.event_type_name() == "system.metrics.exported"));
+        assert!(drained < position("system.pipeline.drained"));
         drop(flow);
 
         let replay_config = dir.path().join("replay.toml");
         std::fs::write(
             &replay_config,
-            "[server]\nenabled = false\n[metrics]\nenabled = false\n",
+            "[server]\nenabled = false\n[metrics]\nenabled = true\n",
         )
         .unwrap();
         // Keeping the old port bound also proves replay needs no listener.
         // This example performs no live external I/O; zero configured source
         // inputs force the proof to reconstruct the recorded 100-input archive.
+        let replay_model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
         FlowApplication::builder()
             .with_config_file(replay_config)
             .with_cli_args(vec![
@@ -584,12 +799,13 @@ enabled = true
                 OsString::from("--verify"),
             ])
             .with_log_level(LogLevel::Error)
-            .run_async(prometheus_demo::flow_definition(
-                0,
-                dir.path().join("replay"),
+            .run_async(observe_exports(
+                prometheus_demo::flow_definition(0, dir.path().join("replay")),
+                replay_model.clone(),
             ))
             .await
             .expect("certified replay must report zero differences (verification exit code 0)");
+        assert_final_example_metrics(&replay_model);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

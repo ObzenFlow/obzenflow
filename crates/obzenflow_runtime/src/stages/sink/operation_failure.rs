@@ -25,7 +25,7 @@ pub struct SinkLifecycleFailureCommit<'a> {
     pub error: &'a SinkOperationError,
     pub error_journal: &'a Arc<dyn Journal<ChainEvent>>,
     pub system_journal: &'a Arc<dyn Journal<SystemEvent>>,
-    pub instrumentation: &'a StageInstrumentation,
+    pub instrumentation: &'a Arc<StageInstrumentation>,
 }
 
 #[doc(hidden)]
@@ -66,21 +66,31 @@ pub async fn record_sink_lifecycle_operation_failure(
     })
     .mark_as_error(commit.error.detail(), commit.error.kind())
     .with_runtime_context(commit.instrumentation.snapshot_with_control());
-    commit
-        .instrumentation
-        .record_error_journal_output_event(&event);
-    let operation = commit.error_journal.append(event, None).await?;
-
-    let lifecycle = SystemEvent::stage_failed_with_metrics_causal(
-        commit.stage_id,
-        commit.error.detail(),
-        false,
-        snapshot_stage_metrics(commit.instrumentation),
-        operation.event.id,
-    );
-    let lifecycle = commit.system_journal.append(lifecycle, None).await?;
-    Ok(SinkLifecycleFailureRecorded {
-        operation,
-        lifecycle_event_id: lifecycle.event.id,
+    let error_journal = commit.error_journal.clone();
+    let system_journal = commit.system_journal.clone();
+    let instrumentation = commit.instrumentation.clone();
+    let stage_id = commit.stage_id;
+    let detail = commit.error.detail();
+    crate::supervised_base::publication::commit(async move {
+        let operation = crate::stages::common::supervision::output_committer::commit_error_output(
+            &error_journal,
+            &instrumentation,
+            event,
+            None,
+        )
+        .await?;
+        let lifecycle = SystemEvent::stage_failed_with_metrics_causal(
+            stage_id,
+            detail,
+            false,
+            snapshot_stage_metrics(&instrumentation),
+            operation.event.id,
+        );
+        let lifecycle = system_journal.append(lifecycle, None).await?;
+        Ok(SinkLifecycleFailureRecorded {
+            operation,
+            lifecycle_event_id: lifecycle.event.id,
+        })
     })
+    .await
 }

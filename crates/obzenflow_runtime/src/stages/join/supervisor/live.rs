@@ -434,10 +434,13 @@ async fn handle_reference_envelope<
                     .await?;
 
                     if route_to_error_journal(&error_event) {
-                        ctx.error_journal
-                            .append(error_event, Some(&envelope))
-                            .await
-                            .map_err(|e| format!("Failed to write join error event: {e}"))?;
+                        crate::supervised_base::publication::append(
+                            &ctx.error_journal,
+                            error_event,
+                            Some(&envelope),
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to write join error event: {e}"))?;
                         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
                             reader.ack_consumed(1);
                         }
@@ -835,10 +838,13 @@ async fn handle_stream_envelope<
                     .await?;
 
                     if route_to_error_journal(&error_event) {
-                        ctx.error_journal
-                            .append(error_event, Some(&merged_parent))
-                            .await
-                            .map_err(|e| format!("Failed to write join error event: {e}"))?;
+                        crate::supervised_base::publication::append(
+                            &ctx.error_journal,
+                            error_event,
+                            Some(&merged_parent),
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to write join error event: {e}"))?;
                         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
                             reader.ack_consumed(1);
                         }

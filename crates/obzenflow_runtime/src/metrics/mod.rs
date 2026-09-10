@@ -40,3 +40,5 @@ impl obzenflow_core::metrics::MetricsSnapshotExporter for RecordingSnapshots {
         *self.infra.lock().unwrap() = Some(value);
     }
 }
+
+mod subscription;

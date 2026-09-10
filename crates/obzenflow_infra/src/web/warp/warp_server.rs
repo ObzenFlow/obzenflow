@@ -3302,19 +3302,27 @@ fn map_system_event_to_sse(
                         .data(data.to_string()),
                 )
             }
-            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested {
-                mode,
-                timeout_ms,
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopAdmitted {
+                admission,
             } => {
                 let mut data = json!({
                     "system_event_type": "pipeline_lifecycle",
-                    "event_type": "flow_stop_requested",
+                    "event_type": "flow_stop_admitted",
                     "timestamp_ms": event.timestamp,
-                    "mode": mode,
+                    "admission": admission,
                 });
-                if let Some(ms) = timeout_ms {
-                    data["timeout_ms"] = json!(ms);
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
                 }
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
+            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::NotStarted => {
+                let mut data = json!({"system_event_type": "pipeline_lifecycle", "event_type": "flow_not_started", "timestamp_ms": event.timestamp});
                 if let Some(vc) = &vector_clock_value {
                     data["vector_clock"] = vc.clone();
                 }
@@ -4143,9 +4151,12 @@ fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static s
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running { .. } => {
                 "flow_running"
             }
-            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopRequested {
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::StopAdmitted {
                 ..
-            } => "flow_stop_requested",
+            } => "flow_stop_admitted",
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::NotStarted => {
+                "flow_not_started"
+            }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Draining { .. } => {
                 "flow_draining"
             }

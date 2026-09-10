@@ -391,17 +391,32 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
     }
 }
 
-#[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
-    fn id(&self) -> &JournalId {
-        &self.journal_id
-    }
+// The complete commit unit outlives a cancelled waiter. Runtime retains its
+// own receipt until this task has finalised clocks and indexes as well as bytes.
+async fn retain_commit<R: Send + 'static>(
+    poisoned: Arc<AtomicBool>,
+    operation: impl std::future::Future<Output = Result<R, JournalError>> + Send + 'static,
+) -> Result<R, JournalError> {
+    use futures::FutureExt;
+    tokio::spawn(async move {
+        match std::panic::AssertUnwindSafe(operation).catch_unwind().await {
+            Ok(result) => result,
+            Err(_) => {
+                poisoned.store(true, Ordering::SeqCst);
+                Err(JournalError::CommitIndeterminate {
+                    source: std::io::Error::other("journal commit task panicked").into(),
+                })
+            }
+        }
+    })
+    .await
+    .map_err(|error| JournalError::CommitIndeterminate {
+        source: error.into(),
+    })?
+}
 
-    fn owner(&self) -> Option<&JournalOwner> {
-        self.owner.as_ref()
-    }
-
-    async fn append(
+impl<T: JournalEvent + 'static> DiskJournal<T> {
+    async fn append_record(
         &self,
         mut event: T,
         parent: Option<&EventEnvelope<T>>,
@@ -424,6 +439,12 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // This serialises append operations and ensures concurrent appends
         // cannot compute the same `writer_seq` from a stale snapshot.
         let _lock = self.read_write_lock.write().await;
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(JournalError::Implementation {
+                message: "journal publication is closed after indeterminate commit".into(),
+                source: "poisoned journal".into(),
+            });
+        }
 
         // FLOWIP-120n F18: stamp under the write lock so sequence order equals
         // append order; re-admitted rows already carry theirs and keep it.
@@ -513,25 +534,29 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             Ok(Err(AppendFailure::RolledBack(e))) => return Err(e),
             Ok(Err(AppendFailure::Poisoned(e))) => {
                 self.poisoned.store(true, Ordering::SeqCst);
-                return Err(e);
+                return Err(JournalError::CommitIndeterminate {
+                    source: Box::new(e),
+                });
             }
             Err(join_error) => {
                 // The blocking task panicked or was cancelled, so the file state
                 // is unknown: poison rather than risk appending past a partial.
                 self.poisoned.store(true, Ordering::SeqCst);
-                return Err(JournalError::Implementation {
-                    message: format!(
-                        "Background writer task {} for journal {}",
-                        if join_error.is_cancelled() {
-                            "was cancelled"
-                        } else if join_error.is_panic() {
-                            "panicked"
-                        } else {
-                            "failed"
-                        },
-                        self.path.display()
-                    ),
-                    source: Box::new(join_error),
+                return Err(JournalError::CommitIndeterminate {
+                    source: Box::new(JournalError::Implementation {
+                        message: format!(
+                            "Background writer task {} for journal {}",
+                            if join_error.is_cancelled() {
+                                "was cancelled"
+                            } else if join_error.is_panic() {
+                                "panicked"
+                            } else {
+                                "failed"
+                            },
+                            self.path.display()
+                        ),
+                        source: Box::new(join_error),
+                    }),
                 });
             }
         };
@@ -557,7 +582,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Ok(envelope)
     }
 
-    async fn append_group(
+    async fn append_records(
         &self,
         group_id: &str,
         mut events: Vec<T>,
@@ -586,6 +611,12 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // One write lock covers clock calculation, construction, the single
         // physical frame append, and publication of every member.
         let _lock = self.read_write_lock.write().await;
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(JournalError::Implementation {
+                message: "journal publication is closed after indeterminate commit".into(),
+                source: "poisoned journal".into(),
+            });
+        }
         if let Some(sequencer) = &self.admission_sequencer {
             for event in &mut events {
                 if event.admission_seq().is_none() {
@@ -669,16 +700,20 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             Ok(Err(AppendFailure::RolledBack(e))) => return Err(e),
             Ok(Err(AppendFailure::Poisoned(e))) => {
                 self.poisoned.store(true, Ordering::SeqCst);
-                return Err(e);
+                return Err(JournalError::CommitIndeterminate {
+                    source: Box::new(e),
+                });
             }
             Err(join_error) => {
                 self.poisoned.store(true, Ordering::SeqCst);
-                return Err(JournalError::Implementation {
-                    message: format!(
-                        "Background atomic-group writer task failed for journal {}",
-                        self.path.display()
-                    ),
-                    source: Box::new(join_error),
+                return Err(JournalError::CommitIndeterminate {
+                    source: Box::new(JournalError::Implementation {
+                        message: format!(
+                            "Background atomic-group writer task failed for journal {}",
+                            self.path.display()
+                        ),
+                        source: Box::new(join_error),
+                    }),
                 });
             }
         };
@@ -701,6 +736,47 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         *self.writer_clocks.write().await = next_writer_clocks;
 
         Ok(envelopes)
+    }
+}
+
+#[async_trait]
+impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
+    fn id(&self) -> &JournalId {
+        &self.journal_id
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        self.owner.as_ref()
+    }
+
+    async fn append(
+        &self,
+        event: T,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<EventEnvelope<T>, JournalError> {
+        let journal = self.clone();
+        let parent = parent.cloned();
+        retain_commit(self.poisoned.clone(), async move {
+            journal.append_record(event, parent.as_ref()).await
+        })
+        .await
+    }
+
+    async fn append_group(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        let journal = self.clone();
+        let parent = parent.cloned();
+        let group_id = group_id.to_owned();
+        retain_commit(self.poisoned.clone(), async move {
+            journal
+                .append_records(&group_id, events, parent.as_ref())
+                .await
+        })
+        .await
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
@@ -1011,6 +1087,65 @@ mod tests {
     use tokio::sync::Barrier;
 
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn cancelled_append_retains_index_clock_and_writer_serialisation() {
+        use futures::FutureExt;
+        for grouped in [false, true] {
+            let directory = tempfile::tempdir_in("target").unwrap();
+            let path = directory.path().join("retained.log");
+            let stage = StageId::new();
+            let writer = WriterId::from(stage);
+            let journal = DiskJournal::<ChainEvent>::with_owner(
+                path.clone(),
+                obzenflow_core::JournalOwner::stage(stage),
+            )
+            .unwrap();
+            // Hold metadata publication after the physical frame is written.
+            let index_guard = journal.index.write().await;
+            let first = ChainEventFactory::data_event(writer, "retained.v1", serde_json::json!(1));
+            let second = ChainEventFactory::data_event(writer, "retained.v1", serde_json::json!(2));
+            let first_id = first.id;
+            let pending_journal = journal.clone();
+            let mut receipt = Box::pin(async move {
+                if grouped {
+                    pending_journal
+                        .append_group("retained", vec![first, second], None)
+                        .await
+                        .map(|_| ())
+                } else {
+                    pending_journal.append(first, None).await.map(|_| ())
+                }
+            });
+            assert!(futures::poll!(receipt.as_mut()).is_pending());
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while std::fs::metadata(&path).unwrap().len() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(receipt);
+            let next = ChainEventFactory::data_event(writer, "retained.v1", serde_json::json!(3));
+            let mut next_receipt = Box::pin(journal.append(next, None));
+            assert!(next_receipt.as_mut().now_or_never().is_none());
+            assert!(journal.read_write_lock.try_read().is_err());
+            drop(index_guard);
+            let appended = tokio::time::timeout(std::time::Duration::from_secs(5), next_receipt)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                appended.vector_clock.get(&writer.to_string()),
+                if grouped { 3 } else { 2 }
+            );
+            assert!(journal.read_event(&first_id).await.unwrap().is_some());
+            assert_eq!(
+                journal.read_all_unordered().await.unwrap().len(),
+                if grouped { 3 } else { 2 }
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_basic_append_and_read() {

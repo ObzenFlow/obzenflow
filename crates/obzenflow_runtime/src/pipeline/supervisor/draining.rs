@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::common::idle_backoff;
 use super::{
     BoxError, ContractEdgeStatus, FlowStopMode, PipelineContext, PipelineEvent, PipelineSupervisor,
     SourceContractStrictMode, DRAIN_LIVENESS_MAX_IDLE,
@@ -167,8 +166,7 @@ pub(super) async fn dispatch_draining(
         }
         PollResult::CursorAdvanced { .. } => Ok(EventLoopDirective::Continue),
         PollResult::NoEvents => {
-            // No events available right now: sleep briefly to avoid busy loop.
-            idle_backoff().await;
+            // The driver owns the cancellable idle wait.
             if supervisor.should_log_barrier() {
                 let snapshot = supervisor.barrier_snapshot(context);
                 tracing::debug!(
@@ -183,9 +181,6 @@ pub(super) async fn dispatch_draining(
             }
             if supervisor.all_stages_and_contracts_complete(context) {
                 // Synthesize AllStagesCompleted when everything is done.
-                if let Err(e) = supervisor.write_all_stages_completed(context).await {
-                    tracing::error!(error = %e, "Failed to write synthetic AllStagesCompleted");
-                }
                 Ok(EventLoopDirective::Transition(
                     PipelineEvent::AllStagesCompleted,
                 ))

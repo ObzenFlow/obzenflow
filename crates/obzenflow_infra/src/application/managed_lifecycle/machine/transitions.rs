@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::time::Instant as TokioInstant;
 
 use super::model::{Action, Context, Event, FailureOrigin, JoinBudget, Outcome, State};
-use super::settlement::{Escalation, Settlement, StopCommand};
+use super::settlement::{Settlement, StopCommand};
 use crate::application::config::StartupMode;
 
 pub(super) fn record_failure<'a>(
@@ -104,14 +104,14 @@ pub(super) fn begin_settlement<'a>(
 pub(super) fn observe_admission<'a>(
     state: &'a State,
     event: &'a Event,
-    ctx: &'a mut Context,
+    _ctx: &'a mut Context,
 ) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
     Box::pin(async move {
         let (State::SettlingFlow(settlement), Event::Admission(status)) = (state, event) else {
             return Ok(registration_mismatch("observe_admission", state, event));
         };
         let mut settlement = settlement.clone();
-        settlement.observe(status, ctx.grace);
+        settlement.observe(status);
         Ok(Transition {
             next_state: State::SettlingFlow(settlement),
             actions: vec![],
@@ -137,56 +137,19 @@ pub(super) fn request_cancellation<'a>(
         let State::SettlingFlow(settlement) = state else {
             return Ok(registration_mismatch("request_cancellation", state, event));
         };
-        match settlement.escalation {
-            Escalation::Cancelling | Escalation::Requested(StopCommand::Cancel) => Ok(stay(state)),
-            Escalation::AwaitingAdmission
-            | Escalation::Graceful(_)
-            | Escalation::Requested(StopCommand::Graceful | StopCommand::Timeout) => {
-                let mut settlement = settlement.clone();
-                settlement.escalation = Escalation::Requested(StopCommand::Cancel);
-                Ok(Transition {
-                    next_state: State::SettlingFlow(settlement),
-                    actions: vec![Action::SendStop(StopCommand::Cancel)],
-                })
-            }
+        if settlement.requested == Some(StopCommand::Cancel)
+            || matches!(
+                settlement.admitted,
+                Some(obzenflow_core::event::PipelineStopAdmission::Cancel { .. })
+            )
+        {
+            return Ok(stay(state));
         }
-    })
-}
-
-pub(super) fn graceful_expired<'a>(
-    state: &'a State,
-    event: &'a Event,
-    _ctx: &'a mut Context,
-) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
-    Box::pin(async move {
-        let State::SettlingFlow(settlement) = state else {
-            return Ok(registration_mismatch("graceful_expired", state, event));
-        };
-        match settlement.escalation {
-            Escalation::Graceful(_) => {
-                let mut settlement = settlement.clone();
-                settlement.escalation = Escalation::Requested(StopCommand::Timeout);
-                Ok(Transition {
-                    next_state: State::SettlingFlow(settlement),
-                    actions: vec![Action::SendStop(StopCommand::Timeout)],
-                })
-            }
-            Escalation::AwaitingAdmission | Escalation::Requested(_) | Escalation::Cancelling => {
-                Ok(stay(state))
-            }
-        }
-    })
-}
-
-pub(super) fn abort_flow<'a>(
-    _state: &'a State,
-    _event: &'a Event,
-    _ctx: &'a mut Context,
-) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
-    Box::pin(async {
+        let mut settlement = settlement.clone();
+        settlement.requested = Some(StopCommand::Cancel);
         Ok(Transition {
-            next_state: State::AbortingFlow,
-            actions: vec![Action::AbortFlow],
+            next_state: State::SettlingFlow(settlement),
+            actions: vec![Action::SendStop(StopCommand::Cancel)],
         })
     })
 }

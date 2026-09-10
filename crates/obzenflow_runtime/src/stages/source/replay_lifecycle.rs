@@ -56,7 +56,9 @@ impl ReplayCompletionGuard {
             }),
         );
 
-        if let Err(e) = system_journal.append(completed_event, None).await {
+        if let Err(e) =
+            crate::supervised_base::publication::append(system_journal, completed_event, None).await
+        {
             tracing::error!(
                 stage_name = %stage_name,
                 journal_error = %e,

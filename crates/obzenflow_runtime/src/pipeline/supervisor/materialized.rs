@@ -121,9 +121,7 @@ pub(super) async fn dispatch_materialized(
         }
         PollResult::CursorAdvanced { .. } => {}
         PollResult::NoEvents => {
-            // No new events, but that's OK: stages might already be running.
-            // Add a brief sleep to avoid busy loop.
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // The driver owns the cancellable idle wait.
         }
         PollResult::Error(e) => {
             tracing::error!("Error polling system journal in Awaiting: {}", e);

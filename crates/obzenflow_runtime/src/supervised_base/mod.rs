@@ -13,6 +13,7 @@ pub mod builder;
 pub mod handle;
 pub mod handler_supervised;
 pub(crate) mod idle_backoff;
+pub(crate) mod publication;
 pub mod self_supervised;
 pub(crate) mod with_external_events;
 
@@ -33,7 +34,8 @@ pub use handle::{HandleBuilder, StandardHandle, SupervisorTaskBuilder};
 
 // DON'T export Supervisor - force users to choose SelfSupervised or HandlerSupervised
 
+#[cfg(test)]
+pub(crate) use with_external_events::SelfSupervisedWithExternalEvents;
 pub(crate) use with_external_events::{
     ExternalEventMode, ExternalEventPolicy, HandlerSupervisedWithExternalEvents,
-    SelfSupervisedWithExternalEvents,
 };

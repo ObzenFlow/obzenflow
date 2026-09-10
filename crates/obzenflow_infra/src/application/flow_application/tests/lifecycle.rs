@@ -362,15 +362,16 @@ enabled = false
                     "system.pipeline.cancelled"
                         | "system.pipeline.completed"
                         | "system.pipeline.failed"
+                        | "system.pipeline.not_started"
                 )
             })
             .collect();
-        assert_eq!(terminals, ["system.pipeline.cancelled"]);
+        assert_eq!(terminals, ["system.pipeline.not_started"]);
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn startup_failure_retains_prior_hook_joins_and_the_cancelled_journal_outcome() {
+async fn startup_failure_retains_prior_hook_joins_and_the_not_started_journal_outcome() {
     use obzenflow_core::event::JournalEvent;
 
     let dir = tempfile::tempdir().unwrap();
@@ -470,10 +471,11 @@ enabled = false
                 "system.pipeline.cancelled"
                     | "system.pipeline.completed"
                     | "system.pipeline.failed"
+                    | "system.pipeline.not_started"
             )
         })
         .collect();
-    assert_eq!(terminals, ["system.pipeline.cancelled"]);
+    assert_eq!(terminals, ["system.pipeline.not_started"]);
     release_tx.send(()).unwrap();
     let result = application.await.unwrap();
     assert!(matches!(result, Err(ApplicationError::IoError(error))
@@ -484,10 +486,10 @@ enabled = false
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_completion_and_panic_remain_primary_across_application_phases() {
+    use crate::lifecycle_observation::Reader;
     use crate::web::host_error::ManagedWebHostError;
     use futures::FutureExt;
-    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEventType};
-    use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
+    use obzenflow_core::event::{PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
@@ -545,8 +547,8 @@ enabled = false
             let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
             let hook_observed = observed.clone();
             let task_observed = observed.clone();
-            let admitted_deadline = Arc::new(Mutex::new(None));
-            let task_deadline = admitted_deadline.clone();
+            let observed_admission = Arc::new(Mutex::new(None));
+            let task_admission = observed_admission.clone();
             let calls = Arc::new(AtomicUsize::new(0));
             let source_calls = calls.clone();
             let (signal, received_signal) = oneshot::channel();
@@ -570,27 +572,40 @@ enabled = false
                     }
                 }
                 if matches!(phase, FaultPhase::Draining | FaultPhase::Cancelling) {
-                    let mut status = lifecycle::observe_stop(&flow);
+                    let mut status = Reader::new(
+                        flow.system_journal().unwrap().clone(),
+                        flow.pipeline_writer_id(),
+                    );
                     if matches!(phase, FaultPhase::Draining) {
                         flow.stop_graceful(Duration::from_secs(60)).await.unwrap();
                     } else {
                         flow.stop_cancel().await.unwrap();
                     }
                     loop {
-                        let admitted = status.snapshot();
-                        if let FlowStopStatus::Graceful { deadline } = admitted {
-                            *task_deadline.lock().unwrap() = Some(deadline);
+                        status.catch_up().await;
+                        let admitted = status.projection.admission.clone();
+                        if matches!(admitted, Some(PipelineStopAdmission::Graceful { .. })) {
+                            *task_admission.lock().unwrap() = admitted;
                             break;
                         }
-                        if matches!(admitted, FlowStopStatus::Cancelling { .. }) {
+                        if matches!(admitted, Some(PipelineStopAdmission::Cancel { .. })) {
                             break;
                         }
-                        status.changed().await.unwrap();
+                        tokio::task::yield_now().await;
                     }
                 }
                 // A terminal-success observation and shutdown signal cannot hide
                 // an independently failed host task.
                 if matches!(phase, FaultPhase::Terminal) {
+                    let mut reader =
+                        Reader::new(flow.system_journal().unwrap(), flow.pipeline_writer_id());
+                    loop {
+                        reader.catch_up().await;
+                        if reader.projection.outcome.is_some() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
                     let _ = task_signal
                         .lock()
                         .unwrap()
@@ -668,17 +683,30 @@ enabled = false
                     "sources must not run after pre-run host failure"
                 );
             }
-            if let Some(deadline) = *admitted_deadline.lock().unwrap() {
-                assert!(
-                    matches!(lifecycle::observe_stop(&flow).snapshot(), FlowStopStatus::Graceful { deadline: final_deadline } if deadline == final_deadline)
-                );
-            }
             let events = flow
                 .system_journal()
                 .unwrap()
                 .read_all_unordered()
                 .await
                 .unwrap();
+            if let Some(admission) = observed_admission.lock().unwrap().as_ref() {
+                let graceful: Vec<_> = events
+                    .iter()
+                    .filter_map(|envelope| match &envelope.event.event {
+                        SystemEventType::PipelineLifecycle(
+                            PipelineLifecycleEvent::StopAdmitted {
+                                admission: value @ PipelineStopAdmission::Graceful { .. },
+                            },
+                        ) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    graceful,
+                    [admission],
+                    "host cleanup must not replace an admitted graceful request"
+                );
+            }
             if matches!(phase, FaultPhase::Terminal) {
                 assert!(
                     events.iter().any(|event| matches!(
@@ -888,7 +916,6 @@ enabled = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signals_preserve_published_failures_and_repeatable_observation() {
     use obzenflow_core::event::JournalEvent;
-    use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
     use obzenflow_runtime::pipeline::PipelineEvent;
     use obzenflow_runtime::supervised_base::SupervisorHandle;
     for started in [false, true] {
@@ -959,7 +986,7 @@ enabled = false
                                 .unwrap();
                                 // In park mode, the signal is strictly later than publication
                                 // and this observer cannot consume the application's join.
-                                assert!(lifecycle::wait(&flow).await.is_err());
+                                assert!(flow.wait_for_completion().await.is_err());
                                 let _ = signal_tx.send(signal);
                             }))
                         })],
@@ -984,17 +1011,17 @@ enabled = false
                     "{result:?}"
                 );
                 assert!(!flow.is_running());
-                assert!(matches!(
-                    lifecycle::observe_stop(&flow).snapshot(),
-                    FlowStopStatus::NotRequested
-                ));
-                assert!(lifecycle::wait(&flow).await.is_err());
+                assert!(flow.wait_for_completion().await.is_err());
                 let events = flow
                     .system_journal()
                     .unwrap()
                     .read_all_unordered()
                     .await
                     .unwrap();
+                assert!(!events
+                    .iter()
+                    .any(|envelope| envelope.event.event_type_name()
+                        == "system.pipeline.stop_admitted"));
                 let terminal: Vec<_> = events
                     .iter()
                     .map(|event| event.event.event_type_name())
@@ -1086,6 +1113,23 @@ enabled = false
                     let flow = flow.clone();
                     tokio::spawn(async move {
                         flow.start().await.unwrap();
+                        // start() admits Run; it does not wait for execution.
+                        // This case exercises stopping an acknowledged running
+                        // flow, rather than cancellation overtaking startup.
+                        let mut reader = crate::lifecycle_observation::Reader::new(
+                            flow.system_journal().unwrap(),
+                            flow.pipeline_writer_id(),
+                        );
+                        loop {
+                            reader.catch_up().await;
+                            if matches!(
+                                reader.projection.progress,
+                                crate::lifecycle_observation::Progress::Running
+                            ) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
                         if cancel {
                             flow.stop_cancel().await.unwrap();
                         } else {

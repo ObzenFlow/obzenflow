@@ -421,7 +421,7 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         .with_flow_context(flow_context)
         .with_runtime_context(runtime_context);
 
-    ctx.data_journal.append(heartbeat, None).await?;
+    crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
     ctx.events_since_last_heartbeat = 0;
     Ok(())
 }

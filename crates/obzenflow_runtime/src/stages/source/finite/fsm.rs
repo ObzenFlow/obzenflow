@@ -510,15 +510,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
                 final_event.runtime_context = Some(runtime_context);
 
-                ctx.data_journal
-                    .append(eof_event, None)
+                crate::supervised_base::publication::append(&ctx.data_journal, eof_event, None)
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
                     })?;
 
-                ctx.data_journal
-                    .append(final_event, None)
+                crate::supervised_base::publication::append(&ctx.data_journal, final_event, None)
                     .await
                     .map_err(|e| {
                         obzenflow_fsm::FsmError::HandlerError(format!(
@@ -570,7 +568,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 // Best-effort: log journal failures but don't fail the FSM
-                match ctx.system_journal.append(system_event, None).await {
+                match crate::supervised_base::publication::append(
+                    &ctx.system_journal,
+                    system_event,
+                    None,
+                )
+                .await
+                {
                     Ok(_) => {
                         if let Some(reason) = cancel_reason {
                             tracing::info!(
@@ -628,7 +632,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 // Write running event to system journal
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
 
-                if let Err(e) = ctx.system_journal.append(running_event, None).await {
+                if let Err(e) = crate::supervised_base::publication::append(
+                    &ctx.system_journal,
+                    running_event,
+                    None,
+                )
+                .await
+                {
                     tracing::error!(
                         stage_name = %ctx.stage_name,
                         journal_error = %e,
@@ -657,11 +667,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     StageType::FiniteSource,
                 ));
 
-                ctx.data_journal.append(contract, None).await.map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to append source_contract: {e}"
-                    ))
-                })?;
+                crate::supervised_base::publication::append(&ctx.data_journal, contract, None)
+                    .await
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to append source_contract: {e}"
+                        ))
+                    })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -707,7 +719,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 let completion_event =
                     SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
 
-                if let Err(e) = ctx.system_journal.append(completion_event, None).await {
+                if let Err(e) = crate::supervised_base::publication::append(
+                    &ctx.system_journal,
+                    completion_event,
+                    None,
+                )
+                .await
+                {
                     tracing::error!(
                         stage_name = %ctx.stage_name,
                         journal_error = %e,

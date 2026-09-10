@@ -10,7 +10,7 @@
 //! Preparing -> StoppingMetrics on failed preparation without a flow.
 //! Starting -> Active on start completion; Starting/Active -> SettlingFlow on stop.
 //! SettlingFlow retains Runtime admission bounds through sends and escalation.
-//! Publication or expiry -> AbortingFlow -> StoppingMetrics -> ClosingHost.
+//! Joined journal observation -> StoppingMetrics -> ClosingHost.
 //! A closed host -> Deregistering -> FlushingMetrics; an absent host skips deregistration.
 //! FlushingMetrics -> JoiningLeftoverHeartbeat -> JoiningTasks -> Finished.
 //! Join-budget expiry stays in the joining phase with the original deadline.
@@ -38,8 +38,6 @@ use obzenflow_fsm::{fsm, StateMachine};
 #[cfg(test)]
 pub(super) use model::JoinBudget;
 pub(super) use model::{Action, Context, Event, FailureOrigin, Outcome, State};
-#[cfg(test)]
-pub(super) use settlement::completion_deadline;
 pub(super) use settlement::{FlowActivity, StopCommand, StopInput, StopReason};
 
 pub(super) type Machine = StateMachine<State, Event, Context, Action>;
@@ -69,7 +67,7 @@ pub(super) fn new() -> Machine {
             on Event::Failure => transitions::record_failure;
             on Event::Started => transitions::started;
             on Event::Stop => transitions::begin_settlement;
-            on Event::PublicationObserved => transitions::abort_flow;
+            on Event::PublicationObserved => transitions::stop_metrics;
         }
         state State::Active {
             on Event::Failure => transitions::record_failure;
@@ -84,13 +82,7 @@ pub(super) fn new() -> Machine {
             on Event::Admission => transitions::observe_admission;
             on Event::StopSent => transitions::acknowledge_stop_send;
             on Event::RepeatedSignal => transitions::request_cancellation;
-            on Event::GracefulExpired => transitions::graceful_expired;
-            on Event::PublicationObserved => transitions::abort_flow;
-            on Event::CompletionExpired => transitions::abort_flow;
-        }
-        state State::AbortingFlow {
-            on Event::Failure => transitions::record_failure;
-            on Event::FlowAborted => transitions::stop_metrics;
+            on Event::PublicationObserved => transitions::stop_metrics;
         }
         state State::StoppingMetrics {
             on Event::Failure => transitions::record_failure;

@@ -24,6 +24,7 @@ where
 {
     reader: Box<dyn JournalReader<T>>,
     eof_received: bool,
+    prefetched: Option<PollResult<T>>,
     stage_name: String,
 }
 
@@ -36,8 +37,13 @@ where
         Self {
             reader,
             eof_received: false,
+            prefetched: None,
             stage_name,
         }
+    }
+
+    pub(crate) fn prefetch(&mut self, result: PollResult<T>) {
+        self.prefetched = Some(result);
     }
 
     /// Check if an event represents EOF (only ChainEvent EOF is treated as terminal)
@@ -73,6 +79,9 @@ where
     type Event = T;
 
     async fn poll_next(&mut self) -> PollResult<Self::Event> {
+        if let Some(result) = self.prefetched.take() {
+            return result;
+        }
         if self.eof_received {
             return PollResult::NoEvents;
         }

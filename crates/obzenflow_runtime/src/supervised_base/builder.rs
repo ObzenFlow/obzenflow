@@ -151,7 +151,7 @@ pub enum BuilderError {
 ///         self.state_watcher.current()
 ///     }
 ///     
-///     async fn wait_for_completion(self) -> Result<(), Self::Error> {
+///     async fn wait_for_completion(&self) -> Result<(), Self::Error> {
 ///         // Custom error conversion logic
 ///     }
 /// }
@@ -180,13 +180,26 @@ pub trait SupervisorHandle: Send + Sync {
     #[doc(hidden)]
     fn request_abort(&self);
 
+    /// Publish a pipeline control row through the owning stage's retained
+    /// writer. A closed stage has no remaining control admission.
+    #[doc(hidden)]
+    async fn publish_pipeline_control(
+        &self,
+        _journal: std::sync::Arc<
+            dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,
+        >,
+        _event: obzenflow_core::event::ChainEvent,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Err(std::io::Error::other("supervisor does not own a stage publication scope").into())
+    }
+
     /// Wait for the supervisor to complete
     ///
-    /// This consumes the handle and waits for the supervisor task to finish.
+    /// This borrows the handle and waits for all owned resources to finish.
     /// Standard handles report task completion. `FlowHandle` also interprets
     /// the acknowledged execution outcome, so a successfully published flow
     /// failure returns an error even when the supervisor task returned normally.
-    async fn wait_for_completion(self) -> Result<(), Self::Error>;
+    async fn wait_for_completion(&self) -> Result<(), Self::Error>;
 
     /// Abort the supervisor task and join it before returning.
     async fn abort_and_wait(&self) -> Result<(), Self::Error>;
@@ -208,7 +221,7 @@ pub enum HandleError {
     SupervisorAborted,
 
     #[error("Supervisor task failed: {0}")]
-    SupervisorFailed(String),
+    SupervisorFailed(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 }
 
 /// Utility struct for creating channels with proper types

@@ -11,9 +11,7 @@ use crate::id_conversions::StageIdExt;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::PipelineContext;
 use crate::stages::common::stage_handle::{StageError, StageEvent, StageHandle};
-use crate::supervised_base::{
-    ChannelBuilder, EventSender, SelfSupervisedExt, SelfSupervisedWithExternalEvents, StateWatcher,
-};
+use crate::supervised_base::{ChannelBuilder, EventSender, StateWatcher};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{JournalEvent, JournalWriterId, SystemEvent};
@@ -249,7 +247,8 @@ async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
             .with_state_watcher(watcher)
             .with_supervisor_task(task)
             .build_standard()
-            .unwrap(),
+            .unwrap()
+            .into(),
     );
     started_rx.await.unwrap();
     drop(context);
@@ -330,6 +329,8 @@ struct StartGate {
 
 #[derive(Clone, Default)]
 struct ShutdownProbe {
+    completed: Arc<std::sync::atomic::AtomicBool>,
+    request_abort_count: Arc<AtomicUsize>,
     force_shutdown_count: Arc<AtomicUsize>,
     wait_for_completion_count: Arc<AtomicUsize>,
     abort_and_join_count: Arc<AtomicUsize>,
@@ -457,7 +458,9 @@ impl StageHandle for TestPipelineStageHandle {
             probe
                 .wait_for_completion_count
                 .fetch_add(1, Ordering::Relaxed);
-            std::future::pending::<()>().await;
+            if !probe.completed.load(Ordering::Relaxed) {
+                std::future::pending::<()>().await;
+            }
         }
         Ok(())
     }
@@ -470,19 +473,19 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     fn request_abort(&self) {
-        // This coordination fixture owns no supervisor task.
+        if let Some(probe) = &self.shutdown_probe {
+            probe.request_abort_count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
 fn test_supervisor(
     system_id: SystemId,
-    system_journal: Arc<MemoryJournal<SystemEvent>>,
+    _system_journal: Arc<MemoryJournal<SystemEvent>>,
 ) -> PipelineSupervisor {
-    let system_journal: Arc<dyn Journal<SystemEvent>> = system_journal;
     PipelineSupervisor {
         name: "test_pipeline_supervisor".to_string(),
         system_id,
-        system_journal,
         last_barrier_log: None,
         last_manual_wait_log: None,
         drain_idle_iters: 0,
@@ -517,8 +520,18 @@ fn spawn_supervisor_loop(
     watcher: StateWatcher<PipelineState>,
 ) -> JoinHandle<Result<(), BoxError>> {
     tokio::spawn(async move {
-        let supervisor = SelfSupervisedWithExternalEvents::new(supervisor, receiver, watcher);
-        SelfSupervisedExt::run(supervisor, initial_state, context).await
+        let scope = crate::supervised_base::publication::PublicationScope::concurrent();
+        let result = scope
+            .enter(crate::pipeline::driver::run(
+                supervisor,
+                receiver,
+                watcher,
+                context,
+                initial_state,
+            ))
+            .await;
+        scope.join().await?;
+        result
     })
 }
 
@@ -543,11 +556,11 @@ async fn stop_and_join(
 
 #[tokio::test]
 async fn graceful_deadline_bounds_a_stalled_source_control_send() {
-    use obzenflow_fsm::FsmAction;
     let system_id = SystemId::new();
     let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
     let (topology, _) = source_sink_topology();
-    let mut context = test_context(topology, system_id, journal, None);
+    let subscription = empty_system_subscription(&journal).await;
+    let mut context = test_context(topology, system_id, journal.clone(), Some(subscription));
     let stage_id = StageId::new();
     context.source_supervisors.insert(
         stage_id,
@@ -560,22 +573,50 @@ async fn graceful_deadline_bounds_a_stalled_source_control_send() {
             stall_drain: true,
         }),
     );
-    context.stop_intent.apply_request(
-        FlowStopMode::Graceful {
-            timeout: std::time::Duration::from_millis(20),
-        },
-        None,
+    let (sender, receiver, watcher) =
+        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Running);
+    let task = spawn_supervisor_loop(
+        PipelineState::Running,
+        test_supervisor(system_id, journal.clone()),
+        context,
+        receiver,
+        watcher,
     );
-    let deadline = context.stop_intent.deadline;
-    tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        crate::pipeline::fsm::PipelineAction::StopSources.execute(&mut context),
-    )
-    .await
-    .expect("a full source control queue cannot hold the pipeline beyond its graceful deadline")
-    .unwrap();
-    assert_eq!(context.stop_intent.deadline, deadline);
-    assert!(context.stop_intent.timeout_due());
+    sender
+        .send(PipelineEvent::StopRequested {
+            mode: FlowStopMode::Graceful {
+                timeout: std::time::Duration::from_millis(20),
+            },
+            reason: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_millis(500), task)
+        .await
+        .expect("a full source control queue cannot hold the pipeline beyond its graceful deadline")
+        .unwrap()
+        .unwrap();
+    let facts = journal.read_all_unordered().await.unwrap();
+    let admissions: Vec<_> = facts
+        .iter()
+        .filter_map(|envelope| match &envelope.event.event {
+            obzenflow_core::event::SystemEventType::PipelineLifecycle(
+                obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { admission },
+            ) => Some(admission.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        admissions,
+        [
+            obzenflow_core::event::PipelineStopAdmission::Graceful {
+                timeout_ms: obzenflow_core::event::types::DurationMs(20)
+            },
+            obzenflow_core::event::PipelineStopAdmission::Cancel {
+                cause: obzenflow_core::event::PipelineCancellationCause::GracefulTimeout
+            },
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1045,6 +1086,106 @@ async fn ready_for_run_stage_failure_transitions_to_error_before_run() {
 }
 
 #[tokio::test]
+async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expiry() {
+    use obzenflow_core::event::{
+        PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType,
+    };
+    let system_id = SystemId::new();
+    let gate = Arc::new(TerminalAppendGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail: false,
+    });
+    let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+    journal.terminal_append = Some(gate.clone());
+    let journal = Arc::new(journal);
+    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+    context.flow_start_time = Some(std::time::Instant::now());
+    let probe = ShutdownProbe::default();
+    probe.completed.store(true, Ordering::Relaxed);
+    let stage = StageId::new();
+    context.stage_supervisors.insert(
+        stage,
+        TestPipelineStageHandle::with_stalled_completion(
+            stage,
+            "already settled",
+            StageType::Sink,
+            probe.clone(),
+        ),
+    );
+    // The fixture completes ordinary cleanup before the terminal write. Its
+    // abort probe then observes whether Runtime services the new deadline.
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
+    sender
+        .send(PipelineEvent::AllStagesCompleted)
+        .await
+        .unwrap();
+    let task = spawn_supervisor_loop(
+        PipelineState::Draining,
+        test_supervisor(system_id, journal.clone()),
+        context,
+        receiver,
+        watcher,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    sender
+        .send(PipelineEvent::StopRequested {
+            mode: FlowStopMode::Graceful {
+                timeout: std::time::Duration::ZERO,
+            },
+            reason: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while probe.request_abort_count.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal publication must not suspend graceful expiry");
+    assert!(!task.is_finished());
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let events = journal.read_all_unordered().await.unwrap();
+    let facts: Vec<_> = events
+        .iter()
+        .filter_map(|row| match &row.event.event {
+            SystemEventType::PipelineLifecycle(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(facts[0], PipelineLifecycleEvent::Completed { .. }));
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|event| matches!(
+                event,
+                PipelineLifecycleEvent::Completed { .. }
+                    | PipelineLifecycleEvent::Cancelled { .. }
+                    | PipelineLifecycleEvent::Failed { .. }
+                    | PipelineLifecycleEvent::NotStarted
+            ))
+            .count(),
+        1
+    );
+    assert!(facts.iter().any(|event| matches!(
+        event,
+        PipelineLifecycleEvent::StopAdmitted {
+            admission: PipelineStopAdmission::Cancel {
+                cause: PipelineCancellationCause::GracefulTimeout
+            }
+        }
+    )));
+}
+
+#[tokio::test]
 async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_failure() {
     for terminal in ["completed", "cancelled", "failed"] {
         for fail in [false, true] {
@@ -1154,8 +1295,10 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
                 None,
             );
         }
-        let admitted = context.stop_intent.status_receiver();
-        let original_admission = admitted.borrow().clone();
+        let original_admission = (
+            context.stop_intent.deadline,
+            context.stop_intent.reason.clone(),
+        );
         let published = context.termination.published.clone();
         // Enter the precise handler under test before dispatch. Materializing
         // and SourceCompleted dispatch can otherwise produce an earlier event.
@@ -1172,16 +1315,33 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
         for action in actions {
             action.execute(&mut context).await.unwrap();
         }
-        let directive = test_supervisor(system_id, journal.clone())
-            .dispatch_state(fsm.state(), &mut context)
-            .await
-            .unwrap();
-        assert!(matches!(directive, EventLoopDirective::Terminate));
         assert_eq!(
-            *admitted.borrow(),
+            (
+                context.stop_intent.deadline,
+                context.stop_intent.reason.clone()
+            ),
             original_admission,
             "failure must not manufacture or renew a stop"
         );
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(state.clone());
+        sender
+            .send(PipelineEvent::Error {
+                message: "unexpected pipeline failure".into(),
+            })
+            .await
+            .unwrap();
+        let task = spawn_supervisor_loop(
+            state.clone(),
+            test_supervisor(system_id, journal.clone()),
+            context,
+            receiver,
+            watcher,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert!(
             matches!(&published.get().unwrap().outcome, ExecutionOutcome::Failed(failure)
             if failure.reason == "unexpected pipeline failure"),
@@ -1208,42 +1368,61 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
 #[tokio::test]
 async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
     use crate::pipeline::termination::{execution_result, ExecutionOutcome};
-    let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
-    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
-    let mut supervisor = test_supervisor(system_id, journal.clone());
-    assert!(
-        execution_result(&context.termination.published).is_err(),
-        "absent evidence cannot mean success"
-    );
-    terminal::dispatch_drained(&mut supervisor, &mut context)
-        .await
-        .unwrap();
-    assert!(matches!(
-        context.termination.published.get().unwrap().outcome,
-        ExecutionOutcome::NotStarted
-    ));
-    assert!(execution_result(&context.termination.published).is_ok());
-    assert!(journal.read_all_unordered().await.unwrap().is_empty());
-
-    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
-    context.termination.fail("first failure".into(), None);
-    context.termination.fail("cleanup failure".into(), None);
-    context
-        .stop_intent
-        .apply_request(FlowStopMode::Cancel, None);
-    terminal::dispatch_failed(&mut supervisor, &mut context, "cleanup failure", &None)
-        .await
-        .unwrap();
-    assert!(
-        matches!(&context.termination.published.get().unwrap().outcome,
-        ExecutionOutcome::Failed(failure) if failure.reason == "first failure")
-    );
-    assert!(execution_result(&context.termination.published).is_err());
-    assert_eq!(
-        journal.read_all_unordered().await.unwrap()[0]
-            .event
-            .event_type_name(),
-        "system.pipeline.failed"
-    );
+    for fail in [false, true] {
+        let system_id = SystemId::new();
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+        let published = context.termination.published.clone();
+        assert!(
+            execution_result(&published).is_err(),
+            "absent evidence cannot mean success"
+        );
+        if fail {
+            context.termination.fail("first failure".into(), None);
+            context.termination.fail("cleanup failure".into(), None);
+        }
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Created);
+        sender
+            .send(PipelineEvent::StopRequested {
+                mode: FlowStopMode::Cancel,
+                reason: None,
+            })
+            .await
+            .unwrap();
+        let task = spawn_supervisor_loop(
+            PipelineState::Created,
+            test_supervisor(system_id, journal.clone()),
+            context,
+            receiver,
+            watcher,
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if fail {
+            assert!(matches!(&published.get().unwrap().outcome,
+            ExecutionOutcome::Failed(failure) if failure.reason == "first failure"));
+        } else {
+            assert!(matches!(
+                published.get().unwrap().outcome,
+                ExecutionOutcome::NotStarted
+            ));
+        }
+        assert_eq!(execution_result(&published).is_err(), fail);
+        let facts = journal.read_all_unordered().await.unwrap();
+        let terminal = if fail {
+            "system.pipeline.failed"
+        } else {
+            "system.pipeline.not_started"
+        };
+        assert!(facts
+            .iter()
+            .any(|fact| fact.event.event_type_name() == terminal));
+        assert_eq!(
+            facts.last().unwrap().event.event_type_name(),
+            "system.pipeline.drained"
+        );
+    }
 }

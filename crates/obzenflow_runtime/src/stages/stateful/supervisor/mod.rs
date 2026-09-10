@@ -513,7 +513,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .with_flow_context(flow_context)
             .with_runtime_context(runtime_context);
 
-        ctx.data_journal.append(heartbeat, None).await?;
+        crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
 
         // Reset counter now that we've published a snapshot.
         ctx.events_since_last_heartbeat = 0;

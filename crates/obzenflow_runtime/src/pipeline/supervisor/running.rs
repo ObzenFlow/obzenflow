@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::common::idle_backoff;
 use super::{BoxError, ContractEdgeStatus, PipelineContext, PipelineEvent, PipelineSupervisor};
 use crate::id_conversions::StageIdExt;
 use crate::messaging::SubscriptionPoller;
@@ -248,7 +247,6 @@ pub(super) async fn dispatch_running(
         PollResult::CursorAdvanced { .. } => Ok(EventLoopDirective::Continue),
         PollResult::NoEvents => {
             // No events available right now: sleep briefly to avoid busy loop.
-            idle_backoff().await;
             Ok(EventLoopDirective::Continue)
         }
         PollResult::Error(e) => {

@@ -2,12 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::fsm::{FlowStopMode, FlowStopStatus, PipelineEvent, PipelineState};
+use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
 use super::termination::{execution_result, PublishedOutcome};
-use crate::__private::lifecycle::StopObserver;
 use crate::errors::FlowError;
 use crate::journal::RunSubstrateState;
-use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_core::event::{SystemEvent, WriterId};
@@ -24,7 +22,6 @@ type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
 pub(crate) struct FlowHandleExtras {
     pub stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
-    pub stop_status: tokio::sync::watch::Receiver<FlowStopStatus>,
     pub published_outcome: PublishedOutcome,
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
@@ -90,7 +87,6 @@ pub enum FlowStartControlOutcome {
 /// so it needs to provide all functionality they might need.
 pub struct FlowHandle {
     stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
-    stop_status: tokio::sync::watch::Receiver<FlowStopStatus>,
     published_outcome: PublishedOutcome,
     /// The standard handle for FSM control
     handle: StandardHandle<PipelineEvent, PipelineState>,
@@ -134,7 +130,6 @@ impl FlowHandle {
     ) -> Self {
         let FlowHandleExtras {
             stage_cleanup,
-            stop_status,
             published_outcome,
             topology,
             flow_name,
@@ -148,7 +143,6 @@ impl FlowHandle {
 
         Self {
             stage_cleanup,
-            stop_status,
             published_outcome,
             handle,
             topology,
@@ -162,10 +156,6 @@ impl FlowHandle {
         }
     }
 
-    pub(crate) fn observe_stop(&self) -> StopObserver {
-        StopObserver::new(self.stop_status.clone())
-    }
-
     pub(crate) fn execution_guard(&self) -> crate::__private::lifecycle::ExecutionGuard {
         crate::__private::lifecycle::ExecutionGuard::new(
             self.handle.abort_handle(),
@@ -176,11 +166,28 @@ impl FlowHandle {
     /// Every flow completion path joins first, then interprets the same
     /// acknowledged execution outcome. Task failure takes precedence.
     pub(crate) async fn wait_for_execution(&self) -> Result<(), FlowError> {
-        self.handle
+        self.wait_for_resources().await?;
+        execution_result(&self.published_outcome)
+    }
+
+    pub(crate) async fn wait_for_resources(&self) -> Result<(), FlowError> {
+        let mut result = self
+            .handle
             .join()
             .await
-            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))?;
-        execution_result(&self.published_outcome)
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)));
+        for stage in &self.stage_cleanup {
+            stage.request_abort();
+        }
+        for stage in &self.stage_cleanup {
+            let joined = stage.abort_and_join().await;
+            if let Err(error) = joined {
+                if result.is_ok() {
+                    result = Err(FlowError::ExecutionFailed(Box::new(error)));
+                }
+            }
+        }
+        result
     }
 
     /// The run substrate selected at composition: durable with its current-run
@@ -361,17 +368,6 @@ impl FlowHandle {
         .await
     }
 
-    pub(crate) async fn cancel_after_timeout(&self) -> Result<(), FlowError> {
-        if !self.is_running() {
-            return Ok(());
-        }
-        self.send_event(PipelineEvent::StopRequested {
-            mode: FlowStopMode::Cancel,
-            reason: Some(STOP_REASON_TIMEOUT.to_string()),
-        })
-        .await
-    }
-
     /// Stop intake and attempt a bounded drain (GracefulStop semantics).
     ///
     /// On timeout expiry, the pipeline should escalate to Cancel.
@@ -493,19 +489,24 @@ impl SupervisorHandle for FlowHandle {
 
     /// Join the supervisor and report the acknowledged execution result.
     /// Intentional cancellation succeeds; execution failure does not.
-    async fn wait_for_completion(self) -> Result<(), Self::Error> {
+    async fn wait_for_completion(&self) -> Result<(), Self::Error> {
         self.wait_for_execution().await
     }
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
         // Request cancellation for the entire group before awaiting any member.
         self.request_abort();
-        let result = self.handle.abort_and_wait().await.map_err(|error| {
-            FlowError::ExecutionFailed(Box::new(std::io::Error::other(error.to_string())))
-        });
+        let mut result = self
+            .handle
+            .abort_and_wait()
+            .await
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)));
         for stage in &self.stage_cleanup {
             if let Err(error) = stage.abort_and_join().await {
                 tracing::warn!(stage = stage.stage_name(), %error, "Emergency stage teardown failed");
+                if result.is_ok() {
+                    result = Err(FlowError::ExecutionFailed(Box::new(error)));
+                }
             }
         }
         result
@@ -516,6 +517,7 @@ impl SupervisorHandle for FlowHandle {
 mod tests {
     use super::*;
     use crate::__private::lifecycle;
+    use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
     use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
     use obzenflow_core::event::types::ViolationCause;
     use std::error::Error;
@@ -524,7 +526,6 @@ mod tests {
     fn empty_extras() -> FlowHandleExtras {
         FlowHandleExtras {
             stage_cleanup: Vec::new(),
-            stop_status: super::super::fsm::StopIntent::default().status_receiver(),
             published_outcome: Default::default(),
             topology: None,
             flow_name: "test_flow".to_string(),
@@ -962,10 +963,18 @@ mod tests {
                 };
                 let first = diagnostic(first);
                 assert_eq!(first, diagnostic(repeated));
-                assert_eq!(first, diagnostic(consumed));
+                let consumed = diagnostic(consumed);
+                if matches!(exit, Exit::Returned) {
+                    assert!(
+                        first.is_ok(),
+                        "resource observation does not classify journal facts"
+                    );
+                } else {
+                    assert_eq!(first, consumed);
+                }
                 match expected {
-                    Some(message) => assert!(first.unwrap_err().contains(message)),
-                    None => first.unwrap(),
+                    Some(message) => assert!(consumed.unwrap_err().contains(message)),
+                    None => consumed.unwrap(),
                 }
             }
         }

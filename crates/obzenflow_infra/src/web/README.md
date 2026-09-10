@@ -90,14 +90,13 @@ if the flow finishes successfully or a shutdown signal arrives concurrently. A l
 bounded graceful stop; an existing stop keeps its admitted deadline. Runtime owns stop admission,
 cancellation and terminal journal publication. Repeating a graceful stop changes neither its deadline
 nor its actions. Cancellation is absorbing; timeout cancellation requires an expired graceful stop.
-The internal `obzenflow_runtime::__private::lifecycle::observe_stop(&flow)` observes admission,
-while a successful stop call only queues a request. Its `StopObserver` supplies owned snapshots
-and cancellation-safe change notification, including explicit observation closure. Tokio watch
-receivers and guards stay inside Runtime; snapshots retain the original admission timestamps.
+The journal's typed `system.pipeline.stop_admitted` fact records admission; a successful stop call
+only queues a request. Infra reads the current pipeline writer from position zero and projects
+admission, progress, outcome and reader health independently. The Runtime deadline remains private.
 
 Runtime retains the first accepted execution failure independently of stop admission. A later
 SIGINT or SIGTERM cannot turn that failure into successful application exit or a cancelled journal
-outcome. The application interprets Runtime's retained outcome only after the supervisor joins;
+outcome. After resources join, the application catches up its journal reader and interprets the terminal fact;
 append failure, missing terminal publication for an executed flow, panic and task abortion remain
 errors. Host failures retain precedence over execution or cleanup failures.
 
@@ -113,17 +112,23 @@ instead of being mistaken for failure because cancellation shares the historical
 cleanup state.
 
 The hidden `obzenflow_runtime::__private::lifecycle` module is a cross-crate framework integration
-contract, not a supported application API. Infra uses `wait(&flow)` and
-`cancel_after_timeout(&flow)` there. All completion paths share one physical join and retain its
-result. Concurrent, dropped and repeated waits cannot consume another caller's completion.
-`FlowHandle::run()`, its `SupervisorHandle::wait_for_completion()` implementation and the internal
-wait use one Runtime helper to report the acknowledged execution result after joining. A failed
-execution remains an error even when the supervisor returned normally. This also applies when
-`run()` observes a flow that already finished or failed before readiness. Explicit pre-execution
-teardown succeeds without requiring an execution's terminal fact; unexplained missing publication
-fails. Generic `StandardHandle` completion remains task-oriented. `HandleError::SupervisorAborted`
+contract, not a supported application API. Infra uses `wait(&flow)` for resource completion.
+Concurrent, dropped and repeated waits cannot consume another caller's join. `FlowHandle::run()`
+and its `SupervisorHandle::wait_for_completion()` implementation also interpret Runtime's retained
+acknowledged outcome. A failed execution remains an error even when the supervisor returned normally.
+Explicit pre-execution teardown publishes `system.pipeline.not_started`; missing terminal publication
+is an observation error after joining and journal catch-up. Generic `StandardHandle` completion
+joins the task and retained publications. `HandleError::SupervisorAborted`
 distinguishes abortion from panic. Emergency `abort_and_wait()` accepts confirmed abortion as
 successful teardown, while ordinary completion observation still reports it as an error.
+
+Runtime joins stage execution and accepted append/accounting work before publishing the selected
+terminal fact. The live metrics reader then catches up the finite physical stage-journal prefix,
+exports its final snapshot and watermark, and joins before `system.pipeline.drained`. Expiring the
+metrics budget requests cancellation but does not declare retained writes joined. A second terminal
+fact is an integrity error; observation retains the first fact and reports unhealthy reader status.
+Metrics collection also runs with `server.enabled = false`; enabling the host additionally exposes
+the Prometheus projection over HTTP.
 
 The listener remains available through normal drain and terminal publication. Closing then stops
 new requests, allows five seconds for existing responses, and aborts and joins remaining connection,

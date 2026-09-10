@@ -832,6 +832,7 @@ mod tests {
             metrics_store: MetricsStore::default(),
             export_interval_secs: 60,
             system_id: SystemId::new(),
+            pipeline_writer: None,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
             composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),

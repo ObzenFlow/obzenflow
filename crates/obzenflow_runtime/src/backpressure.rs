@@ -636,6 +636,11 @@ pub struct BackpressureReservation {
 }
 
 impl BackpressureReservation {
+    /// Freeze the outstanding debt after an uncertain write. The writer is
+    /// closed by publication ownership; neither commit nor refund is known.
+    pub(crate) fn indeterminate(mut self) {
+        self.committed_or_released = true;
+    }
     /// A settled reservation for the no-backpressure cases.
     fn noop() -> Self {
         Self {
@@ -734,6 +739,7 @@ struct DirectFactLeaseState {
     in_flight: u64,
     committed: u64,
     closed: bool,
+    closing: bool,
 }
 
 #[derive(Debug)]
@@ -785,6 +791,7 @@ impl DirectFactLease {
                 in_flight: 0,
                 committed: 0,
                 closed: false,
+                closing: false,
             })),
         }
     }
@@ -818,6 +825,7 @@ impl DirectFactLease {
                 in_flight: 0,
                 committed: 0,
                 closed: false,
+                closing: false,
             })),
         }))
     }
@@ -827,7 +835,7 @@ impl DirectFactLease {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.closed {
+        if state.closed || state.closing {
             return Err("direct-fact lease is closed".to_string());
         }
         if rows > state.remaining {
@@ -859,6 +867,7 @@ impl DirectFactLease {
             return Err("direct-fact lease closed more than once".to_string());
         }
         if state.in_flight != 0 {
+            state.closing = true;
             return Err(format!(
                 "direct-fact lease closed with {} rows still in flight",
                 state.in_flight
@@ -1020,6 +1029,14 @@ impl DirectFactAdmission {
 }
 
 impl DirectFactClaim {
+    pub(crate) fn indeterminate(mut self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        if let Some(reservation) = state.reservation.take() {
+            reservation.indeterminate();
+        }
+        self.settled = true;
+    }
     pub(crate) fn requires_track_accounting(&self) -> bool {
         matches!(
             self.accounting,
@@ -1045,6 +1062,10 @@ impl DirectFactClaim {
             .committed
             .checked_add(self.rows)
             .ok_or_else(|| "direct-fact committed-row overflow".to_string())?;
+        if state.closing && state.in_flight == 0 {
+            state.closed = true;
+            state.reservation.take();
+        }
         self.settled = true;
         Ok(())
     }
@@ -1064,6 +1085,10 @@ impl Drop for DirectFactClaim {
         }
         state.in_flight = state.in_flight.saturating_sub(self.rows);
         state.remaining = state.remaining.saturating_add(self.rows);
+        if state.closing && state.in_flight == 0 {
+            state.closed = true;
+            state.reservation.take();
+        }
     }
 }
 
@@ -1329,6 +1354,24 @@ mod direct_fact_tests {
                 .is_some(),
             "acknowledging the committed row restores the full window"
         );
+    }
+
+    #[test]
+    fn closing_with_an_accepted_claim_retains_its_reservation_until_settlement() {
+        let (writer, _reader, state) = enforced_writer(3);
+        let lease = DirectFactLease::try_acquire(&writer, NonZeroU64::new(3).unwrap())
+            .unwrap()
+            .unwrap();
+        let claim = lease.claim(1).unwrap();
+        assert!(
+            lease.close().is_err(),
+            "closing cannot claim an unfinished publication settled"
+        );
+        assert_eq!(state.reserved.load(Ordering::Acquire), 3);
+        claim.commit().unwrap();
+        assert_eq!(state.writer_seq.load(Ordering::Acquire), 1);
+        assert_eq!(state.reserved.load(Ordering::Acquire), 0);
+        assert_eq!(state.effective_writer.load(Ordering::Acquire), 1);
     }
 
     #[test]

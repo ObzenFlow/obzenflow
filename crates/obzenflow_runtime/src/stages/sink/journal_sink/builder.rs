@@ -84,6 +84,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             .unwrap_or_else(|| Arc::new(JonestownSignalStrategy));
 
         let sink_delivery_boundary = self.config.sink_delivery_boundary;
+        let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self
             .resources
@@ -95,15 +96,17 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             None
         } else {
             let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
-            Some(spawn_heartbeat(
-                self.config.stage_id,
-                self.config.stage_name.clone(),
-                self.resources.system_journal.clone(),
-                self.resources.liveness_snapshots.clone(),
-                heartbeat_state,
-                heartbeat_config,
-                self.resources.runtime_execution.clone(),
-            ))
+            Some(publications.enter_sync(|| {
+                spawn_heartbeat(
+                    self.config.stage_id,
+                    self.config.stage_name.clone(),
+                    self.resources.system_journal.clone(),
+                    self.resources.liveness_snapshots.clone(),
+                    heartbeat_state,
+                    heartbeat_config,
+                    self.resources.runtime_execution.clone(),
+                )
+            }))
         };
 
         // Single-writer receipt identity, resolved once from the connector
@@ -163,8 +166,9 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
 
         // Spawn the supervisor task
         let supervisor_name = format!("sink_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<JournalSinkSupervisor<H>>::new(&supervisor_name).spawn(
-            move || async move {
+        let task = SupervisorTaskBuilder::<JournalSinkSupervisor<H>>::new(&supervisor_name)
+            .with_publications(publications)
+            .spawn(move || async move {
                 let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
                     supervisor,
                     event_receiver,
@@ -178,8 +182,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                     context,
                 )
                 .await
-            },
-        );
+            });
 
         // Build and return handle
         HandleBuilder::new()

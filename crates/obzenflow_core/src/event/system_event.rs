@@ -377,15 +377,12 @@ pub enum PipelineLifecycleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_count: Option<usize>,
     },
-    /// Stop has been requested by an external control plane (UI/API/signal).
-    ///
-    /// `mode` is informational for UIs; the runtime uses internal stop intent to
-    /// coordinate behaviour.
-    StopRequested {
-        mode: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<DurationMs>,
+    /// Runtime admitted this intent; publication may follow admission later.
+    StopAdmitted {
+        admission: PipelineStopAdmission,
     },
+    /// Teardown completed before source execution started.
+    NotStarted,
     Draining {
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<FlowLifecycleMetricsSnapshot>,
@@ -419,6 +416,21 @@ pub enum PipelineLifecycleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_cause: Option<crate::event::types::ViolationCause>,
     },
+}
+
+/// Durable stop admission. Runtime monotonic deadlines are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum PipelineStopAdmission {
+    Graceful { timeout_ms: DurationMs },
+    Cancel { cause: PipelineCancellationCause },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineCancellationCause {
+    Requested,
+    GracefulTimeout,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -790,17 +802,17 @@ impl SystemEventFactory {
         )
     }
 
-    pub fn pipeline_stop_requested(
-        &self,
-        mode: String,
-        timeout_ms: Option<DurationMs>,
-    ) -> SystemEvent {
+    pub fn pipeline_stop_admitted(&self, admission: PipelineStopAdmission) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopRequested {
-                mode,
-                timeout_ms,
-            }),
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted { admission }),
+        )
+    }
+
+    pub fn pipeline_not_started(&self) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::NotStarted),
         )
     }
 
@@ -938,7 +950,8 @@ impl JournalEvent for SystemEvent {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
                 PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",
                 PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
-                PipelineLifecycleEvent::StopRequested { .. } => "system.pipeline.stop_requested",
+                PipelineLifecycleEvent::StopAdmitted { .. } => "system.pipeline.stop_admitted",
+                PipelineLifecycleEvent::NotStarted => "system.pipeline.not_started",
                 PipelineLifecycleEvent::AllStagesCompleted { .. } => {
                     "system.pipeline.all_stages_completed"
                 }
@@ -987,6 +1000,53 @@ mod tests {
     use super::*;
     use crate::StageId;
     use serde_json::json;
+
+    #[test]
+    fn lifecycle_admission_has_one_typed_schema_and_rejects_the_old_event() {
+        for (admission, expected) in [
+            (
+                PipelineStopAdmission::Graceful {
+                    timeout_ms: DurationMs(125),
+                },
+                json!({"mode": "graceful", "timeout_ms": 125}),
+            ),
+            (
+                PipelineStopAdmission::Cancel {
+                    cause: PipelineCancellationCause::Requested,
+                },
+                json!({"mode": "cancel", "cause": "requested"}),
+            ),
+            (
+                PipelineStopAdmission::Cancel {
+                    cause: PipelineCancellationCause::GracefulTimeout,
+                },
+                json!({"mode": "cancel", "cause": "graceful_timeout"}),
+            ),
+        ] {
+            let payload = serde_json::to_value(PipelineLifecycleEvent::StopAdmitted {
+                admission: admission.clone(),
+            })
+            .unwrap();
+            assert_eq!(
+                payload,
+                json!({"pipeline_event": "stop_admitted", "admission": expected})
+            );
+            assert!(
+                matches!(serde_json::from_value::<PipelineLifecycleEvent>(payload).unwrap(), PipelineLifecycleEvent::StopAdmitted { admission: decoded } if decoded == admission)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(PipelineLifecycleEvent::NotStarted).unwrap(),
+            json!({"pipeline_event": "not_started"})
+        );
+        for obsolete in [
+            json!({"pipeline_event": "stop_requested", "mode": "cancel"}),
+            json!({"pipeline_event": "stop_admitted", "admission": {"mode": "cancel"}}),
+            json!({"pipeline_event": "stop_admitted", "admission": {"mode": "graceful"}}),
+        ] {
+            assert!(serde_json::from_value::<PipelineLifecycleEvent>(obsolete).is_err());
+        }
+    }
 
     #[test]
     fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {

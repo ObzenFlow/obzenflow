@@ -7,6 +7,7 @@
 use super::base::Supervisor;
 use super::builder::{EventReceiver, StateWatcher};
 use super::handler_supervised::HandlerSupervised;
+#[cfg(test)]
 use super::self_supervised::SelfSupervised;
 use super::EventLoopDirective;
 
@@ -16,16 +17,11 @@ pub(crate) enum ExternalEventMode {
     Block,
     /// Poll using `try_recv()` and proceed if empty.
     Poll,
-    /// Do not check the external event channel in this state.
+    #[cfg(test)]
     Ignore,
 }
 
 pub(crate) trait ExternalEventPolicy: Supervisor {
-    /// Expired internal work takes priority over another queued control request.
-    fn priority_event(_state: &Self::State, _context: &Self::Context) -> Option<Self::Event> {
-        None
-    }
-
     fn external_event_mode(state: &Self::State) -> ExternalEventMode;
     fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event>;
 }
@@ -99,10 +95,8 @@ where
             self.last_state = Some(new_state);
         }
 
-        if let Some(event) = <S as ExternalEventPolicy>::priority_event(state, context) {
-            return Ok(EventLoopDirective::Transition(event));
-        }
         match <S as ExternalEventPolicy>::external_event_mode(state) {
+            #[cfg(test)]
             ExternalEventMode::Ignore => {}
             ExternalEventMode::Block => match self.external_events.recv().await {
                 Some(event) => return Ok(EventLoopDirective::Transition(event)),
@@ -147,6 +141,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(crate) struct SelfSupervisedWithExternalEvents<S>
 where
     S: SelfSupervised + ExternalEventPolicy + Send + Sync,
@@ -157,6 +152,7 @@ where
     last_state: Option<S::State>,
 }
 
+#[cfg(test)]
 impl<S> SelfSupervisedWithExternalEvents<S>
 where
     S: SelfSupervised + ExternalEventPolicy + Send + Sync,
@@ -175,6 +171,7 @@ where
     }
 }
 
+#[cfg(test)]
 impl<S> Supervisor for SelfSupervisedWithExternalEvents<S>
 where
     S: SelfSupervised + ExternalEventPolicy + Send + Sync,
@@ -196,6 +193,7 @@ where
     }
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl<S> SelfSupervised for SelfSupervisedWithExternalEvents<S>
 where
@@ -214,9 +212,6 @@ where
             self.last_state = Some(new_state);
         }
 
-        if let Some(event) = <S as ExternalEventPolicy>::priority_event(state, context) {
-            return Ok(EventLoopDirective::Transition(event));
-        }
         match <S as ExternalEventPolicy>::external_event_mode(state) {
             ExternalEventMode::Ignore => {}
             ExternalEventMode::Block => match self.external_events.recv().await {

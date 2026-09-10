@@ -1316,19 +1316,11 @@ fn admit_metrics_reporting(
             "requires the compiled web-host capability",
         ));
     }
-    if metrics.enabled {
-        if !cfg!(feature = "prometheus") {
-            return Err(ConfigError::at(
-                "metrics.enabled",
-                "requires the compiled prometheus capability",
-            ));
-        }
-        if !server.enabled {
-            return Err(ConfigError::at(
-                "server.enabled",
-                "enabled Prometheus reporting requires true and the web-host capability",
-            ));
-        }
+    if metrics.enabled && !cfg!(feature = "prometheus") {
+        return Err(ConfigError::at(
+            "metrics.enabled",
+            "requires the compiled prometheus capability",
+        ));
     }
     tracing::debug!(
         studio,
@@ -1488,7 +1480,7 @@ mod tests {
                     );
                     let result = resolve_studio_file(&contents, &[]);
                     let supported = (!host || cfg!(feature = "warp-server"))
-                        && (!enabled || (host && cfg!(feature = "prometheus")));
+                        && (!enabled || cfg!(feature = "prometheus"));
                     assert_eq!(result.is_ok(), supported, "{contents}: {result:?}");
                     if let Ok(resolved) = result {
                         assert_eq!(resolved.server.enabled, host);

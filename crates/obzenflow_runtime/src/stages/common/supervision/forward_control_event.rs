@@ -35,10 +35,10 @@ pub(crate) async fn forward_control_event(
     // omit runtime_context to avoid leaking upstream snapshots.
     forward_event.runtime_context = None;
 
-    let written = data_journal
-        .append(forward_event, Some(envelope))
-        .await
-        .map_err(|e| format!("Failed to forward control event: {e}"))?;
+    let written =
+        crate::supervised_base::publication::append(data_journal, forward_event, Some(envelope))
+            .await
+            .map_err(|e| format!("Failed to forward control event: {e}"))?;
 
     Ok(written)
 }

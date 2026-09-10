@@ -7,17 +7,16 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
+use super::subscription::MetricsSubscription;
 use crate::messaging::system_subscription::SystemSubscription;
-use crate::messaging::upstream_subscription::UpstreamSubscription;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
+use futures::FutureExt;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::event::{JournalEvent, WriterId};
+use obzenflow_core::event::WriterId;
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::ChainEvent;
-use obzenflow_fsm::StateVariant;
 use std::sync::Arc;
 
 use super::fsm::{
@@ -38,10 +37,11 @@ pub(crate) struct MetricsAggregatorSupervisor {
     /// System ID for metrics writer
     pub(crate) system_id: SystemId,
 
-    pub(crate) data_subscription: Option<UpstreamSubscription<ChainEvent>>,
-    pub(crate) error_subscription: Option<UpstreamSubscription<ChainEvent>>,
+    pub(crate) data_subscription: Option<MetricsSubscription>,
+    pub(crate) error_subscription: Option<MetricsSubscription>,
     pub(crate) system_subscription: Option<SystemSubscription<SystemEvent>>,
     pub(crate) export_timer: Option<tokio::time::Interval>,
+    pub(crate) next_input: usize,
 
     pub(crate) state_watcher: StateWatcher<MetricsAggregatorState>,
     pub(crate) last_state: Option<MetricsAggregatorState>,
@@ -86,7 +86,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             ),
         );
 
-        if let Err(e) = self.system_journal.append(event, None).await {
+        if let Err(e) =
+            crate::supervised_base::publication::append(&self.system_journal, event, None).await
+        {
             tracing::error!(
                 journal_error = %e,
                 "Failed to write metrics shutdown event; continuing without system journal entry"
@@ -118,8 +120,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     ),
                 );
 
-                self.system_journal
-                    .append(event, None)
+                crate::supervised_base::publication::append(&self.system_journal, event, None)
                     .await
                     .map(|_| ())
                     .map_err(|e| format!("Failed to write ready event: {e}"))?;
@@ -132,443 +133,82 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 ))
             }
 
-            MetricsAggregatorState::Running => {
-                tracing::debug!("Metrics aggregator state=Running");
-                // Create timer on first entry to Running state
-                if self.export_timer.is_none() {
-                    tracing::debug!(
-                        "Creating export timer with interval {}s",
-                        ctx.export_interval_secs
-                    );
-                    let mut export_timer = tokio::time::interval(tokio::time::Duration::from_secs(
-                        ctx.export_interval_secs,
+            MetricsAggregatorState::Running | MetricsAggregatorState::Draining => {
+                let timer = self.export_timer.get_or_insert_with(|| {
+                    let mut timer = tokio::time::interval(std::time::Duration::from_secs(
+                        ctx.export_interval_secs.max(1),
                     ));
-                    export_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    // First tick happens immediately, so consume it
-                    export_timer.tick().await;
-                    self.export_timer = Some(export_timer);
+                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    timer
+                });
+                if timer.tick().now_or_never().is_some() {
+                    return Ok(EventLoopDirective::Transition(
+                        MetricsAggregatorEvent::ExportMetrics,
+                    ));
                 }
-
-                let MetricsAggregatorSupervisor {
-                    data_subscription,
-                    error_subscription,
-                    system_subscription,
-                    export_timer,
-                    ..
-                } = self;
-
-                let directive: Result<
-                    EventLoopDirective<Self::Event>,
-                    Box<dyn std::error::Error + Send + Sync>,
-                >;
-
-                // Build futures that operate on local subscriptions and timer only.
-                let data_recv = async {
-                    if let Some(sub) = data_subscription.as_mut() {
-                        sub.poll_next_with_state(state.variant_name(), None).await
-                    } else {
-                        // If no data subscription, wait forever
-                        std::future::pending::<PollResult<ChainEvent>>().await
-                    }
-                };
-
-                let error_recv = async {
-                    if let Some(sub) = error_subscription.as_mut() {
-                        match sub.poll_next_with_state(state.variant_name(), None).await {
-                            PollResult::Event(envelope) => Ok(Some(envelope)),
-                            PollResult::CursorAdvanced { .. } => Ok(None),
-                            PollResult::NoEvents => Ok(None),
-                            PollResult::Error(e) => Err(format!("Error: {e}")),
-                        }
-                    } else {
-                        // If no error subscription, wait forever
-                        std::future::pending::<
-                            Result<Option<obzenflow_core::EventEnvelope<ChainEvent>>, String>,
-                        >()
-                        .await
-                    }
-                };
-
-                // FLOWIP-059b: Build future for system events
-                let system_recv = async {
-                    if let Some(sub) = system_subscription.as_mut() {
-                        match sub.poll_next().await {
-                            PollResult::Event(envelope) => Ok(Some(envelope)),
-                            PollResult::CursorAdvanced { .. } => Ok(None),
-                            PollResult::NoEvents => Ok(None),
-                            PollResult::Error(e) => {
-                                Err(format!("Error reading system events: {e}"))
-                            }
-                        }
-                    } else {
-                        // If no system subscription, wait forever
-                        std::future::pending::<
-                            Result<Option<obzenflow_core::EventEnvelope<SystemEvent>>, String>,
-                        >()
-                        .await
-                    }
-                };
-
-                // Timer tick future
-                let timer_tick = async {
-                    if let Some(timer) = export_timer.as_mut() {
-                        timer.tick().await;
-                        Ok(())
-                    } else {
-                        // If no timer, wait forever
-                        std::future::pending::<Result<(), ()>>().await
-                    }
-                };
-
-                tokio::select! {
-                    // FLOWIP-059b: Poll system events first (higher priority, lower volume)
-                    result = system_recv => {
-                        match result {
-                            Ok(Some(envelope)) => {
-                                tracing::debug!(
-                                    event_id = %envelope.event.id(),
-                                    event_type = envelope.event.event_type_name(),
-                                    "Metrics aggregator received system event"
-                                );
-                                if matches!(
-                                    &envelope.event.event,
-                                    obzenflow_core::event::SystemEventType::MetricsCoordination(
-                                        obzenflow_core::event::MetricsCoordinationEvent::DrainRequested,
-                                    )
-                                ) {
-                                    tracing::info!(
-                                        "Metrics aggregator received drain request from system journal"
-                                    );
-                                    *export_timer = None;
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::StartDraining,
-                                    ))
-                                } else {
-                                if matches!(
-                                    &envelope.event.event,
-                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                                        obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
-                                            | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
-                                            | obzenflow_core::event::PipelineLifecycleEvent::Drained
-                                            | obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
-                                            | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
-                                    )
-                                ) {
-                                    *export_timer = None;
-                                }
-                                // Process system event through FSM event
-                                directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::ProcessSystemEvent {
-                                        envelope: Box::new(envelope),
+                // The current pipeline terminal fixes the system endpoint. All
+                // stage producers have settled before it can be committed.
+                for _ in 0..3 {
+                    let input = self.next_input;
+                    self.next_input = (input + 1) % 3;
+                    if input == 0 {
+                        if !ctx.metrics_store.pipeline_terminal() {
+                            if let Some(subscription) = &mut self.system_subscription {
+                                match subscription.poll_next().await {
+                                    PollResult::Event(envelope) => {
+                                        return Ok(EventLoopDirective::Transition(
+                                            MetricsAggregatorEvent::ProcessSystemEvent {
+                                                envelope: Box::new(envelope),
+                                            },
+                                        ))
                                     }
-                                ))
+                                    PollResult::Error(error) => {
+                                        return Ok(EventLoopDirective::Transition(
+                                            MetricsAggregatorEvent::Error(error.to_string()),
+                                        ))
+                                    }
+                                    _ => {}
                                 }
                             }
-                            Ok(None) => {
-                                // No events available - sleep to avoid busy loop
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue)
-                            }
-                            Err(e) => {
-                                // FLOWIP-120q live-tail observer resilience: the metrics
-                                // aggregator is a best-effort observer, so a recoverable
-                                // subscription read error is logged and skipped, not fatal.
-                                // The reader advances past the unreadable record, so the
-                                // next poll resumes after it instead of re-reading it.
-                                tracing::warn!(
-                                    error = %e,
-                                    "Metrics aggregator system subscription read error; skipping record and continuing"
-                                );
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue)
-                            }
                         }
+                        continue;
                     }
-                    // Process data journal events
-                    result = data_recv => {
-                        match result {
+                    let (subscription, journal_kind) = if input == 1 {
+                        (&mut self.data_subscription, MetricsJournalKind::Data)
+                    } else {
+                        (&mut self.error_subscription, MetricsJournalKind::Error)
+                    };
+                    if let Some(subscription) = subscription {
+                        match subscription.poll_next().await {
                             PollResult::Event(envelope) => {
-                                let journal_stage = data_subscription
-                                    .as_ref()
-                                    .and_then(|subscription| {
-                                        subscription.last_delivered_upstream_stage()
-                                    })
-                                    .expect("delivered metrics event must identify its journal");
-                                let kind = if envelope.event.is_control() {
-                                    "control"
-                                } else if envelope.event.is_system() {
-                                    "system"
-                                } else {
-                                    "data"
-                                };
-                                tracing::trace!(
-                                    event_id = %envelope.event.id(),
-                                    event_type = envelope.event.event_type(),
-                                    event_kind = kind,
-                                    "Metrics aggregator received journal event"
-                                );
-                                if envelope.event.is_control() || envelope.event.is_system() {
-                                    // Skip control and system events - they shouldn't be counted
-                                    // in metrics
-                                    directive = Ok(EventLoopDirective::Continue);
-                                } else {
-                                    // Process single event through FSM
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::ProcessBatch {
-                                            events: vec![envelope],
-                                            journal_kind: MetricsJournalKind::Data,
-                                            journal_stage,
-                                        },
-                                    ));
-                                }
+                                return Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::ProcessBatch {
+                                        events: vec![envelope],
+                                        journal_kind,
+                                        journal_stage: subscription
+                                            .last_delivered_upstream_stage()
+                                            .expect("physical reader identity"),
+                                    },
+                                ))
                             }
-                            // Observation readers advance their cursor but do
-                            // not participate in physical stage-edge credit.
-                            PollResult::CursorAdvanced { .. } => {
-                                directive = Ok(EventLoopDirective::Continue);
+                            PollResult::Error(error) => {
+                                return Ok(EventLoopDirective::Transition(
+                                    MetricsAggregatorEvent::Error(error.to_string()),
+                                ))
                             }
-                            PollResult::NoEvents => {
-                                // No events available, continue
-                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                                directive = Ok(EventLoopDirective::Continue)
-                            }
-                            PollResult::Error(e) => {
-                                // FLOWIP-120q live-tail observer resilience: best-effort
-                                // observer, so skip the unreadable record and continue.
-                                tracing::warn!(
-                                    error = %e,
-                                    "Metrics aggregator data journal read error; skipping record and continuing"
-                                );
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue);
-                            }
-                        }
-                    }
-
-                    // Process error journal events (FLOWIP-082g)
-                    result = error_recv => {
-                        match result {
-                            Ok(Some(envelope)) => {
-                                let journal_stage = error_subscription
-                                    .as_ref()
-                                    .and_then(|subscription| {
-                                        subscription.last_delivered_upstream_stage()
-                                    })
-                                    .expect("delivered metrics event must identify its journal");
-                                tracing::debug!(
-                                    event_id = %envelope.event.id(),
-                                    event_type = envelope.event.event_type(),
-                                    "Metrics aggregator received error event"
-                                );
-                                if envelope.event.is_control() || envelope.event.is_system() {
-                                    // Skip control and system events
-                                    directive = Ok(EventLoopDirective::Continue);
-                                } else {
-                                    // Process error event through FSM
-                                    directive = Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::ProcessBatch {
-                                            events: vec![envelope],
-                                            journal_kind: MetricsJournalKind::Error,
-                                            journal_stage,
-                                        },
-                                    ));
-                                }
-                            }
-                            Ok(None) => {
-                                // No error events available - should not happen often since
-                                // error_recv waits forever if no subscription, but sleep if it does
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue)
-                            }
-                            Err(e) => {
-                                // FLOWIP-120q live-tail observer resilience: best-effort
-                                // observer, so skip the unreadable record and continue.
-                                tracing::warn!(
-                                    error = %e,
-                                    "Metrics aggregator error journal read error; skipping record and continuing"
-                                );
-                                idle_backoff().await;
-                                directive = Ok(EventLoopDirective::Continue);
-                            }
-                        }
-                    }
-
-                    // Export periodically
-                    _ = timer_tick => {
-                        tracing::debug!("Metrics aggregator export timer tick");
-                        directive = Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics))
-                    }
-                }
-
-                directive
-            }
-
-            MetricsAggregatorState::Draining => {
-                tracing::debug!("Metrics aggregator state=Draining");
-
-                // Process draining state - keep consuming until:
-                // 1) A full poll round yields no events across system/data/error subscriptions, AND
-                // 2) Lifecycle signals show the pipeline + all stages are terminal.
-                //
-                // We intentionally do NOT depend on journal EOF control events here because some
-                // stage journals (notably sinks) may not emit explicit EOF markers.
-                let MetricsAggregatorSupervisor {
-                    data_subscription,
-                    error_subscription,
-                    system_subscription,
-                    ..
-                } = self;
-
-                // 1) Poll system events first so lifecycle terminal flags are up-to-date.
-                if let Some(sub) = system_subscription.as_mut() {
-                    match sub.poll_next().await {
-                        PollResult::Event(envelope) => {
-                            tracing::debug!(
-                                event_id = %envelope.event.id(),
-                                event_type = envelope.event.event_type_name(),
-                                "Metrics aggregator draining received system event"
-                            );
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::ProcessSystemEvent {
-                                    envelope: Box::new(envelope),
-                                },
-                            ));
-                        }
-                        PollResult::CursorAdvanced { .. } => {
-                            return Ok(EventLoopDirective::Continue);
-                        }
-                        PollResult::NoEvents => {}
-                        PollResult::Error(e) => {
-                            // FLOWIP-120q live-tail observer resilience: best-effort
-                            // observer, so skip the unreadable record and keep draining.
-                            tracing::warn!(
-                                error = %e,
-                                "Metrics aggregator draining system read error; skipping record and continuing"
-                            );
-                            idle_backoff().await;
-                            return Ok(EventLoopDirective::Continue);
+                            _ => {}
                         }
                     }
                 }
-
-                // 2) Drain data journals.
-                if let Some(sub) = data_subscription.as_mut() {
-                    match sub.poll_next_with_state(state.variant_name(), None).await {
-                        PollResult::Event(envelope) => {
-                            let journal_stage = sub
-                                .last_delivered_upstream_stage()
-                                .expect("delivered metrics event must identify its journal");
-                            let kind = if envelope.event.is_control() {
-                                "control"
-                            } else if envelope.event.is_system() {
-                                "system"
-                            } else {
-                                "data"
-                            };
-                            tracing::debug!(
-                                event_id = %envelope.event.id(),
-                                event_type = envelope.event.event_type(),
-                                event_kind = kind,
-                                writer_id = ?envelope.event.writer_id,
-                                "Metrics aggregator draining received journal event"
-                            );
-
-                            if envelope.event.is_control() || envelope.event.is_system() {
-                                tracing::debug!(
-                                    "Metrics aggregator draining: skipped control/system event id={} writer={:?}",
-                                    envelope.event.id,
-                                    envelope.event.writer_id
-                                );
-                                return Ok(EventLoopDirective::Continue);
-                            }
-
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::ProcessBatch {
-                                    events: vec![envelope],
-                                    journal_kind: MetricsJournalKind::Data,
-                                    journal_stage,
-                                },
-                            ));
-                        }
-                        PollResult::CursorAdvanced { .. } => {
-                            return Ok(EventLoopDirective::Continue);
-                        }
-                        PollResult::NoEvents => {}
-                        PollResult::Error(e) => {
-                            // FLOWIP-120q live-tail observer resilience: best-effort
-                            // observer, so skip the unreadable record and keep draining.
-                            tracing::warn!(
-                                error = %e,
-                                "Metrics aggregator draining data read error; skipping record and continuing"
-                            );
-                            idle_backoff().await;
-                            return Ok(EventLoopDirective::Continue);
-                        }
-                    }
-                }
-
-                // 3) Drain error journals (FLOWIP-082g).
-                if let Some(sub) = error_subscription.as_mut() {
-                    match sub.poll_next_with_state(state.variant_name(), None).await {
-                        PollResult::Event(envelope) => {
-                            let journal_stage = sub
-                                .last_delivered_upstream_stage()
-                                .expect("delivered metrics event must identify its journal");
-                            tracing::debug!(
-                                event_id = %envelope.event.id(),
-                                event_type = envelope.event.event_type(),
-                                "Metrics aggregator draining received error event"
-                            );
-
-                            if envelope.event.is_control() || envelope.event.is_system() {
-                                tracing::debug!(
-                                    "Metrics aggregator draining: skipped control/system error event id={} writer={:?}",
-                                    envelope.event.id,
-                                    envelope.event.writer_id
-                                );
-                                return Ok(EventLoopDirective::Continue);
-                            }
-
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::ProcessBatch {
-                                    events: vec![envelope],
-                                    journal_kind: MetricsJournalKind::Error,
-                                    journal_stage,
-                                },
-                            ));
-                        }
-                        PollResult::CursorAdvanced { .. } => {
-                            return Ok(EventLoopDirective::Continue);
-                        }
-                        PollResult::NoEvents => {}
-                        PollResult::Error(e) => {
-                            // FLOWIP-120q live-tail observer resilience: best-effort
-                            // observer, so skip the unreadable record and keep draining.
-                            tracing::warn!(
-                                error = %e,
-                                "Metrics aggregator draining error read error; skipping record and continuing"
-                            );
-                            idle_backoff().await;
-                            return Ok(EventLoopDirective::Continue);
-                        }
-                    }
-                }
-
-                // 4) No events available right now. If lifecycle is terminal, perform final export.
-                if ctx.metrics_store.all_stages_terminal(&ctx.stage_metadata)
-                    && ctx.metrics_store.pipeline_terminal()
-                {
-                    tracing::info!(
-                        "Metrics aggregator: drained journals and lifecycle terminal; emitting FlowTerminal"
-                    );
+                if ctx.metrics_store.pipeline_terminal() {
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::FlowTerminal,
                     ));
                 }
-
-                idle_backoff().await;
-
-                Ok(EventLoopDirective::Continue)
+                tokio::select! {
+                    _ = self.export_timer.as_mut().expect("initialised").tick() => Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics)),
+                    _ = idle_backoff() => Ok(EventLoopDirective::Continue),
+                }
             }
 
             MetricsAggregatorState::Drained { .. } => {
@@ -714,6 +354,7 @@ mod tests {
             error_subscription: None,
             system_subscription: None,
             export_timer: None,
+            next_input: 0,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),
         };
@@ -724,6 +365,7 @@ mod tests {
             stage_error_journals: HashMap::new(),
             backpressure_registry: None,
             include_error_journals: true,
+            pipeline_writer: None,
             metrics_exporter: Arc::new(crate::metrics::RecordingSnapshots::default()),
             metrics_store: MetricsStore::default(),
             export_interval_secs: 10,

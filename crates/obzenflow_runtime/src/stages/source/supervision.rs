@@ -122,7 +122,7 @@ pub(crate) async fn record_source_cleanup_failed(
             error: error.to_string(),
         },
     );
-    system_journal.append(event, None).await?;
+    crate::supervised_base::publication::append(system_journal, event, None).await?;
     Ok(())
 }
 
@@ -329,8 +329,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             let event = pending
                 .event
                 .with_runtime_context(instrumentation.snapshot_with_control());
-            error_journal
-                .append(event, None)
+            crate::supervised_base::publication::append(error_journal, event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
             continue;
@@ -393,8 +392,7 @@ where
             let event = pending
                 .event
                 .with_runtime_context(instrumentation.snapshot_with_control());
-            error_journal
-                .append(event, None)
+            crate::supervised_base::publication::append(error_journal, event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
             continue;

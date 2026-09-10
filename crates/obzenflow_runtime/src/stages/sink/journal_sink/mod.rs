@@ -38,6 +38,20 @@ pub(super) fn journalled_delivery_event(
     ChainEventFactory::delivery_event(writer_id, payload)
 }
 
+/// The retained receipt describes the prefix that will exist if its append
+/// succeeds. Live counters are updated separately after acknowledgement.
+pub(super) fn with_committed_receipt_snapshot(
+    event: ChainEvent,
+    instrumentation: &crate::metrics::instrumentation::StageInstrumentation,
+) -> ChainEvent {
+    let mut snapshot = instrumentation.snapshot_with_control();
+    snapshot.events_emitted_total = snapshot.events_emitted_total.saturating_add(1);
+    snapshot.writer_seq = snapshot.writer_seq.saturating_add(1);
+    snapshot.last_emitted_event_id = Some(event.id);
+    snapshot.last_emitted_writer = Some(event.writer_id);
+    event.with_runtime_context(snapshot)
+}
+
 // Re-export public API
 pub use boundary::{
     SinkDeliveryAdmission, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryPermit,

@@ -19,3 +19,6 @@ pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandle
 pub use fsm::{FlowStopMode, PipelineEvent, PipelineState};
 pub use handle::{FlowHandle, FlowStartControlOutcome, MiddlewareStackConfig};
 pub use max_iterations::MaxIterations;
+
+mod driver;
+mod operations;

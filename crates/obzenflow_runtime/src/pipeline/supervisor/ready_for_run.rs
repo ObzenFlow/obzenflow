@@ -7,7 +7,6 @@ use crate::bootstrap::startup_mode_manual;
 use crate::id_conversions::StageIdExt;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::EventLoopDirective;
-use std::time::Duration;
 
 /// Drives the state after the readiness barrier has completed.
 ///
@@ -84,7 +83,6 @@ pub(super) async fn dispatch_ready_for_run(
                 "Pipeline is ready for Run (startup_mode=manual); waiting for external Run"
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(EventLoopDirective::Continue)
     } else {
         tracing::info!("Pipeline is ready for Run (startup_mode=auto); starting pipeline");

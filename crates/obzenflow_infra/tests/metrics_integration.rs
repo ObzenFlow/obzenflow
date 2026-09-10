@@ -66,6 +66,7 @@ fn make_empty_context(
     stage_id: StageId,
 ) -> MetricsAggregatorContext {
     MetricsAggregatorContext {
+        pipeline_writer: None,
         system_journal,
         // No upstream journals in this test; tail-read will simply see None.
         stage_data_journals: std::collections::HashMap::new(),

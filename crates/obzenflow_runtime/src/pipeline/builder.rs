@@ -20,8 +20,7 @@ use crate::{
     stages::common::stage_handle::BoxedStageHandle,
     stages::LivenessSnapshots,
     supervised_base::{
-        BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt,
-        SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
+        BuilderError, ChannelBuilder, HandleBuilder, SupervisorBuilder, SupervisorTaskBuilder,
     },
 };
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
@@ -373,7 +372,6 @@ impl SupervisorBuilder for PipelineBuilder {
                 .unwrap_or(5_000),
         };
 
-        let stop_status = pipeline_context.stop_intent.status_receiver();
         let published_outcome = pipeline_context.termination.published.clone();
 
         // Create channels using the common infrastructure
@@ -386,7 +384,6 @@ impl SupervisorBuilder for PipelineBuilder {
         let supervisor = PipelineSupervisor {
             name: "pipeline_supervisor".to_string(),
             system_id,
-            system_journal: self.system_journal.clone(),
             last_barrier_log: None,
             last_manual_wait_log: None,
             drain_idle_iters: 0,
@@ -398,34 +395,32 @@ impl SupervisorBuilder for PipelineBuilder {
         // Spawn the supervisor task with proper FSM lifecycle
         tracing::debug!("About to create pipeline supervisor task");
 
-        // Wrap the supervisor so external control events can be injected
-        // consistently (FLOWIP-086i, FLOWIP-051m Phase 1c).
-        let supervisor_with_events = SelfSupervisedWithExternalEvents::new(
-            supervisor,
-            event_receiver,
-            state_watcher_for_task,
-        );
+        let supervisor_task =
+            SupervisorTaskBuilder::<PipelineSupervisor>::new("pipeline_supervisor")
+                .with_publications(
+                    crate::supervised_base::publication::PublicationScope::concurrent(),
+                )
+                .spawn(move || async move {
+                    tracing::debug!("Pipeline supervisor task starting");
 
-        let supervisor_task = SupervisorTaskBuilder::<PipelineSupervisor>::new(
-            "pipeline_supervisor",
-        )
-        .spawn(move || async move {
-            tracing::debug!("Pipeline supervisor task starting");
+                    // Run the supervisor with FSM control
+                    let result = super::driver::run(
+                        supervisor,
+                        event_receiver,
+                        state_watcher_for_task,
+                        pipeline_context,
+                        PipelineState::Created,
+                    )
+                    .await;
 
-            // Run the supervisor with FSM control
-            let result = SelfSupervisedExt::run(
-                supervisor_with_events,
-                PipelineState::Created,
-                pipeline_context,
-            )
-            .await;
-
-            match &result {
-                Ok(()) => tracing::info!("Pipeline supervisor run() completed successfully"),
-                Err(e) => tracing::error!("Pipeline supervisor run() failed: {}", e),
-            }
-            result
-        });
+                    match &result {
+                        Ok(()) => {
+                            tracing::info!("Pipeline supervisor run() completed successfully")
+                        }
+                        Err(e) => tracing::error!("Pipeline supervisor run() failed: {}", e),
+                    }
+                    result
+                });
         tracing::debug!("Pipeline supervisor task handle created");
 
         // Give the supervisor task a chance to start before sending events
@@ -462,7 +457,6 @@ impl SupervisorBuilder for PipelineBuilder {
             standard_handle,
             FlowHandleExtras {
                 stage_cleanup,
-                stop_status,
                 published_outcome,
                 topology,
                 flow_name,
