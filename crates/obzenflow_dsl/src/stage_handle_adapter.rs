@@ -176,4 +176,8 @@ where
             ))
         })
     }
+
+    fn request_abort(&self) {
+        self.inner.request_abort();
+    }
 }

@@ -12,7 +12,49 @@ pub use crate::pipeline::fsm::{FlowCancelCause, FlowStopStatus};
 
 use crate::errors::FlowError;
 use crate::pipeline::FlowHandle;
+use crate::stages::common::stage_handle::StageHandle;
+use std::sync::Arc;
 use tokio::sync::watch;
+use tokio::task::AbortHandle;
+
+/// Emergency cancellation for an application-owned execution lifetime.
+/// This retains cancellation capabilities independently of completion observers
+/// and of the FlowHandle's ownership. Drop cannot claim joined completion.
+pub struct ExecutionGuard {
+    supervisor: Option<AbortHandle>,
+    stages: Vec<Arc<dyn StageHandle>>,
+}
+
+impl ExecutionGuard {
+    pub(crate) fn new(supervisor: AbortHandle, stages: Vec<Arc<dyn StageHandle>>) -> Self {
+        Self {
+            supervisor: Some(supervisor),
+            stages,
+        }
+    }
+
+    /// Release the fallback after the owner has observed ordinary settlement.
+    pub fn disarm(mut self) {
+        self.supervisor = None;
+    }
+}
+
+impl Drop for ExecutionGuard {
+    fn drop(&mut self) {
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.abort();
+            for stage in &self.stages {
+                stage.request_abort();
+            }
+        }
+    }
+}
+
+/// Protect the execution as soon as the application receives its built handle.
+/// Dropping an ordinary wait remains independent of this explicit lifetime guard.
+pub fn guard_execution(flow: &FlowHandle) -> ExecutionGuard {
+    flow.execution_guard()
+}
 
 /// Latest accepted stop status, with channel mechanics kept inside Runtime.
 /// Updates may coalesce; this observes admission state, not every request.

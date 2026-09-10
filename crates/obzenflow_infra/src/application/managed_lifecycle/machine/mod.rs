@@ -67,6 +67,7 @@ pub(super) fn new() -> Machine {
             on Event::Failure => transitions::record_failure;
             on Event::Started => transitions::started;
             on Event::Stop => transitions::begin_settlement;
+            on Event::PublicationObserved => transitions::abort_flow;
         }
         state State::Active {
             on Event::Failure => transitions::record_failure;

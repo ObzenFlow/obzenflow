@@ -224,6 +224,43 @@ fn test_context(
     }
 }
 
+#[tokio::test]
+async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
+    use crate::metrics::fsm::{MetricsAggregatorEvent, MetricsAggregatorState};
+    use crate::supervised_base::HandleBuilder;
+
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, _, _) = source_sink_topology_with_source();
+    let mut context = test_context(topology, system_id, journal, None);
+    let (sender, _receiver, watcher) =
+        ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
+            .build(MetricsAggregatorState::Running);
+    let (started_tx, started_rx) = oneshot::channel();
+    let (terminated_tx, terminated_rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _termination = terminated_tx;
+        started_tx.send(()).unwrap();
+        std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>().await
+    });
+    context.metrics_handle = Some(
+        HandleBuilder::new()
+            .with_event_sender(sender)
+            .with_state_watcher(watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .unwrap(),
+    );
+    started_rx.await.unwrap();
+    drop(context);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), terminated_rx)
+            .await
+            .expect("metrics task must be cancelled when its pipeline disappears")
+            .is_err()
+    );
+}
+
 #[test]
 fn contract_keys_for_stage_pair_returns_all_matching_logical_feeds() {
     let system_id = SystemId::new();
@@ -430,6 +467,10 @@ impl StageHandle for TestPipelineStageHandle {
             probe.abort_and_join_count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    fn request_abort(&self) {
+        // This coordination fixture owns no supervisor task.
     }
 }
 

@@ -166,6 +166,13 @@ impl FlowHandle {
         StopObserver::new(self.stop_status.clone())
     }
 
+    pub(crate) fn execution_guard(&self) -> crate::__private::lifecycle::ExecutionGuard {
+        crate::__private::lifecycle::ExecutionGuard::new(
+            self.handle.abort_handle(),
+            self.stage_cleanup.clone(),
+        )
+    }
+
     /// Every flow completion path joins first, then interprets the same
     /// acknowledged execution outcome. Task failure takes precedence.
     pub(crate) async fn wait_for_execution(&self) -> Result<(), FlowError> {
@@ -477,6 +484,13 @@ impl SupervisorHandle for FlowHandle {
         self.handle.current_state()
     }
 
+    fn request_abort(&self) {
+        self.handle.abort();
+        for stage in &self.stage_cleanup {
+            stage.request_abort();
+        }
+    }
+
     /// Join the supervisor and report the acknowledged execution result.
     /// Intentional cancellation succeeds; execution failure does not.
     async fn wait_for_completion(self) -> Result<(), Self::Error> {
@@ -484,6 +498,8 @@ impl SupervisorHandle for FlowHandle {
     }
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
+        // Request cancellation for the entire group before awaiting any member.
+        self.request_abort();
         let result = self.handle.abort_and_wait().await.map_err(|error| {
             FlowError::ExecutionFailed(Box::new(std::io::Error::other(error.to_string())))
         });
@@ -518,6 +534,62 @@ mod tests {
             flow_effective_config: None,
             liveness_snapshots: None,
             run_substrate: RunSubstrateState::Ephemeral,
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_guard_is_independent_of_completion_observers_and_handle_ownership() {
+        for disarm in [false, true] {
+            let (sender, _receiver, watcher) =
+                ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Created);
+            let task = tokio::spawn(std::future::pending::<
+                Result<(), Box<dyn std::error::Error + Send + Sync>>,
+            >());
+            let flow = Arc::new(FlowHandle::new(
+                HandleBuilder::new()
+                    .with_event_sender(sender)
+                    .with_state_watcher(watcher)
+                    .with_supervisor_task(task)
+                    .build_standard()
+                    .unwrap(),
+                empty_extras(),
+            ));
+            let guard = lifecycle::guard_execution(&flow);
+            assert_eq!(
+                Arc::strong_count(&flow),
+                1,
+                "guard must not retain the FlowHandle"
+            );
+            let mut observer = Box::pin(lifecycle::wait(&flow));
+            assert!(futures::poll!(&mut observer).is_pending());
+            drop(observer);
+            assert!(
+                flow.is_running(),
+                "dropping an observer must not cancel execution"
+            );
+            if disarm {
+                guard.disarm();
+                assert!(
+                    flow.is_running(),
+                    "releasing the fallback must not request cancellation"
+                );
+                flow.abort_and_wait().await.unwrap();
+            } else {
+                drop(guard);
+            }
+            for _ in 0..2 {
+                let error = tokio::time::timeout(Duration::from_secs(1), lifecycle::wait(&flow))
+                    .await
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error
+                    .source()
+                    .unwrap()
+                    .to_string()
+                    .contains("Supervisor task was aborted"));
+            }
+            assert!(!flow.is_running());
+            assert_eq!(flow.current_state(), PipelineState::Created);
         }
     }
 

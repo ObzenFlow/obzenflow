@@ -143,6 +143,12 @@ pub trait StageHandle: Send + Sync {
 
     /// Abort the underlying supervisor task and join it deterministically.
     async fn abort_and_join(&self) -> Result<(), StageError>;
+
+    /// Request immediate supervisor cancellation without waiting for its join.
+    /// Used by Runtime lifetime guards; this does not claim stage completion.
+    /// Implementations must be idempotent and non-blocking.
+    #[doc(hidden)]
+    fn request_abort(&self);
 }
 
 /// Type-erased stage handle for pipeline storage

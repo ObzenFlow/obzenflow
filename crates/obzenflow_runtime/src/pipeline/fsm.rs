@@ -403,6 +403,23 @@ pub(crate) struct PipelineContext {
     pub(crate) metrics_drain_timeout_ms: u64,
 }
 
+impl Drop for PipelineContext {
+    fn drop(&mut self) {
+        // A cancelled or panicking supervisor cannot execute its cleanup actions.
+        // These requests also cover failure before the application receives a handle.
+        for stage in self
+            .stage_supervisors
+            .values()
+            .chain(self.source_supervisors.values())
+        {
+            stage.request_abort();
+        }
+        if let Some(metrics) = &self.metrics_handle {
+            metrics.abort();
+        }
+    }
+}
+
 impl PipelineContext {
     /// Legacy timeout errors retain the existing admission gate. Every other
     /// error selects a failure without manufacturing an external stop intent.
@@ -1103,6 +1120,12 @@ impl FsmAction for PipelineAction {
                 // This prevents tokio runtime teardown from cancelling in-flight journal writes
                 // from the metrics task (which otherwise produces error log spam on Ctrl+C).
                 if let Some(mut metrics_handle) = context.metrics_handle.take() {
+                    // Retain cancellation after taking the handle out of the context,
+                    // including while either completion wait below is pending.
+                    let _metrics_guard = crate::__private::lifecycle::ExecutionGuard::new(
+                        metrics_handle.abort_handle(),
+                        Vec::new(),
+                    );
                     let metrics_timeout = Duration::from_secs(2);
 
                     match metrics_handle

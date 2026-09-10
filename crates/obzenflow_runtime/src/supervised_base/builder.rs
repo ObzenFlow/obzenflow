@@ -173,6 +173,13 @@ pub trait SupervisorHandle: Send + Sync {
     /// Get the current state of the supervisor
     fn current_state(&self) -> Self::State;
 
+    /// Request immediate cancellation of owned supervisor tasks without waiting.
+    /// Framework lifetime guards use this when their driving future is dropped.
+    /// Implementations must be idempotent and non-blocking.
+    /// This does not establish termination or select an execution outcome.
+    #[doc(hidden)]
+    fn request_abort(&self);
+
     /// Wait for the supervisor to complete
     ///
     /// This consumes the handle and waits for the supervisor task to finish.

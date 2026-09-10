@@ -19,6 +19,259 @@ enum HostFault {
     Panic,
 }
 
+#[derive(Clone, Debug)]
+struct PendingLifetimeSource {
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    cancelled: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+struct PendingPollDrop(Option<oneshot::Sender<()>>);
+
+impl Drop for PendingPollDrop {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::common::handlers::TypedAsyncInfiniteSourceHandler
+    for PendingLifetimeSource
+{
+    type Output = IdlePayload;
+
+    async fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
+        let _drop = PendingPollDrop(self.cancelled.lock().unwrap().take());
+        if let Some(started) = self.started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        std::future::pending().await
+    }
+}
+
+fn pending_lifetime_source() -> (
+    PendingLifetimeSource,
+    oneshot::Receiver<()>,
+    oneshot::Receiver<()>,
+) {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    (
+        PendingLifetimeSource {
+            started: Arc::new(Mutex::new(Some(started_tx))),
+            cancelled: Arc::new(Mutex::new(Some(cancelled_tx))),
+        },
+        started_rx,
+        cancelled_rx,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_application_cancels_runtime_and_pending_stage_work() {
+    use obzenflow_core::event::JournalEvent;
+    use obzenflow_dsl::async_infinite_source;
+    use obzenflow_runtime::supervised_base::SupervisorHandle;
+
+    for hosted in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(&config, format!(
+            "[server]\nenabled = {hosted}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n[metrics]\nenabled = false\n"
+        )).unwrap();
+        let (left, left_started, left_cancelled) = pending_lifetime_source();
+        let (right, right_started, right_cancelled) = pending_lifetime_source();
+        let (flow_tx, flow_rx) = oneshot::channel();
+        let flow_tx = Mutex::new(Some(flow_tx));
+        let application = tokio::spawn(FlowApplication::launch(
+            FlowDefinition::materialize(move |_| {
+                let sink = NoopSink;
+                Ok(flow! {
+                    name: "application_drop", journals: crate::journal::memory_journals(),
+                    stages: {
+                        left = async_infinite_source!(IdlePayload => left);
+                        right = async_infinite_source!(IdlePayload => right);
+                        sink = sink!(IdlePayload => sink);
+                    },
+                    topology: { left |> sink; right |> sink; }
+                })
+            }),
+            LaunchParams {
+                cli_args: Some(vec![
+                    "regression".into(),
+                    "--config".into(),
+                    config.into_os_string(),
+                ]),
+                flow_handle_hooks: vec![Box::new(move |flow| {
+                    // Standalone execution must retain unique ownership of its handle.
+                    let observation = (
+                        hosted.then(|| flow.clone()),
+                        flow.state_receiver(),
+                        flow.system_journal().unwrap(),
+                    );
+                    assert!(flow_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(observation)
+                        .is_ok());
+                    Ok(tokio::spawn(async {}))
+                })],
+                ..LaunchParams::default()
+            },
+        ));
+        let (retained_flow, mut states, journal) = flow_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            left_started.await.unwrap();
+            right_started.await.unwrap();
+        })
+        .await
+        .expect("both stage operations must be pending");
+        application.abort();
+        assert!(application.await.unwrap_err().is_cancelled());
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), async {
+            if let Some(flow) = &retained_flow {
+                let error = lifecycle::wait(flow).await.unwrap_err();
+                assert!(std::error::Error::source(&error)
+                    .unwrap()
+                    .to_string()
+                    .contains("aborted"));
+            } else {
+                // No FlowHandle survives standalone execution, so closure also witnesses
+                // release of the pipeline task's state publisher on the live caller runtime.
+                while states.changed().await.is_ok() {}
+            }
+            left_cancelled.await.unwrap();
+            right_cancelled.await.unwrap();
+        })
+        .await;
+        if let Some(flow) = &retained_flow {
+            // Clean up even if the cancellation assertion regresses.
+            flow.abort_and_wait().await.unwrap();
+        }
+        cancelled.expect("application drop must cancel the supervisor and both stage operations");
+        let facts = journal.read_all_unordered().await.unwrap();
+        assert!(
+            !facts.iter().any(|fact| matches!(
+                fact.event.event_type_name(),
+                "system.pipeline.completed" | "system.pipeline.cancelled"
+            )),
+            "emergency cancellation must not invent a published outcome"
+        );
+        if hosted {
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("host listener released");
+            drop(listener);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
+    use obzenflow_runtime::supervised_base::SupervisorHandle;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("obzenflow.toml");
+    let port = available_local_port();
+    std::fs::write(&config, format!(
+        "[server]\nenabled = true\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n[metrics]\nenabled = false\n"
+    )).unwrap();
+    let (flow_tx, flow_rx) = oneshot::channel();
+    let flow_tx = Mutex::new(Some(flow_tx));
+    let (preparing_tx, preparing_rx) = oneshot::channel();
+    let application = tokio::spawn(FlowApplication::launch(
+        FlowDefinition::materialize(move |_| {
+            let source = IdleInfiniteSource;
+            let sink = NoopSink;
+            Ok(flow! {
+                name: "application_drop_preparation", journals: crate::journal::memory_journals(),
+                stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                topology: { src |> sink; }
+            })
+        }),
+        LaunchParams {
+            cli_args: Some(vec![
+                "regression".into(),
+                "--config".into(),
+                config.into_os_string(),
+            ]),
+            flow_handle_hooks: vec![Box::new(move |flow| {
+                assert!(flow_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(flow.clone())
+                    .is_ok());
+                Ok(tokio::spawn(async {}))
+            })],
+            test_host_task: Some((
+                Box::pin(async move {
+                    preparing_tx.send(()).unwrap();
+                    std::future::pending().await
+                }),
+                true,
+            )),
+            ..LaunchParams::default()
+        },
+    ));
+    let flow = flow_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), preparing_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(flow.is_running());
+    application.abort();
+    assert!(application.await.unwrap_err().is_cancelled());
+    let completed = tokio::time::timeout(Duration::from_secs(2), lifecycle::wait(&flow)).await;
+    flow.abort_and_wait().await.unwrap();
+    assert!(completed
+        .expect("built flow must be cancelled during host preparation")
+        .is_err());
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("host listener released");
+    drop(listener);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_start_observes_runtime_exit_before_readiness() {
+    use obzenflow_runtime::supervised_base::SupervisorHandle;
+    for terminal_mode in ["exit", "park"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(&config, format!(
+            "[server]\nenabled = true\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\non_terminal = \"{terminal_mode}\"\n[metrics]\nenabled = false\n"
+        )).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), FlowApplication::launch(
+            FlowDefinition::new(move |context| async move {
+                let source = IdleInfiniteSource;
+                let sink = NoopSink;
+                let flow = flow! {
+                    name: "startup_runtime_exit", journals: crate::journal::memory_journals(),
+                    stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                    topology: { src |> sink; }
+                }.build(context).await?;
+                flow.abort_and_wait().await.unwrap();
+                assert!(!flow.is_running());
+                assert!(!flow.current_state().is_terminal());
+                Ok(flow)
+            }),
+            LaunchParams {
+                cli_args: Some(vec!["regression".into(), "--config".into(), config.into_os_string()]),
+                ..LaunchParams::default()
+            },
+        )).await.expect("hosted startup must observe Runtime termination before readiness");
+        assert!(
+            matches!(result, Err(ApplicationError::FlowExecutionFailed(ref message))
+            if message.contains("Supervisor task was aborted")),
+            "joined Runtime error: {result:?}"
+        );
+        let listener =
+            TcpListener::bind(("127.0.0.1", port)).expect("host must be joined before return");
+        drop(listener);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_startup_signals_withhold_automatic_run() {
     use obzenflow_core::event::JournalEvent;

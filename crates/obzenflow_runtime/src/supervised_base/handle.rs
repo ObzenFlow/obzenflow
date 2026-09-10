@@ -165,6 +165,10 @@ where
         self.supervisor_abort.abort();
     }
 
+    pub(crate) fn abort_handle(&self) -> AbortHandle {
+        self.supervisor_abort.clone()
+    }
+
     /// Best-effort bounded wait for supervisor completion.
     ///
     /// Returns:
@@ -198,6 +202,10 @@ where
 
     fn current_state(&self) -> Self::State {
         self.state_watcher.current()
+    }
+
+    fn request_abort(&self) {
+        self.abort();
     }
 
     async fn wait_for_completion(self) -> Result<(), Self::Error> {

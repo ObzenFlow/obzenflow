@@ -424,6 +424,50 @@ async fn both_join_budgets_diagnose_once_and_require_their_own_completion() {
     assert_eq!(*machine.state(), State::Finished);
 }
 
+#[tokio::test]
+async fn runtime_completion_during_startup_requires_teardown_before_cleanup() {
+    let mut machine = machine::new();
+    let mut context = context();
+    assert_eq!(
+        machine
+            .handle(Event::HostBound(StartupMode::Auto), &mut context)
+            .await
+            .unwrap(),
+        [Action::StartFlow]
+    );
+    assert_eq!(*machine.state(), State::Starting);
+    machine
+        .handle(Event::Failure(FailureOrigin::Application), &mut context)
+        .await
+        .unwrap();
+    assert_eq!(
+        machine
+            .handle(Event::PublicationObserved, &mut context)
+            .await
+            .unwrap(),
+        [Action::AbortFlow]
+    );
+    assert_eq!(*machine.state(), State::AbortingFlow);
+    assert!(machine
+        .handle(Event::Started, &mut context)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        *machine.state(),
+        State::AbortingFlow,
+        "late readiness cannot restart execution"
+    );
+    assert_eq!(
+        machine
+            .handle(Event::FlowAborted, &mut context)
+            .await
+            .unwrap(),
+        [Action::StopMetrics]
+    );
+    assert_eq!(context.outcome, Outcome::ApplicationFailure);
+}
+
 /// Drive the real action completions to a named cleanup boundary for controlled I/O tests.
 async fn advance_to(driver: &mut ApplicationLifecycle, reached: impl Fn(&State) -> bool) {
     while !reached(driver.machine.state()) {

@@ -1439,6 +1439,8 @@ impl FlowApplication {
                 }
             };
 
+            application.protect_flow(&flow_handle);
+
             // The selected run substrate (FLOWIP-120u): durable with its locator,
             // or ephemeral with none. An ephemeral resume never reaches here;
             // the build refuses it (F13).

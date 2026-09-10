@@ -395,6 +395,13 @@ impl HeartbeatHandle {
     }
 }
 
+impl Drop for HeartbeatHandle {
+    fn drop(&mut self) {
+        // Channel closure alone cannot interrupt a pending journal append.
+        self.cancel();
+    }
+}
+
 pub fn spawn_heartbeat(
     stage_id: StageId,
     stage_name: String,
@@ -590,6 +597,31 @@ mod tests {
 
     fn live_execution() -> RuntimeExecution {
         RuntimeExecution::new(RuntimeMode::Live, None)
+    }
+
+    #[tokio::test]
+    async fn dropping_heartbeat_cancels_work_that_is_not_polling_the_cancel_channel() {
+        let (cancel, _cancel_rx) = watch::channel(false);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _termination = terminated_tx;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let handle = HeartbeatHandle {
+            state: HeartbeatState::new(Vec::new()),
+            cancel,
+            task,
+        };
+        started_rx.await.unwrap();
+        drop(handle);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), terminated_rx)
+                .await
+                .expect("dropping the stage heartbeat must interrupt pending work")
+                .is_err()
+        );
     }
 
     /// Metadata-only archive stub; the resume strategy reads

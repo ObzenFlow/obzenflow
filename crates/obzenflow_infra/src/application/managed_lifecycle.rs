@@ -135,6 +135,7 @@ pub(super) struct ApplicationLifecycle {
     host_error: Option<ApplicationError>,
     failure: Option<Failure>,
     auxiliary_errors: Vec<JoinError>,
+    execution_guard: Option<lifecycle::ExecutionGuard>,
     flow: Option<Arc<FlowHandle>>,
     stop: Option<lifecycle::StopObserver>,
     operation: Option<BoxFuture<'static, Observed>>,
@@ -164,6 +165,7 @@ impl ApplicationLifecycle {
             host_error: None,
             failure: None,
             auxiliary_errors: Vec::new(),
+            execution_guard: None,
             flow: None,
             stop: None,
             operation: None,
@@ -191,6 +193,7 @@ impl ApplicationLifecycle {
     }
 
     pub async fn run_standalone(&mut self, flow: FlowHandle) -> Result<(), ApplicationError> {
+        self.protect_flow(&flow);
         self.flow = Some(Arc::new(flow));
         self.drive(
             Event::Standalone,
@@ -252,7 +255,14 @@ impl ApplicationLifecycle {
         self.take_result()
     }
 
+    pub(super) fn protect_flow(&mut self, flow: &FlowHandle) {
+        if self.execution_guard.is_none() {
+            self.execution_guard = Some(lifecycle::guard_execution(flow));
+        }
+    }
+
     fn attach_flow(&mut self, flow: Arc<FlowHandle>) {
+        self.protect_flow(&flow);
         // Subscribe before sending; queue success does not supply admission timestamps.
         self.stop = Some(lifecycle::observe_stop(&flow));
         self.flow = Some(flow);
@@ -351,9 +361,16 @@ impl ApplicationLifecycle {
             Action::StartFlow => {
                 tracing::info!("Starting flow execution (startup_mode=auto)");
                 let flow = self.flow.as_ref().expect("bound host has a flow").clone();
-                self.begin(Box::pin(
-                    async move { Observed::Started(flow.start().await) },
-                ));
+                self.begin(Box::pin(async move {
+                    // A supervisor can exit without publishing another state change.
+                    // Completion must win over a stale readiness observation, while
+                    // the outer Starting select still gives ready host faults/signals priority.
+                    tokio::select! {
+                        biased;
+                        result = lifecycle::wait(&flow) => Observed::Publication(result),
+                        result = flow.start() => Observed::Started(result),
+                    }
+                }));
             }
             Action::RunStandalone => {
                 let flow = self
@@ -392,11 +409,8 @@ impl ApplicationLifecycle {
                     .expect("settlement requires a flow")
                     .clone();
                 self.begin(Box::pin(async move {
-                    Observed::Aborted(if flow.is_running() {
-                        flow.abort_and_wait().await
-                    } else {
-                        Ok(())
-                    })
+                    // Even an already-exited pipeline can have surviving stage tasks.
+                    Observed::Aborted(flow.abort_and_wait().await)
                 }));
             }
             Action::StopMetrics => {
@@ -504,7 +518,7 @@ impl ApplicationLifecycle {
         match observed {
             Observed::Started(Ok(())) => Event::Started,
             Observed::Started(Err(error)) => {
-                self.failure.get_or_insert(Failure::Execution(error));
+                tracing::debug!(%error, "Flow start did not complete; observing Runtime execution result");
                 Event::Stop(StopReason::Graceful, self.stop_input())
             }
             Observed::Standalone(result) => {
@@ -569,6 +583,9 @@ impl ApplicationLifecycle {
 
     fn take_result(&mut self) -> Result<(), ApplicationError> {
         assert!(matches!(self.machine.state(), State::Finished));
+        if let Some(guard) = self.execution_guard.take() {
+            guard.disarm();
+        }
         self.flow = None;
         match self.context.outcome {
             Outcome::HostFailure => {
