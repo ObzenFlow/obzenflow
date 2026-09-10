@@ -22,7 +22,7 @@
 //! with cohesive policy in private submodules.
 //! - `model`: lifecycle states, observations, commands and context.
 //! - `settlement`: Runtime stop admission, escalation state and absolute deadlines.
-//! - `transitions`: state changes and the commands selected by each observation.
+//! - `transitions`: handlers for the edges registered here, with shared policy helpers.
 //!
 //! Resource handles, pending futures and I/O stay in the application driver.
 //! Re-exported types retain visibility within `managed_lifecycle` only.
@@ -39,8 +39,6 @@ pub(super) use model::{Action, Context, Event, FailureOrigin, Outcome, State};
 #[cfg(test)]
 pub(super) use settlement::completion_deadline;
 pub(super) use settlement::{FlowActivity, StopCommand, StopInput, StopReason};
-
-use transitions::reduce;
 
 pub(super) type Machine = StateMachine<State, Event, Context, Action>;
 
@@ -59,70 +57,70 @@ pub(super) fn new() -> Machine {
             })
         };
         state State::Preparing {
-            on Event::Failure => reduce;
-            on Event::HostBound => reduce;
-            on Event::Standalone => reduce;
-            on Event::PreparationFailed => reduce;
-            on Event::Stop => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::HostBound => transitions::host_bound;
+            on Event::Standalone => transitions::run_standalone;
+            on Event::PreparationFailed => transitions::stop_metrics;
+            on Event::Stop => transitions::begin_settlement;
         }
         state State::Starting {
-            on Event::Failure => reduce;
-            on Event::Started => reduce;
-            on Event::Stop => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::Started => transitions::started;
+            on Event::Stop => transitions::begin_settlement;
         }
         state State::Active {
-            on Event::Failure => reduce;
-            on Event::Stop => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::Stop => transitions::begin_settlement;
         }
         state State::RunningStandalone {
-            on Event::Failure => reduce;
-            on Event::StandaloneReturned => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::StandaloneReturned => transitions::stop_metrics;
         }
         state State::SettlingFlow {
-            on Event::Failure => reduce;
-            on Event::Admission => reduce;
-            on Event::StopSent => reduce;
-            on Event::RepeatedSignal => reduce;
-            on Event::GracefulExpired => reduce;
-            on Event::PublicationObserved => reduce;
-            on Event::CompletionExpired => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::Admission => transitions::observe_admission;
+            on Event::StopSent => transitions::acknowledge_stop_send;
+            on Event::RepeatedSignal => transitions::request_cancellation;
+            on Event::GracefulExpired => transitions::graceful_expired;
+            on Event::PublicationObserved => transitions::abort_flow;
+            on Event::CompletionExpired => transitions::abort_flow;
         }
         state State::AbortingFlow {
-            on Event::Failure => reduce;
-            on Event::FlowAborted => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::FlowAborted => transitions::stop_metrics;
         }
         state State::StoppingMetrics {
-            on Event::Failure => reduce;
-            on Event::MetricsStopped => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::MetricsStopped => transitions::close_host;
         }
         state State::ClosingHost {
-            on Event::Failure => reduce;
-            on Event::HostClosed => reduce;
-            on Event::HostAbsent => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::HostClosed => transitions::host_closed;
+            on Event::HostAbsent => transitions::host_absent;
         }
         state State::Deregistering {
-            on Event::Failure => reduce;
-            on Event::HeartbeatJoined => reduce;
-            on Event::DeregistrationExpired => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::HeartbeatJoined => transitions::heartbeat_joined;
+            on Event::DeregistrationExpired => transitions::abort_deregistration;
         }
         state State::JoiningDeregisteredHeartbeat {
-            on Event::Failure => reduce;
-            on Event::HeartbeatJoined => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::HeartbeatJoined => transitions::heartbeat_joined;
         }
         state State::FlushingMetrics {
-            on Event::Failure => reduce;
-            on Event::MetricsFlushed => reduce;
-            on Event::FlushExpired => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::MetricsFlushed => transitions::finish_metrics_flush;
+            on Event::FlushExpired => transitions::finish_metrics_flush;
         }
         state State::JoiningLeftoverHeartbeat {
-            on Event::Failure => reduce;
-            on Event::LeftoverHeartbeatJoined => reduce;
-            on Event::JoinBudgetExpired => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::LeftoverHeartbeatJoined => transitions::join_tasks;
+            on Event::JoinBudgetExpired => transitions::leftover_heartbeat_budget_expired;
         }
         state State::JoiningTasks {
-            on Event::Failure => reduce;
-            on Event::TasksJoined => reduce;
-            on Event::JoinBudgetExpired => reduce;
+            on Event::Failure => transitions::record_failure;
+            on Event::TasksJoined => transitions::finish;
+            on Event::JoinBudgetExpired => transitions::tasks_budget_expired;
         }
     }
 }

@@ -3,167 +3,394 @@
 // https://obzenflow.dev
 
 //! Transition decisions only; actions enqueue commands for the application driver.
+//!
+//! The FSM declaration selects each handler. Payload checks below diagnose a registration
+//! mismatch; they do not select between lifecycle edges. Duplicate inputs are handled
+//! explicitly within the policy for their registered edge.
 
-use obzenflow_fsm::Transition;
-use obzenflow_runtime::__private::lifecycle::FlowStopStatus;
+use obzenflow_fsm::{
+    types::{BoxFuture, FsmResult},
+    Transition,
+};
 use std::time::Duration;
+use tokio::time::Instant as TokioInstant;
 
 use super::model::{Action, Context, Event, FailureOrigin, JoinBudget, Outcome, State};
-use super::settlement::{
-    CompletionBound, Escalation, FlowActivity, Settlement, StopCommand, StopReason,
-};
+use super::settlement::{Escalation, Settlement, StopCommand};
 use crate::application::config::StartupMode;
 
-pub(super) fn reduce<'a>(
+pub(super) fn record_failure<'a>(
     state: &'a State,
     event: &'a Event,
     ctx: &'a mut Context,
-) -> obzenflow_fsm::types::BoxFuture<'a, obzenflow_fsm::types::FsmResult<Transition<State, Action>>>
-{
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
     Box::pin(async move {
-        let mut next = state.clone();
-        let mut actions = Vec::new();
-        match (state, event) {
-            (_, Event::Failure(origin)) => {
-                ctx.outcome = match (ctx.outcome, origin) {
-                    (_, FailureOrigin::Host) | (Outcome::HostFailure, _) => Outcome::HostFailure,
-                    _ => Outcome::ApplicationFailure,
-                };
-            }
-            (State::Preparing, Event::HostBound(StartupMode::Auto)) => {
-                next = State::Starting;
-                actions.push(Action::StartFlow);
-            }
-            (State::Preparing, Event::HostBound(StartupMode::Manual))
-            | (State::Starting, Event::Started) => next = State::Active,
-            (State::Preparing, Event::Standalone) => {
-                next = State::RunningStandalone;
-                actions.push(Action::RunStandalone);
-            }
-            (State::Preparing | State::Starting | State::Active, Event::Stop(reason, input)) => {
-                let before_run = matches!(reason, StopReason::BeforeRun);
-                let command = if matches!(input.activity, FlowActivity::Terminal) {
-                    None
-                } else if before_run {
-                    Some(StopCommand::Cancel)
-                } else {
-                    match (&input.admitted, reason, input.activity) {
-                        (FlowStopStatus::Graceful { .. }, StopReason::Cancel, _) => {
-                            Some(StopCommand::Cancel)
-                        }
-                        (FlowStopStatus::NotRequested, _, FlowActivity::BeforeRun)
-                        | (FlowStopStatus::NotRequested, StopReason::Cancel, _) => {
-                            Some(StopCommand::Cancel)
-                        }
-                        (FlowStopStatus::NotRequested, _, _) => Some(StopCommand::Graceful),
-                        _ => None,
-                    }
-                };
-                let mut settlement = Settlement {
-                    bound: if before_run {
-                        CompletionBound::BeforeRun(input.at + ctx.grace + ctx.grace)
-                    } else {
-                        CompletionBound::AwaitingAdmission(input.at + ctx.grace)
-                    },
-                    escalation: match command {
-                        Some(StopCommand::Cancel) => Escalation::Requested(StopCommand::Cancel),
-                        _ => Escalation::AwaitingAdmission,
-                    },
-                };
-                settlement.observe(&input.admitted, ctx.grace);
-                next = State::SettlingFlow(settlement);
-                actions.push(Action::SettleFlow(command));
-            }
-            (State::SettlingFlow(settlement), Event::Admission(status)) => {
-                let mut settlement = settlement.clone();
-                settlement.observe(status, ctx.grace);
-                next = State::SettlingFlow(settlement);
-            }
-            (State::SettlingFlow(settlement), Event::RepeatedSignal)
-                if !matches!(
-                    settlement.escalation,
-                    Escalation::Cancelling | Escalation::Requested(StopCommand::Cancel)
-                ) =>
-            {
+        let Event::Failure(origin) = event else {
+            return Ok(registration_mismatch("record_failure", state, event));
+        };
+        ctx.outcome = match (ctx.outcome, origin) {
+            (_, FailureOrigin::Host) | (Outcome::HostFailure, _) => Outcome::HostFailure,
+            _ => Outcome::ApplicationFailure,
+        };
+        Ok(stay(state))
+    })
+}
+
+pub(super) fn host_bound<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let Event::HostBound(startup) = event else {
+            return Ok(registration_mismatch("host_bound", state, event));
+        };
+        Ok(match startup {
+            StartupMode::Auto => Transition {
+                next_state: State::Starting,
+                actions: vec![Action::StartFlow],
+            },
+            StartupMode::Manual => Transition {
+                next_state: State::Active,
+                actions: vec![],
+            },
+        })
+    })
+}
+
+pub(super) fn started<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
+        Ok(Transition {
+            next_state: State::Active,
+            actions: vec![],
+        })
+    })
+}
+
+pub(super) fn run_standalone<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
+        Ok(Transition {
+            next_state: State::RunningStandalone,
+            actions: vec![Action::RunStandalone],
+        })
+    })
+}
+
+pub(super) fn begin_settlement<'a>(
+    state: &'a State,
+    event: &'a Event,
+    ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let Event::Stop(reason, input) = event else {
+            return Ok(registration_mismatch("begin_settlement", state, event));
+        };
+        let (settlement, command) = Settlement::begin(*reason, input, ctx.grace);
+        Ok(Transition {
+            next_state: State::SettlingFlow(settlement),
+            actions: vec![Action::SettleFlow(command)],
+        })
+    })
+}
+
+pub(super) fn observe_admission<'a>(
+    state: &'a State,
+    event: &'a Event,
+    ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let (State::SettlingFlow(settlement), Event::Admission(status)) = (state, event) else {
+            return Ok(registration_mismatch("observe_admission", state, event));
+        };
+        let mut settlement = settlement.clone();
+        settlement.observe(status, ctx.grace);
+        Ok(Transition {
+            next_state: State::SettlingFlow(settlement),
+            actions: vec![],
+        })
+    })
+}
+
+pub(super) fn acknowledge_stop_send<'a>(
+    state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    // Sending a request neither establishes admission nor renews its bound.
+    Box::pin(async move { Ok(stay(state)) })
+}
+
+pub(super) fn request_cancellation<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let State::SettlingFlow(settlement) = state else {
+            return Ok(registration_mismatch("request_cancellation", state, event));
+        };
+        match settlement.escalation {
+            Escalation::Cancelling | Escalation::Requested(StopCommand::Cancel) => Ok(stay(state)),
+            Escalation::AwaitingAdmission
+            | Escalation::Graceful(_)
+            | Escalation::Requested(StopCommand::Graceful | StopCommand::Timeout) => {
                 let mut settlement = settlement.clone();
                 settlement.escalation = Escalation::Requested(StopCommand::Cancel);
-                next = State::SettlingFlow(settlement);
-                actions.push(Action::SendStop(StopCommand::Cancel));
+                Ok(Transition {
+                    next_state: State::SettlingFlow(settlement),
+                    actions: vec![Action::SendStop(StopCommand::Cancel)],
+                })
             }
-            (State::SettlingFlow(settlement), Event::GracefulExpired)
-                if matches!(settlement.escalation, Escalation::Graceful(_)) =>
-            {
+        }
+    })
+}
+
+pub(super) fn graceful_expired<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let State::SettlingFlow(settlement) = state else {
+            return Ok(registration_mismatch("graceful_expired", state, event));
+        };
+        match settlement.escalation {
+            Escalation::Graceful(_) => {
                 let mut settlement = settlement.clone();
                 settlement.escalation = Escalation::Requested(StopCommand::Timeout);
-                next = State::SettlingFlow(settlement);
-                actions.push(Action::SendStop(StopCommand::Timeout));
+                Ok(Transition {
+                    next_state: State::SettlingFlow(settlement),
+                    actions: vec![Action::SendStop(StopCommand::Timeout)],
+                })
             }
-            (State::SettlingFlow(_), Event::PublicationObserved | Event::CompletionExpired) => {
-                next = State::AbortingFlow;
-                actions.push(Action::AbortFlow);
+            Escalation::AwaitingAdmission | Escalation::Requested(_) | Escalation::Cancelling => {
+                Ok(stay(state))
             }
-            (State::Preparing, Event::PreparationFailed)
-            | (State::AbortingFlow, Event::FlowAborted)
-            | (State::RunningStandalone, Event::StandaloneReturned) => {
-                next = State::StoppingMetrics;
-                actions.push(Action::StopMetrics);
-            }
-            (State::StoppingMetrics, Event::MetricsStopped) => {
-                next = State::ClosingHost;
-                actions.push(Action::CloseHost);
-            }
-            (State::ClosingHost, Event::HostClosed { at }) => {
-                next = State::Deregistering {
-                    deadline: *at + Duration::from_secs(5),
-                };
-                actions.push(Action::AwaitDeregistration);
-            }
-            (State::ClosingHost, Event::HostAbsent { at })
-            | (
-                State::Deregistering { .. } | State::JoiningDeregisteredHeartbeat,
-                Event::HeartbeatJoined { at },
-            ) => {
-                next = State::FlushingMetrics {
-                    deadline: *at + ctx.grace,
-                };
-                actions.push(Action::FlushMetrics);
-            }
-            (State::Deregistering { .. }, Event::DeregistrationExpired) => {
-                next = State::JoiningDeregisteredHeartbeat;
-                actions.push(Action::AbortDeregistration);
-            }
-            (
-                State::FlushingMetrics { .. },
-                Event::MetricsFlushed { at } | Event::FlushExpired { at },
-            ) => {
-                next = State::JoiningLeftoverHeartbeat(JoinBudget::new(*at, ctx.grace));
-                actions.push(Action::JoinLeftoverHeartbeat);
-            }
-            (State::JoiningLeftoverHeartbeat(_), Event::LeftoverHeartbeatJoined { at }) => {
-                next = State::JoiningTasks(JoinBudget::new(*at, ctx.grace));
-                actions.push(Action::JoinTasks);
-            }
-            (State::JoiningTasks(_), Event::TasksJoined) => next = State::Finished,
-            (State::JoiningTasks(JoinBudget::Within { deadline }), Event::JoinBudgetExpired) => {
-                next = State::JoiningTasks(JoinBudget::Exceeded {
-                    deadline: *deadline,
-                });
-                actions.push(Action::DiagnoseJoinBudget);
-            }
-            (
-                State::JoiningLeftoverHeartbeat(JoinBudget::Within { deadline }),
-                Event::JoinBudgetExpired,
-            ) => {
-                next = State::JoiningLeftoverHeartbeat(JoinBudget::Exceeded {
-                    deadline: *deadline,
-                });
-                actions.push(Action::DiagnoseJoinBudget);
-            }
-            _ => {}
         }
+    })
+}
+
+pub(super) fn abort_flow<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
         Ok(Transition {
-            next_state: next,
+            next_state: State::AbortingFlow,
+            actions: vec![Action::AbortFlow],
+        })
+    })
+}
+
+pub(super) fn stop_metrics<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
+        Ok(Transition {
+            next_state: State::StoppingMetrics,
+            actions: vec![Action::StopMetrics],
+        })
+    })
+}
+
+pub(super) fn close_host<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
+        Ok(Transition {
+            next_state: State::ClosingHost,
+            actions: vec![Action::CloseHost],
+        })
+    })
+}
+
+pub(super) fn host_closed<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let Event::HostClosed { at } = event else {
+            return Ok(registration_mismatch("host_closed", state, event));
+        };
+        Ok(Transition {
+            next_state: State::Deregistering {
+                deadline: *at + Duration::from_secs(5),
+            },
+            actions: vec![Action::AwaitDeregistration],
+        })
+    })
+}
+
+pub(super) fn host_absent<'a>(
+    state: &'a State,
+    event: &'a Event,
+    ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let Event::HostAbsent { at } = event else {
+            return Ok(registration_mismatch("host_absent", state, event));
+        };
+        Ok(flush_metrics(*at, ctx.grace))
+    })
+}
+
+pub(super) fn heartbeat_joined<'a>(
+    state: &'a State,
+    event: &'a Event,
+    ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let Event::HeartbeatJoined { at } = event else {
+            return Ok(registration_mismatch("heartbeat_joined", state, event));
+        };
+        Ok(flush_metrics(*at, ctx.grace))
+    })
+}
+
+pub(super) fn abort_deregistration<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
+        Ok(Transition {
+            next_state: State::JoiningDeregisteredHeartbeat,
+            actions: vec![Action::AbortDeregistration],
+        })
+    })
+}
+
+pub(super) fn finish_metrics_flush<'a>(
+    state: &'a State,
+    event: &'a Event,
+    ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let (Event::MetricsFlushed { at } | Event::FlushExpired { at }) = event else {
+            return Ok(registration_mismatch("finish_metrics_flush", state, event));
+        };
+        Ok(Transition {
+            next_state: State::JoiningLeftoverHeartbeat(JoinBudget::new(*at, ctx.grace)),
+            actions: vec![Action::JoinLeftoverHeartbeat],
+        })
+    })
+}
+
+pub(super) fn join_tasks<'a>(
+    state: &'a State,
+    event: &'a Event,
+    ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let Event::LeftoverHeartbeatJoined { at } = event else {
+            return Ok(registration_mismatch("join_tasks", state, event));
+        };
+        Ok(Transition {
+            next_state: State::JoiningTasks(JoinBudget::new(*at, ctx.grace)),
+            actions: vec![Action::JoinTasks],
+        })
+    })
+}
+
+pub(super) fn finish<'a>(
+    _state: &'a State,
+    _event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async {
+        Ok(Transition {
+            next_state: State::Finished,
+            actions: vec![],
+        })
+    })
+}
+
+pub(super) fn leftover_heartbeat_budget_expired<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let State::JoiningLeftoverHeartbeat(budget) = state else {
+            return Ok(registration_mismatch(
+                "leftover_heartbeat_budget_expired",
+                state,
+                event,
+            ));
+        };
+        let (budget, actions) = expire_join_budget(*budget);
+        Ok(Transition {
+            next_state: State::JoiningLeftoverHeartbeat(budget),
             actions,
         })
     })
+}
+
+pub(super) fn tasks_budget_expired<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _ctx: &'a mut Context,
+) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
+    Box::pin(async move {
+        let State::JoiningTasks(budget) = state else {
+            return Ok(registration_mismatch("tasks_budget_expired", state, event));
+        };
+        let (budget, actions) = expire_join_budget(*budget);
+        Ok(Transition {
+            next_state: State::JoiningTasks(budget),
+            actions,
+        })
+    })
+}
+
+fn flush_metrics(at: TokioInstant, grace: Duration) -> Transition<State, Action> {
+    Transition {
+        next_state: State::FlushingMetrics {
+            deadline: at + grace,
+        },
+        actions: vec![Action::FlushMetrics],
+    }
+}
+
+fn expire_join_budget(budget: JoinBudget) -> (JoinBudget, Vec<Action>) {
+    match budget {
+        JoinBudget::Within { deadline } => (
+            JoinBudget::Exceeded { deadline },
+            vec![Action::DiagnoseJoinBudget],
+        ),
+        JoinBudget::Exceeded { .. } => (budget, vec![]),
+    }
+}
+
+fn stay(state: &State) -> Transition<State, Action> {
+    Transition {
+        next_state: state.clone(),
+        actions: vec![],
+    }
+}
+
+fn registration_mismatch(handler: &str, state: &State, event: &Event) -> Transition<State, Action> {
+    // The driver expects infallible handlers. Diagnose an internal wiring error without
+    // panicking during cleanup, altering its outcome or pretending an operation completed.
+    tracing::error!(
+        handler,
+        ?state,
+        ?event,
+        "Application lifecycle handler registration mismatch"
+    );
+    stay(state)
 }

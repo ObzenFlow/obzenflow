@@ -58,6 +58,45 @@ pub(in super::super) struct Settlement {
 }
 
 impl Settlement {
+    /// Choose the initial request and observation bound from the current Runtime input.
+    pub(super) fn begin(
+        reason: StopReason,
+        input: &StopInput,
+        grace: Duration,
+    ) -> (Self, Option<StopCommand>) {
+        let before_run = matches!(reason, StopReason::BeforeRun);
+        let command = if matches!(input.activity, FlowActivity::Terminal) {
+            None
+        } else if before_run {
+            Some(StopCommand::Cancel)
+        } else {
+            match (&input.admitted, reason, input.activity) {
+                (FlowStopStatus::Graceful { .. }, StopReason::Cancel, _) => {
+                    Some(StopCommand::Cancel)
+                }
+                (FlowStopStatus::NotRequested, _, FlowActivity::BeforeRun)
+                | (FlowStopStatus::NotRequested, StopReason::Cancel, _) => {
+                    Some(StopCommand::Cancel)
+                }
+                (FlowStopStatus::NotRequested, _, _) => Some(StopCommand::Graceful),
+                _ => None,
+            }
+        };
+        let mut settlement = Self {
+            bound: if before_run {
+                CompletionBound::BeforeRun(input.at + grace + grace)
+            } else {
+                CompletionBound::AwaitingAdmission(input.at + grace)
+            },
+            escalation: match command {
+                Some(StopCommand::Cancel) => Escalation::Requested(StopCommand::Cancel),
+                _ => Escalation::AwaitingAdmission,
+            },
+        };
+        settlement.observe(&input.admitted, grace);
+        (settlement, command)
+    }
+
     pub fn completion_deadline(&self) -> Instant {
         match self.bound {
             CompletionBound::AwaitingAdmission(at)
