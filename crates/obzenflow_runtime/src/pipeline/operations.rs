@@ -271,7 +271,19 @@ pub(super) fn prepare(
                                 handle.ready().await?;
                                 handle.start().await
                             }
-                            PipelineAction::StopSources => handle.begin_drain().await,
+                            PipelineAction::StopSources => {
+                                // A finite source can finish while downstream work is still
+                                // draining. Its retained join, rather than another control
+                                // send, reports any failure from that completed source.
+                                if handle.is_drained() {
+                                    Ok(())
+                                } else {
+                                    match handle.begin_drain().await {
+                                        Err(_) if handle.is_drained() => Ok(()),
+                                        result => result,
+                                    }
+                                }
+                            }
                             _ => unreachable!(),
                         }
                     };

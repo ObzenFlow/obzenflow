@@ -26,11 +26,10 @@ fn observed_admission_suppresses_duplicate_stop_requests() {
         },
     ] {
         let input = StopInput {
-            activity: FlowActivity::Executing,
+            terminal: false,
             admitted: Some(admission.clone()),
         };
-        let (settlement, command) =
-            Settlement::begin(StopReason::Graceful, &input, Duration::from_secs(5));
+        let (settlement, command) = Settlement::begin(StopReason::Graceful, &input);
         assert_eq!(command, None);
         assert_eq!(settlement.admitted, Some(admission));
     }
@@ -55,7 +54,7 @@ async fn host_error_precedence_survives_cleanup_and_duplicate_failure_observatio
             Event::Stop(
                 StopReason::Graceful,
                 StopInput {
-                    activity: FlowActivity::Executing,
+                    terminal: false,
                     admitted: None,
                 },
             ),
@@ -110,11 +109,7 @@ async fn host_error_precedence_survives_cleanup_and_duplicate_failure_observatio
 #[tokio::test]
 async fn transition_matrix_preserves_startup_admission_and_escalation() {
     for startup in [StartupMode::Auto, StartupMode::Manual] {
-        for activity in [
-            FlowActivity::BeforeRun,
-            FlowActivity::Executing,
-            FlowActivity::Terminal,
-        ] {
+        for terminal in [false, true] {
             for reason in [StopReason::Graceful, StopReason::Cancel] {
                 let mut machine = machine::new();
                 let mut context = context();
@@ -135,7 +130,7 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                         Event::Stop(
                             reason,
                             StopInput {
-                                activity,
+                                terminal,
                                 admitted: None,
                             },
                         ),
@@ -143,11 +138,9 @@ async fn transition_matrix_preserves_startup_admission_and_escalation() {
                     )
                     .await
                     .unwrap();
-                let command = match (activity, reason) {
-                    (FlowActivity::Terminal, _) => None,
-                    (FlowActivity::BeforeRun, _) | (_, StopReason::Cancel) => {
-                        Some(StopCommand::Cancel)
-                    }
+                let command = match (terminal, reason) {
+                    (true, _) => None,
+                    (_, StopReason::Cancel) => Some(StopCommand::Cancel),
                     _ => Some(StopCommand::Graceful),
                 };
                 assert_eq!(actions, [Action::SettleFlow(command)]);
@@ -217,7 +210,7 @@ async fn runtime_timeout_admission_is_observed_without_an_application_timeout_co
             Event::Stop(
                 StopReason::Graceful,
                 StopInput {
-                    activity: FlowActivity::Executing,
+                    terminal: false,
                     admitted: Some(PipelineStopAdmission::Graceful {
                         timeout_ms: DurationMs(2_000),
                     }),

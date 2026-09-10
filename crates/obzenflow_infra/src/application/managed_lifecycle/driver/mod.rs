@@ -12,9 +12,9 @@ use super::machine;
 #[cfg(feature = "warp-server")]
 use super::signals;
 
-use crate::lifecycle_observation::{Feed, Health, Outcome as ObservedOutcome, Progress};
+use crate::lifecycle_observation::{Feed, Health, ObservationError, Outcome as ObservedOutcome};
 use futures::future::BoxFuture;
-use machine::{Action, Context, Event, FlowActivity, State, StopCommand, StopInput, StopReason};
+use machine::{Action, Context, Event, State, StopCommand, StopInput, StopReason};
 use machine::{FailureOrigin, Outcome};
 use obzenflow_fsm::StateVariant;
 use obzenflow_runtime::__private::lifecycle;
@@ -68,12 +68,14 @@ async fn abort_and_join(tasks: Vec<ApplicationTask>) -> Vec<JoinError> {
 enum Failure {
     Application(ApplicationError),
     Execution(FlowError),
+    Observation(ObservationError),
 }
 
 impl Failure {
     fn into_application(self) -> ApplicationError {
         match self {
             Self::Application(error) => error,
+            Self::Observation(error) => ApplicationError::Other(Box::new(error)),
             Self::Execution(error) => {
                 let message = match &error {
                     FlowError::ExecutionFailed(source) => format!("{error}: {source}"),
@@ -90,6 +92,7 @@ impl std::fmt::Display for Failure {
         match self {
             Self::Application(error) => error.fmt(f),
             Self::Execution(error) => error.fmt(f),
+            Self::Observation(error) => error.fmt(f),
         }
     }
 }
@@ -104,8 +107,8 @@ enum ResourceGroup {
 /// Consumed once before delivering the corresponding typed FSM observation.
 enum Observed {
     Started(Result<(), FlowError>),
-    Standalone(Result<(), FlowError>),
-    Publication(Result<(), FlowError>),
+    Standalone(Result<(), Failure>),
+    Publication(Result<(), Failure>),
     Joined(ResourceGroup, Vec<JoinError>),
     #[cfg(feature = "warp-server")]
     HostClosed(Result<(), ManagedWebHostError>),
@@ -126,6 +129,7 @@ pub(in crate::application) struct ApplicationLifecycle {
     host: Option<ManagedWebHost>,
     host_error: Option<ApplicationError>,
     failure: Option<Failure>,
+    observation_error: Option<ObservationError>,
     auxiliary_errors: Vec<JoinError>,
     execution_guard: Option<lifecycle::ExecutionGuard>,
     flow: Option<Arc<FlowHandle>>,
@@ -156,6 +160,7 @@ impl ApplicationLifecycle {
             host: None,
             host_error: None,
             failure: None,
+            observation_error: None,
             auxiliary_errors: Vec::new(),
             execution_guard: None,
             flow: None,
@@ -264,20 +269,29 @@ impl ApplicationLifecycle {
         self.flow = Some(flow);
     }
 
-    fn stop_input(&mut self) -> StopInput {
+    fn stop_input(&self) -> StopInput {
         let projection = self.stop.as_ref().map(Feed::snapshot);
-        let activity = match projection.as_ref() {
-            Some(projection) if projection.outcome.is_some() => FlowActivity::Terminal,
-            Some(projection)
-                if matches!(projection.progress, Progress::Running | Progress::Draining) =>
-            {
-                FlowActivity::Executing
-            }
-            _ => FlowActivity::BeforeRun,
-        };
         StopInput {
-            activity,
+            terminal: projection
+                .as_ref()
+                .is_some_and(|projection| projection.outcome.is_some()),
             admitted: projection.and_then(|projection| projection.admission),
+        }
+    }
+
+    fn observation_failed(&mut self, error: ObservationError) -> Event {
+        self.observation_error.get_or_insert(error);
+        Event::ObservationFailed(self.stop_input())
+    }
+
+    fn retain_failure(&mut self, error: Failure) {
+        match error {
+            Failure::Observation(error) => {
+                self.observation_error.get_or_insert(error);
+            }
+            error => {
+                self.failure.get_or_insert(error);
+            }
         }
     }
 
@@ -286,7 +300,8 @@ impl ApplicationLifecycle {
         // precedence; the driver retains both original errors. Re-observation is
         // deliberate and cannot restart an operation or an absolute deadline.
         for origin in [
-            self.failure.as_ref().map(|_| FailureOrigin::Application),
+            (self.failure.is_some() || self.observation_error.is_some())
+                .then_some(FailureOrigin::Application),
             self.host_error.as_ref().map(|_| FailureOrigin::Host),
         ]
         .into_iter()
@@ -471,6 +486,7 @@ impl ApplicationLifecycle {
             .as_ref()
             .map(ToString::to_string)
             .or_else(|| self.failure.as_ref().map(ToString::to_string))
+            .or_else(|| self.observation_error.as_ref().map(ToString::to_string))
     }
 
     fn diagnose(&self, message: &str, group: ResourceGroup) {
@@ -491,13 +507,13 @@ impl ApplicationLifecycle {
             }
             Observed::Standalone(result) => {
                 if let Err(error) = result {
-                    self.failure.get_or_insert(Failure::Execution(error));
+                    self.retain_failure(error);
                 }
                 Event::StandaloneReturned
             }
             Observed::Publication(result) => {
                 if let Err(error) = result {
-                    self.failure.get_or_insert(Failure::Execution(error));
+                    self.retain_failure(error);
                 }
                 Event::PublicationObserved
             }
@@ -554,6 +570,9 @@ impl ApplicationLifecycle {
                 if let Some(secondary) = self.failure.take() {
                     tracing::warn!(%secondary, "Cleanup after managed host failure also failed");
                 }
+                if let Some(error) = self.observation_error.take() {
+                    tracing::warn!(%error, "Lifecycle observation after managed host failure also failed");
+                }
                 Err(self
                     .host_error
                     .take()
@@ -562,6 +581,7 @@ impl ApplicationLifecycle {
             Outcome::ApplicationFailure => Err(self
                 .failure
                 .take()
+                .or_else(|| self.observation_error.take().map(Failure::Observation))
                 .expect("observed application error is retained")
                 .into_application()),
             Outcome::Success => Ok(()),
@@ -578,6 +598,14 @@ impl ApplicationLifecycle {
             if matches!(self.machine.state(), State::Finished) {
                 return;
             }
+            let watch_observation = self.observation_error.is_none()
+                && matches!(
+                    self.machine.state(),
+                    State::Starting
+                        | State::Active
+                        | State::RunningStandalone
+                        | State::SettlingFlow(_)
+                );
             // Preserve startup arbitration: an already-ready signal can withhold Run.
             // During settlement the publication observation instead wins a signal race.
             #[cfg(feature = "warp-server")]
@@ -587,6 +615,9 @@ impl ApplicationLifecycle {
                     error = host_failure(&mut self.host), if self.host_error.is_none() => {
                         self.retain_host_error(error);
                         Event::Stop(StopReason::Graceful, self.stop_input())
+                    }
+                    error = observation_failure(&self.stop), if watch_observation => {
+                        self.observation_failed(error)
                     }
                     reason = signals::next(&mut signals) => Event::Stop(reason, self.stop_input()),
                     observed = pending(&mut self.operation) => {
@@ -626,6 +657,9 @@ impl ApplicationLifecycle {
                     if matches!(self.machine.state(), State::Preparing | State::Starting | State::Active) {
                         Event::Stop(StopReason::Graceful, self.stop_input())
                     } else { continue; }
+                }
+                error = observation_failure(&self.stop), if watch_observation => {
+                    self.observation_failed(error)
                 }
                 observed = pending(&mut self.operation) => {
                     self.operation = None;
@@ -693,19 +727,28 @@ async fn terminal_observation(flow: &Option<Arc<FlowHandle>>, observation: &Opti
     let _ = wait_journal(flow, observation.as_ref()).await;
 }
 
-async fn wait_journal(flow: &FlowHandle, observation: Option<&Feed>) -> Result<(), FlowError> {
+async fn observation_failure(observation: &Option<Feed>) -> ObservationError {
+    match observation {
+        Some(feed) => feed.failed().await,
+        None => ObservationError::JournalUnavailable,
+    }
+}
+
+async fn wait_journal(flow: &FlowHandle, observation: Option<&Feed>) -> Result<(), Failure> {
     let joined = lifecycle::wait(flow).await;
     let projection = match observation {
         Some(feed) => feed.settled().await,
         None => {
-            return joined.and(Err(FlowError::ExecutionFailed(Box::new(
-                std::io::Error::other("pipeline system journal is unavailable"),
-            ))))
+            return joined
+                .map_err(Failure::Execution)
+                .and(Err(Failure::Observation(
+                    ObservationError::JournalUnavailable,
+                )))
         }
     };
-    joined?;
+    joined.map_err(Failure::Execution)?;
     let error = match (projection.health, projection.outcome) {
-        (Health::Failed(error), _) => Some(error),
+        (Health::Failed(error), _) => return Err(Failure::Observation(error)),
         (_, Some(ObservedOutcome::Failed(reason))) => Some(reason),
         (_, Some(_)) => None,
         (_, None) => {
@@ -713,8 +756,8 @@ async fn wait_journal(flow: &FlowHandle, observation: Option<&Feed>) -> Result<(
         }
     };
     match error {
-        Some(error) => Err(FlowError::ExecutionFailed(Box::new(std::io::Error::other(
-            error,
+        Some(error) => Err(Failure::Execution(FlowError::ExecutionFailed(Box::new(
+            std::io::Error::other(error),
         )))),
         None => Ok(()),
     }

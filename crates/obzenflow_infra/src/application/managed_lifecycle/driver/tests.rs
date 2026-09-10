@@ -6,6 +6,8 @@ use super::*;
 use machine::JoinBudget;
 use tokio::sync::oneshot;
 
+mod observation;
+
 struct Cancelled(Option<oneshot::Sender<()>>);
 impl Drop for Cancelled {
     fn drop(&mut self) {

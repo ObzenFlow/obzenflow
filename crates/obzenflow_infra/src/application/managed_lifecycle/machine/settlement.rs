@@ -17,15 +17,9 @@ pub(in super::super) enum StopReason {
     Cancel,
     BeforeRun,
 }
-#[derive(Clone, Copy, Debug)]
-pub(in super::super) enum FlowActivity {
-    BeforeRun,
-    Executing,
-    Terminal,
-}
 #[derive(Clone, Debug)]
 pub(in super::super) struct StopInput {
-    pub activity: FlowActivity,
+    pub terminal: bool,
     pub admitted: Option<PipelineStopAdmission>,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -34,17 +28,10 @@ pub(in super::super) struct Settlement {
     pub(super) admitted: Option<PipelineStopAdmission>,
 }
 impl Settlement {
-    pub(super) fn begin(
-        reason: StopReason,
-        input: &StopInput,
-        _grace: std::time::Duration,
-    ) -> (Self, Option<StopCommand>) {
-        let command = match (&input.activity, &input.admitted, reason) {
-            (FlowActivity::Terminal, _, _) | (_, Some(PipelineStopAdmission::Cancel { .. }), _) => {
-                None
-            }
-            (_, _, StopReason::Cancel | StopReason::BeforeRun)
-            | (FlowActivity::BeforeRun, _, _) => Some(StopCommand::Cancel),
+    pub(super) fn begin(reason: StopReason, input: &StopInput) -> (Self, Option<StopCommand>) {
+        let command = match (input.terminal, &input.admitted, reason) {
+            (true, _, _) | (_, Some(PipelineStopAdmission::Cancel { .. }), _) => None,
+            (_, _, StopReason::Cancel | StopReason::BeforeRun) => Some(StopCommand::Cancel),
             (_, Some(PipelineStopAdmission::Graceful { .. }), _) => None,
             _ => Some(StopCommand::Graceful),
         };

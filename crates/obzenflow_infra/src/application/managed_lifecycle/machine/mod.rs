@@ -38,7 +38,7 @@ use obzenflow_fsm::{fsm, StateMachine};
 #[cfg(test)]
 pub(super) use model::JoinBudget;
 pub(super) use model::{Action, Context, Event, FailureOrigin, Outcome, State};
-pub(super) use settlement::{FlowActivity, StopCommand, StopInput, StopReason};
+pub(super) use settlement::{StopCommand, StopInput, StopReason};
 
 pub(super) type Machine = StateMachine<State, Event, Context, Action>;
 
@@ -62,19 +62,23 @@ pub(super) fn new() -> Machine {
             on Event::Standalone => transitions::run_standalone;
             on Event::PreparationFailed => transitions::stop_metrics;
             on Event::Stop => transitions::begin_settlement;
+            on Event::ObservationFailed => transitions::begin_settlement;
         }
         state State::Starting {
             on Event::Failure => transitions::record_failure;
             on Event::Started => transitions::started;
             on Event::Stop => transitions::begin_settlement;
+            on Event::ObservationFailed => transitions::begin_settlement;
             on Event::PublicationObserved => transitions::stop_metrics;
         }
         state State::Active {
             on Event::Failure => transitions::record_failure;
             on Event::Stop => transitions::begin_settlement;
+            on Event::ObservationFailed => transitions::begin_settlement;
         }
         state State::RunningStandalone {
             on Event::Failure => transitions::record_failure;
+            on Event::ObservationFailed => transitions::begin_settlement;
             on Event::StandaloneReturned => transitions::stop_metrics;
         }
         state State::SettlingFlow {
@@ -82,6 +86,7 @@ pub(super) fn new() -> Machine {
             on Event::Admission => transitions::observe_admission;
             on Event::StopSent => transitions::acknowledge_stop_send;
             on Event::RepeatedSignal => transitions::request_cancellation;
+            on Event::ObservationFailed => transitions::request_cancellation;
             on Event::PublicationObserved => transitions::stop_metrics;
         }
         state State::StoppingMetrics {

@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::time::Instant as TokioInstant;
 
 use super::model::{Action, Context, Event, FailureOrigin, JoinBudget, Outcome, State};
-use super::settlement::{Settlement, StopCommand};
+use super::settlement::{Settlement, StopCommand, StopReason};
 use crate::application::config::StartupMode;
 
 pub(super) fn record_failure<'a>(
@@ -87,13 +87,15 @@ pub(super) fn run_standalone<'a>(
 pub(super) fn begin_settlement<'a>(
     state: &'a State,
     event: &'a Event,
-    ctx: &'a mut Context,
+    _ctx: &'a mut Context,
 ) -> BoxFuture<'a, FsmResult<Transition<State, Action>>> {
     Box::pin(async move {
-        let Event::Stop(reason, input) = event else {
-            return Ok(registration_mismatch("begin_settlement", state, event));
+        let (reason, input) = match event {
+            Event::Stop(reason, input) => (*reason, input),
+            Event::ObservationFailed(input) => (StopReason::Cancel, input),
+            _ => return Ok(registration_mismatch("begin_settlement", state, event)),
         };
-        let (settlement, command) = Settlement::begin(*reason, input, ctx.grace);
+        let (settlement, command) = Settlement::begin(reason, input);
         Ok(Transition {
             next_state: State::SettlingFlow(settlement),
             actions: vec![Action::SettleFlow(command)],

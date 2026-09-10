@@ -9,15 +9,27 @@ use obzenflow_core::event::{
     PipelineLifecycleEvent as Lifecycle, PipelineStopAdmission, SystemEvent, SystemEventType,
     WriterId,
 };
-use obzenflow_core::journal::{Journal, JournalReader};
+use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{EventEnvelope, EventId};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error)]
+pub(crate) enum ObservationError {
+    #[error("pipeline lifecycle observation failed: {0}")]
+    Journal(#[source] Arc<JournalError>),
+    #[error("pipeline lifecycle integrity error: multiple terminal facts")]
+    ConflictingTerminal,
+    #[error("pipeline lifecycle observation reader stopped")]
+    ReaderStopped,
+    #[error("pipeline lifecycle observation failed: system journal is unavailable")]
+    JournalUnavailable,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum Health {
     Reading,
     Healthy,
-    Failed(String),
+    Failed(ObservationError),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,8 +73,10 @@ impl Projection {
         }
     }
 
-    pub(crate) fn fail(&mut self, error: impl ToString) {
-        self.health = Health::Failed(error.to_string());
+    fn fail(&mut self, error: ObservationError) {
+        if !matches!(self.health, Health::Failed(_)) {
+            self.health = Health::Failed(error);
+        }
     }
 
     pub(crate) fn fold(&mut self, envelope: &EventEnvelope<SystemEvent>) {
@@ -81,7 +95,7 @@ impl Projection {
         };
         if let Some(outcome) = outcome {
             if self.terminal_id.is_some_and(|id| id != envelope.event.id) {
-                self.fail("pipeline lifecycle integrity error: multiple terminal facts");
+                self.fail(ObservationError::ConflictingTerminal);
             } else {
                 self.terminal_id = Some(envelope.event.id);
                 self.outcome = Some(outcome);
@@ -144,7 +158,8 @@ impl Reader {
             match self.journal.as_ref().expect("reader source").reader().await {
                 Ok(reader) => self.reader = Some(reader),
                 Err(error) => {
-                    self.projection.fail(error);
+                    self.projection
+                        .fail(ObservationError::Journal(Arc::new(error)));
                     return true;
                 }
             }
@@ -159,7 +174,8 @@ impl Reader {
                     return true;
                 }
                 Err(error) => {
-                    self.projection.fail(error);
+                    self.projection
+                        .fail(ObservationError::Journal(Arc::new(error)));
                     return true;
                 }
             }
@@ -181,7 +197,10 @@ impl Feed {
         journal: Arc<dyn Journal<SystemEvent>>,
         writer: WriterId,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let mut reader = Reader::new(journal, writer);
+        Self::spawn_reader(Reader::new(journal, writer))
+    }
+
+    pub(crate) fn spawn_reader(mut reader: Reader) -> (Self, tokio::task::JoinHandle<()>) {
         let (updates, snapshot) = tokio::sync::watch::channel(reader.projection.clone());
         let (barriers, mut requests) =
             tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<Projection>>(8);
@@ -216,6 +235,19 @@ impl Feed {
         self.snapshot.borrow().clone()
     }
 
+    /// Health must wake application policy even while execution and joins are pending.
+    pub(crate) async fn failed(&self) -> ObservationError {
+        let mut snapshot = self.snapshot.clone();
+        loop {
+            if let Health::Failed(error) = &snapshot.borrow_and_update().health {
+                return error.clone();
+            }
+            if snapshot.changed().await.is_err() {
+                return ObservationError::ReaderStopped;
+            }
+        }
+    }
+
     /// Called after resource joining. This always asks for another catch-up,
     /// so an older temporary EOF cannot establish an absent-terminal error.
     pub(crate) async fn settled(&self) -> Projection {
@@ -226,7 +258,7 @@ impl Feed {
             }
         }
         let mut projection = self.snapshot();
-        projection.fail("pipeline lifecycle observation reader stopped");
+        projection.fail(ObservationError::ReaderStopped);
         projection
     }
 }
@@ -299,9 +331,10 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert!(
-            matches!(projection.health, Health::Failed(ref error) if error.contains("multiple terminal facts"))
-        );
+        assert!(matches!(
+            projection.health,
+            Health::Failed(ObservationError::ConflictingTerminal)
+        ));
         assert_eq!(projection.terminal_id, Some(terminal.event.id));
         assert_eq!(projection.outcome, Some(Outcome::NotStarted));
     }
@@ -323,7 +356,7 @@ mod tests {
         assert!(!reader.catch_up().await);
         assert!(reader.catch_up().await);
         assert_eq!(reader.reader.as_ref().unwrap().position(), 300);
-        assert_eq!(reader.projection.health, Health::Healthy);
+        assert!(matches!(reader.projection.health, Health::Healthy));
         let (feed, task) = Feed::spawn(journal.clone(), writer.into());
         assert_eq!(feed.settled().await.outcome, None);
         journal

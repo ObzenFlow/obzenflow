@@ -72,6 +72,7 @@ pub(in super::super) enum Event {
     PreparationFailed,
     Started,
     Stop(StopReason, StopInput),
+    ObservationFailed(StopInput),
     Admission(Option<PipelineStopAdmission>),
     StopSent,
     RepeatedSignal,
