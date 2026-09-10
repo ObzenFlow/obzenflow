@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::*;
+use obzenflow_runtime::__private::lifecycle;
+
 #[derive(Clone, Copy, Debug)]
 enum FaultPhase {
     BeforeRun,

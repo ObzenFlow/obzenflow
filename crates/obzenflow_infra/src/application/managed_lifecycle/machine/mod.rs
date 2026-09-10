@@ -29,6 +29,8 @@
 
 mod model;
 mod settlement;
+#[cfg(test)]
+mod tests;
 mod transitions;
 
 use obzenflow_fsm::{fsm, StateMachine};

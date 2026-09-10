@@ -5,13 +5,12 @@
 //! Private application FSM driver. Runtime owns execution; the host owns its subtree.
 //! Futures and original errors live here, outside cloneable transition payloads.
 
-// Hosted observations remain in the closed vocabulary for non-hosted builds.
-#[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
-mod machine;
-#[cfg(feature = "warp-server")]
-mod signals;
 #[cfg(test)]
 mod tests;
+
+use super::machine;
+#[cfg(feature = "warp-server")]
+use super::signals;
 
 use futures::future::BoxFuture;
 use machine::{Action, Context, Event, FlowActivity, State, StopCommand, StopInput, StopReason};
@@ -26,17 +25,17 @@ use std::time::{Duration, Instant};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio::time::Instant as TokioInstant;
 
-use super::config::OnTerminalArg;
+use crate::application::config::OnTerminalArg;
 #[cfg(feature = "warp-server")]
-use super::config::StartupMode;
-use super::ApplicationError;
+use crate::application::config::StartupMode;
+use crate::application::ApplicationError;
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::HttpSurfaceMetricsEmitter;
 #[cfg(feature = "warp-server")]
 use crate::web::{host_error::ManagedWebHostError, managed_host::ManagedWebHost};
 
 /// Drop requests cancellation; only an awaited join establishes termination.
-pub(super) struct ApplicationTask(pub JoinHandle<()>);
+pub(in crate::application) struct ApplicationTask(pub JoinHandle<()>);
 
 impl ApplicationTask {
     async fn join(mut self) -> Result<(), JoinError> {
@@ -121,7 +120,7 @@ enum Observed {
     MetricsFlushed,
 }
 
-pub(super) struct ApplicationLifecycle {
+pub(in crate::application) struct ApplicationLifecycle {
     machine: machine::Machine,
     context: Context,
     pub tasks: Vec<ApplicationTask>,
@@ -230,7 +229,7 @@ impl ApplicationLifecycle {
         startup: StartupMode,
         initial_failure: Option<ManagedWebHostError>,
         #[cfg(test)] injected_signal: Option<
-            tokio::sync::oneshot::Receiver<super::flow_application::ShutdownSignal>,
+            tokio::sync::oneshot::Receiver<crate::application::flow_application::ShutdownSignal>,
         >,
     ) -> Result<(), ApplicationError> {
         self.host = Some(host);
@@ -255,7 +254,7 @@ impl ApplicationLifecycle {
         self.take_result()
     }
 
-    pub(super) fn protect_flow(&mut self, flow: &FlowHandle) {
+    pub(in crate::application) fn protect_flow(&mut self, flow: &FlowHandle) {
         if self.execution_guard.is_none() {
             self.execution_guard = Some(lifecycle::guard_execution(flow));
         }
