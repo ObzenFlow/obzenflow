@@ -4,8 +4,8 @@
 
 //! Prompt handoffs authorised by the pipeline FSM.
 
-use super::fsm::{PipelineAction, PipelineContext};
-use super::resources::{ProducerTail, StageCommand};
+use super::PipelineContext;
+use crate::pipeline::resources::{ProducerTail, StageCommand};
 use crate::supervised_base::publication::BoxError;
 use crate::supervised_base::SupervisorHandle;
 use futures::{stream::FuturesUnordered, FutureExt};
@@ -14,6 +14,29 @@ use obzenflow_core::event::{
 };
 use obzenflow_fsm::{FsmAction, FsmError};
 use std::sync::Mutex;
+
+#[derive(Clone, Debug)]
+pub(crate) enum PipelineAction {
+    InitialiseStages,
+    StartMetricsAggregator,
+    StartNonSources,
+    StartSources,
+    StopSources,
+    Publish {
+        event: Box<SystemEvent>,
+        control: bool,
+    },
+    CancelStages {
+        contract_abort: bool,
+    },
+    ObserveStages,
+    CaptureProducerTail,
+    PublishTerminal,
+    ObserveMetrics,
+    CancelMetrics,
+    PublishFinalMarker,
+    DrainMetrics,
+}
 
 fn publish(ctx: &mut PipelineContext, event: SystemEvent, control: bool) -> Result<(), BoxError> {
     let journal = ctx.system_journal.clone();
@@ -144,7 +167,7 @@ impl PipelineAction {
                     ctx.resources.stage_joins = Some(Mutex::new(joins));
                     if !ctx.progress.stages_cancelled {
                         ctx.progress.cleanup_deadline.get_or_insert_with(|| {
-                            std::time::Instant::now() + super::fsm::stop_drain_timeout()
+                            std::time::Instant::now() + super::context::stop_drain_timeout()
                         });
                     }
                 }
@@ -174,7 +197,7 @@ impl PipelineAction {
                     journal.append(event, None).await?;
                     let at = std::time::Instant::now();
                     published
-                        .set(super::termination::PublishedTermination {
+                        .set(crate::pipeline::termination::PublishedTermination {
                             outcome,
                             event_id: Some(id),
                         })

@@ -4,21 +4,17 @@
 
 //! Responsive inputs for the established self-supervised runner.
 
-#[cfg(test)]
-mod tests;
-
 use super::fsm::{
-    FlowStopMode, PipelineAction, PipelineContext, PipelineControl, PipelineDeadline,
-    PipelineFsmEvent, PipelineFsmState, PipelineState,
+    PipelineAction, PipelineContext, PipelineDeadline, PipelineFsmEvent, PipelineFsmState,
 };
 use super::resources::{OperationalFailure, ProducerTail};
+use super::{FlowStopMode, PipelineControl, PipelineState};
 use crate::messaging::{PollResult, SubscriptionPoller, SystemSubscription};
 use crate::stages::common::stage_handle::StageError;
 use crate::supervised_base::{
     EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher, SupervisorHandle,
 };
 use futures::{future::BoxFuture, FutureExt, Stream};
-use obzenflow_core::event::types::{SeqNo, ViolationCause};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::id::SystemId;
 use std::future::Future;
@@ -26,6 +22,8 @@ use std::pin::Pin;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+pub use super::fsm::context::ContractEdgeStatus;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type JournalRead = BoxFuture<'static, (SystemSubscription<SystemEvent>, PollResult<SystemEvent>)>;
@@ -456,76 +454,5 @@ impl SelfSupervised for PipelineSupervisor {
             Poll::Pending
         })
         .await)
-    }
-}
-
-/// Strictness mode for source at-least-once contracts.
-///
-/// This is a minimal, flow-wide toggle for how contract failures on
-/// *source* edges influence pipeline behaviour:
-/// - `Abort` (default): any failed source contract aborts the pipeline.
-/// - `Warn`: failures are logged and surfaced via contract events, but
-///   do not cause a pipeline abort. This is intended as a transitional
-///   mode until full contract strictness plumbing lands in 090d.
-///
-/// FLOWIP-010: build-resolved from `contracts.source_contract_strict_mode`
-/// and carried on `PipelineContext`; the registry rejects unknown tokens at
-/// startup (the old env coercion is gone).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum SourceContractStrictMode {
-    #[default]
-    Abort,
-    Warn,
-}
-
-impl SourceContractStrictMode {
-    /// Parse the registry-validated token (`abort` or `warn`).
-    pub(crate) fn from_token(token: &str) -> Self {
-        match token {
-            "warn" => SourceContractStrictMode::Warn,
-            _ => SourceContractStrictMode::Abort,
-        }
-    }
-}
-
-/// Status for a contract edge (upstream -> reader).
-#[derive(Clone, Debug, Default)]
-pub struct ContractEdgeStatus {
-    passed: bool,
-    reader_seq: Option<SeqNo>,
-    advertised_writer_seq: Option<SeqNo>,
-}
-
-impl ContractEdgeStatus {
-    pub(crate) fn passed(reader_seq: Option<SeqNo>, advertised_writer_seq: Option<SeqNo>) -> Self {
-        Self {
-            passed: true,
-            reader_seq,
-            advertised_writer_seq,
-        }
-    }
-
-    pub(crate) fn failed(
-        _reason: Option<ViolationCause>,
-        reader_seq: Option<SeqNo>,
-        advertised_writer_seq: Option<SeqNo>,
-    ) -> Self {
-        Self {
-            passed: false,
-            reader_seq,
-            advertised_writer_seq,
-        }
-    }
-
-    pub(crate) fn is_passed(&self) -> bool {
-        self.passed
-    }
-
-    pub fn reader_seq(&self) -> Option<SeqNo> {
-        self.reader_seq
-    }
-
-    pub fn advertised_writer_seq(&self) -> Option<SeqNo> {
-        self.advertised_writer_seq
     }
 }

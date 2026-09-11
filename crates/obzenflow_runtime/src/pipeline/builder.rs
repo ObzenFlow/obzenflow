@@ -8,9 +8,11 @@
 //! to the FSM architecture patterns, returning only a FlowHandle for control.
 
 use super::{
-    fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState, PipelineState},
+    fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState},
     handle::{FlowHandle, FlowHandleExtras},
+    metrics::prepare_metrics,
     supervisor::PipelineSupervisor,
+    PipelineState,
 };
 use crate::journal::RunSubstrateState;
 use crate::{
@@ -355,7 +357,7 @@ impl PipelineBuilder {
                 .flow_effective_config
                 .as_ref()
                 .map(|cfg| {
-                    crate::pipeline::supervisor::SourceContractStrictMode::from_token(
+                    super::config::SourceContractStrictMode::from_token(
                         cfg.source_contract_strict_mode(),
                     )
                 })
@@ -452,130 +454,6 @@ impl PipelineBuilder {
     }
 }
 
-pub(super) async fn prepare_metrics(
-    context: &PipelineContext,
-) -> Result<Option<crate::metrics::builder::PreparedMetricsAggregator>, BuilderError> {
-    use crate::metrics::{MetricsAggregatorBuilder, MetricsInputs};
-    let Some(exporter) = context.metrics_exporter.clone() else {
-        return Ok(None);
-    };
-    let inputs = MetricsInputs::new(
-        context.stage_data_journals.clone(),
-        context.stage_error_journals.clone(),
-    )
-    .with_backpressure_registry_opt(context.backpressure_registry.clone());
-    let metadata = context
-        .stage_supervisors
-        .iter()
-        .chain(context.source_supervisors.iter())
-        .filter_map(|(id, handle)| {
-            context
-                .topology
-                .stages()
-                .find(|stage| stage.id == id.to_topology_id())
-                .map(|stage| {
-                    (
-                        *id,
-                        obzenflow_core::metrics::StageMetadata {
-                            name: stage.name.clone(),
-                            stage_type: handle.stage_type(),
-                            reference_mode: None,
-                            flow_name: context.flow_name.clone(),
-                            flow_id: Some(context.flow_id),
-                        },
-                    )
-                })
-        })
-        .collect();
-    let builder = MetricsAggregatorBuilder::new(inputs, context.system_journal.clone(), exporter)
-        .with_pipeline_writer(context.system_id.into())
-        .with_stage_metadata(metadata)
-        .with_composite_boundaries(super::fsm::composite_boundaries_from_topology(
-            &context.topology,
-        ))
-        .with_export_interval(1);
-    builder.prepare().await.map(Some)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::feed_plan::{FactVisibility, FeedRole, LogicalFeed, PayloadTypeDescriptor};
-    use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, StageType, TypeHintInfo};
-
-    #[test]
-    fn expected_contract_keys_preserve_multiple_logical_feeds_for_stage_pair() {
-        let upstream = StageId::new();
-        let downstream = StageId::new();
-        let upstream_topology_id = upstream.to_topology_id();
-        let downstream_topology_id = downstream.to_topology_id();
-        let topology = Topology::new_unvalidated(
-            vec![
-                StageInfo::new(upstream_topology_id, "upstream", StageType::Transform),
-                StageInfo::new(downstream_topology_id, "downstream", StageType::Join),
-            ],
-            vec![DirectedEdge::new(
-                upstream_topology_id,
-                downstream_topology_id,
-                EdgeKind::Forward,
-            )],
-        )
-        .expect("topology");
-
-        let first_type = TypeHintInfo::exact("crate::FirstFact");
-        let second_type = TypeHintInfo::exact("crate::SecondFact");
-        let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
-        let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
-        let feed_plan = FeedPlan::new(
-            HashMap::new(),
-            vec![
-                LogicalFeed {
-                    key: first_key.clone(),
-                    selected_payload: PayloadTypeDescriptor::from_type_hint(
-                        first_type,
-                        FactVisibility::Routable,
-                    ),
-                },
-                LogicalFeed {
-                    key: second_key.clone(),
-                    selected_payload: PayloadTypeDescriptor::from_type_hint(
-                        second_type,
-                        FactVisibility::Routable,
-                    ),
-                },
-            ],
-        );
-
-        let keys = derive_expected_contract_keys(&topology, &feed_plan);
-
-        assert_eq!(keys.len(), 2);
-        assert!(keys.contains(&first_key));
-        assert!(keys.contains(&second_key));
-        assert!(!keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
-    }
-
-    #[test]
-    fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
-        let upstream = StageId::new();
-        let downstream = StageId::new();
-        let upstream_topology_id = upstream.to_topology_id();
-        let downstream_topology_id = downstream.to_topology_id();
-        let topology = Topology::new_unvalidated(
-            vec![
-                StageInfo::new(upstream_topology_id, "upstream", StageType::Transform),
-                StageInfo::new(downstream_topology_id, "downstream", StageType::Sink),
-            ],
-            vec![DirectedEdge::new(
-                upstream_topology_id,
-                downstream_topology_id,
-                EdgeKind::Forward,
-            )],
-        )
-        .expect("topology");
-
-        let keys = derive_expected_contract_keys(&topology, &FeedPlan::default());
-
-        assert_eq!(keys.len(), 1);
-        assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
-    }
-}
+#[path = "tests/builder.rs"]
+mod tests;

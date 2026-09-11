@@ -5,13 +5,17 @@
 //! Lifecycle policy. Journal envelopes are folded here, inside the canonical
 //! FSM transition, before it authorises effects through named actions.
 
-use super::fsm::{
-    self, FlowStopMode, PipelineAction as A, PipelineContext as C, PipelineControl,
-    PipelineDeadline, PipelineFsmEvent as E, PipelineFsmState as S, StopRequestOutcome,
+use super::context::{record_stage_completion, ContractEdgeStatus, StopRequestOutcome};
+use super::{
+    PipelineAction as A, PipelineContext as C, PipelineDeadline, PipelineFsmEvent as E,
+    PipelineFsmState as S,
 };
-use super::supervisor::{ContractEdgeStatus, SourceContractStrictMode};
-use super::termination::ExecutionOutcome;
 use crate::id_conversions::StageIdExt;
+use crate::pipeline::config::SourceContractStrictMode;
+use crate::pipeline::metrics::compute_flow_lifecycle_metrics;
+use crate::pipeline::resources::ProducerTail;
+use crate::pipeline::termination::ExecutionOutcome;
+use crate::pipeline::{FlowStopMode, PipelineControl};
 use futures::future::BoxFuture;
 use obzenflow_core::event::types::{DurationMs, ViolationCause};
 use obzenflow_core::event::{
@@ -300,7 +304,7 @@ pub(super) fn settled<'a>(state: &'a S, _: &'a E, ctx: &'a mut C) -> Decision<'a
                             .map(|start| start.elapsed().as_millis() as u64)
                             .unwrap_or(0),
                     );
-                    let metrics = fsm::compute_flow_lifecycle_metrics(ctx);
+                    let metrics = compute_flow_lifecycle_metrics(ctx);
                     let event =
                         match &outcome {
                             ExecutionOutcome::Completed => {
@@ -357,9 +361,8 @@ pub(super) fn journal<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decisio
     };
     let row = &envelope.event;
     ctx.last_system_event_id_seen = Some(row.id);
-    if matches!(ctx.resources.producer_tail, super::resources::ProducerTail::Through(id) if id == row.id)
-    {
-        ctx.resources.producer_tail = super::resources::ProducerTail::Reached;
+    if matches!(ctx.resources.producer_tail, ProducerTail::Through(id) if id == row.id) {
+        ctx.resources.producer_tail = ProducerTail::Reached;
     }
     let mut next = state.clone();
     let mut actions = Vec::new();
@@ -380,7 +383,7 @@ pub(super) fn journal<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decisio
                             ctx.stage_lifecycle_metrics
                                 .insert(*stage_id, metrics.clone());
                         }
-                        fsm::record_stage_completion(
+                        record_stage_completion(
                             &mut ctx.completed_stages,
                             *stage_id,
                             ctx.topology.num_stages(),

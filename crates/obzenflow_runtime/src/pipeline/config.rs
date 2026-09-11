@@ -7,6 +7,7 @@
 use crate::stages::common::handlers::source::traits::{FiniteSourceHandler, InfiniteSourceHandler};
 use crate::stages::common::handlers::{SinkHandler, TransformHandler};
 use obzenflow_core::{SccId, StageId};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -76,4 +77,60 @@ pub struct StageConfig {
 pub struct ObserverConfig {
     pub name: String,
     // TODO: Replace with appropriate observer handler trait when designed
+}
+
+/// Structural middleware configuration for a stage (FLOWIP-059).
+///
+/// Contains both the ordered list of middleware names and their static configuration
+/// snapshots for the topology observability API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiddlewareStackConfig {
+    /// Ordered list of middleware names in the stack
+    pub stack: Vec<String>,
+    /// Circuit breaker static config (if present)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker: Option<serde_json::Value>,
+    /// Rate limiter static config (if present)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limiter: Option<serde_json::Value>,
+}
+
+impl MiddlewareStackConfig {
+    /// Create a new middleware stack config with just names (no detailed config)
+    pub fn names_only(stack: Vec<String>) -> Self {
+        Self {
+            stack,
+            circuit_breaker: None,
+            rate_limiter: None,
+        }
+    }
+}
+
+/// Strictness mode for source at-least-once contracts.
+///
+/// This is a minimal, flow-wide toggle for how contract failures on
+/// *source* edges influence pipeline behaviour:
+/// - `Abort` (default): any failed source contract aborts the pipeline.
+/// - `Warn`: failures are logged and surfaced via contract events, but
+///   do not cause a pipeline abort. This is intended as a transitional
+///   mode until full contract strictness plumbing lands in 090d.
+///
+/// FLOWIP-010: build-resolved from `contracts.source_contract_strict_mode`
+/// and carried on `PipelineContext`; the registry rejects unknown tokens at
+/// startup (the old env coercion is gone).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SourceContractStrictMode {
+    #[default]
+    Abort,
+    Warn,
+}
+
+impl SourceContractStrictMode {
+    /// Parse the registry-validated token (`abort` or `warn`).
+    pub(crate) fn from_token(token: &str) -> Self {
+        match token {
+            "warn" => SourceContractStrictMode::Warn,
+            _ => SourceContractStrictMode::Abort,
+        }
+    }
 }
