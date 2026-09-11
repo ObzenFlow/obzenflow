@@ -537,7 +537,7 @@ pub(in crate::pipeline) async fn stop_and_join(
     task: JoinHandle<Result<(), BoxError>>,
 ) {
     sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+        .send(PipelineFsmEvent::from(PipelineControl::Stop {
             mode: FlowStopMode::Cancel,
         }))
         .await

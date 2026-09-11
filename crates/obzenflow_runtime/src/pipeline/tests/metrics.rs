@@ -5,7 +5,7 @@
 //! Pipeline metrics preparation, topology metadata and child lifetime coordination.
 
 use crate::id_conversions::StageIdExt;
-use crate::pipeline::fsm::{PipelineAction, PipelineDeadline, PipelineFsmEvent, PipelineFsmState};
+use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::metrics::composite_boundaries_from_topology;
 use crate::pipeline::tests::support::{
     make_context, make_fsm_context, owned_test_stage, source_sink_topology_with_source,
@@ -298,9 +298,7 @@ async fn original_terminal_acknowledgement_expires_metrics_before_delayed_journa
             .dispatch_state(&PipelineFsmState::PublishingTerminal, &mut ctx)
             .await
             .unwrap(),
-        crate::supervised_base::EventLoopDirective::Transition(PipelineFsmEvent::Deadline(
-            PipelineDeadline::Metrics
-        ))
+        crate::supervised_base::EventLoopDirective::Transition(PipelineFsmEvent::MetricsExpired)
     ));
     assert_eq!(ctx.resources.terminal_ack.get(), Some(&ack));
     ctx.resources.metrics.abort_and_join().await.unwrap();

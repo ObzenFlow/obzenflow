@@ -13,7 +13,7 @@ use crate::pipeline::tests::support::{
     source_sink_topology_with_source, spawn_supervisor_loop, stop_and_join, test_context,
     test_supervisor, wait_for_state, MemoryJournal, TestPipelineStageHandle,
 };
-use crate::pipeline::{PipelineControl, PipelineState};
+use crate::pipeline::PipelineState;
 use crate::supervised_base::ChannelBuilder;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
@@ -238,7 +238,7 @@ async fn running_state_requires_committed_source_running_after_start() {
     );
 
     sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Start))
+        .send(PipelineFsmEvent::Start)
         .await
         .expect("Run should send");
     tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
@@ -289,7 +289,7 @@ async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run() {
     let (sender, receiver, watcher) =
         ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Materialized);
     sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Start))
+        .send(PipelineFsmEvent::Start)
         .await
         .expect("early Run should queue");
 

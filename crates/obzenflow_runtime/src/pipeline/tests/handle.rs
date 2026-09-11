@@ -96,7 +96,7 @@ fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
     let published = extras.published_outcome.clone();
     let task = tokio::spawn(async move {
         match event_receiver.recv().await {
-            Some(PipelineFsmEvent::Control(PipelineControl::Start)) => {
+            Some(PipelineFsmEvent::Start) => {
                 use super::super::termination::{
                     ExecutionFailure, ExecutionOutcome, PublishedTermination,
                 };
@@ -178,10 +178,7 @@ async fn start_if_ready_now_dispatches_run_in_ready_for_run() {
         }
     );
     assert!(
-        matches!(
-            event_receiver.try_recv(),
-            Ok(PipelineFsmEvent::Control(PipelineControl::Start))
-        ),
+        matches!(event_receiver.try_recv(), Ok(PipelineFsmEvent::Start)),
         "ReadyForRun admission should dispatch Run"
     );
 }

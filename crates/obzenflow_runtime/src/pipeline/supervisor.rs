@@ -4,15 +4,13 @@
 
 //! Responsive inputs for the established self-supervised runner.
 
-use super::fsm::{
-    PipelineAction, PipelineContext, PipelineDeadline, PipelineFsmEvent, PipelineFsmState,
-};
+use super::fsm::{PipelineAction, PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use super::resources::{OperationalFailure, ProducerTail};
-use super::{FlowStopMode, PipelineControl, PipelineState};
+use super::PipelineState;
 use crate::messaging::{PollResult, SubscriptionPoller, SystemSubscription};
 use crate::stages::common::stage_handle::StageError;
 use crate::supervised_base::{
-    EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher, SupervisorHandle,
+    EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher,
 };
 use futures::{future::BoxFuture, FutureExt, Stream};
 use obzenflow_core::event::{SystemEvent, WriterId};
@@ -93,7 +91,7 @@ impl PipelineSupervisor {
         if let Some(event) = self.take_operational_failure(ctx) {
             return Poll::Ready(EventLoopDirective::Transition(event));
         }
-        if Self::settlement_satisfied(state, ctx) {
+        if state.settlement_satisfied(ctx) {
             return Poll::Ready(EventLoopDirective::Transition(
                 PipelineFsmEvent::PhysicalSettlementSatisfied,
             ));
@@ -107,55 +105,14 @@ impl PipelineSupervisor {
         cx: &mut Context<'_>,
         mut deadline_wait: Pin<&mut tokio::time::Sleep>,
     ) -> Poll<PipelineFsmEvent> {
-        if let Some((at, deadline)) = Self::next_deadline(state, ctx) {
+        if let Some((at, deadline)) = state.next_deadline(ctx) {
             if Instant::now() >= at {
-                return Poll::Ready(PipelineFsmEvent::Deadline(deadline));
+                return Poll::Ready(deadline.into());
             }
             deadline_wait.as_mut().reset(at.into());
             let _ = deadline_wait.as_mut().poll(cx);
         }
         Poll::Pending
-    }
-
-    fn next_deadline(
-        state: &PipelineFsmState,
-        ctx: &PipelineContext,
-    ) -> Option<(Instant, PipelineDeadline)> {
-        if matches!(state, PipelineFsmState::PublishingFinalMarker) {
-            // Execution and metrics have joined. An old stop deadline cannot
-            // authorise another control publication behind the final marker.
-            return None;
-        }
-        let graceful = ctx
-            .stop_intent
-            .deadline
-            .filter(|_| matches!(ctx.stop_intent.mode, Some(FlowStopMode::Graceful { .. })))
-            .map(|at| (at, PipelineDeadline::GracefulStop));
-        let cleanup = ctx
-            .progress
-            .cleanup_deadline
-            .filter(|_| !ctx.progress.stages_cancelled)
-            .map(|at| (at, PipelineDeadline::StageCleanup));
-        let metrics = ctx
-            .resources
-            .terminal_ack
-            .get()
-            .filter(|_| {
-                !ctx.progress.metrics_cancelled
-                    && !ctx.resources.metrics_joined
-                    && ctx.resources.metrics.handle().is_some()
-            })
-            .map(|at| {
-                (
-                    *at + Duration::from_millis(ctx.metrics_drain_timeout_ms),
-                    PipelineDeadline::Metrics,
-                )
-            });
-        graceful
-            .into_iter()
-            .chain(cleanup)
-            .chain(metrics)
-            .min_by_key(|(at, _)| *at)
     }
 
     fn take_operational_failure(&mut self, ctx: &PipelineContext) -> Option<PipelineFsmEvent> {
@@ -170,37 +127,6 @@ impl PipelineSupervisor {
         Some(PipelineFsmEvent::OperationalFailure {
             message: error.to_string(),
         })
-    }
-
-    fn settlement_satisfied(state: &PipelineFsmState, ctx: &mut PipelineContext) -> bool {
-        use PipelineFsmState as S;
-        match state {
-            S::Materializing => ctx.resources.delivery.is_empty(),
-            S::SettlingStages => {
-                ctx.resources.stages_joined && ctx.resources.publication_settlement.is_none()
-            }
-            S::CatchingUpProducers => {
-                matches!(ctx.resources.producer_tail, ProducerTail::Reached)
-                    || ctx.progress.journal_failed
-            }
-            S::FinalisingMetrics => {
-                ctx.resources.metrics_joined
-                    && ctx.resources.publication_settlement.is_none()
-                    && (ctx.progress.metrics_drained
-                        || ctx.progress.metrics_cancelled
-                        || ctx.resources.metrics.handle().is_none()
-                        || ctx.resources.metrics.handle().is_some_and(|handle| {
-                            matches!(
-                                handle.current_state(),
-                                crate::metrics::MetricsAggregatorState::Failed { .. }
-                            )
-                        }))
-            }
-            S::PublishingFinalMarker => {
-                ctx.progress.final_marker_seen && ctx.resources.publication_settlement.is_none()
-            }
-            _ => false,
-        }
     }
 
     fn poll_inputs_round_robin(
@@ -322,7 +248,7 @@ impl PipelineSupervisor {
         let event = match state {
             PipelineFsmState::Created => PipelineFsmEvent::Bootstrap,
             PipelineFsmState::ReadyForRun if !crate::bootstrap::startup_mode_manual() => {
-                PipelineFsmEvent::Control(PipelineControl::Start)
+                PipelineFsmEvent::Start
             }
             _ => return Poll::Pending,
         };

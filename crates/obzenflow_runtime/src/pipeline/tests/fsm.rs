@@ -276,7 +276,7 @@ async fn repeated_graceful_controls_have_no_actions_and_cancel_folds_once() {
         context.flow_start_time = Some(std::time::Instant::now());
         let mut fsm = build_pipeline_fsm_with_initial(PipelineFsmState::Running);
         let event = |seconds| {
-            PipelineFsmEvent::Control(PipelineControl::Stop {
+            PipelineFsmEvent::from(PipelineControl::Stop {
                 mode: FlowStopMode::Graceful {
                     timeout: Duration::from_secs(seconds),
                 },
@@ -296,7 +296,7 @@ async fn repeated_graceful_controls_have_no_actions_and_cancel_folds_once() {
                 .is_empty());
             assert_eq!(context.stop_intent.deadline, deadline);
         }
-        let cancel = PipelineFsmEvent::Control(PipelineControl::Stop {
+        let cancel = PipelineFsmEvent::from(PipelineControl::Stop {
             mode: FlowStopMode::Cancel,
         });
         let admitted = fsm.handle(cancel.clone(), &mut context).await.unwrap();
@@ -321,7 +321,7 @@ async fn repeated_abort_controls_preserve_the_first_failure_without_new_work() {
     let mut machine = build_pipeline_fsm_with_initial(PipelineFsmState::Running);
     let first = machine
         .handle(
-            PipelineFsmEvent::Control(PipelineControl::Abort {
+            PipelineFsmEvent::from(PipelineControl::Abort {
                 reason: "first failure".into(),
             }),
             &mut ctx,
@@ -332,7 +332,7 @@ async fn repeated_abort_controls_preserve_the_first_failure_without_new_work() {
     for _ in 0..128 {
         assert!(machine
             .handle(
-                PipelineFsmEvent::Control(PipelineControl::Abort {
+                PipelineFsmEvent::from(PipelineControl::Abort {
                     reason: "later request".into(),
                 }),
                 &mut ctx
@@ -355,8 +355,7 @@ async fn readiness_and_start_consume_committed_pipeline_facts() {
     assert!(fsm
         .handle(PipelineFsmEvent::PhysicalSettlementSatisfied, &mut ctx)
         .await
-        .unwrap()
-        .is_empty());
+        .is_err());
     assert!(matches!(
         fsm.state(),
         PipelineFsmState::AwaitingStageReadiness
@@ -368,10 +367,7 @@ async fn readiness_and_start_consume_committed_pipeline_facts() {
         .await
         .unwrap();
     assert!(matches!(fsm.state(), PipelineFsmState::ReadyForRun));
-    let actions = fsm
-        .handle(PipelineFsmEvent::Control(PipelineControl::Start), &mut ctx)
-        .await
-        .unwrap();
+    let actions = fsm.handle(PipelineFsmEvent::Start, &mut ctx).await.unwrap();
     assert!(matches!(fsm.state(), PipelineFsmState::StartingSources));
     assert!(actions
         .iter()
@@ -405,7 +401,7 @@ async fn pre_ready_and_duplicate_start_controls_do_not_authorise_sources() {
         let mut ctx = make_fsm_context();
         let mut fsm = build_pipeline_fsm_with_initial(initial.clone());
         assert!(fsm
-            .handle(PipelineFsmEvent::Control(PipelineControl::Start), &mut ctx)
+            .handle(PipelineFsmEvent::Start, &mut ctx)
             .await
             .unwrap()
             .is_empty());
@@ -423,7 +419,7 @@ async fn readiness_failure_and_cancel_stay_pending_until_settlement() {
                 message: "readiness fault".into(),
             }
         } else {
-            PipelineFsmEvent::Control(PipelineControl::Stop {
+            PipelineFsmEvent::from(PipelineControl::Stop {
                 mode: FlowStopMode::Cancel,
             })
         };

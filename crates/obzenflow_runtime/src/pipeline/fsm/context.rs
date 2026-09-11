@@ -5,6 +5,7 @@
 //! Pipeline lifecycle context, progress, stop intent and contract tracking.
 
 use crate::feed_plan::FeedKey;
+use crate::id_conversions::StageIdExt;
 use crate::messaging::system_subscription::SystemSubscription;
 use crate::pipeline::config::SourceContractStrictMode;
 use crate::pipeline::resources::PipelineResources;
@@ -216,6 +217,13 @@ impl PipelineContext {
         upstream: StageId,
         reader: StageId,
     ) -> Vec<FeedKey> {
+        if ![upstream, reader].into_iter().all(|id| {
+            self.topology
+                .stages()
+                .any(|stage| stage.id == id.to_topology_id())
+        }) {
+            return vec![];
+        }
         let mut keys: Vec<FeedKey> = self
             .expected_contract_pairs
             .iter()
@@ -223,7 +231,11 @@ impl PipelineContext {
             .cloned()
             .collect();
 
-        if keys.is_empty() {
+        if keys.is_empty()
+            && self.topology.edges().iter().any(|edge| {
+                edge.from == upstream.to_topology_id() && edge.to == reader.to_topology_id()
+            })
+        {
             keys.push(FeedKey::legacy_stage_pair(upstream, reader));
         }
 
@@ -243,32 +255,20 @@ impl PipelineContext {
         selected_event_type: Option<&str>,
         feed_role: Option<&str>,
     ) -> Vec<FeedKey> {
-        if let Some(selected_event_type) = selected_event_type {
-            let mut keys: Vec<FeedKey> = self
-                .expected_contract_pairs
-                .iter()
-                .filter(|key| {
-                    key.matches_stage_pair(upstream, reader)
-                        && key.selected_payload_key == selected_event_type
-                        && feed_role
-                            .map(|role| key.role.as_str() == role)
-                            .unwrap_or(true)
-                })
-                .cloned()
-                .collect();
-
-            if !keys.is_empty() {
-                keys.sort_by(|left, right| {
-                    left.role
-                        .as_str()
-                        .cmp(right.role.as_str())
-                        .then_with(|| left.selected_payload_key.cmp(&right.selected_payload_key))
-                });
-                return keys;
-            }
-        }
-
+        let untyped_pair = FeedKey::legacy_stage_pair(upstream, reader);
         self.contract_keys_for_stage_pair(upstream, reader)
+            .into_iter()
+            .filter(|key| {
+                // An unspecified topology edge has no selected-payload
+                // contract. A declared logical feed must match exactly.
+                selected_event_type
+                    .map(|selected| key == &untyped_pair || key.selected_payload_key == selected)
+                    .unwrap_or(true)
+                    && feed_role
+                        .map(|role| key.role.as_str() == role)
+                        .unwrap_or(true)
+            })
+            .collect()
     }
 }
 

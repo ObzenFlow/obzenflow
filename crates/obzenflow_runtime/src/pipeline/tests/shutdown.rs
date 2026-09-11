@@ -23,7 +23,7 @@ use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventFactory};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, SystemId};
+use obzenflow_core::SystemId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -173,16 +173,13 @@ async fn abort_publication_rejection_cannot_skip_siblings_or_resume_commands() {
     assert!(
         matches!(first, EventLoopDirective::Transition(PipelineFsmEvent::OperationalFailure { message }) if message == original)
     );
-    sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Start))
-        .await
-        .unwrap();
+    sender.send(PipelineFsmEvent::Start).await.unwrap();
     assert!(matches!(
         supervisor
             .dispatch_state(&state, &mut context)
             .await
             .unwrap(),
-        EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+        EventLoopDirective::Transition(PipelineFsmEvent::Start)
     ));
     assert_eq!(
         context.resources.failure.get().unwrap().to_string(),
@@ -204,11 +201,15 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
     let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
     journal.terminal_append = Some(gate.clone());
     let journal = Arc::new(journal);
-    let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+    let (topology, upstream, stage) = source_sink_topology_with_source();
+    let mut context = test_context(topology, system_id, journal.clone(), None);
+    context.stage_supervisors.insert(
+        upstream,
+        TestPipelineStageHandle::boxed(upstream, "completed upstream", StageType::Transform),
+    );
     context.flow_start_time = Some(std::time::Instant::now());
     let probe = ShutdownProbe::default();
     probe.completed.store(true, Ordering::Relaxed);
-    let stage = StageId::new();
     context.stage_supervisors.insert(
         stage,
         TestPipelineStageHandle::with_stalled_completion(
@@ -221,14 +222,12 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
     // The fixture completes ordinary cleanup before the terminal write. Its
     // abort probe then observes whether Runtime services the new deadline.
     let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
-    journal
-        .append(
-            obzenflow_core::event::SystemEventFactory::new(system_id)
-                .pipeline_all_stages_completed(),
-            None,
-        )
-        .await
-        .unwrap();
+    for id in [upstream, stage] {
+        journal
+            .append(SystemEvent::stage_completed(id), None)
+            .await
+            .unwrap();
+    }
     let task = spawn_supervisor_loop(
         PipelineState::Draining,
         test_supervisor(system_id, journal.clone()),
@@ -240,7 +239,7 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
         .await
         .unwrap();
     sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+        .send(PipelineFsmEvent::from(PipelineControl::Stop {
             mode: FlowStopMode::Graceful {
                 timeout: std::time::Duration::ZERO,
             },
@@ -308,7 +307,20 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
             let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
             journal.terminal_append = Some(gate.clone());
             let journal = Arc::new(journal);
-            let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
+            let (topology, upstream, stage) = source_sink_topology_with_source();
+            let mut context = test_context(topology, system_id, journal.clone(), None);
+            context.stage_supervisors.insert(
+                upstream,
+                TestPipelineStageHandle::boxed(
+                    upstream,
+                    "completed upstream",
+                    StageType::Transform,
+                ),
+            );
+            context.stage_supervisors.insert(
+                stage,
+                TestPipelineStageHandle::boxed(stage, "completed sink", StageType::Sink),
+            );
             context.flow_start_time = Some(std::time::Instant::now());
             if terminal == "cancelled" {
                 context
@@ -324,15 +336,13 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
                     message: "test_failure".into(),
                 }
             } else {
-                journal
-                    .append(
-                        obzenflow_core::event::SystemEventFactory::new(system_id)
-                            .pipeline_all_stages_completed(),
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                PipelineFsmEvent::Control(PipelineControl::Start)
+                for id in [upstream, stage] {
+                    journal
+                        .append(SystemEvent::stage_completed(id), None)
+                        .await
+                        .unwrap();
+                }
+                PipelineFsmEvent::Start
             };
             sender.send(event).await.unwrap();
             let task = spawn_supervisor_loop(
@@ -502,7 +512,7 @@ async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
         }
         let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Created);
         sender
-            .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+            .send(PipelineFsmEvent::from(PipelineControl::Stop {
                 mode: FlowStopMode::Cancel,
             }))
             .await
@@ -572,7 +582,7 @@ async fn cancellation_catches_up_late_producer_failure_before_selecting_terminal
     let published = context.termination.published.clone();
     let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
     sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+        .send(PipelineFsmEvent::from(PipelineControl::Stop {
             mode: FlowStopMode::Cancel,
         }))
         .await
@@ -638,15 +648,18 @@ async fn final_marker_coalesces_late_controls_without_restarting_finalisation() 
             reason: "too late to change execution".into(),
         },
     ] {
-        sender
-            .send(PipelineFsmEvent::Control(control))
-            .await
-            .unwrap();
+        sender.send(PipelineFsmEvent::from(control)).await.unwrap();
         let directive = supervisor
             .dispatch_state(machine.state(), &mut ctx)
             .await
             .unwrap();
-        let EventLoopDirective::Transition(event @ PipelineFsmEvent::Control(_)) = directive else {
+        let EventLoopDirective::Transition(
+            event @ (PipelineFsmEvent::Start
+            | PipelineFsmEvent::GracefulStop { .. }
+            | PipelineFsmEvent::Cancel
+            | PipelineFsmEvent::Abort { .. }),
+        ) = directive
+        else {
             panic!("a settled execution's old stop deadline must not pre-empt its final append");
         };
         assert!(machine.handle(event, &mut ctx).await.unwrap().is_empty());

@@ -7,6 +7,7 @@
 //! Builder and handle unit tests are loaded by their owning modules from this
 //! directory to retain access to private helpers without exposing production APIs.
 
+mod admission;
 mod fsm;
 mod metrics;
 mod shutdown;

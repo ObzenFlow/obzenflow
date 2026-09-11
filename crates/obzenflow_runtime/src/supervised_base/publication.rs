@@ -4,6 +4,13 @@
 
 //! Execution-owned publication lifetime. This scope retains work, never
 //! lifecycle facts or permission to invoke a handler.
+//!
+//! SupervisorTaskBuilder installs the owner around each shared runner. New
+//! tasks must explicitly enter a captured scope or use `commit_in` with that
+//! owner; Tokio does not inherit the task-local binding when spawning a task.
+//! With neither a bound nor an explicit owner, standalone callers execute
+//! inline and cancellation follows the caller's future. Retained publication
+//! guarantees require an owner.
 
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
@@ -495,19 +502,23 @@ pub(crate) fn commit<T: Send + 'static>(
     .boxed()
 }
 
+/// The captured owner governs admission, writer order and failure retention.
+/// Only a matching task-local owner can supply an already-accepted context.
 pub(crate) fn commit_in<T: Send + 'static>(
     scope: Option<Arc<PublicationScope>>,
     operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
 ) -> BoxFuture<'static, Result<T, BoxError>> {
     let operation = operation.boxed();
     async move {
-        if CURRENT.try_with(|_| ()).is_ok() {
-            commit(operation).await
-        } else if let Some(scope) = scope {
-            scope.accept(operation).await
-        } else {
-            operation.await
+        if let Some(scope) = scope {
+            let same_owner = CURRENT
+                .try_with(|context| Arc::ptr_eq(&context.scope, &scope))
+                .unwrap_or(false);
+            if !same_owner {
+                return scope.accept(operation).await;
+            }
         }
+        commit(operation).await
     }
     .boxed()
 }
@@ -533,6 +544,136 @@ pub(crate) fn append<T: JournalEvent + 'static>(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn captured_owner_keeps_writer_order_and_failure_under_another_accepted_scope() {
+        let owner = PublicationScope::new();
+        let ambient = PublicationScope::new();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (release, gate) = oneshot::channel();
+        let first_order = order.clone();
+        let first = owner
+            .enqueue(async move {
+                gate.await?;
+                first_order.lock().unwrap().push("earlier");
+                Ok(())
+            })
+            .unwrap();
+
+        let captured = owner.clone();
+        let captured_order = order.clone();
+        ambient
+            .accept(async move {
+                let mut receipt = commit_in(Some(captured), async move {
+                    captured_order.lock().unwrap().push("captured");
+                    Err::<(), BoxError>(Box::new(JournalError::CommitIndeterminate {
+                        source: std::io::Error::other("lost acknowledgement").into(),
+                    }))
+                });
+                // The captured publication must wait for its own writer tail,
+                // even though the caller is already accepted by another owner.
+                assert!(futures::poll!(&mut receipt).is_pending());
+                release.send(()).unwrap();
+                assert!(is_indeterminate(receipt.await.unwrap_err().as_ref()));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        first.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), ["earlier", "captured"]);
+        ambient.join().await.unwrap();
+        assert!(is_indeterminate(&owner.join().await.unwrap_err()));
+    }
+
+    #[tokio::test]
+    async fn captured_owner_rejects_closed_admission_under_another_scope() {
+        let owner = PublicationScope::new();
+        let ambient = PublicationScope::new();
+        let executed = Arc::new(AtomicUsize::new(0));
+        owner.close();
+
+        let count = executed.clone();
+        let error = ambient
+            .enter(commit_in(Some(owner.clone()), async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(is_admission_closed(error.as_ref()));
+        assert_eq!(executed.load(Ordering::Relaxed), 0);
+        owner.join().await.unwrap();
+        ambient.join().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn captured_owner_retains_nested_commits_after_unscoped_child_is_cancelled() {
+        let owner = PublicationScope::new();
+        let accounted = Arc::new(AtomicUsize::new(0));
+        let (started, accepted) = oneshot::channel();
+        let (release, gate) = oneshot::channel();
+        let count = accounted.clone();
+        let caller = owner.enter_sync(move || {
+            let captured = PublicationScope::current().unwrap();
+            tokio::spawn(async move {
+                // Tokio does not inherit the parent's task-local binding.
+                assert!(PublicationScope::current().is_none());
+                let nested_owner = captured.clone();
+                commit_in(Some(captured), async move {
+                    started.send(()).unwrap();
+                    gate.await?;
+                    let nested_count = count.clone();
+                    commit(async move {
+                        nested_count.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    })
+                    .await?;
+                    // Both nested entry points must finish within the
+                    // accepted publication after admission has closed.
+                    commit_in(Some(nested_owner), async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        Err::<(), BoxError>(Box::new(JournalError::CommitIndeterminate {
+                            source: std::io::Error::other("lost acknowledgement").into(),
+                        }))
+                    })
+                    .await
+                })
+                .await
+            })
+        });
+
+        accepted.await.unwrap();
+        owner.close();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        let mut settlement = Box::pin(owner.join());
+        assert!(futures::poll!(&mut settlement).is_pending());
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), settlement)
+            .await
+            .expect("nested commits must not queue behind their own publication")
+            .unwrap_err();
+        assert!(is_indeterminate(&error));
+        assert_eq!(accounted.load(Ordering::Relaxed), 2);
+        assert!(PublicationScope::current().is_none());
+    }
+
+    #[tokio::test]
+    async fn unscoped_standalone_publication_remains_caller_owned() {
+        assert!(PublicationScope::current().is_none());
+        assert_eq!(commit_in(None, async { Ok(7) }).await.unwrap(), 7);
+
+        let (release, gate) = oneshot::channel::<()>();
+        let mut publication = commit(async move {
+            gate.await?;
+            Ok(())
+        });
+        assert!(futures::poll!(&mut publication).is_pending());
+        drop(publication);
+        assert!(release.send(()).is_err());
+    }
 
     #[tokio::test]
     async fn saturated_writer_reserves_two_controls_in_the_same_order() {

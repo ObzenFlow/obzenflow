@@ -8,7 +8,7 @@ use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
 use crate::messaging::SystemSubscription;
-use crate::pipeline::fsm::{PipelineAction, PipelineDeadline, PipelineFsmEvent, PipelineFsmState};
+use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::tests::support::{
@@ -95,7 +95,7 @@ async fn graceful_deadline_bounds_a_stalled_source_control_send() {
         watcher,
     );
     sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+        .send(PipelineFsmEvent::from(PipelineControl::Stop {
             mode: FlowStopMode::Graceful {
                 timeout: std::time::Duration::from_millis(20),
             },
@@ -155,10 +155,7 @@ async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins() {
         .unwrap();
     let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
     for _ in 0..32 {
-        sender
-            .send(PipelineFsmEvent::Control(PipelineControl::Start))
-            .await
-            .unwrap();
+        sender.send(PipelineFsmEvent::Start).await.unwrap();
     }
     let mut supervisor =
         PipelineSupervisor::new(system_id, receiver, watcher, ctx.resources.failure.clone());
@@ -172,7 +169,7 @@ async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins() {
                 .dispatch_state(&PipelineFsmState::Running, &mut ctx)
                 .await
                 .unwrap(),
-            EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+            EventLoopDirective::Transition(PipelineFsmEvent::Start)
         ) {
             controls_observed += 1;
         }
@@ -205,7 +202,7 @@ async fn queued_controls_cannot_starve_bootstrap_or_automatic_start() {
         // distinguish queued controls from the automatically generated Start.
         for _ in 0..2 {
             sender
-                .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+                .send(PipelineFsmEvent::from(PipelineControl::Stop {
                     mode: FlowStopMode::Cancel,
                 }))
                 .await
@@ -219,7 +216,7 @@ async fn queued_controls_cannot_starve_bootstrap_or_automatic_start() {
         );
         assert!(matches!(
             supervisor.dispatch_state(&state, &mut ctx).await.unwrap(),
-            EventLoopDirective::Transition(PipelineFsmEvent::Control(PipelineControl::Stop { .. }))
+            EventLoopDirective::Transition(PipelineFsmEvent::Cancel)
         ));
         let directive = supervisor.dispatch_state(&state, &mut ctx).await.unwrap();
         assert!(
@@ -230,16 +227,14 @@ async fn queued_controls_cannot_starve_bootstrap_or_automatic_start() {
                     EventLoopDirective::Transition(PipelineFsmEvent::Bootstrap)
                 ) | (
                     PipelineFsmState::ReadyForRun,
-                    EventLoopDirective::Transition(PipelineFsmEvent::Control(
-                        PipelineControl::Start
-                    ))
+                    EventLoopDirective::Transition(PipelineFsmEvent::Start)
                 )
             ),
             "startup in {state:?} must get a turn while controls are still queued"
         );
         assert!(matches!(
             supervisor.dispatch_state(&state, &mut ctx).await.unwrap(),
-            EventLoopDirective::Transition(PipelineFsmEvent::Control(PipelineControl::Stop { .. }))
+            EventLoopDirective::Transition(PipelineFsmEvent::Cancel)
         ));
     }
 }
@@ -311,16 +306,13 @@ async fn completed_action_failure_gateway_does_not_report_the_original_error_aga
         .after_transition(&PipelineFsmState::SettlingStages, &ctx)
         .await
         .unwrap();
-    sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Start))
-        .await
-        .unwrap();
+    sender.send(PipelineFsmEvent::Start).await.unwrap();
     assert!(matches!(
         supervisor
             .dispatch_state(&PipelineFsmState::SettlingStages, &mut ctx)
             .await
             .unwrap(),
-        EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+        EventLoopDirective::Transition(PipelineFsmEvent::Start)
     ));
     assert_eq!(
         ctx.resources.failure.get().unwrap().to_string(),
@@ -369,19 +361,13 @@ async fn pending_journal_read_survives_controls_and_gets_bounded_service() {
     })
     .await
     .unwrap();
-    sender
-        .send(PipelineFsmEvent::Control(PipelineControl::Start))
-        .await
-        .unwrap();
+    sender.send(PipelineFsmEvent::Start).await.unwrap();
     assert!(matches!(
         first.await.unwrap(),
-        EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+        EventLoopDirective::Transition(PipelineFsmEvent::Start)
     ));
     for _ in 0..32 {
-        sender
-            .send(PipelineFsmEvent::Control(PipelineControl::Start))
-            .await
-            .unwrap();
+        sender.send(PipelineFsmEvent::Start).await.unwrap();
     }
     for _ in 0..8 {
         assert!(matches!(
@@ -389,7 +375,7 @@ async fn pending_journal_read_survives_controls_and_gets_bounded_service() {
                 .dispatch_state(&PipelineFsmState::Running, &mut context)
                 .await
                 .unwrap(),
-            EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+            EventLoopDirective::Transition(PipelineFsmEvent::Start)
         ));
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -428,10 +414,7 @@ async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
         .with_event_buffer(32)
         .build(PipelineState::Draining);
     for _ in 0..32 {
-        sender
-            .send(PipelineFsmEvent::Control(PipelineControl::Start))
-            .await
-            .unwrap();
+        sender.send(PipelineFsmEvent::Start).await.unwrap();
     }
     let mut supervisor = PipelineSupervisor::new(
         context.system_id,
@@ -445,8 +428,8 @@ async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
         .unwrap();
     assert!(matches!(
         directive,
-        crate::supervised_base::EventLoopDirective::Transition(PipelineFsmEvent::Deadline(
-            PipelineDeadline::GracefulStop
-        ))
+        crate::supervised_base::EventLoopDirective::Transition(
+            PipelineFsmEvent::GracefulStopExpired
+        )
     ));
 }

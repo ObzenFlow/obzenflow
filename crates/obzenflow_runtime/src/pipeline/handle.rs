@@ -279,7 +279,7 @@ impl FlowHandle {
         );
         match current_state {
             PipelineState::ReadyForRun => {
-                tracing::debug!("FlowHandle::start() - Sending PipelineFsmEvent::Control(PipelineControl::Start) to start flow");
+                tracing::debug!("FlowHandle::start() - Sending PipelineFsmEvent::Start to start flow");
                 self.send_control(PipelineControl::Start).await
             }
             PipelineState::Running => {
@@ -433,7 +433,7 @@ impl FlowHandle {
     /// the canonical FSM and its committed journal facts.
     pub async fn send_control(&self, control: PipelineControl) -> Result<(), FlowError> {
         self.handle
-            .send_event(PipelineFsmEvent::Control(control))
+            .send_event(PipelineFsmEvent::from(control))
             .await
             .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))
     }

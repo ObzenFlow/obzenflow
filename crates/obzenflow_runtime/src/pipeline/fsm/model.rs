@@ -5,7 +5,7 @@
 //! Private execution phases, input events, deadlines and their public projection.
 
 use super::PipelineContext;
-use crate::pipeline::{PipelineControl, PipelineState};
+use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_fsm::{EventVariant, StateVariant};
 
@@ -39,9 +39,14 @@ pub(crate) enum PipelineDeadline {
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineFsmEvent {
     Bootstrap,
-    Control(PipelineControl),
+    Start,
+    GracefulStop { timeout: std::time::Duration },
+    Cancel,
+    Abort { reason: String },
     Journal(Box<obzenflow_core::EventEnvelope<SystemEvent>>),
-    Deadline(PipelineDeadline),
+    GracefulStopExpired,
+    StageCleanupExpired,
+    MetricsExpired,
     PhysicalSettlementSatisfied,
     OperationalFailure { message: String },
 }
@@ -50,11 +55,41 @@ impl EventVariant for PipelineFsmEvent {
     fn variant_name(&self) -> &str {
         match self {
             Self::Bootstrap => "Bootstrap",
-            Self::Control(_) => "Control",
+            Self::Start => "Start",
+            Self::GracefulStop { .. } => "GracefulStop",
+            Self::Cancel => "Cancel",
+            Self::Abort { .. } => "Abort",
             Self::Journal(_) => "Journal",
-            Self::Deadline(_) => "Deadline",
+            Self::GracefulStopExpired => "GracefulStopExpired",
+            Self::StageCleanupExpired => "StageCleanupExpired",
+            Self::MetricsExpired => "MetricsExpired",
             Self::PhysicalSettlementSatisfied => "PhysicalSettlementSatisfied",
             Self::OperationalFailure { .. } => "OperationalFailure",
+        }
+    }
+}
+
+impl From<PipelineControl> for PipelineFsmEvent {
+    fn from(control: PipelineControl) -> Self {
+        match control {
+            PipelineControl::Start => Self::Start,
+            PipelineControl::Stop {
+                mode: FlowStopMode::Graceful { timeout },
+            } => Self::GracefulStop { timeout },
+            PipelineControl::Stop {
+                mode: FlowStopMode::Cancel,
+            } => Self::Cancel,
+            PipelineControl::Abort { reason } => Self::Abort { reason },
+        }
+    }
+}
+
+impl From<PipelineDeadline> for PipelineFsmEvent {
+    fn from(deadline: PipelineDeadline) -> Self {
+        match deadline {
+            PipelineDeadline::GracefulStop => Self::GracefulStopExpired,
+            PipelineDeadline::StageCleanup => Self::StageCleanupExpired,
+            PipelineDeadline::Metrics => Self::MetricsExpired,
         }
     }
 }
