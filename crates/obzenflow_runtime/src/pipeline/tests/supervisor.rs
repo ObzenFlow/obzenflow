@@ -4,8 +4,12 @@
 
 //! Supervisor dispatch fairness, retained journal reads and deadline service.
 
+use crate::bootstrap::{
+    bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
+};
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::{PipelineAction, PipelineDeadline, PipelineFsmEvent, PipelineFsmState};
+use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::tests::support::{
     empty_system_subscription, make_fsm_context, source_sink_topology,
@@ -15,6 +19,7 @@ use crate::pipeline::tests::support::{
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use async_trait::async_trait;
+use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -23,7 +28,7 @@ use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventEnvelope, StageId, SystemId};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 struct PausedReader {
@@ -183,6 +188,108 @@ async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins() {
     assert!(
         controls_observed > 0 && controls_observed < 32,
         "controls must share dispatch with owned work"
+    );
+}
+
+#[tokio::test]
+async fn queued_controls_cannot_starve_bootstrap_or_automatic_start() {
+    let _lock = bootstrap_test_lock_async().await;
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Auto,
+        ..BootstrapConfig::default()
+    });
+    for state in [PipelineFsmState::Created, PipelineFsmState::ReadyForRun] {
+        let mut ctx = make_fsm_context();
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(state.public_state(&ctx));
+        // Exercise dispatch without applying these control transitions. Stops
+        // distinguish queued controls from the automatically generated Start.
+        for _ in 0..2 {
+            sender
+                .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+                    mode: FlowStopMode::Cancel,
+                }))
+                .await
+                .unwrap();
+        }
+        let mut supervisor = PipelineSupervisor::new(
+            ctx.system_id,
+            receiver,
+            watcher,
+            ctx.resources.failure.clone(),
+        );
+        assert!(matches!(
+            supervisor.dispatch_state(&state, &mut ctx).await.unwrap(),
+            EventLoopDirective::Transition(PipelineFsmEvent::Control(PipelineControl::Stop { .. }))
+        ));
+        let directive = supervisor.dispatch_state(&state, &mut ctx).await.unwrap();
+        assert!(
+            matches!(
+                (&state, directive),
+                (
+                    PipelineFsmState::Created,
+                    EventLoopDirective::Transition(PipelineFsmEvent::Bootstrap)
+                ) | (
+                    PipelineFsmState::ReadyForRun,
+                    EventLoopDirective::Transition(PipelineFsmEvent::Control(
+                        PipelineControl::Start
+                    ))
+                )
+            ),
+            "startup in {state:?} must get a turn while controls are still queued"
+        );
+        assert!(matches!(
+            supervisor.dispatch_state(&state, &mut ctx).await.unwrap(),
+            EventLoopDirective::Transition(PipelineFsmEvent::Control(PipelineControl::Stop { .. }))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn ready_stage_joins_cannot_starve_other_resource_completions() {
+    // One turn per ready resource must suffice, even with more stage joins
+    // ready than the supervisor can consume within that budget.
+    const DISPATCH_BUDGET: usize = 4;
+    let mut ctx = make_fsm_context();
+    ctx.resources.stage_joins = Some(Mutex::new(
+        (0..=DISPATCH_BUDGET)
+            .map(|_| futures::future::ready(Ok(())).boxed())
+            .collect(),
+    ));
+    ctx.resources.refresh_publications();
+    ctx.resources.producer_tail =
+        ProducerTail::Reading(Mutex::new(futures::future::ready(Ok(None)).boxed()));
+    ctx.resources.metrics_join = Some(Mutex::new(futures::future::ready(Ok(())).boxed()));
+    let (_sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
+    let mut supervisor = PipelineSupervisor::new(
+        ctx.system_id,
+        receiver,
+        watcher,
+        ctx.resources.failure.clone(),
+    );
+
+    for _ in 0..DISPATCH_BUDGET {
+        assert!(matches!(
+            supervisor
+                .dispatch_state(&PipelineFsmState::Running, &mut ctx)
+                .await
+                .unwrap(),
+            EventLoopDirective::Continue
+        ));
+    }
+
+    assert!(ctx.resources.publication_settlement.is_none());
+    assert!(matches!(ctx.resources.producer_tail, ProducerTail::Reached));
+    assert!(ctx.resources.metrics_joined);
+    assert!(ctx.resources.metrics_join.is_none());
+    assert!(
+        !ctx.resources
+            .stage_joins
+            .as_mut()
+            .expect("some stage joins must remain unobserved")
+            .get_mut()
+            .unwrap()
+            .is_empty(),
+        "other resources must finish before the ready stage joins are exhausted"
     );
 }
 

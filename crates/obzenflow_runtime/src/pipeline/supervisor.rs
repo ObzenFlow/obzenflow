@@ -37,8 +37,8 @@ pub(crate) struct PipelineSupervisor {
     subscription: Option<SystemSubscription<SystemEvent>>,
     pending_read: Mutex<Option<JournalRead>>,
     idle: Option<Pin<Box<tokio::time::Sleep>>>,
-    next_input: usize,
-    next_resource: usize,
+    input_cursor: RoundRobinCursor<SupervisorInput>,
+    resource_cursor: RoundRobinCursor<ResourceInput>,
     failure: OperationalFailure,
     failure_reported: bool,
 }
@@ -59,14 +59,65 @@ impl PipelineSupervisor {
             subscription: None,
             pending_read: Mutex::new(None),
             idle: None,
-            next_input: 0,
-            next_resource: 0,
+            input_cursor: RoundRobinCursor::new(SupervisorInput::ORDER),
+            resource_cursor: RoundRobinCursor::new(ResourceInput::ORDER),
             failure,
             failure_reported: false,
         }
     }
 
-    fn deadline(
+    fn attach_journal_subscription(&mut self, ctx: &mut PipelineContext) {
+        if self.subscription.is_none()
+            && self
+                .pending_read
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
+            self.subscription = ctx.completion_subscription.take();
+        }
+    }
+
+    fn poll_dispatch(
+        &mut self,
+        state: &PipelineFsmState,
+        ctx: &mut PipelineContext,
+        cx: &mut Context<'_>,
+        deadline_wait: Pin<&mut tokio::time::Sleep>,
+    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
+        // Deadlines, failures and completed settlement take priority over the
+        // ordinary inputs, which share the remaining dispatch turns fairly.
+        if let Poll::Ready(event) = Self::poll_deadline(state, ctx, cx, deadline_wait) {
+            return Poll::Ready(EventLoopDirective::Transition(event));
+        }
+        if let Some(event) = self.take_operational_failure(ctx) {
+            return Poll::Ready(EventLoopDirective::Transition(event));
+        }
+        if Self::settlement_satisfied(state, ctx) {
+            return Poll::Ready(EventLoopDirective::Transition(
+                PipelineFsmEvent::PhysicalSettlementSatisfied,
+            ));
+        }
+        self.poll_inputs_round_robin(state, ctx, cx)
+    }
+
+    fn poll_deadline(
+        state: &PipelineFsmState,
+        ctx: &PipelineContext,
+        cx: &mut Context<'_>,
+        mut deadline_wait: Pin<&mut tokio::time::Sleep>,
+    ) -> Poll<PipelineFsmEvent> {
+        if let Some((at, deadline)) = Self::next_deadline(state, ctx) {
+            if Instant::now() >= at {
+                return Poll::Ready(PipelineFsmEvent::Deadline(deadline));
+            }
+            deadline_wait.as_mut().reset(at.into());
+            let _ = deadline_wait.as_mut().poll(cx);
+        }
+        Poll::Pending
+    }
+
+    fn next_deadline(
         state: &PipelineFsmState,
         ctx: &PipelineContext,
     ) -> Option<(Instant, PipelineDeadline)> {
@@ -107,7 +158,21 @@ impl PipelineSupervisor {
             .min_by_key(|(at, _)| *at)
     }
 
-    fn physical_ready(state: &PipelineFsmState, ctx: &mut PipelineContext) -> bool {
+    fn take_operational_failure(&mut self, ctx: &PipelineContext) -> Option<PipelineFsmEvent> {
+        if let Some(error) = ctx.resources.publications.first_failure() {
+            ctx.resources.retain_failure(Box::new(error));
+        }
+        if self.failure_reported {
+            return None;
+        }
+        let error = ctx.resources.failure.get()?;
+        self.failure_reported = true;
+        Some(PipelineFsmEvent::OperationalFailure {
+            message: error.to_string(),
+        })
+    }
+
+    fn settlement_satisfied(state: &PipelineFsmState, ctx: &mut PipelineContext) -> bool {
         use PipelineFsmState as S;
         match state {
             S::Materializing => ctx.resources.delivery.is_empty(),
@@ -135,6 +200,41 @@ impl PipelineSupervisor {
                 ctx.progress.final_marker_seen && ctx.resources.publication_settlement.is_none()
             }
             _ => false,
+        }
+    }
+
+    fn poll_inputs_round_robin(
+        &mut self,
+        state: &PipelineFsmState,
+        ctx: &mut PipelineContext,
+        cx: &mut Context<'_>,
+    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
+        for input in self.input_cursor.polling_order() {
+            let result = match input {
+                SupervisorInput::Control => self.poll_control(cx),
+                SupervisorInput::Journal => self.poll_journal(ctx, cx),
+                SupervisorInput::CommandDelivery => self.poll_command_delivery(ctx, cx),
+                SupervisorInput::Resources => self.poll_resources_or_startup(state, ctx, cx),
+            };
+            if result.is_ready() {
+                self.input_cursor.advance_after(input);
+                return result;
+            }
+        }
+        Poll::Pending
+    }
+
+    fn poll_control(&mut self, cx: &mut Context<'_>) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
+        if !self.controls_open {
+            return Poll::Pending;
+        }
+        match std::pin::pin!(self.controls.recv()).as_mut().poll(cx) {
+            Poll::Ready(Some(event)) => Poll::Ready(EventLoopDirective::Transition(event)),
+            Poll::Ready(None) => {
+                self.controls_open = false;
+                Poll::Ready(EventLoopDirective::Continue)
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -193,120 +293,213 @@ impl PipelineSupervisor {
         })
     }
 
-    fn poll_resources(
+    fn poll_command_delivery(
         &mut self,
         ctx: &mut PipelineContext,
         cx: &mut Context<'_>,
     ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        for offset in 0..4 {
-            let input = (self.next_resource + offset) % 4;
-            let ready = match input {
-                0 => {
-                    if let Some(joins) = &mut ctx.resources.stage_joins {
-                        match Pin::new(joins.get_mut().unwrap_or_else(|e| e.into_inner()))
-                            .poll_next(cx)
-                        {
-                            Poll::Ready(Some(result)) => {
-                                if let Err(error) = result {
-                                    if !(ctx.progress.stages_cancelled
-                                        && matches!(error, StageError::Aborted))
-                                    {
-                                        ctx.resources.retain_failure(Box::new(error));
-                                    }
-                                }
-                                true
-                            }
-                            Poll::Ready(None) => {
-                                ctx.resources.stage_joins = None;
-                                ctx.resources.stages_joined = true;
-                                true
-                            }
-                            Poll::Pending => false,
-                        }
-                    } else {
-                        false
-                    }
-                }
-                1 => {
-                    if let Some(observation) = &mut ctx.resources.publication_settlement {
-                        match Pin::new(observation).poll(cx) {
-                            Poll::Ready(result) => {
-                                ctx.resources.publication_settlement = None;
-                                if let Err(error) = result {
-                                    ctx.resources.retain_failure(Box::new(error));
-                                }
-                                true
-                            }
-                            Poll::Pending => false,
-                        }
-                    } else {
-                        false
-                    }
-                }
-                2 => {
-                    if let ProducerTail::Reading(read) = &mut ctx.resources.producer_tail {
-                        match read
-                            .get_mut()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .as_mut()
-                            .poll(cx)
-                        {
-                            Poll::Ready(result) => {
-                                ctx.resources.producer_tail = match result {
-                                    Ok(Some(id)) if ctx.last_system_event_id_seen != Some(id) => {
-                                        ProducerTail::Through(id)
-                                    }
-                                    Ok(_) => ProducerTail::Reached,
-                                    Err(error) => {
-                                        ctx.progress.journal_failed = true;
-                                        ctx.resources.retain_failure(error);
-                                        ProducerTail::Reached
-                                    }
-                                };
-                                true
-                            }
-                            Poll::Pending => false,
-                        }
-                    } else {
-                        false
-                    }
-                }
-                _ => {
-                    if let Some(join) = &mut ctx.resources.metrics_join {
-                        match join
-                            .get_mut()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .as_mut()
-                            .poll(cx)
-                        {
-                            Poll::Ready(result) => {
-                                ctx.resources.metrics_join = None;
-                                ctx.resources.metrics_joined = true;
-                                if let Err(error) = result {
-                                    if !(ctx.progress.metrics_cancelled
-                                        && matches!(error, HandleError::SupervisorAborted))
-                                    {
-                                        ctx.resources.retain_failure(Box::new(error));
-                                    }
-                                }
-                                true
-                            }
-                            Poll::Pending => false,
-                        }
-                    } else {
-                        false
-                    }
-                }
+        let Poll::Ready(Some(result)) = ctx.resources.delivery.poll(cx) else {
+            return Poll::Pending;
+        };
+        self.idle = None;
+        if let Err(error) = result {
+            ctx.resources.retain_failure(Box::new(error));
+        }
+        Poll::Ready(EventLoopDirective::Continue)
+    }
+
+    fn poll_resources_or_startup(
+        &mut self,
+        state: &PipelineFsmState,
+        ctx: &mut PipelineContext,
+        cx: &mut Context<'_>,
+    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
+        if self.poll_resource_completions(ctx, cx).is_ready() {
+            return Poll::Ready(EventLoopDirective::Continue);
+        }
+        // Startup shares the resource turn so busy controls cannot starve it.
+        // Owned resource progress is serviced before generating a startup event.
+        let event = match state {
+            PipelineFsmState::Created => PipelineFsmEvent::Bootstrap,
+            PipelineFsmState::ReadyForRun if !crate::bootstrap::startup_mode_manual() => {
+                PipelineFsmEvent::Control(PipelineControl::Start)
+            }
+            _ => return Poll::Pending,
+        };
+        Poll::Ready(EventLoopDirective::Transition(event))
+    }
+
+    fn poll_resource_completions(
+        &mut self,
+        ctx: &mut PipelineContext,
+        cx: &mut Context<'_>,
+    ) -> Poll<()> {
+        for input in self.resource_cursor.polling_order() {
+            let result = match input {
+                ResourceInput::StageJoin => Self::poll_stage_join(ctx, cx),
+                ResourceInput::PublicationSettlement => Self::poll_publication_settlement(ctx, cx),
+                ResourceInput::ProducerTail => Self::poll_producer_tail(ctx, cx),
+                ResourceInput::MetricsJoin => Self::poll_metrics_join(ctx, cx),
             };
-            if ready {
+            if result.is_ready() {
                 // A producer or our own append has settled. Check the existing
                 // journal again without extending a previous temporary-EOF wait.
                 self.idle = None;
-                self.next_resource = (input + 1) % 4;
-                return Poll::Ready(EventLoopDirective::Continue);
+                self.resource_cursor.advance_after(input);
+                return result;
             }
         }
         Poll::Pending
+    }
+
+    fn poll_stage_join(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(joins) = &mut ctx.resources.stage_joins else {
+            return Poll::Pending;
+        };
+        let Poll::Ready(result) =
+            Pin::new(joins.get_mut().unwrap_or_else(|e| e.into_inner())).poll_next(cx)
+        else {
+            return Poll::Pending;
+        };
+        match result {
+            Some(Err(error))
+                if !(ctx.progress.stages_cancelled && matches!(error, StageError::Aborted)) =>
+            {
+                ctx.resources.retain_failure(Box::new(error));
+            }
+            None => {
+                ctx.resources.stage_joins = None;
+                ctx.resources.stages_joined = true;
+            }
+            Some(_) => {}
+        }
+        Poll::Ready(())
+    }
+
+    fn poll_publication_settlement(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(observation) = &mut ctx.resources.publication_settlement else {
+            return Poll::Pending;
+        };
+        let Poll::Ready(result) = Pin::new(observation).poll(cx) else {
+            return Poll::Pending;
+        };
+        ctx.resources.publication_settlement = None;
+        if let Err(error) = result {
+            ctx.resources.retain_failure(Box::new(error));
+        }
+        Poll::Ready(())
+    }
+
+    fn poll_producer_tail(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
+        let ProducerTail::Reading(read) = &mut ctx.resources.producer_tail else {
+            return Poll::Pending;
+        };
+        let Poll::Ready(result) = read
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .poll(cx)
+        else {
+            return Poll::Pending;
+        };
+        ctx.resources.producer_tail = match result {
+            Ok(Some(id)) if ctx.last_system_event_id_seen != Some(id) => ProducerTail::Through(id),
+            Ok(_) => ProducerTail::Reached,
+            Err(error) => {
+                ctx.progress.journal_failed = true;
+                ctx.resources.retain_failure(error);
+                ProducerTail::Reached
+            }
+        };
+        Poll::Ready(())
+    }
+
+    fn poll_metrics_join(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
+        let Some(join) = &mut ctx.resources.metrics_join else {
+            return Poll::Pending;
+        };
+        let Poll::Ready(result) = join
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .poll(cx)
+        else {
+            return Poll::Pending;
+        };
+        ctx.resources.metrics_join = None;
+        ctx.resources.metrics_joined = true;
+        if let Err(error) = result {
+            if !(ctx.progress.metrics_cancelled && matches!(error, HandleError::SupervisorAborted))
+            {
+                ctx.resources.retain_failure(Box::new(error));
+            }
+        }
+        Poll::Ready(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SupervisorInput {
+    Control,
+    Journal,
+    CommandDelivery,
+    Resources,
+}
+
+impl SupervisorInput {
+    const ORDER: &'static [Self] = &[
+        Self::Control,
+        Self::Journal,
+        Self::CommandDelivery,
+        Self::Resources,
+    ];
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceInput {
+    StageJoin,
+    PublicationSettlement,
+    ProducerTail,
+    MetricsJoin,
+}
+
+impl ResourceInput {
+    const ORDER: &'static [Self] = &[
+        Self::StageJoin,
+        Self::PublicationSettlement,
+        Self::ProducerTail,
+        Self::MetricsJoin,
+    ];
+}
+
+/// Visits each input once, starting after the last input that made progress.
+/// An entirely pending scan leaves the cursor unchanged.
+struct RoundRobinCursor<Input: 'static> {
+    order: &'static [Input],
+    next_index: usize,
+}
+
+impl<Input: Copy + PartialEq> RoundRobinCursor<Input> {
+    fn new(order: &'static [Input]) -> Self {
+        assert!(!order.is_empty(), "round-robin polling needs an input");
+        Self {
+            order,
+            next_index: 0,
+        }
+    }
+
+    fn polling_order(&self) -> impl Iterator<Item = Input> + 'static {
+        let (before_next, from_next) = self.order.split_at(self.next_index);
+        from_next.iter().chain(before_next).copied()
+    }
+
+    fn advance_after(&mut self, input: Input) {
+        let served_index = self
+            .order
+            .iter()
+            .position(|candidate| *candidate == input)
+            .expect("served input belongs to this round-robin cursor");
+        self.next_index = (served_index + 1) % self.order.len();
     }
 }
 
@@ -366,93 +559,11 @@ impl SelfSupervised for PipelineSupervisor {
         if matches!(state, PipelineFsmState::Finished { .. }) {
             return Ok(EventLoopDirective::Terminate);
         }
-        if self.subscription.is_none()
-            && self
-                .pending_read
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_none()
-        {
-            self.subscription = ctx.completion_subscription.take();
-        }
+        self.attach_journal_subscription(ctx);
         let mut deadline_wait = Box::pin(tokio::time::sleep(Duration::ZERO));
-        Ok(std::future::poll_fn(|cx| {
-            if let Some((at, deadline)) = Self::deadline(state, ctx) {
-                if Instant::now() >= at {
-                    return Poll::Ready(EventLoopDirective::Transition(
-                        PipelineFsmEvent::Deadline(deadline),
-                    ));
-                }
-                deadline_wait.as_mut().reset(at.into());
-                let _ = deadline_wait.as_mut().poll(cx);
-            }
-            if let Some(error) = ctx.resources.publications.first_failure() {
-                ctx.resources.retain_failure(Box::new(error));
-            }
-            if !self.failure_reported {
-                if let Some(error) = ctx.resources.failure.get() {
-                    self.failure_reported = true;
-                    return Poll::Ready(EventLoopDirective::Transition(
-                        PipelineFsmEvent::OperationalFailure {
-                            message: error.to_string(),
-                        },
-                    ));
-                }
-            }
-            if Self::physical_ready(state, ctx) {
-                return Poll::Ready(EventLoopDirective::Transition(
-                    PipelineFsmEvent::PhysicalSettlementSatisfied,
-                ));
-            }
-            for offset in 0..4 {
-                let input = (self.next_input + offset) % 4;
-                let result = match input {
-                    0 if self.controls_open => {
-                        match std::pin::pin!(self.controls.recv()).as_mut().poll(cx) {
-                            Poll::Ready(Some(event)) => {
-                                Poll::Ready(EventLoopDirective::Transition(event))
-                            }
-                            Poll::Ready(None) => {
-                                self.controls_open = false;
-                                Poll::Ready(EventLoopDirective::Continue)
-                            }
-                            Poll::Pending => Poll::Pending,
-                        }
-                    }
-                    1 => self.poll_journal(ctx, cx),
-                    2 => match ctx.resources.delivery.poll(cx) {
-                        Poll::Ready(Some(result)) => {
-                            self.idle = None;
-                            if let Err(error) = result {
-                                ctx.resources.retain_failure(Box::new(error));
-                            }
-                            Poll::Ready(EventLoopDirective::Continue)
-                        }
-                        _ => Poll::Pending,
-                    },
-                    3 => match self.poll_resources(ctx, cx) {
-                        Poll::Pending if matches!(state, PipelineFsmState::Created) => {
-                            Poll::Ready(EventLoopDirective::Transition(PipelineFsmEvent::Bootstrap))
-                        }
-                        Poll::Pending
-                            if matches!(state, PipelineFsmState::ReadyForRun)
-                                && !crate::bootstrap::startup_mode_manual() =>
-                        {
-                            Poll::Ready(EventLoopDirective::Transition(PipelineFsmEvent::Control(
-                                PipelineControl::Start,
-                            )))
-                        }
-                        result => result,
-                    },
-                    _ => Poll::Pending,
-                };
-                if let Poll::Ready(directive) = result {
-                    self.next_input = (input + 1) % 4;
-                    return Poll::Ready(directive);
-                }
-            }
-            Poll::Pending
-        })
-        .await)
+        Ok(
+            std::future::poll_fn(|cx| self.poll_dispatch(state, ctx, cx, deadline_wait.as_mut()))
+                .await,
+        )
     }
 }
