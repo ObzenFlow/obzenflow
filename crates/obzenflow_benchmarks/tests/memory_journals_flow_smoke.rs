@@ -13,7 +13,6 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the memory-journals smoke test. Matches the

@@ -75,14 +75,13 @@ where
         self.stage_type
     }
 
-    async fn publish_pipeline_control(
+    fn publish_pipeline_control(
         &self,
         journal: Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>>,
         event: obzenflow_core::event::ChainEvent,
     ) -> Result<(), StageError> {
         self.inner
             .publish_pipeline_control(journal, event)
-            .await
             .map_err(|error| StageError::Execution(Arc::from(error)))
     }
 

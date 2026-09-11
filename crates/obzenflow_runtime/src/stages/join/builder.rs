@@ -12,8 +12,8 @@ use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, Heartbe
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
-    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents,
+    SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::journal::Journal;
@@ -238,19 +238,14 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
 
         // Spawn the supervisor task
         let supervisor_name = format!("join_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<JoinSupervisor<H>>::new(&supervisor_name)
+        let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
+            supervisor,
+            event_receiver,
+            state_watcher_for_task,
+        );
+        let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)
-            .spawn(move || async move {
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
-                    supervisor,
-                    event_receiver,
-                    state_watcher_for_task,
-                );
-
-                // Run with the wrapper
-                HandlerSupervisedExt::run(supervisor_with_events, JoinState::<H>::Created, context)
-                    .await
-            });
+            .spawn_handler_supervised(supervisor_with_events, JoinState::<H>::Created, context);
 
         // Build and return handle
         HandleBuilder::new()

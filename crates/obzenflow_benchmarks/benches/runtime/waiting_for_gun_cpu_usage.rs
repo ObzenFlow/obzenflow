@@ -21,7 +21,6 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

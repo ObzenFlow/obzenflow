@@ -10,7 +10,8 @@
 use std::error::Error;
 use std::fmt::Debug;
 
-/// Base trait that all supervisor builders must implement
+/// Builder trait for supervisors exposing a `SupervisorHandle`.
+/// The pipeline uses an inherent builder because its control boundary is opaque.
 ///
 /// The builder pattern ensures:
 /// - Supervisors are created and started atomically
@@ -40,7 +41,7 @@ use std::fmt::Debug;
 ///             .map_err(|e| BuilderError::WriterRegistrationError(e.to_string()))?;
 ///         
 ///         // 2. Create context
-///         let context = Arc::new(MyContext { ... });
+///         let context = MyContext { ... };
 ///         
 ///         // 3. Create channels
 ///         let (event_sender, event_receiver, state_watcher) =
@@ -51,7 +52,7 @@ use std::fmt::Debug;
 ///         
 ///         // 5. Spawn task
 ///         let task = SupervisorTaskBuilder::new("my_supervisor")
-///             .spawn(|| async { supervisor.run().await });
+///             .spawn_self_supervised(supervisor, MyState::Initial, context);
 ///         
 ///         // 6. Build and return handle
 ///         HandleBuilder::new()
@@ -183,7 +184,7 @@ pub trait SupervisorHandle: Send + Sync {
     /// Publish a pipeline control row through the owning stage's retained
     /// writer. A closed stage has no remaining control admission.
     #[doc(hidden)]
-    async fn publish_pipeline_control(
+    fn publish_pipeline_control(
         &self,
         _journal: std::sync::Arc<
             dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,

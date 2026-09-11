@@ -26,7 +26,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::Path;

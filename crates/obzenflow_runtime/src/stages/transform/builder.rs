@@ -22,8 +22,8 @@ use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, Heartbe
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
-    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents,
+    SupervisorBuilder, SupervisorTaskBuilder,
 };
 
 use super::config::TransformConfig;
@@ -206,23 +206,18 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
         // Spawn the supervisor task
         let supervisor_name = format!("transform_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<TransformSupervisor<H>>::new(&supervisor_name)
+        let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
+            supervisor,
+            event_receiver,
+            state_watcher_for_task,
+        );
+        let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)
-            .spawn(move || async move {
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
-                    supervisor,
-                    event_receiver,
-                    state_watcher_for_task,
-                );
-
-                // Run with the wrapper
-                HandlerSupervisedExt::run(
-                    supervisor_with_events,
-                    TransformState::<H>::Created,
-                    context,
-                )
-                .await
-            });
+            .spawn_handler_supervised(
+                supervisor_with_events,
+                TransformState::<H>::Created,
+                context,
+            );
 
         // Build and return handle
         HandleBuilder::new()

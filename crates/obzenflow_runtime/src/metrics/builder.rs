@@ -13,8 +13,8 @@ use super::{
     supervisor::MetricsAggregatorSupervisor,
 };
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt, StandardHandle,
-    SupervisorBuilder, SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, StandardHandle, SupervisorBuilder,
+    SupervisorTaskBuilder,
 };
 use obzenflow_core::{
     event::SystemEvent,
@@ -95,6 +95,20 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
     type Error = BuilderError;
 
     async fn build(self) -> Result<Self::Handle, Self::Error> {
+        self.prepare().await?.start()
+    }
+}
+
+/// Prepared journal inputs, with no live child and no published readiness.
+pub(crate) struct PreparedMetricsAggregator {
+    context: MetricsAggregatorContext,
+    io: super::fsm::MetricsAggregatorIo,
+    system_journal: Arc<dyn Journal<SystemEvent>>,
+    system_id: obzenflow_core::id::SystemId,
+}
+
+impl MetricsAggregatorBuilder {
+    pub(crate) async fn prepare(self) -> Result<PreparedMetricsAggregator, BuilderError> {
         // Create system ID for metrics aggregator
         let system_id = obzenflow_core::id::SystemId::new();
 
@@ -113,6 +127,30 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
 
         metrics_context.pipeline_writer = self.pipeline_writer;
 
+        Ok(PreparedMetricsAggregator {
+            context: metrics_context,
+            io: metrics_io,
+            system_journal: self.system_journal,
+            system_id,
+        })
+    }
+}
+
+impl PreparedMetricsAggregator {
+    pub(crate) fn writer_id(&self) -> obzenflow_core::event::WriterId {
+        self.system_id.into()
+    }
+
+    /// The caller authorises the child's lifetime. All fallible journal input
+    /// construction happened in prepare; spawning does no storage I/O.
+    pub(crate) fn start(self) -> Result<super::MetricsHandle, BuilderError> {
+        let Self {
+            context: metrics_context,
+            io: metrics_io,
+            system_journal,
+            system_id,
+        } = self;
+
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels
         // for consistency and potential future use
@@ -124,7 +162,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         // Create supervisor (private struct)
         let supervisor = MetricsAggregatorSupervisor {
             name: "metrics_aggregator".to_string(),
-            system_journal: self.system_journal.clone(),
+            system_journal,
             system_id,
             data_subscription: Some(metrics_io.data_subscription),
             error_subscription: metrics_io.error_subscription,
@@ -136,18 +174,13 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         };
 
         // Spawn the supervisor task
-        let supervisor_task = SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new(
-            "metrics_aggregator",
-        )
-        .spawn(move || async move {
-            // Run the supervisor directly. Metrics does not use external events.
-            SelfSupervisedExt::run(
-                supervisor,
-                MetricsAggregatorState::Initializing,
-                metrics_context,
-            )
-            .await
-        });
+        let supervisor_task =
+            SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new("metrics_aggregator")
+                .spawn_self_supervised(
+                    supervisor,
+                    MetricsAggregatorState::Initializing,
+                    metrics_context,
+                );
 
         // Build and return the standard handle
         HandleBuilder::new()

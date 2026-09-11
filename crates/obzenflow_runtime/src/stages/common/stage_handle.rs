@@ -111,6 +111,11 @@ pub enum StageEvent {
 /// - Identity (stage_id, name)
 /// - Lifecycle control (initialize, start, drain)
 /// - State queries (is_ready, is_drained)
+///
+/// Command methods retain a pending mailbox send until acceptance. Dropping an
+/// unaccepted command future cancels that send; an accepted message belongs to
+/// the receiving stage. Returning from a command does not certify the requested
+/// lifecycle transition: the pipeline observes its committed system-journal fact.
 #[async_trait::async_trait]
 pub trait StageHandle: Send + Sync {
     /// Get the stage ID
@@ -160,7 +165,7 @@ pub trait StageHandle: Send + Sync {
     fn request_abort(&self);
 
     #[doc(hidden)]
-    async fn publish_pipeline_control(
+    fn publish_pipeline_control(
         &self,
         _journal: std::sync::Arc<
             dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,

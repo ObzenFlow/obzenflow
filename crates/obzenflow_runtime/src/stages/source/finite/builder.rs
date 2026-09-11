@@ -14,8 +14,8 @@ use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
-    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents,
+    SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::WriterId;
 
@@ -136,24 +136,15 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         // Spawn the supervisor task
         let supervisor_name = format!("finite_source_{}", self.config.stage_name);
-        let stage_name_for_trace = self.config.stage_name.clone();
-        let task = SupervisorTaskBuilder::<FiniteSourceSupervisor<H>>::new(&supervisor_name).spawn(
-            move || async move {
-                tracing::debug!("Spawned task for finite_source_{}", stage_name_for_trace);
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
-                    supervisor,
-                    event_receiver,
-                    state_watcher_for_task,
-                );
-
-                // Run with the wrapper
-                HandlerSupervisedExt::run(
-                    supervisor_with_events,
-                    FiniteSourceState::<H>::Created,
-                    context,
-                )
-                .await
-            },
+        let supervisor = HandlerSupervisedWithExternalEvents::new(
+            supervisor,
+            event_receiver,
+            state_watcher_for_task,
+        );
+        let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
+            supervisor,
+            FiniteSourceState::<H>::Created,
+            context,
         );
 
         // Build and return handle

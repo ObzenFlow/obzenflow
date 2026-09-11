@@ -34,7 +34,6 @@ use obzenflow_runtime::stages::observer::{
     SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::future::pending;

@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
+use super::fsm::{FlowStopMode, PipelineControl, PipelineFsmEvent, PipelineState};
 use super::termination::{execution_result, PublishedOutcome};
 use crate::errors::FlowError;
 use crate::journal::RunSubstrateState;
 use crate::stages::LivenessSnapshots;
-use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
+use crate::supervised_base::{StandardHandle, SupervisorHandle};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -23,6 +23,8 @@ type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 pub(crate) struct FlowHandleExtras {
     pub stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
     pub published_outcome: PublishedOutcome,
+    pub metrics: Arc<super::resources::MetricsOwner>,
+    pub operational_failure: super::resources::OperationalFailure,
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
@@ -63,11 +65,11 @@ impl MiddlewareStackConfig {
     }
 }
 
-/// Immediate outcome for externally requested pipeline start admission.
+/// Immediate result of submitting a start control, without an FSM acknowledgement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlowStartControlOutcome {
-    /// `Run` was accepted and sent while the pipeline was ready.
-    Started { state: PipelineState },
+    /// `Start` was sent after observing readiness; the FSM decides admission.
+    Submitted { observed_state: PipelineState },
     /// The pipeline was already running, so no duplicate `Run` was sent.
     AlreadyRunning { state: PipelineState },
     /// The pipeline cannot accept `Run` in the observed state.
@@ -88,8 +90,10 @@ pub enum FlowStartControlOutcome {
 pub struct FlowHandle {
     stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
     published_outcome: PublishedOutcome,
+    metrics: Arc<super::resources::MetricsOwner>,
+    operational_failure: super::resources::OperationalFailure,
     /// The standard handle for FSM control
-    handle: StandardHandle<PipelineEvent, PipelineState>,
+    handle: StandardHandle<PipelineFsmEvent, PipelineState>,
 
     /// Flow topology for visualization (read-only)
     topology: Option<Arc<Topology>>,
@@ -125,12 +129,14 @@ pub struct FlowHandle {
 impl FlowHandle {
     /// Create a new flow handle from a standard handle and extras
     pub(crate) fn new(
-        handle: StandardHandle<PipelineEvent, PipelineState>,
+        handle: StandardHandle<PipelineFsmEvent, PipelineState>,
         extras: FlowHandleExtras,
     ) -> Self {
         let FlowHandleExtras {
             stage_cleanup,
             published_outcome,
+            metrics,
+            operational_failure,
             topology,
             flow_name,
             contract_attachments,
@@ -144,6 +150,8 @@ impl FlowHandle {
         Self {
             stage_cleanup,
             published_outcome,
+            metrics,
+            operational_failure,
             handle,
             topology,
             flow_name,
@@ -160,6 +168,7 @@ impl FlowHandle {
         crate::__private::lifecycle::ExecutionGuard::new(
             self.handle.abort_handle(),
             self.stage_cleanup.clone(),
+            self.metrics.clone(),
         )
     }
 
@@ -185,6 +194,16 @@ impl FlowHandle {
                 if result.is_ok() {
                     result = Err(FlowError::ExecutionFailed(Box::new(error)));
                 }
+            }
+        }
+        if let Err(error) = self.metrics.abort_and_join().await {
+            if result.is_ok() {
+                result = Err(FlowError::ExecutionFailed(Box::new(error)));
+            }
+        }
+        if result.is_ok() {
+            if let Some(error) = self.operational_failure.get() {
+                result = Err(FlowError::ExecutionFailed(Box::new(error.clone())));
             }
         }
         result
@@ -215,8 +234,10 @@ impl FlowHandle {
         let state = self.current_state();
         match state {
             PipelineState::ReadyForRun => {
-                self.send_event(PipelineEvent::Run).await?;
-                Ok(FlowStartControlOutcome::Started { state })
+                self.send_control(PipelineControl::Start).await?;
+                Ok(FlowStartControlOutcome::Submitted {
+                    observed_state: state,
+                })
             }
             PipelineState::Running => Ok(FlowStartControlOutcome::AlreadyRunning { state }),
             _ => Ok(FlowStartControlOutcome::Rejected {
@@ -299,8 +320,8 @@ impl FlowHandle {
         );
         match current_state {
             PipelineState::ReadyForRun => {
-                tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
-                self.send_event(PipelineEvent::Run).await
+                tracing::debug!("FlowHandle::start() - Sending PipelineFsmEvent::Control(PipelineControl::Start) to start flow");
+                self.send_control(PipelineControl::Start).await
             }
             PipelineState::Running => {
                 tracing::debug!("FlowHandle::start() - Pipeline already running");
@@ -331,7 +352,7 @@ impl FlowHandle {
     /// already `Running`, it waits for completion without sending another `Run`.
     /// This is the primary method users should call after creating a flow.
     ///
-    /// Like `SupervisorHandle::wait_for_completion`, this joins the supervisor
+    /// Like `FlowHandle::wait_for_completion`, this joins the supervisor
     /// and reports the acknowledged execution result, including when the flow
     /// has already finished. Intentional cancellation succeeds; execution or
     /// task failure and missing terminal publication return an error.
@@ -347,8 +368,7 @@ impl FlowHandle {
 
     /// User-initiated stop request.
     ///
-    /// This is distinct from `PipelineEvent::Shutdown` which represents natural
-    /// source completion detected by the pipeline supervisor.
+    /// Natural source completion is observed through the system journal.
     pub async fn stop(&self) -> Result<(), FlowError> {
         self.stop_cancel().await
     }
@@ -361,9 +381,8 @@ impl FlowHandle {
         if !self.is_running() {
             return Ok(());
         }
-        self.send_event(PipelineEvent::StopRequested {
+        self.send_control(PipelineControl::Stop {
             mode: FlowStopMode::Cancel,
-            reason: None,
         })
         .await
     }
@@ -375,9 +394,8 @@ impl FlowHandle {
         if !self.is_running() {
             return Ok(());
         }
-        self.send_event(PipelineEvent::StopRequested {
+        self.send_control(PipelineControl::Stop {
             mode: FlowStopMode::Graceful { timeout },
-            reason: None,
         })
         .await
     }
@@ -389,8 +407,8 @@ impl FlowHandle {
 
     /// Force shutdown by sending Error event to FSM
     pub async fn abort(&self, reason: &str) -> Result<(), FlowError> {
-        self.send_event(PipelineEvent::Error {
-            message: format!("Force abort: {reason}"),
+        self.send_control(PipelineControl::Abort {
+            reason: reason.into(),
         })
         .await
     }
@@ -451,65 +469,19 @@ impl FlowHandle {
     }
 }
 
-// Custom implementation for SupervisorHandle trait to use FlowError
-#[async_trait::async_trait]
-impl SupervisorHandle for FlowHandle {
-    type Event = PipelineEvent;
-    type State = PipelineState;
-    type Error = FlowError;
-
-    async fn send_event(&self, event: Self::Event) -> Result<(), Self::Error> {
-        self.handle.send_event(event).await.map_err(|e| match e {
-            HandleError::SupervisorNotRunning => {
-                FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Pipeline supervisor is not running",
-                )))
-            }
-            HandleError::SupervisorFailed(msg) => {
-                FlowError::ExecutionFailed(Box::new(std::io::Error::other(msg)))
-            }
-            HandleError::SupervisorPanicked(msg) => FlowError::ExecutionFailed(Box::new(
-                std::io::Error::other(format!("Task panicked: {msg}")),
-            )),
-            _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
-        })
-    }
-
-    fn current_state(&self) -> Self::State {
-        self.handle.current_state()
-    }
-
-    fn request_abort(&self) {
-        self.handle.abort();
-        for stage in &self.stage_cleanup {
-            stage.request_abort();
-        }
+impl FlowHandle {
+    /// Submit a caller control. Admission and lifecycle progression belong to
+    /// the canonical FSM and its committed journal facts.
+    pub async fn send_control(&self, control: PipelineControl) -> Result<(), FlowError> {
+        self.handle
+            .send_event(PipelineFsmEvent::Control(control))
+            .await
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))
     }
 
     /// Join the supervisor and report the acknowledged execution result.
-    /// Intentional cancellation succeeds; execution failure does not.
-    async fn wait_for_completion(&self) -> Result<(), Self::Error> {
+    pub async fn wait_for_completion(&self) -> Result<(), FlowError> {
         self.wait_for_execution().await
-    }
-
-    async fn abort_and_wait(&self) -> Result<(), Self::Error> {
-        // Request cancellation for the entire group before awaiting any member.
-        self.request_abort();
-        let mut result = self
-            .handle
-            .abort_and_wait()
-            .await
-            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)));
-        for stage in &self.stage_cleanup {
-            if let Err(error) = stage.abort_and_join().await {
-                tracing::warn!(stage = stage.stage_name(), %error, "Emergency stage teardown failed");
-                if result.is_ok() {
-                    result = Err(FlowError::ExecutionFailed(Box::new(error)));
-                }
-            }
-        }
-        result
     }
 }
 
@@ -527,6 +499,8 @@ mod tests {
         FlowHandleExtras {
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),
+            metrics: Default::default(),
+            operational_failure: Default::default(),
             topology: None,
             flow_name: "test_flow".to_string(),
             contract_attachments: None,
@@ -542,7 +516,8 @@ mod tests {
     async fn execution_guard_is_independent_of_completion_observers_and_handle_ownership() {
         for disarm in [false, true] {
             let (sender, _receiver, watcher) =
-                ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Created);
+                ChannelBuilder::<PipelineFsmEvent, PipelineState>::new()
+                    .build(PipelineState::Created);
             let task = tokio::spawn(std::future::pending::<
                 Result<(), Box<dyn std::error::Error + Send + Sync>>,
             >());
@@ -574,7 +549,7 @@ mod tests {
                     flow.is_running(),
                     "releasing the fallback must not request cancellation"
                 );
-                flow.abort_and_wait().await.unwrap();
+                drop(lifecycle::guard_execution(&flow));
             } else {
                 drop(guard);
             }
@@ -596,7 +571,7 @@ mod tests {
 
     fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
         let (event_sender, mut event_receiver, state_watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new()
+            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new()
                 .with_event_buffer(4)
                 .build(PipelineState::ReadyForRun);
 
@@ -605,7 +580,7 @@ mod tests {
         let published = extras.published_outcome.clone();
         let task = tokio::spawn(async move {
             match event_receiver.recv().await {
-                Some(PipelineEvent::Run) => {
+                Some(PipelineFsmEvent::Control(PipelineControl::Start)) => {
                     use super::super::termination::{
                         ExecutionFailure, ExecutionOutcome, PublishedTermination,
                     };
@@ -653,9 +628,9 @@ mod tests {
 
     fn flow_handle_for_start_admission(
         initial_state: PipelineState,
-    ) -> (FlowHandle, EventReceiver<PipelineEvent>) {
+    ) -> (FlowHandle, EventReceiver<PipelineFsmEvent>) {
         let (event_sender, event_receiver, state_watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new()
+            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new()
                 .with_event_buffer(4)
                 .build(initial_state);
 
@@ -683,12 +658,15 @@ mod tests {
 
         assert_eq!(
             outcome,
-            FlowStartControlOutcome::Started {
-                state: PipelineState::ReadyForRun
+            FlowStartControlOutcome::Submitted {
+                observed_state: PipelineState::ReadyForRun
             }
         );
         assert!(
-            matches!(event_receiver.try_recv(), Ok(PipelineEvent::Run)),
+            matches!(
+                event_receiver.try_recv(),
+                Ok(PipelineFsmEvent::Control(PipelineControl::Start))
+            ),
             "ReadyForRun admission should dispatch Run"
         );
     }
@@ -918,7 +896,7 @@ mod tests {
         for (state, outcome, exit, expected) in cases {
             for use_run in [false, true] {
                 let (sender, _receiver, watcher) =
-                    ChannelBuilder::<PipelineEvent, PipelineState>::new().build(state.clone());
+                    ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(state.clone());
                 let extras = empty_extras();
                 let published = extras.published_outcome.clone();
                 let outcome = outcome.clone();
@@ -984,7 +962,7 @@ mod tests {
     async fn framework_waits_do_not_consume_completion_or_skip_the_physical_join() {
         use super::super::termination::{ExecutionOutcome, PublishedTermination};
         let (sender, _receiver, watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Drained);
+            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Drained);
         let extras = empty_extras();
         extras
             .published_outcome

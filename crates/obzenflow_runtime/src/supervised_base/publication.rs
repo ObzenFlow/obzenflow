@@ -84,6 +84,10 @@ pub(crate) fn accounting_failed(error: BoxError) -> BoxError {
 
 type Completion = Shared<BoxFuture<'static, Result<(), SharedError>>>;
 
+/// An observation of the publications accepted at capture time. It neither
+/// closes admission nor owns a new task. Every captured join is observed.
+pub(crate) type PublicationSettlement = Shared<BoxFuture<'static, Result<(), SharedError>>>;
+
 struct Operation {
     task: tokio::task::AbortHandle,
     completion: Completion,
@@ -109,6 +113,7 @@ struct State {
 pub(crate) struct PublicationScope {
     state: Mutex<State>,
     slots: Arc<Semaphore>,
+    control_slots: Arc<Semaphore>,
     ordered: bool,
 }
 
@@ -124,14 +129,19 @@ tokio::task_local! {
 
 impl PublicationScope {
     pub(crate) fn new() -> Arc<Self> {
-        Self::with_ordering(true)
+        Self::with_ordering(true, 1)
     }
 
+    pub(crate) fn pipeline() -> Arc<Self> {
+        Self::with_ordering(true, 2)
+    }
+
+    #[cfg(test)]
     pub(crate) fn concurrent() -> Arc<Self> {
-        Self::with_ordering(false)
+        Self::with_ordering(false, 1)
     }
 
-    fn with_ordering(ordered: bool) -> Arc<Self> {
+    fn with_ordering(ordered: bool, control_capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             ordered,
             state: Mutex::new(State {
@@ -143,6 +153,7 @@ impl PublicationScope {
                 failure: None,
             }),
             slots: Arc::new(Semaphore::new(64)),
+            control_slots: Arc::new(Semaphore::new(control_capacity)),
         })
     }
 
@@ -203,6 +214,33 @@ impl PublicationScope {
             state.admission = Admission::Closed;
         }
         self.slots.close();
+        self.control_slots.close();
+    }
+
+    pub(crate) fn first_failure(&self) -> Option<SharedError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::reap(&mut state);
+        state.failure.clone()
+    }
+
+    pub(crate) fn observe_accepted(&self) -> PublicationSettlement {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self::reap(&mut state);
+        let failure = state.failure.clone();
+        let completions: Vec<_> = state
+            .operations
+            .values()
+            .map(|operation| operation.completion.clone())
+            .collect();
+        async move {
+            let results = futures::future::join_all(completions).await;
+            match failure.or_else(|| results.into_iter().find_map(Result::err)) {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+        .boxed()
+        .shared()
     }
 
     fn retain_error(&self, error: BoxError) -> BoxError {
@@ -258,6 +296,23 @@ impl PublicationScope {
     ) -> Result<BoxFuture<'static, Result<T, BoxError>>, BoxError> {
         let slot = self
             .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::Closed => Box::new(AdmissionClosed) as BoxError,
+                error => Box::new(error) as BoxError,
+            })?;
+        self.register(slot, operation)
+    }
+
+    /// Reserved control admission shares the ordinary writer tail. Capacity
+    /// bounds admission only; it cannot overtake an accepted blocked write.
+    pub(crate) fn enqueue_control<T: Send + 'static>(
+        self: &Arc<Self>,
+        operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
+    ) -> Result<BoxFuture<'static, Result<T, BoxError>>, BoxError> {
+        let slot = self
+            .control_slots
             .clone()
             .try_acquire_owned()
             .map_err(|error| match error {
@@ -478,6 +533,87 @@ pub(crate) fn append<T: JournalEvent + 'static>(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn saturated_writer_reserves_two_controls_in_the_same_order() {
+        let scope = PublicationScope::pipeline();
+        let (release, gate) = oneshot::channel();
+        drop(
+            scope
+                .enqueue(async move {
+                    gate.await?;
+                    Ok(())
+                })
+                .unwrap(),
+        );
+        let order = Arc::new(Mutex::new(Vec::new()));
+        for index in 1..64 {
+            let order = order.clone();
+            drop(
+                scope
+                    .enqueue(async move {
+                        order.lock().unwrap().push(index);
+                        Ok(())
+                    })
+                    .unwrap(),
+            );
+        }
+        assert!(scope.enqueue(async { Ok(()) }).is_err());
+        for index in 64..66 {
+            let order = order.clone();
+            drop(
+                scope
+                    .enqueue_control(async move {
+                        order.lock().unwrap().push(index);
+                        Ok(())
+                    })
+                    .unwrap(),
+            );
+        }
+        assert!(scope.enqueue_control(async { Ok(()) }).is_err());
+        assert!(order.lock().unwrap().is_empty());
+        let mut abandoned = Box::pin(scope.observe_accepted());
+        assert!(futures::poll!(&mut abandoned).is_pending());
+        drop(abandoned);
+        release.send(()).unwrap();
+        scope.observe_accepted().await.unwrap();
+        assert_eq!(*order.lock().unwrap(), (1..66).collect::<Vec<_>>());
+        // Observation did not close admission.
+        scope.enqueue(async { Ok(()) }).unwrap().await.unwrap();
+        scope.join().await.unwrap();
+        assert!(scope.enqueue_control(async { Ok(()) }).is_err());
+    }
+
+    #[tokio::test]
+    async fn observation_captures_only_accepted_writes_and_exposes_failure_before_all_settle() {
+        let scope = PublicationScope::concurrent();
+        let before = scope.observe_accepted();
+        let (release, gate) = oneshot::channel();
+        drop(
+            scope
+                .enqueue(async move {
+                    gate.await?;
+                    Ok(())
+                })
+                .unwrap(),
+        );
+        let failure = scope
+            .enqueue(async {
+                Err::<(), BoxError>(Box::new(JournalError::CommitIndeterminate {
+                    source: std::io::Error::other("lost acknowledgement").into(),
+                }))
+            })
+            .unwrap();
+        before.await.unwrap();
+        let mut observation = Box::pin(scope.observe_accepted());
+        assert!(futures::poll!(&mut observation).is_pending());
+        assert!(failure.await.is_err());
+        assert!(is_indeterminate(&scope.first_failure().unwrap()));
+        assert!(futures::poll!(&mut observation).is_pending());
+        release.send(()).unwrap();
+        assert!(is_indeterminate(&observation.await.unwrap_err()));
+        assert!(is_indeterminate(&scope.join().await.unwrap_err()));
+    }
 
     #[tokio::test]
     async fn dropped_receipt_and_cancelled_join_retain_fifo_accounting() {

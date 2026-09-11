@@ -32,7 +32,6 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;

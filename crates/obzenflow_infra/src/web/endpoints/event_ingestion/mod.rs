@@ -353,7 +353,6 @@ mod tests {
         InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
         TypedAsyncInfiniteSourceHandler,
     };
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::fs;

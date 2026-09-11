@@ -14,8 +14,7 @@ use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt, SupervisorBuilder,
-    SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::WriterId;
 
@@ -136,17 +135,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);
-        let stage_name_for_trace = self.config.stage_name.clone();
-        let task = SupervisorTaskBuilder::<AsyncInfiniteSourceSupervisor<H>>::new(&supervisor_name)
-            .spawn(move || async move {
-                tracing::debug!(
-                    "Spawned task for async_infinite_source_{}",
-                    stage_name_for_trace
-                );
-
-                HandlerSupervisedExt::run(supervisor, InfiniteSourceState::<H>::Created, context)
-                    .await
-            });
+        let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
+            supervisor,
+            InfiniteSourceState::<H>::Created,
+            context,
+        );
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

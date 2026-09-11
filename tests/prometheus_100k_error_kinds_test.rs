@@ -518,8 +518,7 @@ mod managed_lifecycle_regressions {
             SystemEvent, SystemEventType,
         };
         use obzenflow_infra::journal::disk::log_record::LogRecord;
-        use obzenflow_runtime::pipeline::{FlowStopMode, PipelineEvent};
-        use obzenflow_runtime::supervised_base::SupervisorHandle;
+        use obzenflow_runtime::pipeline::{FlowStopMode, PipelineControl};
         use std::time::Duration;
 
         let dir = tempfile::tempdir_in("target").unwrap();
@@ -554,11 +553,10 @@ mod managed_lifecycle_regressions {
                     }
                     // A zero budget asks Runtime to expire immediately. This
                     // witnesses the shipped flow's facts, not elapsed timing.
-                    flow.send_event(PipelineEvent::StopRequested {
+                    flow.send_control(PipelineControl::Stop {
                         mode: FlowStopMode::Graceful {
                             timeout: Duration::ZERO,
                         },
-                        reason: None,
                     })
                     .await
                     .unwrap();

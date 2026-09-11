@@ -4,9 +4,9 @@
 
 use super::base::Supervisor;
 use super::{
-    ChannelBuilder, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
-    HandlerSupervisedExt, HandlerSupervisedWithExternalEvents, SelfSupervised, SelfSupervisedExt,
-    SelfSupervisedWithExternalEvents,
+    ChannelBuilder, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandleBuilder,
+    HandlerSupervised, HandlerSupervisedWithExternalEvents, SelfSupervised,
+    SelfSupervisedWithExternalEvents, SupervisorHandle, SupervisorTaskBuilder,
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::{
@@ -231,7 +231,19 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
         failure_actions_executed: failure_actions_executed.clone(),
     };
 
-    let result = SelfSupervisedExt::run(supervisor, TestState::Running, ctx).await;
+    let (sender, _receiver, watcher) = ChannelBuilder::new().build(TestState::Running);
+    let task = SupervisorTaskBuilder::new("test-self-supervisor").spawn_self_supervised(
+        supervisor,
+        TestState::Running,
+        ctx,
+    );
+    let handle = HandleBuilder::<TestEvent, _>::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap();
+    let result = handle.wait_for_completion().await;
     assert!(result.is_ok());
     assert_eq!(failure_actions_executed.load(Ordering::Relaxed), 1);
     assert_eq!(completion_writes.load(Ordering::Relaxed), 1);
@@ -251,7 +263,19 @@ async fn dispatch_state_error_drives_fsm_failure_path_handler_supervised() {
         failure_actions_executed: failure_actions_executed.clone(),
     };
 
-    let result = HandlerSupervisedExt::run(supervisor, TestState::Running, ctx).await;
+    let (sender, _receiver, watcher) = ChannelBuilder::new().build(TestState::Running);
+    let task = SupervisorTaskBuilder::new("test-handler-supervisor").spawn_handler_supervised(
+        supervisor,
+        TestState::Running,
+        ctx,
+    );
+    let handle = HandleBuilder::<TestEvent, _>::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap();
+    let result = handle.wait_for_completion().await;
     assert!(result.is_ok());
     assert_eq!(failure_actions_executed.load(Ordering::Relaxed), 1);
     assert_eq!(completion_writes.load(Ordering::Relaxed), 1);

@@ -20,7 +20,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::EventEnvelope;
+use obzenflow_core::{EventEnvelope, StageId};
 use obzenflow_topology::TopologyBuilder;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,6 +33,9 @@ struct MemoryJournal<T: JournalEvent> {
     owner: Option<JournalOwner>,
     events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
     terminal_append: Option<Arc<TerminalAppendGate>>,
+    metrics_ready_append: Option<Arc<TerminalAppendGate>>,
+    fail_reader: Option<usize>,
+    reader_calls: AtomicUsize,
 }
 
 impl<T: JournalEvent> MemoryJournal<T> {
@@ -42,6 +45,9 @@ impl<T: JournalEvent> MemoryJournal<T> {
             owner: Some(owner),
             events: Arc::new(Mutex::new(Vec::new())),
             terminal_append: None,
+            metrics_ready_append: None,
+            fail_reader: None,
+            reader_calls: AtomicUsize::new(0),
         }
     }
 }
@@ -99,6 +105,12 @@ where
         event: T,
         _parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
+        if event.event_type_name() == "system.metrics.ready" {
+            if let Some(gate) = &self.metrics_ready_append {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+        }
         if matches!(
             event.event_type_name(),
             "system.pipeline.completed" | "system.pipeline.cancelled" | "system.pipeline.failed"
@@ -131,6 +143,9 @@ where
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        if self.fail_reader == Some(self.reader_calls.fetch_add(1, Ordering::Relaxed) + 1) {
+            return Err(JournalError::Full);
+        }
         Ok(Box::new(MemoryJournalReader {
             events: Arc::clone(&self.events),
             pos: position as usize,
@@ -204,7 +219,8 @@ fn test_context(
         running_stages: HashSet::new(),
         completion_subscription,
         metrics_exporter: None,
-        metrics_handle: None,
+        resources: Default::default(),
+        progress: Default::default(),
         stage_data_journals: Vec::new(),
         stage_error_journals: Vec::new(),
         backpressure_registry: None,
@@ -230,7 +246,7 @@ async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
     let system_id = SystemId::new();
     let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
     let (topology, _, _) = source_sink_topology_with_source();
-    let mut context = test_context(topology, system_id, journal, None);
+    let context = test_context(topology, system_id, journal, None);
     let (sender, _receiver, watcher) =
         ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
             .build(MetricsAggregatorState::Running);
@@ -241,14 +257,13 @@ async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
         started_tx.send(()).unwrap();
         std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>().await
     });
-    context.metrics_handle = Some(
+    context.resources.metrics.install_for_test(
         HandleBuilder::new()
             .with_event_sender(sender)
             .with_state_watcher(watcher)
             .with_supervisor_task(task)
             .build_standard()
-            .unwrap()
-            .into(),
+            .unwrap(),
     );
     started_rx.await.unwrap();
     drop(context);
@@ -314,6 +329,7 @@ fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status() {
 
 struct TestPipelineStageHandle {
     stall_drain: bool,
+    panic_on_start: bool,
     id: StageId,
     name: String,
     stage_type: StageType,
@@ -330,6 +346,7 @@ struct StartGate {
 #[derive(Clone, Default)]
 struct ShutdownProbe {
     completed: Arc<std::sync::atomic::AtomicBool>,
+    completed_notify: Arc<tokio::sync::Notify>,
     request_abort_count: Arc<AtomicUsize>,
     force_shutdown_count: Arc<AtomicUsize>,
     wait_for_completion_count: Arc<AtomicUsize>,
@@ -340,6 +357,7 @@ impl TestPipelineStageHandle {
     fn boxed(id: StageId, name: impl Into<String>, stage_type: StageType) -> Arc<dyn StageHandle> {
         Arc::new(Self {
             stall_drain: false,
+            panic_on_start: false,
             id,
             name: name.into(),
             stage_type,
@@ -358,6 +376,7 @@ impl TestPipelineStageHandle {
     ) -> Arc<dyn StageHandle> {
         Arc::new(Self {
             stall_drain: false,
+            panic_on_start: false,
             id,
             name: name.into(),
             stage_type,
@@ -378,6 +397,7 @@ impl TestPipelineStageHandle {
     ) -> Arc<dyn StageHandle> {
         Arc::new(Self {
             stall_drain: false,
+            panic_on_start: false,
             id,
             name: name.into(),
             stage_type,
@@ -424,6 +444,10 @@ impl StageHandle for TestPipelineStageHandle {
                 let _ = release.await;
             }
         }
+        assert!(
+            !self.panic_on_start,
+            "pipeline command panic after metrics start"
+        );
         Ok(())
     }
 
@@ -458,8 +482,12 @@ impl StageHandle for TestPipelineStageHandle {
             probe
                 .wait_for_completion_count
                 .fetch_add(1, Ordering::Relaxed);
+            let notified = probe.completed_notify.notified();
             if !probe.completed.load(Ordering::Relaxed) {
-                std::future::pending::<()>().await;
+                notified.await;
+            }
+            if probe.request_abort_count.load(Ordering::Relaxed) > 0 {
+                return Err(StageError::Aborted);
             }
         }
         Ok(())
@@ -474,22 +502,44 @@ impl StageHandle for TestPipelineStageHandle {
 
     fn request_abort(&self) {
         if let Some(probe) = &self.shutdown_probe {
-            probe.request_abort_count.fetch_add(1, Ordering::Relaxed);
+            if probe
+                .request_abort_count
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+            {
+                return;
+            }
+            probe.completed.store(true, Ordering::Relaxed);
+            probe.completed_notify.notify_waiters();
         }
     }
 }
 
-fn test_supervisor(
-    system_id: SystemId,
-    _system_journal: Arc<MemoryJournal<SystemEvent>>,
-) -> PipelineSupervisor {
-    PipelineSupervisor {
-        name: "test_pipeline_supervisor".to_string(),
-        system_id,
-        last_barrier_log: None,
-        last_manual_wait_log: None,
-        drain_idle_iters: 0,
+fn test_supervisor(system_id: SystemId, _journal: Arc<MemoryJournal<SystemEvent>>) -> SystemId {
+    system_id
+}
+
+fn initial_fsm_state(state: &PipelineState) -> PipelineFsmState {
+    match state {
+        PipelineState::Created | PipelineState::Materializing => PipelineFsmState::Created,
+        PipelineState::Materialized => PipelineFsmState::AwaitingStageReadiness,
+        PipelineState::ReadyForRun => PipelineFsmState::ReadyForRun,
+        PipelineState::Running => PipelineFsmState::Running,
+        PipelineState::SourceCompleted => PipelineFsmState::SourceCompleted,
+        PipelineState::Draining => PipelineFsmState::Draining,
+        _ => PipelineFsmState::SettlingStages,
     }
+}
+
+async fn ready_stage(ctx: &mut PipelineContext, id: StageId) {
+    ctx.stage_supervisors.insert(
+        id,
+        TestPipelineStageHandle::boxed(id, "sink", StageType::Sink),
+    );
+    ctx.system_journal
+        .append(SystemEvent::stage_running(id), None)
+        .await
+        .unwrap();
 }
 
 async fn wait_for_state(
@@ -514,36 +564,60 @@ async fn wait_for_state(
 
 fn spawn_supervisor_loop(
     initial_state: PipelineState,
-    supervisor: PipelineSupervisor,
-    context: PipelineContext,
-    receiver: crate::supervised_base::EventReceiver<PipelineEvent>,
+    system_id: SystemId,
+    mut context: PipelineContext,
+    receiver: crate::supervised_base::EventReceiver<PipelineFsmEvent>,
     watcher: StateWatcher<PipelineState>,
 ) -> JoinHandle<Result<(), BoxError>> {
     tokio::spawn(async move {
-        let scope = crate::supervised_base::publication::PublicationScope::concurrent();
-        let result = scope
-            .enter(crate::pipeline::driver::run(
-                supervisor,
-                receiver,
-                watcher,
-                context,
-                initial_state,
-            ))
-            .await;
-        scope.join().await?;
-        result
+        if context.completion_subscription.is_none() {
+            context.completion_subscription = Some(SystemSubscription::new(
+                context.system_journal.reader().await?,
+                "test_pipeline".into(),
+            ));
+        }
+        context.expected_sources = context.source_supervisors.keys().copied().collect();
+        if matches!(
+            initial_state,
+            PipelineState::Running | PipelineState::SourceCompleted | PipelineState::Draining
+        ) {
+            context
+                .flow_start_time
+                .get_or_insert_with(std::time::Instant::now);
+        }
+        let scope = context.resources.publications.clone();
+        let supervisor = PipelineSupervisor::new(
+            system_id,
+            receiver,
+            watcher.clone(),
+            context.resources.failure.clone(),
+        );
+        let (sender, _receiver, _) =
+            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(initial_state.clone());
+        let task = crate::supervised_base::SupervisorTaskBuilder::new("test_pipeline")
+            .with_publications(scope)
+            .spawn_self_supervised(supervisor, initial_fsm_state(&initial_state), context);
+        let handle = crate::supervised_base::HandleBuilder::new()
+            .with_event_sender(sender)
+            .with_state_watcher(watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .unwrap();
+        handle
+            .wait_for_completion()
+            .await
+            .map_err(|error| Box::new(error) as BoxError)
     })
 }
 
 async fn stop_and_join(
-    sender: &EventSender<PipelineEvent>,
+    sender: &EventSender<PipelineFsmEvent>,
     task: JoinHandle<Result<(), BoxError>>,
 ) {
     sender
-        .send(PipelineEvent::StopRequested {
+        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
             mode: FlowStopMode::Cancel,
-            reason: Some("test_stop".to_string()),
-        })
+        }))
         .await
         .expect("stop should send");
 
@@ -571,10 +645,11 @@ async fn graceful_deadline_bounds_a_stalled_source_control_send() {
             start_gate: None,
             shutdown_probe: None,
             stall_drain: true,
+            panic_on_start: false,
         }),
     );
     let (sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Running);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Running);
     let task = spawn_supervisor_loop(
         PipelineState::Running,
         test_supervisor(system_id, journal.clone()),
@@ -583,12 +658,11 @@ async fn graceful_deadline_bounds_a_stalled_source_control_send() {
         watcher,
     );
     sender
-        .send(PipelineEvent::StopRequested {
+        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
             mode: FlowStopMode::Graceful {
                 timeout: std::time::Duration::from_millis(20),
             },
-            reason: None,
-        })
+        }))
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_millis(500), task)
@@ -656,11 +730,11 @@ async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_clea
     );
 
     let (_sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Draining);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Draining);
     let started = std::time::Instant::now();
     let task = spawn_supervisor_loop(
         PipelineState::Draining,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
@@ -685,36 +759,13 @@ async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_clea
         shutdown_probe
             .wait_for_completion_count
             .load(Ordering::Relaxed),
-        0,
-        "an overdue supervisor should not receive a fresh completion wait"
+        1,
+        "the existing typed completion must still be observed after abort"
     );
     assert_eq!(
-        shutdown_probe.abort_and_join_count.load(Ordering::Relaxed),
+        shutdown_probe.request_abort_count.load(Ordering::Relaxed),
         1,
-        "the overdue supervisor must be aborted and joined exactly once"
-    );
-}
-
-#[test]
-fn is_gating_edge_for_contract_behaves_as_expected() {
-    // Non-source edges are always gating, regardless of mode.
-    assert!(is_gating_edge_for_contract(
-        false,
-        SourceContractStrictMode::Abort
-    ));
-    assert!(is_gating_edge_for_contract(
-        false,
-        SourceContractStrictMode::Warn
-    ));
-
-    // Source edges are gating only when strict mode is Abort.
-    assert!(is_gating_edge_for_contract(
-        true,
-        SourceContractStrictMode::Abort
-    ));
-    assert!(
-        !is_gating_edge_for_contract(true, SourceContractStrictMode::Warn),
-        "source edges should be non-gating when strict mode is Warn"
+        "the overdue supervisor receives one synchronous abort before joining"
     );
 }
 
@@ -735,14 +786,14 @@ async fn manual_ready_for_run_publishes_state_and_waits_for_external_run() {
         system_journal.clone(),
         Some(subscription),
     );
-    context.running_stages.insert(sink_stage_id);
+    ready_stage(&mut context, sink_stage_id).await;
 
     let (sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materialized);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Materialized);
     let mut state_rx = watcher.subscribe();
     let task = spawn_supervisor_loop(
         PipelineState::Materialized,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
@@ -779,14 +830,14 @@ async fn auto_ready_for_run_emits_run_and_reaches_running() {
         system_journal.clone(),
         Some(subscription),
     );
-    context.running_stages.insert(sink_stage_id);
+    ready_stage(&mut context, sink_stage_id).await;
 
     let (sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materialized);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Materialized);
     let mut state_rx = watcher.subscribe();
     let task = spawn_supervisor_loop(
         PipelineState::Materialized,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
@@ -811,12 +862,12 @@ async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic(
         TestPipelineStageHandle::boxed(sink_stage_id, "sink", StageType::Sink),
     );
 
-    let (_sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materializing);
+    let (_sender, receiver, watcher) = ChannelBuilder::<PipelineFsmEvent, PipelineState>::new()
+        .build(PipelineState::Materializing);
     let mut state_rx = watcher.subscribe();
     let task = spawn_supervisor_loop(
         PipelineState::Materializing,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
@@ -854,15 +905,15 @@ async fn materialized_to_ready_for_run_publishes_post_transition_state() {
         system_journal.clone(),
         Some(subscription),
     );
-    context.running_stages.insert(sink_stage_id);
+    ready_stage(&mut context, sink_stage_id).await;
 
     let (sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materialized);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Materialized);
     let watcher_for_assertion = watcher.clone();
     let mut state_rx = watcher.subscribe();
     let task = spawn_supervisor_loop(
         PipelineState::Materialized,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
@@ -882,7 +933,7 @@ async fn materialized_to_ready_for_run_publishes_post_transition_state() {
 }
 
 #[tokio::test]
-async fn running_state_is_published_after_source_start_actions_complete() {
+async fn running_state_requires_committed_source_running_after_start() {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
@@ -898,7 +949,7 @@ async fn running_state_is_published_after_source_start_actions_complete() {
         system_journal.clone(),
         Some(subscription),
     );
-    context.running_stages.insert(sink_stage_id);
+    ready_stage(&mut context, sink_stage_id).await;
     context.stage_supervisors.insert(
         sink_stage_id,
         TestPipelineStageHandle::boxed(sink_stage_id, "sink", StageType::Sink),
@@ -920,19 +971,19 @@ async fn running_state_is_published_after_source_start_actions_complete() {
     );
 
     let (sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::ReadyForRun);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::ReadyForRun);
     let watcher_for_assertion = watcher.clone();
     let mut state_rx = watcher.subscribe();
     let task = spawn_supervisor_loop(
         PipelineState::ReadyForRun,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
     );
 
     sender
-        .send(PipelineEvent::Run)
+        .send(PipelineFsmEvent::Control(PipelineControl::Start))
         .await
         .expect("Run should send");
     tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
@@ -942,12 +993,16 @@ async fn running_state_is_published_after_source_start_actions_complete() {
 
     assert!(
         matches!(watcher_for_assertion.current(), PipelineState::ReadyForRun),
-        "Running must not be published until NotifySourceStart completes"
+        "a pending source command is not running evidence"
     );
 
     release_tx
         .send(())
         .expect("source start action should still be waiting");
+    system_journal
+        .append(SystemEvent::stage_running(source_stage_id), None)
+        .await
+        .unwrap();
     wait_for_state(&mut state_rx, "Running", |state| {
         matches!(state, PipelineState::Running)
     })
@@ -974,19 +1029,19 @@ async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run() {
         system_journal.clone(),
         Some(subscription),
     );
-    context.running_stages.insert(sink_stage_id);
+    ready_stage(&mut context, sink_stage_id).await;
 
     let (sender, receiver, watcher) =
-        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materialized);
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Materialized);
     sender
-        .send(PipelineEvent::Run)
+        .send(PipelineFsmEvent::Control(PipelineControl::Start))
         .await
         .expect("early Run should queue");
 
     let mut state_rx = watcher.subscribe();
     let task = spawn_supervisor_loop(
         PipelineState::Materialized,
-        test_supervisor(system_id, system_journal),
+        test_supervisor(system_id, system_journal.clone()),
         context,
         receiver,
         watcher,
@@ -1006,83 +1061,278 @@ async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run() {
 }
 
 #[tokio::test]
-async fn materialized_without_non_source_stages_transitions_to_error() {
+async fn empty_topology_fails_through_the_canonical_fsm() {
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
-    let topology = empty_topology();
-    let mut context = test_context(topology, system_id, system_journal.clone(), None);
-    let mut supervisor = test_supervisor(system_id, system_journal);
-
-    let directive = materialized::dispatch_materialized(&mut supervisor, &mut context)
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut context = test_context(empty_topology(), system_id, journal, None);
+    let mut machine =
+        crate::pipeline::fsm::build_pipeline_fsm_with_initial(PipelineFsmState::Created);
+    machine
+        .handle(PipelineFsmEvent::Bootstrap, &mut context)
         .await
-        .expect("dispatch should succeed");
-
-    assert!(matches!(
-        directive,
-        EventLoopDirective::Transition(PipelineEvent::Error { ref message })
-            if message.contains("source-only")
-    ));
+        .unwrap();
+    assert!(matches!(machine.state(), PipelineFsmState::SettlingStages));
+    assert!(context
+        .termination
+        .failure
+        .as_ref()
+        .unwrap()
+        .reason
+        .contains("Stage count mismatch"));
 }
 
 #[tokio::test]
-async fn materialized_stage_failed_or_cancelled_before_readiness_transitions_to_error() {
-    let system_id = SystemId::new();
-
-    for event in [
-        SystemEvent::stage_failed(StageId::new(), "boom".to_string(), false),
-        SystemEvent::stage_cancelled(StageId::new(), "cancelled".to_string()),
+async fn stage_failures_and_cancellations_before_readiness_use_journal_evidence() {
+    for state in [
+        PipelineFsmState::AwaitingStageReadiness,
+        PipelineFsmState::ReadyForRun,
     ] {
-        let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
-        let (topology, _sink_stage_id) = source_sink_topology();
-        let subscription = system_subscription_with(&system_journal, [event]).await;
-        let mut context = test_context(
-            topology,
-            system_id,
-            system_journal.clone(),
-            Some(subscription),
-        );
-        let mut supervisor = test_supervisor(system_id, system_journal);
-
-        let directive = materialized::dispatch_materialized(&mut supervisor, &mut context)
-            .await
-            .expect("dispatch should succeed");
-
-        assert!(matches!(
-            directive,
-            EventLoopDirective::Transition(PipelineEvent::Error { .. })
-        ));
+        for cancelled in [false, true] {
+            let system_id = SystemId::new();
+            let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+            let (topology, sink) = source_sink_topology();
+            let event = if cancelled {
+                SystemEvent::stage_cancelled(sink, "cancelled".into())
+            } else {
+                SystemEvent::stage_failed(sink, "ready fault".into(), false)
+            };
+            let envelope = journal.append(event, None).await.unwrap();
+            let mut context = test_context(topology, system_id, journal, None);
+            let mut machine = crate::pipeline::fsm::build_pipeline_fsm_with_initial(state.clone());
+            machine
+                .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
+                .await
+                .unwrap();
+            assert!(matches!(machine.state(), PipelineFsmState::SettlingStages));
+            assert!(context.termination.failure.is_some());
+        }
     }
 }
 
 #[tokio::test]
-async fn ready_for_run_stage_failure_transitions_to_error_before_run() {
-    let _lock = bootstrap_test_lock_async().await;
-    let _guard = install_bootstrap_config(BootstrapConfig {
-        startup_mode: StartupMode::Manual,
-        ..BootstrapConfig::default()
-    });
+async fn materialisation_reconsiders_readiness_facts_already_consumed() {
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
-    let (topology, _sink_stage_id) = source_sink_topology();
-    let failed = SystemEvent::stage_failed(StageId::new(), "ready fault".to_string(), false);
-    let subscription = system_subscription_with(&system_journal, [failed]).await;
-    let mut context = test_context(
-        topology,
-        system_id,
-        system_journal.clone(),
-        Some(subscription),
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, sink) = source_sink_topology();
+    let mut context = test_context(topology, system_id, journal.clone(), None);
+    context.stage_supervisors.insert(
+        sink,
+        TestPipelineStageHandle::boxed(sink, "sink", StageType::Sink),
     );
-    let mut supervisor = test_supervisor(system_id, system_journal);
-
-    let directive = ready_for_run::dispatch_ready_for_run(&mut supervisor, &mut context)
+    let mut machine =
+        crate::pipeline::fsm::build_pipeline_fsm_with_initial(PipelineFsmState::Materializing);
+    let envelope = journal
+        .append(SystemEvent::stage_running(sink), None)
         .await
-        .expect("dispatch should succeed");
-
+        .unwrap();
+    assert!(machine
+        .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
+        .await
+        .unwrap()
+        .is_empty());
+    let actions = machine
+        .handle(PipelineFsmEvent::PhysicalSettlementSatisfied, &mut context)
+        .await
+        .unwrap();
     assert!(matches!(
-        directive,
-        EventLoopDirective::Transition(PipelineEvent::Error { ref message })
-            if message.contains("ready fault")
+        machine.state(),
+        PipelineFsmState::AwaitingStageReadiness
     ));
+    let readiness = actions
+        .into_iter()
+        .find_map(|action| match action {
+            PipelineAction::Publish { event, .. } => Some(*event),
+            _ => None,
+        })
+        .expect("previously consumed Running fact must authorise readiness publication");
+    let envelope = journal.append(readiness, None).await.unwrap();
+    machine
+        .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
+        .await
+        .unwrap();
+    assert!(matches!(machine.state(), PipelineFsmState::ReadyForRun));
+}
+
+#[tokio::test]
+async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins() {
+    use obzenflow_fsm::FsmAction;
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let mut ctx = test_context(topology, system_id, journal, None);
+    ctx.source_supervisors.insert(
+        source,
+        TestPipelineStageHandle::boxed(source, "source", StageType::FiniteSource),
+    );
+    ctx.stage_supervisors.insert(
+        sink,
+        TestPipelineStageHandle::boxed(sink, "sink", StageType::Sink),
+    );
+    PipelineAction::StartSources
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+    PipelineAction::ObserveStages
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
+    for _ in 0..32 {
+        sender
+            .send(PipelineFsmEvent::Control(PipelineControl::Start))
+            .await
+            .unwrap();
+    }
+    let mut supervisor =
+        PipelineSupervisor::new(system_id, receiver, watcher, ctx.resources.failure.clone());
+    let mut controls_observed = 0;
+    for _ in 0..16 {
+        if ctx.resources.delivery.is_empty() && ctx.resources.stages_joined {
+            break;
+        }
+        if matches!(
+            supervisor
+                .dispatch_state(&PipelineFsmState::Running, &mut ctx)
+                .await
+                .unwrap(),
+            EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+        ) {
+            controls_observed += 1;
+        }
+    }
+    assert!(
+        ctx.resources.delivery.is_empty(),
+        "authorised commands need bounded service"
+    );
+    assert!(
+        ctx.resources.stages_joined,
+        "every stage join needs bounded service"
+    );
+    assert!(
+        controls_observed > 0 && controls_observed < 32,
+        "controls must share dispatch with owned work"
+    );
+}
+
+#[tokio::test]
+async fn completed_action_failure_gateway_does_not_report_the_original_error_again() {
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, _) = source_sink_topology();
+    let mut ctx = test_context(topology, system_id, journal, None);
+    ctx.resources
+        .retain_failure(Box::new(std::io::Error::other("handoff failed")));
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
+    let mut supervisor =
+        PipelineSupervisor::new(system_id, receiver, watcher, ctx.resources.failure.clone());
+    // This hook follows successful execution of the shared runner's failure
+    // actions. Dispatch must retain the error for completion without routing it
+    // through that gateway a second time.
+    supervisor
+        .after_transition(&PipelineFsmState::SettlingStages, &ctx)
+        .await
+        .unwrap();
+    sender
+        .send(PipelineFsmEvent::Control(PipelineControl::Start))
+        .await
+        .unwrap();
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&PipelineFsmState::SettlingStages, &mut ctx)
+            .await
+            .unwrap(),
+        EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+    ));
+    assert_eq!(
+        ctx.resources.failure.get().unwrap().to_string(),
+        "handoff failed"
+    );
+}
+
+#[tokio::test]
+async fn abort_publication_rejection_cannot_skip_siblings_or_resume_commands() {
+    use obzenflow_fsm::FsmAction;
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let mut context = test_context(topology, system_id, journal, None);
+    let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
+    let handles: Vec<Arc<dyn StageHandle>> = vec![
+        Arc::new(owned_test_stage(
+            source,
+            StageType::FiniteSource,
+            Some(probes[0].clone()),
+        )),
+        Arc::new(owned_test_stage(
+            sink,
+            StageType::Sink,
+            Some(probes[1].clone()),
+        )),
+    ];
+    context
+        .source_supervisors
+        .insert(source, handles[0].clone());
+    context.stage_supervisors.insert(sink, handles[1].clone());
+    for id in [source, sink] {
+        context.stage_data_journals.push((
+            id,
+            Arc::new(MemoryJournal::with_owner(JournalOwner::stage(id))),
+        ));
+    }
+    context
+        .resources
+        .delivery
+        .enqueue(
+            handles,
+            &[crate::pipeline::resources::StageCommand::Start],
+            2,
+        )
+        .unwrap();
+    context.progress.abort_cause =
+        Some((ViolationCause::Other("contract fault".into()), Some(source)));
+    // These fixtures reject the control-publication capability. Every child
+    // must still be aborted before the original admission error is returned.
+    assert!(PipelineAction::CancelStages {
+        contract_abort: true
+    }
+    .execute(&mut context)
+    .await
+    .is_err());
+    assert!(context.resources.delivery.is_empty());
+    for probe in probes {
+        assert_eq!(probe.request_abort_count.load(Ordering::Relaxed), 1);
+    }
+    let original = context.resources.failure.get().unwrap().to_string();
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
+    let mut supervisor = PipelineSupervisor::new(
+        system_id,
+        receiver,
+        watcher,
+        context.resources.failure.clone(),
+    );
+    let state = PipelineFsmState::SettlingStages;
+    let first = supervisor
+        .dispatch_state(&state, &mut context)
+        .await
+        .unwrap();
+    assert!(
+        matches!(first, EventLoopDirective::Transition(PipelineFsmEvent::OperationalFailure { message }) if message == original)
+    );
+    sender
+        .send(PipelineFsmEvent::Control(PipelineControl::Start))
+        .await
+        .unwrap();
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&state, &mut context)
+            .await
+            .unwrap(),
+        EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+    ));
+    assert_eq!(
+        context.resources.failure.get().unwrap().to_string(),
+        original
+    );
 }
 
 #[tokio::test]
@@ -1116,8 +1366,12 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
     // The fixture completes ordinary cleanup before the terminal write. Its
     // abort probe then observes whether Runtime services the new deadline.
     let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
-    sender
-        .send(PipelineEvent::AllStagesCompleted)
+    journal
+        .append(
+            obzenflow_core::event::SystemEventFactory::new(system_id)
+                .pipeline_all_stages_completed(),
+            None,
+        )
         .await
         .unwrap();
     let task = spawn_supervisor_loop(
@@ -1131,12 +1385,11 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
         .await
         .unwrap();
     sender
-        .send(PipelineEvent::StopRequested {
+        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
             mode: FlowStopMode::Graceful {
                 timeout: std::time::Duration::ZERO,
             },
-            reason: None,
-        })
+        }))
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1161,7 +1414,9 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
             _ => None,
         })
         .collect();
-    assert!(matches!(facts[0], PipelineLifecycleEvent::Completed { .. }));
+    assert!(facts
+        .iter()
+        .any(|fact| matches!(fact, PipelineLifecycleEvent::Completed { .. })));
     assert_eq!(
         facts
             .iter()
@@ -1208,13 +1463,21 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
             let published = context.termination.published.clone();
             let state = PipelineState::Draining;
             let (sender, receiver, watcher) =
-                ChannelBuilder::<PipelineEvent, PipelineState>::new().build(state.clone());
+                ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(state.clone());
             let event = if terminal == "failed" {
-                PipelineEvent::Error {
+                PipelineFsmEvent::OperationalFailure {
                     message: "test_failure".into(),
                 }
             } else {
-                PipelineEvent::AllStagesCompleted
+                journal
+                    .append(
+                        obzenflow_core::event::SystemEventFactory::new(system_id)
+                            .pipeline_all_stages_completed(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                PipelineFsmEvent::Control(PipelineControl::Start)
             };
             sender.send(event).await.unwrap();
             let task = spawn_supervisor_loop(
@@ -1302,10 +1565,11 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
         let published = context.termination.published.clone();
         // Enter the precise handler under test before dispatch. Materializing
         // and SourceCompleted dispatch can otherwise produce an earlier event.
-        let mut fsm = crate::pipeline::fsm::build_pipeline_fsm_with_initial(state.clone());
+        let mut fsm =
+            crate::pipeline::fsm::build_pipeline_fsm_with_initial(initial_fsm_state(&state));
         let actions = fsm
             .handle(
-                PipelineEvent::Error {
+                PipelineFsmEvent::OperationalFailure {
                     message: "unexpected pipeline failure".into(),
                 },
                 &mut context,
@@ -1325,7 +1589,7 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
         );
         let (sender, receiver, watcher) = ChannelBuilder::new().build(state.clone());
         sender
-            .send(PipelineEvent::Error {
+            .send(PipelineFsmEvent::OperationalFailure {
                 message: "unexpected pipeline failure".into(),
             })
             .await
@@ -1383,10 +1647,9 @@ async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
         }
         let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Created);
         sender
-            .send(PipelineEvent::StopRequested {
+            .send(PipelineFsmEvent::Control(PipelineControl::Stop {
                 mode: FlowStopMode::Cancel,
-                reason: None,
-            })
+            }))
             .await
             .unwrap();
         let task = spawn_supervisor_loop(
@@ -1425,4 +1688,307 @@ async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
             "system.pipeline.drained"
         );
     }
+}
+
+#[tokio::test]
+async fn cancellation_catches_up_late_producer_failure_before_selecting_terminal() {
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, sink) = source_sink_topology();
+    let subscription = empty_system_subscription(&journal).await;
+    let mut context = test_context(topology, system_id, journal.clone(), Some(subscription));
+    context.stage_supervisors.insert(
+        sink,
+        TestPipelineStageHandle::boxed(sink, "sink", StageType::Sink),
+    );
+    for _ in 0..64 {
+        journal
+            .append(SystemEvent::stage_running(sink), None)
+            .await
+            .unwrap();
+    }
+    journal
+        .append(
+            SystemEvent::stage_failed(sink, "late producer failure".into(), false),
+            None,
+        )
+        .await
+        .unwrap();
+    let published = context.termination.published.clone();
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
+    sender
+        .send(PipelineFsmEvent::Control(PipelineControl::Stop {
+            mode: FlowStopMode::Cancel,
+        }))
+        .await
+        .unwrap();
+    let task = spawn_supervisor_loop(
+        PipelineState::Running,
+        system_id,
+        context,
+        receiver,
+        watcher,
+    );
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(&published.get().unwrap().outcome, crate::pipeline::termination::ExecutionOutcome::Failed(failure) if failure.reason.contains("late producer failure"))
+    );
+    let rows = journal.read_all_unordered().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.event.event_type_name() == "system.pipeline.failed")
+            .count(),
+        1
+    );
+    assert!(!rows
+        .iter()
+        .any(|row| row.event.event_type_name() == "system.pipeline.cancelled"));
+}
+
+struct PausedReader {
+    row: Option<EventEnvelope<SystemEvent>>,
+    calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl JournalReader<SystemEvent> for PausedReader {
+    async fn next(&mut self) -> Result<Option<EventEnvelope<SystemEvent>>, JournalError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        // Moving the cursor before suspension intentionally makes cancellation
+        // unsafe. A recreated read would skip this committed envelope.
+        let row = self.row.take();
+        if row.is_some() {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(row)
+    }
+    fn position(&self) -> u64 {
+        u64::from(self.row.is_none())
+    }
+}
+
+#[tokio::test]
+async fn pending_journal_read_survives_controls_and_gets_bounded_service() {
+    let system_id = SystemId::new();
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, sink) = source_sink_topology();
+    let row = journal
+        .append(SystemEvent::stage_running(sink), None)
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let subscription = SystemSubscription::new(
+        Box::new(PausedReader {
+            row: Some(row.clone()),
+            calls: calls.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+        }),
+        "paused reader".into(),
+    );
+    let mut context = test_context(topology, system_id, journal, Some(subscription));
+    let (sender, receiver, watcher) = ChannelBuilder::new()
+        .with_event_buffer(32)
+        .build(PipelineState::Running);
+    let mut supervisor = PipelineSupervisor::new(
+        system_id,
+        receiver,
+        watcher,
+        context.resources.failure.clone(),
+    );
+    let mut first = Box::pin(supervisor.dispatch_state(&PipelineFsmState::Running, &mut context));
+    assert!(futures::poll!(&mut first).is_pending());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            _ = entered.notified() => {},
+            result = &mut first => panic!("read unexpectedly completed: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    sender
+        .send(PipelineFsmEvent::Control(PipelineControl::Start))
+        .await
+        .unwrap();
+    assert!(matches!(
+        first.await.unwrap(),
+        EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+    ));
+    for _ in 0..32 {
+        sender
+            .send(PipelineFsmEvent::Control(PipelineControl::Start))
+            .await
+            .unwrap();
+    }
+    for _ in 0..8 {
+        assert!(matches!(
+            supervisor
+                .dispatch_state(&PipelineFsmState::Running, &mut context)
+                .await
+                .unwrap(),
+            EventLoopDirective::Transition(PipelineFsmEvent::Control(_))
+        ));
+    }
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    release.notify_one();
+    let mut delivered = false;
+    for _ in 0..4 {
+        if let EventLoopDirective::Transition(PipelineFsmEvent::Journal(envelope)) = supervisor
+            .dispatch_state(&PipelineFsmState::Running, &mut context)
+            .await
+            .unwrap()
+        {
+            assert_eq!(envelope.event.id, row.event.id);
+            delivered = true;
+            break;
+        }
+    }
+    assert!(
+        delivered,
+        "ready journal input must be served despite the full control queue"
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+struct DiscardSnapshots;
+impl obzenflow_core::metrics::MetricsSnapshotExporter for DiscardSnapshots {
+    fn publish_app_snapshot(&self, _: obzenflow_core::metrics::AppMetricsSnapshot) {}
+    fn publish_infra_snapshot(&self, _: obzenflow_core::metrics::InfraMetricsSnapshot) {}
+}
+
+fn owned_test_stage(
+    id: StageId,
+    stage_type: StageType,
+    probe: Option<ShutdownProbe>,
+) -> TestPipelineStageHandle {
+    TestPipelineStageHandle {
+        id,
+        name: "builder stage".into(),
+        stage_type,
+        stall_drain: false,
+        panic_on_start: false,
+        start_gate: None,
+        shutdown_probe: probe,
+    }
+}
+
+#[tokio::test]
+async fn subscription_or_metrics_preparation_failure_joins_every_supplied_stage() {
+    for fail_reader in [1, 2] {
+        let system_id = SystemId::new();
+        let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+        journal.fail_reader = Some(fail_reader);
+        let (topology, source, sink) = source_sink_topology_with_source();
+        let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
+        let result =
+            crate::pipeline::PipelineBuilder::new(topology, Arc::new(journal), FlowId::new())
+                .with_sources(vec![Box::new(owned_test_stage(
+                    source,
+                    StageType::FiniteSource,
+                    Some(probes[0].clone()),
+                ))])
+                .with_stages(vec![Box::new(owned_test_stage(
+                    sink,
+                    StageType::Sink,
+                    Some(probes[1].clone()),
+                ))])
+                .with_metrics_exporter(Arc::new(DiscardSnapshots))
+                .build()
+                .await;
+        assert!(
+            result.is_err(),
+            "reader {fail_reader} must fail construction"
+        );
+        for probe in probes {
+            assert_eq!(probe.request_abort_count.load(Ordering::Relaxed), 1);
+            assert_eq!(probe.abort_and_join_count.load(Ordering::Relaxed), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_finish() {
+    use crate::__private::lifecycle;
+    let system_id = SystemId::new();
+    let metrics_gate = Arc::new(TerminalAppendGate {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        fail: false,
+    });
+    let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+    journal.metrics_ready_append = Some(metrics_gate.clone());
+    let journal = Arc::new(journal);
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let (entered, start_entered) = oneshot::channel();
+    let (release, start_release) = oneshot::channel();
+    let mut stage = owned_test_stage(sink, StageType::Sink, None);
+    stage.panic_on_start = true;
+    stage.start_gate = Some(StartGate {
+        entered: Mutex::new(Some(entered)),
+        release: tokio::sync::Mutex::new(Some(start_release)),
+        count: Arc::new(AtomicUsize::new(0)),
+    });
+    let flow = crate::pipeline::PipelineBuilder::new(topology, journal.clone(), FlowId::new())
+        .with_sources(vec![Box::new(owned_test_stage(
+            source,
+            StageType::FiniteSource,
+            None,
+        ))])
+        .with_stages(vec![Box::new(stage)])
+        .with_metrics_exporter(Arc::new(DiscardSnapshots))
+        .build()
+        .await
+        .unwrap();
+    let guard = lifecycle::guard_execution(&flow);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        start_entered.await.unwrap();
+        metrics_gate.entered.notified().await;
+    })
+    .await
+    .unwrap();
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while flow.is_running() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut abandoned = Box::pin(lifecycle::wait(&flow));
+    assert!(
+        futures::poll!(&mut abandoned).is_pending(),
+        "accepted metrics publication still owns its join"
+    );
+    drop(abandoned);
+    metrics_gate.release.notify_one();
+    for _ in 0..2 {
+        let error = tokio::time::timeout(Duration::from_secs(2), lifecycle::wait(&flow))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("panicked"));
+    }
+    guard.disarm();
+    let rows = journal.read_all_unordered().await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.event.event_type_name() == "system.metrics.ready")
+            .count(),
+        1
+    );
+    assert!(!rows
+        .iter()
+        .any(|row| row.event.event_type_name() == "system.pipeline.drained"));
 }

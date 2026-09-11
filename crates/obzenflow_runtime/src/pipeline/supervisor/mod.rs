@@ -2,53 +2,461 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Pipeline Supervisor
-//!
-//! Supervisor responsibilities:
-//! - own the pipeline FSM and dispatch loop (via `SelfSupervised`)
-//! - poll subscriptions and translate I/O into FSM events
-//! - execute orchestration side effects via FSM actions
+//! Responsive inputs for the established self-supervised runner.
 
-mod abort_requested;
-mod created;
-mod draining;
-mod materialized;
-mod materializing;
-mod ready_for_run;
-mod running;
-mod source_completed;
 #[cfg(test)]
 mod tests;
 
-use super::fsm::{FlowStopMode, PipelineAction, PipelineContext, PipelineEvent, PipelineState};
-use crate::feed_plan::FeedKey;
-use crate::id_conversions::StageIdExt;
-use crate::supervised_base::{EventLoopDirective, SelfSupervised};
+use super::fsm::{
+    FlowStopMode, PipelineAction, PipelineContext, PipelineControl, PipelineDeadline,
+    PipelineFsmEvent, PipelineFsmState, PipelineState,
+};
+use super::resources::{OperationalFailure, ProducerTail};
+use crate::messaging::{PollResult, SubscriptionPoller, SystemSubscription};
+use crate::stages::common::stage_handle::StageError;
+use crate::supervised_base::{
+    EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher, SupervisorHandle,
+};
+use futures::{future::BoxFuture, FutureExt, Stream};
 use obzenflow_core::event::types::{SeqNo, ViolationCause};
-use obzenflow_core::event::WriterId;
-use obzenflow_core::{id::SystemId, StageId};
+use obzenflow_core::event::{SystemEvent, WriterId};
+use obzenflow_core::id::SystemId;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-const DRAIN_LIVENESS_MAX_IDLE: u64 = 100;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type JournalRead = BoxFuture<'static, (SystemSubscription<SystemEvent>, PollResult<SystemEvent>)>;
 
-pub(super) type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-/// Pipeline supervisor - manages the lifecycle of a pipeline.
 pub(crate) struct PipelineSupervisor {
-    /// Supervisor name
-    pub(crate) name: String,
+    name: String,
+    system_id: SystemId,
+    controls: EventReceiver<PipelineFsmEvent>,
+    controls_open: bool,
+    watcher: StateWatcher<PipelineState>,
+    subscription: Option<SystemSubscription<SystemEvent>>,
+    pending_read: Mutex<Option<JournalRead>>,
+    idle: Option<Pin<Box<tokio::time::Sleep>>>,
+    next_input: usize,
+    next_resource: usize,
+    failure: OperationalFailure,
+    failure_reported: bool,
+}
 
-    /// System ID for this pipeline (used for writer_id and lifecycle events)
-    pub(crate) system_id: SystemId,
+impl PipelineSupervisor {
+    pub(crate) fn new(
+        system_id: SystemId,
+        controls: EventReceiver<PipelineFsmEvent>,
+        watcher: StateWatcher<PipelineState>,
+        failure: OperationalFailure,
+    ) -> Self {
+        Self {
+            name: "pipeline_supervisor".into(),
+            system_id,
+            controls,
+            controls_open: true,
+            watcher,
+            subscription: None,
+            pending_read: Mutex::new(None),
+            idle: None,
+            next_input: 0,
+            next_resource: 0,
+            failure,
+            failure_reported: false,
+        }
+    }
 
-    /// Throttled logging for barrier snapshots during drain
-    pub(crate) last_barrier_log: Option<Instant>,
+    fn deadline(
+        state: &PipelineFsmState,
+        ctx: &PipelineContext,
+    ) -> Option<(Instant, PipelineDeadline)> {
+        if matches!(state, PipelineFsmState::PublishingFinalMarker) {
+            // Execution and metrics have joined. An old stop deadline cannot
+            // authorise another control publication behind the final marker.
+            return None;
+        }
+        let graceful = ctx
+            .stop_intent
+            .deadline
+            .filter(|_| matches!(ctx.stop_intent.mode, Some(FlowStopMode::Graceful { .. })))
+            .map(|at| (at, PipelineDeadline::GracefulStop));
+        let cleanup = ctx
+            .progress
+            .cleanup_deadline
+            .filter(|_| !ctx.progress.stages_cancelled)
+            .map(|at| (at, PipelineDeadline::StageCleanup));
+        let metrics = ctx
+            .resources
+            .terminal_ack
+            .get()
+            .filter(|_| {
+                !ctx.progress.metrics_cancelled
+                    && !ctx.resources.metrics_joined
+                    && ctx.resources.metrics.handle().is_some()
+            })
+            .map(|at| {
+                (
+                    *at + Duration::from_millis(ctx.metrics_drain_timeout_ms),
+                    PipelineDeadline::Metrics,
+                )
+            });
+        graceful
+            .into_iter()
+            .chain(cleanup)
+            .chain(metrics)
+            .min_by_key(|(at, _)| *at)
+    }
 
-    /// Throttled logging while waiting for external Run in startup_mode=manual.
-    pub(crate) last_manual_wait_log: Option<Instant>,
+    fn physical_ready(state: &PipelineFsmState, ctx: &mut PipelineContext) -> bool {
+        use PipelineFsmState as S;
+        match state {
+            S::Materializing => ctx.resources.delivery.is_empty(),
+            S::SettlingStages => {
+                ctx.resources.stages_joined && ctx.resources.publication_settlement.is_none()
+            }
+            S::CatchingUpProducers => {
+                matches!(ctx.resources.producer_tail, ProducerTail::Reached)
+                    || ctx.progress.journal_failed
+            }
+            S::FinalisingMetrics => {
+                ctx.resources.metrics_joined
+                    && ctx.resources.publication_settlement.is_none()
+                    && (ctx.progress.metrics_drained
+                        || ctx.progress.metrics_cancelled
+                        || ctx.resources.metrics.handle().is_none()
+                        || ctx.resources.metrics.handle().is_some_and(|handle| {
+                            matches!(
+                                handle.current_state(),
+                                crate::metrics::MetricsAggregatorState::Failed { .. }
+                            )
+                        }))
+            }
+            S::PublishingFinalMarker => {
+                ctx.progress.final_marker_seen && ctx.resources.publication_settlement.is_none()
+            }
+            _ => false,
+        }
+    }
 
-    /// Idle iterations observed during draining (for liveness guard)
-    pub(crate) drain_idle_iters: u64,
+    fn poll_journal(
+        &mut self,
+        ctx: &mut PipelineContext,
+        cx: &mut Context<'_>,
+    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
+        if ctx.progress.journal_failed
+            || matches!(ctx.resources.producer_tail, ProducerTail::Reading(_))
+        {
+            return Poll::Pending;
+        }
+        let pending = self
+            .pending_read
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner());
+        if pending.is_none() {
+            if let Some(idle) = &mut self.idle {
+                if idle.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
+            }
+            self.idle = None;
+            let Some(mut subscription) = self.subscription.take() else {
+                return Poll::Pending;
+            };
+            *pending = Some(
+                async move {
+                    let result = subscription.poll_next().await;
+                    (subscription, result)
+                }
+                .boxed(),
+            );
+        }
+        let Poll::Ready((subscription, result)) =
+            pending.as_mut().expect("owned read").as_mut().poll(cx)
+        else {
+            return Poll::Pending;
+        };
+        *pending = None;
+        self.subscription = Some(subscription);
+        Poll::Ready(match result {
+            PollResult::Event(envelope) => {
+                EventLoopDirective::Transition(PipelineFsmEvent::Journal(Box::new(envelope)))
+            }
+            PollResult::Error(error) => {
+                ctx.progress.journal_failed = true;
+                ctx.resources.retain_failure(error);
+                EventLoopDirective::Continue
+            }
+            PollResult::NoEvents | PollResult::CursorAdvanced { .. } => {
+                self.idle = Some(Box::pin(tokio::time::sleep(Duration::from_millis(10))));
+                EventLoopDirective::Continue
+            }
+        })
+    }
+
+    fn poll_resources(
+        &mut self,
+        ctx: &mut PipelineContext,
+        cx: &mut Context<'_>,
+    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
+        for offset in 0..4 {
+            let input = (self.next_resource + offset) % 4;
+            let ready = match input {
+                0 => {
+                    if let Some(joins) = &mut ctx.resources.stage_joins {
+                        match Pin::new(joins.get_mut().unwrap_or_else(|e| e.into_inner()))
+                            .poll_next(cx)
+                        {
+                            Poll::Ready(Some(result)) => {
+                                if let Err(error) = result {
+                                    if !(ctx.progress.stages_cancelled
+                                        && matches!(error, StageError::Aborted))
+                                    {
+                                        ctx.resources.retain_failure(Box::new(error));
+                                    }
+                                }
+                                true
+                            }
+                            Poll::Ready(None) => {
+                                ctx.resources.stage_joins = None;
+                                ctx.resources.stages_joined = true;
+                                true
+                            }
+                            Poll::Pending => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+                1 => {
+                    if let Some(observation) = &mut ctx.resources.publication_settlement {
+                        match Pin::new(observation).poll(cx) {
+                            Poll::Ready(result) => {
+                                ctx.resources.publication_settlement = None;
+                                if let Err(error) = result {
+                                    ctx.resources.retain_failure(Box::new(error));
+                                }
+                                true
+                            }
+                            Poll::Pending => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+                2 => {
+                    if let ProducerTail::Reading(read) = &mut ctx.resources.producer_tail {
+                        match read
+                            .get_mut()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_mut()
+                            .poll(cx)
+                        {
+                            Poll::Ready(result) => {
+                                ctx.resources.producer_tail = match result {
+                                    Ok(Some(id)) if ctx.last_system_event_id_seen != Some(id) => {
+                                        ProducerTail::Through(id)
+                                    }
+                                    Ok(_) => ProducerTail::Reached,
+                                    Err(error) => {
+                                        ctx.progress.journal_failed = true;
+                                        ctx.resources.retain_failure(error);
+                                        ProducerTail::Reached
+                                    }
+                                };
+                                true
+                            }
+                            Poll::Pending => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => {
+                    if let Some(join) = &mut ctx.resources.metrics_join {
+                        match join
+                            .get_mut()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_mut()
+                            .poll(cx)
+                        {
+                            Poll::Ready(result) => {
+                                ctx.resources.metrics_join = None;
+                                ctx.resources.metrics_joined = true;
+                                if let Err(error) = result {
+                                    if !(ctx.progress.metrics_cancelled
+                                        && matches!(error, HandleError::SupervisorAborted))
+                                    {
+                                        ctx.resources.retain_failure(Box::new(error));
+                                    }
+                                }
+                                true
+                            }
+                            Poll::Pending => false,
+                        }
+                    } else {
+                        false
+                    }
+                }
+            };
+            if ready {
+                // A producer or our own append has settled. Check the existing
+                // journal again without extending a previous temporary-EOF wait.
+                self.idle = None;
+                self.next_resource = (input + 1) % 4;
+                return Poll::Ready(EventLoopDirective::Continue);
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
+    type State = PipelineFsmState;
+    type Event = PipelineFsmEvent;
+    type Context = PipelineContext;
+    type Action = PipelineAction;
+
+    fn build_state_machine(&self, initial_state: Self::State) -> super::fsm::PipelineFsm {
+        super::fsm::build_pipeline_fsm_with_initial(initial_state)
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+#[async_trait::async_trait]
+impl SelfSupervised for PipelineSupervisor {
+    fn writer_id(&self) -> WriterId {
+        self.system_id.into()
+    }
+    fn event_for_action_error(&self, message: String) -> PipelineFsmEvent {
+        PipelineFsmEvent::OperationalFailure { message }
+    }
+
+    async fn after_transition(
+        &mut self,
+        state: &Self::State,
+        ctx: &PipelineContext,
+    ) -> Result<(), BoxError> {
+        // The shared runner routes an action error through the failure FSM
+        // before calling this hook. Do not report that same retained error a
+        // second time through dispatch; asynchronous owner failures still enter
+        // the first-failure check there.
+        self.failure_reported |= ctx.resources.failure.get().is_some();
+        let projection = state.public_state(ctx);
+        if projection != self.watcher.current() {
+            let _ = self.watcher.update(projection);
+        }
+        Ok(())
+    }
+
+    async fn write_completion_event(&self) -> Result<(), BoxError> {
+        // Settlement already happened in the FSM. This hook only returns the
+        // retained operational result through the established runner contract.
+        self.failure
+            .get()
+            .map_or(Ok(()), |error| Err(Box::new(error.clone()) as BoxError))
+    }
+
+    async fn dispatch_state(
+        &mut self,
+        state: &Self::State,
+        ctx: &mut PipelineContext,
+    ) -> Result<EventLoopDirective<Self::Event>, BoxError> {
+        if matches!(state, PipelineFsmState::Finished { .. }) {
+            return Ok(EventLoopDirective::Terminate);
+        }
+        if self.subscription.is_none()
+            && self
+                .pending_read
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
+            self.subscription = ctx.completion_subscription.take();
+        }
+        let mut deadline_wait = Box::pin(tokio::time::sleep(Duration::ZERO));
+        Ok(std::future::poll_fn(|cx| {
+            if let Some((at, deadline)) = Self::deadline(state, ctx) {
+                if Instant::now() >= at {
+                    return Poll::Ready(EventLoopDirective::Transition(
+                        PipelineFsmEvent::Deadline(deadline),
+                    ));
+                }
+                deadline_wait.as_mut().reset(at.into());
+                let _ = deadline_wait.as_mut().poll(cx);
+            }
+            if let Some(error) = ctx.resources.publications.first_failure() {
+                ctx.resources.retain_failure(Box::new(error));
+            }
+            if !self.failure_reported {
+                if let Some(error) = ctx.resources.failure.get() {
+                    self.failure_reported = true;
+                    return Poll::Ready(EventLoopDirective::Transition(
+                        PipelineFsmEvent::OperationalFailure {
+                            message: error.to_string(),
+                        },
+                    ));
+                }
+            }
+            if Self::physical_ready(state, ctx) {
+                return Poll::Ready(EventLoopDirective::Transition(
+                    PipelineFsmEvent::PhysicalSettlementSatisfied,
+                ));
+            }
+            for offset in 0..4 {
+                let input = (self.next_input + offset) % 4;
+                let result = match input {
+                    0 if self.controls_open => {
+                        match std::pin::pin!(self.controls.recv()).as_mut().poll(cx) {
+                            Poll::Ready(Some(event)) => {
+                                Poll::Ready(EventLoopDirective::Transition(event))
+                            }
+                            Poll::Ready(None) => {
+                                self.controls_open = false;
+                                Poll::Ready(EventLoopDirective::Continue)
+                            }
+                            Poll::Pending => Poll::Pending,
+                        }
+                    }
+                    1 => self.poll_journal(ctx, cx),
+                    2 => match ctx.resources.delivery.poll(cx) {
+                        Poll::Ready(Some(result)) => {
+                            self.idle = None;
+                            if let Err(error) = result {
+                                ctx.resources.retain_failure(Box::new(error));
+                            }
+                            Poll::Ready(EventLoopDirective::Continue)
+                        }
+                        _ => Poll::Pending,
+                    },
+                    3 => match self.poll_resources(ctx, cx) {
+                        Poll::Pending if matches!(state, PipelineFsmState::Created) => {
+                            Poll::Ready(EventLoopDirective::Transition(PipelineFsmEvent::Bootstrap))
+                        }
+                        Poll::Pending
+                            if matches!(state, PipelineFsmState::ReadyForRun)
+                                && !crate::bootstrap::startup_mode_manual() =>
+                        {
+                            Poll::Ready(EventLoopDirective::Transition(PipelineFsmEvent::Control(
+                                PipelineControl::Start,
+                            )))
+                        }
+                        result => result,
+                    },
+                    _ => Poll::Pending,
+                };
+                if let Poll::Ready(directive) = result {
+                    self.next_input = (input + 1) % 4;
+                    return Poll::Ready(directive);
+                }
+            }
+            Poll::Pending
+        })
+        .await)
+    }
 }
 
 /// Strictness mode for source at-least-once contracts.
@@ -80,252 +488,10 @@ impl SourceContractStrictMode {
     }
 }
 
-/// Helper used to decide whether a given edge should be treated as
-/// gating for the purposes of contract-driven pipeline aborts.
-#[inline]
-fn is_gating_edge_for_contract(is_source: bool, mode: SourceContractStrictMode) -> bool {
-    // Non-source edges are always gating; source edges are gating
-    // only when strict mode is configured to Abort.
-    !is_source || matches!(mode, SourceContractStrictMode::Abort)
-}
-
-impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
-    type State = PipelineState;
-    type Event = PipelineEvent;
-    type Context = PipelineContext;
-    type Action = PipelineAction;
-
-    fn build_state_machine(
-        &self,
-        initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
-        crate::pipeline::fsm::build_pipeline_fsm_with_initial(initial_state)
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-}
-
-#[async_trait::async_trait]
-impl SelfSupervised for PipelineSupervisor {
-    fn writer_id(&self) -> WriterId {
-        WriterId::from(self.system_id)
-    }
-
-    fn event_for_action_error(&self, msg: String) -> PipelineEvent {
-        PipelineEvent::Error { message: msg }
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // The owned pipeline driver publishes terminal and drained facts in
-        // writer order after the required resource joins.
-        Ok(())
-    }
-
-    async fn dispatch_state(
-        &mut self,
-        state: &Self::State,
-        context: &mut PipelineContext,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        match state {
-            PipelineState::Created => created::dispatch_created(self, context).await,
-            PipelineState::Materializing => {
-                materializing::dispatch_materializing(self, context).await
-            }
-            PipelineState::Materialized => materialized::dispatch_materialized(self, context).await,
-            PipelineState::ReadyForRun => {
-                ready_for_run::dispatch_ready_for_run(self, context).await
-            }
-            PipelineState::Running => running::dispatch_running(self, context).await,
-            PipelineState::SourceCompleted => {
-                source_completed::dispatch_source_completed(self, context).await
-            }
-            PipelineState::Draining => draining::dispatch_draining(self, context).await,
-            PipelineState::Drained | PipelineState::Failed { .. } => Err(std::io::Error::other(
-                "pipeline terminal settlement belongs to its owned driver",
-            )
-            .into()),
-            PipelineState::AbortRequested { reason, upstream } => {
-                abort_requested::dispatch_abort_requested(self, reason, upstream).await
-            }
-        }
-    }
-}
-
-impl PipelineSupervisor {
-    /// If any contract edge has an explicit failure recorded, return an abort directive.
-    fn missing_contract_abort(
-        &self,
-        context: &PipelineContext,
-    ) -> Option<EventLoopDirective<PipelineEvent>> {
-        let seen = &context.contract_pairs;
-
-        // Find any edge with an explicit failure (contract violated).
-        if let Some((key, status)) = seen.iter().find(|(key, status)| {
-            let is_source = context.expected_sources.contains(&key.upstream_stage);
-            let mode = context.source_contract_strict;
-            let is_gating = is_gating_edge_for_contract(is_source, mode);
-            is_gating && !status.is_passed()
-        }) {
-            let upstream_name = context
-                .topology
-                .stage_name(key.upstream_stage.to_topology_id())
-                .unwrap_or("unknown")
-                .to_string();
-            let reader_name = context
-                .topology
-                .stage_name(key.downstream_stage.to_topology_id())
-                .unwrap_or("unknown")
-                .to_string();
-
-            // Prefer the recorded violation cause, fall back to a generic label.
-            let reason = status
-                .reason
-                .clone()
-                .unwrap_or_else(|| ViolationCause::Other("contract_failed".into()));
-
-            tracing::error!(
-                upstream = ?key.upstream_stage,
-                reader = ?key.downstream_stage,
-                selected_payload_key = %key.selected_payload_key,
-                role = %key.role,
-                upstream_name,
-                reader_name,
-                "Contract edge recorded as failed; aborting pipeline based on explicit contract violation"
-            );
-
-            Some(EventLoopDirective::Transition(PipelineEvent::Abort {
-                reason,
-                upstream: Some(key.upstream_stage),
-            }))
-        } else {
-            None
-        }
-    }
-
-    /// Check if all stages have completed and all contract pairs are satisfied.
-    fn all_stages_and_contracts_complete(&self, context: &PipelineContext) -> bool {
-        let completed = context.completed_stages.len();
-        let total = context.topology.num_stages();
-
-        if completed < total {
-            return false;
-        }
-
-        let seen = &context.contract_pairs;
-
-        // Success requires that every *gating* contract edge has a recorded pass.
-        // Missing contract evidence blocks completion: the pipeline must see
-        // explicit pass evidence before synthesising AllStagesCompleted.
-        // Source edges configured in warn-only mode are treated as non-gating
-        // for this check.
-        context.expected_contract_pairs.iter().all(|key| {
-            let is_source = context.expected_sources.contains(&key.upstream_stage);
-            let mode = context.source_contract_strict;
-            let is_gating = is_gating_edge_for_contract(is_source, mode);
-            if !is_gating {
-                return true;
-            }
-            matches!(seen.get(key), Some(status) if status.is_passed())
-        })
-    }
-
-    /// Snapshot the current drain barrier state for logging/inspection.
-    fn barrier_snapshot(&self, context: &PipelineContext) -> BarrierSnapshot {
-        let completed: Vec<StageId> = context.completed_stages.clone();
-        let expected_stages: Vec<StageId> = context
-            .topology
-            .stages()
-            .map(|s| StageId::from_topology_id(s.id))
-            .collect();
-        let pending_stages: Vec<StageId> = expected_stages
-            .iter()
-            .copied()
-            .filter(|id| !completed.contains(id))
-            .collect();
-
-        let expected_contracts = context.expected_contract_pairs.clone();
-        let seen = &context.contract_pairs;
-        let missing_contracts: Vec<FeedKey> = expected_contracts
-            .iter()
-            .filter(|key| {
-                let is_source = context.expected_sources.contains(&key.upstream_stage);
-                let mode = context.source_contract_strict;
-                let is_gating = is_gating_edge_for_contract(is_source, mode);
-                if !is_gating {
-                    return false;
-                }
-                !matches!(seen.get(*key), Some(status) if status.is_passed())
-            })
-            .cloned()
-            .collect();
-
-        let total_contracts = expected_contracts.len();
-        let satisfied_contracts = expected_contracts
-            .iter()
-            .filter(|key| {
-                let is_source = context.expected_sources.contains(&key.upstream_stage);
-                let mode = context.source_contract_strict;
-                let is_gating = is_gating_edge_for_contract(is_source, mode);
-                if !is_gating {
-                    return false;
-                }
-                matches!(seen.get(*key), Some(status) if status.is_passed())
-            })
-            .count();
-
-        BarrierSnapshot {
-            pending_stages,
-            missing_contracts,
-            completed: completed.len(),
-            total: expected_stages.len(),
-            satisfied_contracts,
-            total_contracts,
-        }
-    }
-
-    /// Throttle barrier logging to avoid spamming the drain loop.
-    fn should_log_barrier(&mut self) -> bool {
-        let now = Instant::now();
-        match self.last_barrier_log {
-            Some(last) if now.duration_since(last) < Duration::from_secs(1) => false,
-            _ => {
-                self.last_barrier_log = Some(now);
-                true
-            }
-        }
-    }
-
-    /// Throttle "waiting for external Run" logging in startup_mode=manual.
-    fn should_log_manual_wait(&mut self) -> bool {
-        let now = Instant::now();
-        match self.last_manual_wait_log {
-            Some(last) if now.duration_since(last) < Duration::from_secs(5) => false,
-            _ => {
-                self.last_manual_wait_log = Some(now);
-                true
-            }
-        }
-    }
-}
-
-/// Lightweight snapshot of drain barrier progress for diagnostics.
-#[derive(Debug)]
-struct BarrierSnapshot {
-    pending_stages: Vec<StageId>,
-    missing_contracts: Vec<FeedKey>,
-    completed: usize,
-    total: usize,
-    satisfied_contracts: usize,
-    total_contracts: usize,
-}
-
 /// Status for a contract edge (upstream -> reader).
 #[derive(Clone, Debug, Default)]
 pub struct ContractEdgeStatus {
     passed: bool,
-    reason: Option<ViolationCause>,
     reader_seq: Option<SeqNo>,
     advertised_writer_seq: Option<SeqNo>,
 }
@@ -334,20 +500,18 @@ impl ContractEdgeStatus {
     pub(crate) fn passed(reader_seq: Option<SeqNo>, advertised_writer_seq: Option<SeqNo>) -> Self {
         Self {
             passed: true,
-            reason: None,
             reader_seq,
             advertised_writer_seq,
         }
     }
 
     pub(crate) fn failed(
-        reason: Option<ViolationCause>,
+        _reason: Option<ViolationCause>,
         reader_seq: Option<SeqNo>,
         advertised_writer_seq: Option<SeqNo>,
     ) -> Self {
         Self {
             passed: false,
-            reason,
             reader_seq,
             advertised_writer_seq,
         }

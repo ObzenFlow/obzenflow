@@ -82,7 +82,7 @@ This is the piece that often confuses newcomers, but it solves a real problem an
 
 **The problem.** Every supervisor needs to react to external control-plane events (Start, BeginDrain, Stop, etc.) sent by its handle. But the supervisor's `dispatch_state` method is already doing state-specific work: polling subscriptions, processing data, managing timers. If every supervisor also had to check the control channel in every state, that logic would be duplicated across every supervisor and every state handler, and it would be easy to forget a check in one state, creating a subtle bug where a stop command is ignored.
 
-**The solution.** `HandlerSupervisedWithExternalEvents` wraps stage supervisors and intercepts `dispatch_state`. The pipeline has its own driver, which services controls and deadlines while owned I/O remains pending. Before delegating to a stage supervisor's dispatch logic, the wrapper:
+**The solution.** `HandlerSupervisedWithExternalEvents` wraps stage supervisors and intercepts `dispatch_state`. The pipeline supervisor multiplexes its own controls, deadlines, journal input and typed resource observations through `dispatch_state`, under the shared self-supervised runner. Before delegating to a stage supervisor's dispatch logic, the wrapper:
 
 1. **Publishes state changes** to the `StateWatcher` (watch channel), but only when the FSM state actually changes. This is how external observers (handles, the pipeline supervisor, tests) see the current state without polling.
 
@@ -96,7 +96,7 @@ This is the piece that often confuses newcomers, but it solves a real problem an
 
 The wrapper never calls `machine.handle()` and never executes FSM actions. It only influences which `EventLoopDirective` the run loop sees. The single-gateway rule is preserved.
 
-**Why a decorator and not a trait method?** Because the control-channel checking is identical across all supervisors (same `ExternalEventMode` logic, same `StateWatcher` publish, same channel-closed mapping). Putting it in a decorator means supervisors only implement their state-specific dispatch logic, and the control-plane bridging is wired once, tested once, and cannot drift. The supervisor itself never sees the `EventReceiver` or `StateWatcher`. It just writes its dispatch logic and the wrapper handles the rest.
+**Why a decorator and not a trait method?** Because these stage supervisors share control-channel checking (same `ExternalEventMode` logic, same `StateWatcher` publish, same channel-closed mapping). Putting it in a decorator means supervisors only implement their state-specific dispatch logic, and the control-plane bridging is wired once, tested once, and cannot drift. The supervisor itself never sees the `EventReceiver` or `StateWatcher`. It just writes its dispatch logic and the wrapper handles the rest.
 
 **The `ExternalEventPolicy` trait** is the only thing each supervisor must define to configure the wrapper. It has two methods:
 
@@ -129,18 +129,18 @@ loop:
 
 The run loop has two error recovery paths, both designed to prevent errors from bypassing the FSM:
 
-1. **`dispatch_state` returns `Err`**: The loop calls `self.event_for_action_error(msg)` to create a supervisor-specific failure event, feeds it to `machine.handle()`, and executes the resulting failure actions. Then it `continue`s the loop. The next iteration sees the new FSM state (typically `Failed`) and returns `Terminate`.
+1. **`dispatch_state` returns `Err`**: The loop calls `self.event_for_action_error(msg)` to create a supervisor-specific failure event, feeds it to `machine.handle()`, and executes the resulting failure actions. Then it `continue`s the loop. The next iteration sees the new FSM state and continues its failure or settlement path.
 
-2. **An action's `execute()` returns `Err`**: Same pattern. The error is converted to a failure event, the FSM transitions to a failure state, failure actions execute (writing failure lifecycle events, cleaning up resources), and the loop breaks out of the current action sequence. The next iteration terminates cleanly.
+2. **An action's `execute()` returns `Err`**: Same pattern. The error is converted to a failure event, the FSM transitions to a failure state, failure actions execute (writing failure lifecycle events, cleaning up resources), and the loop breaks out of the current action sequence. Remaining normal actions are abandoned; subsequent dispatch follows the failure or settlement state.
 
-In both cases, the FSM is always the authority. Errors do not cause the task to exit with an opaque panic or propagate via `?`. They drive the FSM through its defined failure path, which ensures lifecycle events are written, metrics are updated, and the pipeline supervisor is notified.
+Dispatch and action errors enter the FSM failure gateway. Machine, hook and failure-action errors can still return early, and panic or abort can skip completion hooks. Typed handles and publication ownership retain resources across those exits. The pipeline returns `Terminate` only after its FSM has consumed the required journal facts and settled its resources; its completion hook only returns the retained operational result.
 
 ## Construction-time wiring
 
 ```mermaid
 sequenceDiagram
   participant Caller
-  participant Builder as "SupervisorBuilder impl"
+  participant Builder as "Stage builder"
   participant Channels as "ChannelBuilder"
   participant Supervisor as "Supervisor (pub(crate))"
   participant Wrapper as "WithExternalEvents wrapper"
@@ -153,25 +153,27 @@ sequenceDiagram
   Channels-->>Builder: EventSender + EventReceiver + StateWatcher
   Builder->>Supervisor: construct + Context
   Builder->>Wrapper: wrap(Supervisor, EventReceiver, StateWatcher)
-  Builder->>TaskBuilder: spawn(run(Wrapper, initial_state, Context))
-  TaskBuilder-->>Builder: JoinHandle
-  Builder->>Handle: build handle (EventSender + StateWatcher + JoinHandle)
+  Builder->>TaskBuilder: spawn_handler_supervised(Wrapper, initial_state, Context)
+  TaskBuilder-->>Builder: SupervisorTask
+  Builder->>Handle: build handle (EventSender + StateWatcher + SupervisorTask)
   Builder-->>Caller: return Handle
 ```
 
-The builder creates the channels, constructs the supervisor, wraps it with `WithExternalEvents`, spawns the supervision loop as a tokio task, and returns a handle. The handle holds the `EventSender` (to send control events) and `StateWatcher` (to observe state changes). The supervisor holds the `EventReceiver` (via the wrapper). This is a clean split: handles are the public API surface, supervisors are internal task runners.
+A wrapped stage builder creates the channels, constructs the supervisor, wraps it with `WithExternalEvents`, spawns the supervision loop as a tokio task, and returns a handle. The handle holds the `EventSender` (to send control events) and `StateWatcher` (to observe state changes). The supervisor holds the `EventReceiver` (via the wrapper). This is a clean split: handles are the public API surface, supervisors are internal task runners.
+
+Production supervisor task construction accepts a typed self-supervised or handler-supervised component and selects the corresponding shared runner. Direct construction from a raw runner or task is exposed only to unit fixtures. This closes the normal construction bypass; source review still needs to trace the production call graph.
 
 ### Actors (glossary)
 
 - `Caller`: The outer layer that constructs and drives a supervisor via its handle (typically the DSL/infrastructure). Examples: `src/pipeline/builder.rs` and `src/stages/transform/builder.rs`.
-- `Builder`: A `SupervisorBuilder` implementation that assembles resources, spawns the task, and returns a handle. See `src/supervised_base/builder.rs`.
+- `Builder`: A `SupervisorBuilder` implementation that assembles resources, spawns the task, and returns a handle. The pipeline instead has an inherent builder and returns an opaque `FlowHandle`. See `src/supervised_base/builder.rs`.
 - `EventSender` / `EventReceiver`: Typed `tokio::sync::mpsc` channel used for control-plane events (start/stop/drain). See `src/supervised_base/builder.rs`.
 - `StateWatcher`: Typed `tokio::sync::watch` wrapper used to publish the current FSM state to observers (`update`, `subscribe`, `current`). See `src/supervised_base/builder.rs`.
 - `Handle`: Usually a `StandardHandle<E, S>` built by `HandleBuilder` (and for the pipeline, wrapped by `FlowHandle`). See `src/supervised_base/handle.rs` and `src/pipeline/handle.rs`.
 - `Supervisor task`: Spawned via `SupervisorTaskBuilder` and runs `SelfSupervisedExt::run` or `HandlerSupervisedExt::run`. See `src/supervised_base/handle.rs`, `src/supervised_base/self_supervised.rs`, and `src/supervised_base/handler_supervised.rs`.
 - `Supervisor`: An internal `pub(crate)` type implementing `Supervisor` plus either `SelfSupervised` or `HandlerSupervised`. Examples: `src/pipeline/supervisor/mod.rs` (SelfSupervised) and `src/stages/transform/supervisor/mod.rs` (HandlerSupervised).
 - `Context`: Mutable state passed through the supervision loop and into FSM actions; for stages it typically owns the user handler. Examples: `src/pipeline/fsm.rs` and `src/stages/transform/fsm.rs`.
-- `WithExternalEvents` wrapper: Stage builders use `HandlerSupervisedWithExternalEvents` (in `src/supervised_base/with_external_events.rs`) to bridge `EventReceiver` and `StateWatcher` into `dispatch_state`. The pipeline driver owns its control channel and retained operations directly. The self-supervised wrapper remains only in base-loop test fixtures.
+- `WithExternalEvents` wrapper: Stage builders use `HandlerSupervisedWithExternalEvents` (in `src/supervised_base/with_external_events.rs`) to bridge `EventReceiver` and `StateWatcher` into `dispatch_state`. The pipeline supervisor owns its control channel, retained journal read, command delivery and typed join observations directly. The self-supervised wrapper remains only in base-loop test fixtures.
 
 ## Runtime supervision (stage event loop with user handler invocation)
 

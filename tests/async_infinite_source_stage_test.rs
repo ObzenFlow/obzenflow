@@ -17,7 +17,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the async-infinite source stage test. The JSON
@@ -64,6 +63,7 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
 struct TestAsyncInfiniteSource {
     rx: Arc<TokioMutex<mpsc::UnboundedReceiver<u64>>>,
     drain_calls: Arc<AtomicU64>,
+    poll_entered: Arc<Notify>,
     max_batch_size: usize,
 }
 
@@ -76,6 +76,7 @@ impl TestAsyncInfiniteSource {
         Self {
             rx: Arc::new(TokioMutex::new(rx)),
             drain_calls,
+            poll_entered: Arc::new(Notify::new()),
             max_batch_size,
         }
     }
@@ -87,6 +88,7 @@ impl TypedAsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
 
     async fn next(&mut self) -> std::result::Result<Vec<Self::Output>, SourceError> {
         let mut rx = self.rx.lock().await;
+        self.poll_entered.notify_one();
 
         let first = rx
             .recv()
@@ -189,7 +191,8 @@ async fn wait_for_data_event_count(
 }
 
 #[tokio::test]
-async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() -> Result<()> {
+async fn async_infinite_source_graceful_stop_interrupts_blocked_next_and_calls_drain() -> Result<()>
+{
     let (_tx, rx) = mpsc::unbounded_channel();
     let drain_calls = Arc::new(AtomicU64::new(0));
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -198,9 +201,10 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
     let drain_calls_for_flow = Arc::clone(&drain_calls);
     let events_for_flow = Arc::clone(&events);
     let event_ready_for_flow = Arc::clone(&event_ready);
+    let source = TestAsyncInfiniteSource::new(rx, drain_calls_for_flow, 32);
+    let poll_entered = source.poll_entered.clone();
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestAsyncInfiniteSource::new(rx, drain_calls_for_flow, 32);
         let sink = CollectSink::new(events_for_flow, event_ready_for_flow);
 
         Ok(flow! {
@@ -224,7 +228,10 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
     handle.start().await?;
     wait_for_running(&handle).await?;
 
-    handle.stop().await?;
+    tokio::time::timeout(Duration::from_secs(5), poll_entered.notified())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for the source to enter next()"))?;
+    handle.stop_graceful(Duration::from_secs(5)).await?;
 
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await
@@ -301,7 +308,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
 
     wait_for_data_event_count(&events, &event_ready, 2).await?;
 
-    handle.stop().await?;
+    handle.stop_graceful(Duration::from_secs(5)).await?;
 
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await

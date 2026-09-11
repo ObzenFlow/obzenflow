@@ -10,13 +10,13 @@ use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::EventId;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ExecutionFailure {
     pub reason: String,
     pub cause: Option<ViolationCause>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ExecutionOutcome {
     Completed,
     Cancelled {

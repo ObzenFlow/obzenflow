@@ -20,16 +20,19 @@ use std::sync::Arc;
 pub struct ExecutionGuard {
     supervisor: Option<ExecutionCancellation>,
     stages: Vec<Arc<dyn StageHandle>>,
+    metrics: Arc<crate::pipeline::resources::MetricsOwner>,
 }
 
 impl ExecutionGuard {
     pub(crate) fn new(
         supervisor: ExecutionCancellation,
         stages: Vec<Arc<dyn StageHandle>>,
+        metrics: Arc<crate::pipeline::resources::MetricsOwner>,
     ) -> Self {
         Self {
             supervisor: Some(supervisor),
             stages,
+            metrics,
         }
     }
 
@@ -43,6 +46,7 @@ impl Drop for ExecutionGuard {
     fn drop(&mut self) {
         if let Some(supervisor) = &self.supervisor {
             supervisor.abort();
+            self.metrics.request_abort();
             for stage in &self.stages {
                 stage.request_abort();
             }

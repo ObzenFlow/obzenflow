@@ -25,6 +25,7 @@ pub struct SupervisorTask {
     publications: Arc<PublicationScope>,
 }
 
+#[cfg(test)]
 impl From<Task> for SupervisorTask {
     fn from(task: Task) -> Self {
         Self {
@@ -265,7 +266,7 @@ where
         self.abort();
     }
 
-    async fn publish_pipeline_control(
+    fn publish_pipeline_control(
         &self,
         journal: Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>>,
         event: obzenflow_core::event::ChainEvent,
@@ -273,14 +274,12 @@ where
         match self
             .supervisor_abort
             .publications
-            .accept(async move {
+            .enqueue_control(async move {
                 journal.append(event, None).await?;
                 Ok(())
-            })
-            .await
-        {
+            }) {
             Err(error) if error.is::<super::publication::AdmissionClosed>() => Ok(()),
-            result => result,
+            result => result.map(drop),
         }
     }
 
@@ -323,8 +322,8 @@ where
         self
     }
 
-    /// Spawn the supervisor task
-    pub fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
+    /// Spawn an already selected runner. Only typed construction calls this.
+    fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
@@ -390,6 +389,55 @@ where
             task: handle,
             publications,
         }
+    }
+}
+
+impl<S> SupervisorTaskBuilder<S>
+where
+    S: super::SelfSupervised + Send + 'static,
+    S::State: Send + Sync + 'static,
+    S::Event: Send + Sync + 'static,
+    S::Context: 'static,
+    S::Action: 'static,
+{
+    pub fn spawn_self_supervised(
+        self,
+        supervisor: S,
+        initial_state: S::State,
+        context: S::Context,
+    ) -> SupervisorTask {
+        self.spawn(move || super::SelfSupervisedExt::run(supervisor, initial_state, context))
+    }
+}
+
+impl<S> SupervisorTaskBuilder<S>
+where
+    S: super::HandlerSupervised + Send + 'static,
+    S::State: Send + Sync + 'static,
+    S::Event: Send + Sync + 'static,
+    S::Context: 'static,
+    S::Action: 'static,
+{
+    pub fn spawn_handler_supervised(
+        self,
+        supervisor: S,
+        initial_state: S::State,
+        context: S::Context,
+    ) -> SupervisorTask {
+        self.spawn(move || super::HandlerSupervisedExt::run(supervisor, initial_state, context))
+    }
+}
+
+#[cfg(test)]
+impl<S: Send + 'static> SupervisorTaskBuilder<S> {
+    pub(crate) fn spawn_for_test<F, Fut>(self, f: F) -> SupervisorTask
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
+            + Send
+            + 'static,
+    {
+        self.spawn(f)
     }
 }
 

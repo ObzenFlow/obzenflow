@@ -16,9 +16,10 @@ mod termination;
 // Note: PipelineSupervisor is intentionally NOT exported - use PipelineBuilder
 pub use builder::PipelineBuilder;
 pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType};
-pub use fsm::{FlowStopMode, PipelineEvent, PipelineState};
+pub use fsm::{FlowStopMode, PipelineControl, PipelineState};
 pub use handle::{FlowHandle, FlowStartControlOutcome, MiddlewareStackConfig};
 pub use max_iterations::MaxIterations;
 
-mod driver;
-mod operations;
+mod actions;
+pub(crate) mod resources;
+mod transitions;

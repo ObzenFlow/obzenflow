@@ -5,6 +5,17 @@
 use super::*;
 use obzenflow_runtime::__private::lifecycle;
 
+async fn abort_execution_for_test(flow: &FlowHandle) {
+    drop(lifecycle::guard_execution(flow));
+    let error = lifecycle::wait(flow)
+        .await
+        .expect_err("emergency cancellation retains the aborted result");
+    assert!(std::error::Error::source(&error)
+        .unwrap()
+        .to_string()
+        .contains("aborted"));
+}
+
 #[derive(Clone, Copy, Debug)]
 enum FaultPhase {
     BeforeRun,
@@ -74,7 +85,6 @@ fn pending_lifetime_source() -> (
 async fn dropped_application_cancels_runtime_and_pending_stage_work() {
     use obzenflow_core::event::JournalEvent;
     use obzenflow_dsl::async_infinite_source;
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
 
     for hosted in [true, false] {
         let dir = tempfile::tempdir().unwrap();
@@ -152,7 +162,7 @@ async fn dropped_application_cancels_runtime_and_pending_stage_work() {
         .await;
         if let Some(flow) = &retained_flow {
             // Clean up even if the cancellation assertion regresses.
-            flow.abort_and_wait().await.unwrap();
+            abort_execution_for_test(flow).await;
         }
         cancelled.expect("application drop must cancel the supervisor and both stage operations");
         let facts = journal.read_all_unordered().await.unwrap();
@@ -172,7 +182,6 @@ async fn dropped_application_cancels_runtime_and_pending_stage_work() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("obzenflow.toml");
     let port = available_local_port();
@@ -227,7 +236,7 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     application.abort();
     assert!(application.await.unwrap_err().is_cancelled());
     let completed = tokio::time::timeout(Duration::from_secs(2), lifecycle::wait(&flow)).await;
-    flow.abort_and_wait().await.unwrap();
+    abort_execution_for_test(&flow).await;
     assert!(completed
         .expect("built flow must be cancelled during host preparation")
         .is_err());
@@ -237,7 +246,6 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hosted_start_observes_runtime_exit_before_readiness() {
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
     for terminal_mode in ["exit", "park"] {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("obzenflow.toml");
@@ -254,7 +262,7 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
                     stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                     topology: { src |> sink; }
                 }.build(context).await?;
-                flow.abort_and_wait().await.unwrap();
+                abort_execution_for_test(&flow).await;
                 assert!(!flow.is_running());
                 assert!(!flow.current_state().is_terminal());
                 Ok(flow)
@@ -916,8 +924,6 @@ enabled = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signals_preserve_published_failures_and_repeatable_observation() {
     use obzenflow_core::event::JournalEvent;
-    use obzenflow_runtime::pipeline::PipelineEvent;
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
     for started in [false, true] {
         for on_terminal in ["park", "exit"] {
             for signal in [ShutdownSignal::Sigint, ShutdownSignal::Sigterm] {
@@ -979,11 +985,7 @@ enabled = false
                                 if started {
                                     flow.start().await.unwrap();
                                 }
-                                flow.send_event(PipelineEvent::Error {
-                                    message: "actual pipeline failure".into(),
-                                })
-                                .await
-                                .unwrap();
+                                flow.abort("actual pipeline failure").await.unwrap();
                                 // In park mode, the signal is strictly later than publication
                                 // and this observer cannot consume the application's join.
                                 assert!(flow.wait_for_completion().await.is_err());

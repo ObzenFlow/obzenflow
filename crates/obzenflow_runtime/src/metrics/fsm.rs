@@ -15,7 +15,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerOpenTrigger, MetricsLifecycle, MiddlewareLifecycle,
     ObservabilityPayload,
 };
-use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{JournalEvent, SinkOperationFailed, SinkOperationPhase, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::ingress::IngressKey;
@@ -329,6 +329,10 @@ impl StageMetrics {
                 .unwrap_or(0)
                 .max(runtime_ctx.errors_total),
         );
+        for (kind, count) in &runtime_ctx.errors_by_kind {
+            let current = self.errors_by_kind.entry(kind.clone()).or_insert(0);
+            *current = (*current).max(*count);
+        }
         self.event_loops_total = self.event_loops_total.max(runtime_ctx.event_loops_total);
         self.event_loops_with_work_total = self
             .event_loops_with_work_total
@@ -1644,11 +1648,9 @@ impl FsmAction for MetricsAggregatorAction {
                         metrics.merge_runtime_context(runtime_ctx);
                     }
 
-                    // Track error kinds for breakdown (total bounded later by snapshot errors_total)
-                    if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
-                        let key = kind.clone().unwrap_or(ErrorKind::Unknown);
-                        *metrics.errors_by_kind.entry(key).or_insert(0) += 1;
-                    }
+                    // Error totals and kinds come from the same cumulative
+                    // snapshot. Counting error-marked rows again would duplicate
+                    // errors across forwarded rows and tail refreshes.
                 } // metrics reference dropped here
 
                 if let Some(runtime_ctx) = &event.runtime_context {
@@ -1659,6 +1661,37 @@ impl FsmAction for MetricsAggregatorAction {
 
             MetricsAggregatorAction::ExportMetrics => {
                 tracing::debug!("ExportMetrics action triggered");
+                // Keep wide metrics current even when the physical cursors lag.
+                // This refresh does not advance input coverage or its watermark:
+                // only the collector's sequential reads can authorise Drained.
+                for (stage_id, journal) in ctx
+                    .stage_data_journals
+                    .iter()
+                    .chain(ctx.stage_error_journals.iter())
+                {
+                    if let Some(runtime_ctx) =
+                        crate::metrics::tail_read::read_latest_runtime_context_for_stage(
+                            journal, *stage_id,
+                        )
+                        .await
+                    {
+                        if let Some(meta) = ctx.stage_metadata.get_mut(stage_id) {
+                            if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
+                                meta.reference_mode = infer_join_reference_mode_from_fsm_state(
+                                    &runtime_ctx.fsm_state,
+                                )
+                                .map(str::to_owned);
+                            }
+                        }
+                        ctx.metrics_store
+                            .stage_metrics
+                            .entry(*stage_id)
+                            .or_default()
+                            .merge_runtime_context(&runtime_ctx);
+                        ctx.metrics_store
+                            .update_control_metrics_from_runtime_context(*stage_id, &runtime_ctx);
+                    }
+                }
                 ctx.metrics_exporter
                     .publish_app_snapshot(ctx.build_app_metrics_snapshot());
 
