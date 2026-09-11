@@ -7,32 +7,34 @@
 use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
+use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
+use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::tests::support::{
     empty_system_subscription, empty_topology, ready_stage, source_sink_topology,
     source_sink_topology_with_source, spawn_supervisor_loop, stop_and_join, test_context,
-    test_supervisor, wait_for_state, MemoryJournal, TestPipelineStageHandle,
+    test_supervisor, wait_for_state, TestPipelineStageHandle,
 };
 use crate::pipeline::PipelineState;
 use crate::supervised_base::ChannelBuilder;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::SystemId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-#[tokio::test]
-async fn manual_ready_for_run_publishes_state_and_waits_for_external_run() {
+pub async fn manual_ready_for_run_publishes_state_and_waits_for_external_run(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
     });
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink_stage_id) = source_sink_topology();
     let subscription = empty_system_subscription(&system_journal).await;
     let mut context = test_context(
@@ -68,15 +70,17 @@ async fn manual_ready_for_run_publishes_state_and_waits_for_external_run() {
     stop_and_join(&sender, task).await;
 }
 
-#[tokio::test]
-async fn auto_ready_for_run_emits_run_and_reaches_running() {
+pub async fn auto_ready_for_run_emits_run_and_reaches_running(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Auto,
         ..BootstrapConfig::default()
     });
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink_stage_id) = source_sink_topology();
     let subscription = empty_system_subscription(&system_journal).await;
     let mut context = test_context(
@@ -106,10 +110,12 @@ async fn auto_ready_for_run_emits_run_and_reaches_running() {
     stop_and_join(&sender, task).await;
 }
 
-#[tokio::test]
-async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic() {
+pub async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink_stage_id) = source_sink_topology();
     let mut context = test_context(topology, system_id, system_journal.clone(), None);
     context.stage_supervisors.insert(
@@ -143,15 +149,17 @@ async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic(
         .expect("supervisor should return ok after failure transition");
 }
 
-#[tokio::test]
-async fn materialized_to_ready_for_run_publishes_post_transition_state() {
+pub async fn materialized_to_ready_for_run_publishes_post_transition_state(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
     });
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink_stage_id) = source_sink_topology();
     let subscription = empty_system_subscription(&system_journal).await;
     let mut context = test_context(
@@ -187,15 +195,17 @@ async fn materialized_to_ready_for_run_publishes_post_transition_state() {
     stop_and_join(&sender, task).await;
 }
 
-#[tokio::test]
-async fn running_state_requires_committed_source_running_after_start() {
+pub async fn running_state_requires_committed_source_running_after_start(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
     });
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, source_stage_id, sink_stage_id) = source_sink_topology_with_source();
     let subscription = empty_system_subscription(&system_journal).await;
     let mut context = test_context(
@@ -267,15 +277,17 @@ async fn running_state_requires_committed_source_running_after_start() {
     stop_and_join(&sender, task).await;
 }
 
-#[tokio::test]
-async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run() {
+pub async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
     });
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink_stage_id) = source_sink_topology();
     let subscription = empty_system_subscription(&system_journal).await;
     let mut context = test_context(
@@ -315,10 +327,12 @@ async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run() {
     stop_and_join(&sender, task).await;
 }
 
-#[tokio::test]
-async fn empty_topology_fails_through_the_canonical_fsm() {
+pub async fn empty_topology_fails_through_the_canonical_fsm(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let mut context = test_context(empty_topology(), system_id, journal, None);
     let mut machine =
         crate::pipeline::fsm::build_pipeline_fsm_with_initial(PipelineFsmState::Created);
@@ -336,15 +350,17 @@ async fn empty_topology_fails_through_the_canonical_fsm() {
         .contains("Stage count mismatch"));
 }
 
-#[tokio::test]
-async fn stage_failures_and_cancellations_before_readiness_use_journal_evidence() {
+pub async fn stage_failures_and_cancellations_before_readiness_use_journal_evidence(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for state in [
         PipelineFsmState::AwaitingStageReadiness,
         PipelineFsmState::ReadyForRun,
     ] {
         for cancelled in [false, true] {
             let system_id = SystemId::new();
-            let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+            let mut journals = make_journals();
+            let journal = new_system_journal(&mut *journals, system_id);
             let (topology, sink) = source_sink_topology();
             let event = if cancelled {
                 SystemEvent::stage_cancelled(sink, "cancelled".into())
@@ -364,10 +380,12 @@ async fn stage_failures_and_cancellations_before_readiness_use_journal_evidence(
     }
 }
 
-#[tokio::test]
-async fn materialisation_reconsiders_readiness_facts_already_consumed() {
+pub async fn materialisation_reconsiders_readiness_facts_already_consumed(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink) = source_sink_topology();
     let mut context = test_context(topology, system_id, journal.clone(), None);
     context.stage_supervisors.insert(

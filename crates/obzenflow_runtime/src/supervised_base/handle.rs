@@ -428,7 +428,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<S: Send + 'static> SupervisorTaskBuilder<S> {
     pub(crate) fn spawn_for_test<F, Fut>(self, f: F) -> SupervisorTask
     where

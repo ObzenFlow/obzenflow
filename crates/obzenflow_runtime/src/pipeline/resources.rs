@@ -135,7 +135,7 @@ impl MetricsOwner {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_for_test(&self, handle: MetricsHandle) {
         let mut slot = self.0.lock().unwrap();
         assert!(slot.handle.is_none());

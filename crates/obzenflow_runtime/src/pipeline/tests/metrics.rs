@@ -4,26 +4,29 @@
 
 //! Pipeline metrics preparation, topology metadata and child lifetime coordination.
 
+#[cfg(test)]
 use crate::id_conversions::StageIdExt;
+use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
+#[cfg(test)]
 use crate::pipeline::metrics::composite_boundaries_from_topology;
 use crate::pipeline::tests::support::{
     make_context, make_fsm_context, owned_test_stage, source_sink_topology_with_source,
-    test_context, DiscardSnapshots, MemoryJournal, StartGate, TerminalAppendGate,
+    test_context, DiscardSnapshots, StartGate, TerminalAppendGate,
 };
+use crate::pipeline::tests::support::{new_stage_journal, new_system_journal, ControlledJournal};
 use crate::pipeline::PipelineState;
 use crate::supervised_base::{ChannelBuilder, SupervisorHandle};
-use crate::testing::memory_journal::MemoryJournal as LiveJournal;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{
     ChainEvent, JournalEvent, MetricsCoordinationEvent, SystemEvent, SystemEventFactory,
     SystemEventType,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{FlowId, StageId, SystemId};
 use obzenflow_fsm::FsmAction;
+#[cfg(test)]
 use obzenflow_topology::{
     BoundaryPortSpec, CompositePortRef, DirectedEdge, EdgeKind, PortDirection, StageInfo,
     StageType as TopologyStageType, SubgraphInternalEdge, Topology, TopologySubgraphInfo,
@@ -124,13 +127,15 @@ fn runtime_boundary_is_the_named_multi_port_cut_even_when_not_collapsible() {
     }));
 }
 
-#[tokio::test]
-async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
+pub async fn dropping_pipeline_context_cancels_its_metrics_supervisor(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::metrics::fsm::{MetricsAggregatorEvent, MetricsAggregatorState};
     use crate::supervised_base::HandleBuilder;
 
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, _, _) = source_sink_topology_with_source();
     let context = test_context(topology, system_id, journal, None);
     let (sender, _receiver, watcher) =
@@ -138,11 +143,12 @@ async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
             .build(MetricsAggregatorState::Running);
     let (started_tx, started_rx) = oneshot::channel();
     let (terminated_tx, terminated_rx) = oneshot::channel::<()>();
-    let task = tokio::spawn(async move {
-        let _termination = terminated_tx;
-        started_tx.send(()).unwrap();
-        std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>().await
-    });
+    let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("test_metrics")
+        .spawn_for_test(move || async move {
+            let _termination = terminated_tx;
+            started_tx.send(()).unwrap();
+            std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>().await
+        });
     context.resources.metrics.install_for_test(
         HandleBuilder::new()
             .with_event_sender(sender)
@@ -161,8 +167,9 @@ async fn dropping_pipeline_context_cancels_its_metrics_supervisor() {
     );
 }
 
-#[tokio::test]
-async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_finish() {
+pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_finish(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::__private::lifecycle;
     let system_id = SystemId::new();
     let metrics_gate = Arc::new(TerminalAppendGate {
@@ -170,9 +177,10 @@ async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_fini
         release: tokio::sync::Notify::new(),
         fail: false,
     });
-    let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+    let mut journals = make_journals();
+    let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
     journal.metrics_ready_append = Some(metrics_gate.clone());
-    let journal = Arc::new(journal);
+    let journal: Arc<dyn obzenflow_core::journal::Journal<SystemEvent>> = Arc::new(journal);
     let (topology, source, sink) = source_sink_topology_with_source();
     let (entered, start_entered) = oneshot::channel();
     let (release, start_release) = oneshot::channel();
@@ -239,9 +247,10 @@ async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_fini
         .any(|row| row.event.event_type_name() == "system.pipeline.drained"));
 }
 
-#[tokio::test]
-async fn metrics_preparation_is_passive_and_cancellation_prevents_late_installation() {
-    let mut ctx = make_fsm_context();
+pub async fn metrics_preparation_is_passive_and_cancellation_prevents_late_installation(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
     ctx.metrics_exporter = Some(Arc::new(RecordingSnapshots::default()));
     let prepared = crate::pipeline::metrics::prepare_metrics(&ctx)
         .await
@@ -264,19 +273,21 @@ async fn metrics_preparation_is_passive_and_cancellation_prevents_late_installat
         .is_empty());
 }
 
-#[tokio::test]
-async fn original_terminal_acknowledgement_expires_metrics_before_delayed_journal_consumption() {
+pub async fn original_terminal_acknowledgement_expires_metrics_before_delayed_journal_consumption(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::metrics::{MetricsAggregatorEvent, MetricsAggregatorState};
     use crate::pipeline::supervisor::PipelineSupervisor;
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SelfSupervised};
-    let mut ctx = make_fsm_context();
+    let mut ctx = make_fsm_context(make_journals);
     ctx.metrics_drain_timeout_ms = 1;
     let (sender, _receiver, watcher) =
         ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
             .build(MetricsAggregatorState::Running);
-    let task = tokio::spawn(std::future::pending::<
-        Result<(), Box<dyn std::error::Error + Send + Sync>>,
-    >());
+    let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("test_metrics")
+        .spawn_for_test(
+            std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        );
     let metrics = HandleBuilder::new()
         .with_event_sender(sender)
         .with_state_watcher(watcher)
@@ -304,11 +315,13 @@ async fn original_terminal_acknowledgement_expires_metrics_before_delayed_journa
     ctx.resources.metrics.abort_and_join().await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn drain_metrics_skips_when_metrics_not_started() {
+pub async fn drain_metrics_skips_when_metrics_not_started(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
+    let mut journals = make_journals();
     let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::system(system_id)));
+        new_system_journal(&mut *journals, system_id);
 
     let mut ctx = make_context(
         system_id,
@@ -329,19 +342,19 @@ async fn drain_metrics_skips_when_metrics_not_started() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof() {
+pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::{context::RuntimeContext, ChainEventFactory};
     let system_id = SystemId::new();
-    let journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal: Arc<dyn Journal<SystemEvent>> = new_system_journal(&mut *journals, system_id);
     let data_stage = StageId::new();
     let error_stage = StageId::new();
-    let data: Arc<dyn Journal<ChainEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::stage(data_stage)));
+    let data: Arc<dyn Journal<ChainEvent>> = new_stage_journal(&mut *journals, data_stage, "data");
     let errors: Arc<dyn Journal<ChainEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::stage(error_stage)));
+        new_stage_journal(&mut *journals, error_stage, "errors");
     for (stage, rows, target, failed) in [
         (data_stage, 50, &data, false),
         (error_stage, 7, &errors, true),
@@ -446,15 +459,17 @@ async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof() {
         .any(|row| row.event.event_type_name() == "system.metrics.drained"));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact() {
+pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
+    let mut journals = make_journals();
     let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::system(system_id)));
+        new_system_journal(&mut *journals, system_id);
 
     let stage_id = StageId::new();
     let stage_journal: Arc<dyn Journal<ChainEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::stage(stage_id)));
+        new_stage_journal(&mut *journals, stage_id, "data");
 
     let mut ctx = make_context(
         system_id,

@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use crate::replay::ReplayArchive;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 
 thread_local! {
     static INSTALL_OWNER: u8 = const { 0 };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn bootstrap_test_mutex() -> &'static TokioMutex<()> {
     static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| TokioMutex::new(()))
@@ -290,7 +290,7 @@ pub(crate) fn bootstrap_test_lock() -> TokioMutexGuard<'static, ()> {
     bootstrap_test_mutex().blocking_lock()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn bootstrap_test_lock_async() -> TokioMutexGuard<'static, ()> {
     bootstrap_test_mutex().lock().await
 }

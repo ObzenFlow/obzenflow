@@ -7,14 +7,16 @@
 use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
+use crate::journal::FlowJournalFactory;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::supervisor::PipelineSupervisor;
+use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::tests::support::{
     empty_system_subscription, make_fsm_context, source_sink_topology,
     source_sink_topology_with_source, spawn_supervisor_loop, test_context, test_supervisor,
-    MemoryJournal, TestPipelineStageHandle,
+    TestPipelineStageHandle,
 };
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
@@ -23,9 +25,7 @@ use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventEnvelope, StageId, SystemId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,10 +65,12 @@ fn pipeline_supervisor_has_no_inline_fsm_definition() {
     );
 }
 
-#[tokio::test]
-async fn graceful_deadline_bounds_a_stalled_source_control_send() {
+pub async fn graceful_deadline_bounds_a_stalled_source_control_send(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, _) = source_sink_topology();
     let subscription = empty_system_subscription(&journal).await;
     let mut context = test_context(topology, system_id, journal.clone(), Some(subscription));
@@ -130,11 +132,13 @@ async fn graceful_deadline_bounds_a_stalled_source_control_send() {
     );
 }
 
-#[tokio::test]
-async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins() {
+pub async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use obzenflow_fsm::FsmAction;
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, source, sink) = source_sink_topology_with_source();
     let mut ctx = test_context(topology, system_id, journal, None);
     ctx.source_supervisors.insert(
@@ -188,15 +192,16 @@ async fn persistent_controls_cannot_starve_command_delivery_or_stage_joins() {
     );
 }
 
-#[tokio::test]
-async fn queued_controls_cannot_starve_bootstrap_or_automatic_start() {
+pub async fn queued_controls_cannot_starve_bootstrap_or_automatic_start(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Auto,
         ..BootstrapConfig::default()
     });
     for state in [PipelineFsmState::Created, PipelineFsmState::ReadyForRun] {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         let (sender, receiver, watcher) = ChannelBuilder::new().build(state.public_state(&ctx));
         // Exercise dispatch without applying these control transitions. Stops
         // distinguish queued controls from the automatically generated Start.
@@ -239,12 +244,13 @@ async fn queued_controls_cannot_starve_bootstrap_or_automatic_start() {
     }
 }
 
-#[tokio::test]
-async fn ready_stage_joins_cannot_starve_other_resource_completions() {
+pub async fn ready_stage_joins_cannot_starve_other_resource_completions(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     // One turn per ready resource must suffice, even with more stage joins
     // ready than the supervisor can consume within that budget.
     const DISPATCH_BUDGET: usize = 4;
-    let mut ctx = make_fsm_context();
+    let mut ctx = make_fsm_context(make_journals);
     ctx.resources.stage_joins = Some(Mutex::new(
         (0..=DISPATCH_BUDGET)
             .map(|_| futures::future::ready(Ok(())).boxed())
@@ -288,10 +294,12 @@ async fn ready_stage_joins_cannot_starve_other_resource_completions() {
     );
 }
 
-#[tokio::test]
-async fn completed_action_failure_gateway_does_not_report_the_original_error_again() {
+pub async fn completed_action_failure_gateway_does_not_report_the_original_error_again(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, _) = source_sink_topology();
     let mut ctx = test_context(topology, system_id, journal, None);
     ctx.resources
@@ -320,10 +328,12 @@ async fn completed_action_failure_gateway_does_not_report_the_original_error_aga
     );
 }
 
-#[tokio::test]
-async fn pending_journal_read_survives_controls_and_gets_bounded_service() {
+pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink) = source_sink_topology();
     let row = journal
         .append(SystemEvent::stage_running(sink), None)
@@ -399,11 +409,12 @@ async fn pending_journal_read_survives_controls_and_gets_bounded_service() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
-#[tokio::test]
-async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
+pub async fn expired_stop_is_dispatched_before_a_full_external_control_queue(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::pipeline::supervisor::PipelineSupervisor;
     use crate::supervised_base::{ChannelBuilder, SelfSupervised};
-    let mut context = make_fsm_context();
+    let mut context = make_fsm_context(make_journals);
     context.stop_intent.apply_request(
         FlowStopMode::Graceful {
             timeout: std::time::Duration::ZERO,

@@ -5,15 +5,17 @@
 //! Pipeline construction and cleanup on preparation failures.
 
 use super::*;
+#[cfg(test)]
 use crate::feed_plan::{FactVisibility, FeedRole, LogicalFeed, PayloadTypeDescriptor};
+use crate::journal::FlowJournalFactory;
+use crate::pipeline::tests::support::{new_system_journal, ControlledJournal};
+#[cfg(test)]
 use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, StageType, TypeHintInfo};
 
 use crate::pipeline::tests::support::{
-    owned_test_stage, source_sink_topology_with_source, DiscardSnapshots, MemoryJournal,
-    ShutdownProbe,
+    owned_test_stage, source_sink_topology_with_source, DiscardSnapshots, ShutdownProbe,
 };
 use obzenflow_core::event::context::StageType as CoreStageType;
-use obzenflow_core::journal::journal_owner::JournalOwner;
 use std::sync::atomic::Ordering;
 
 #[test]
@@ -92,11 +94,13 @@ fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
     assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
 }
 
-#[tokio::test]
-async fn subscription_or_metrics_preparation_failure_joins_every_supplied_stage() {
+pub async fn subscription_or_metrics_preparation_failure_joins_every_supplied_stage(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for fail_reader in [1, 2] {
         let system_id = SystemId::new();
-        let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+        let mut journals = make_journals();
+        let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
         journal.fail_reader = Some(fail_reader);
         let (topology, source, sink) = source_sink_topology_with_source();
         let probes = [ShutdownProbe::default(), ShutdownProbe::default()];

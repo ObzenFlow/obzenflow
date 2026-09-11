@@ -5,18 +5,19 @@
 //! Shared pipeline contexts, controlled journals, stages and runner fixtures.
 
 use crate::id_conversions::StageIdExt;
+use crate::journal::FlowJournalFactory;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 use crate::stages::common::stage_handle::{StageError, StageEvent, StageHandle};
 use crate::supervised_base::{ChannelBuilder, EventSender, StateWatcher, SupervisorHandle};
-use crate::testing::memory_journal::MemoryJournal as LiveJournal;
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::{ChainEvent, JournalEvent, JournalWriterId, SystemEvent};
+use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, JournalId, SystemId};
 use obzenflow_core::journal::journal_error::JournalError;
+use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
@@ -31,22 +32,20 @@ use tokio::task::JoinHandle;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-pub(in crate::pipeline) struct MemoryJournal<T: JournalEvent> {
-    id: JournalId,
-    owner: Option<JournalOwner>,
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+/// Adds only the failure and pause points needed by lifecycle scenarios.
+/// Storage, envelope construction and readers belong to the supplied journal.
+pub(in crate::pipeline) struct ControlledJournal<T: JournalEvent> {
+    inner: Arc<dyn Journal<T>>,
     pub(in crate::pipeline) terminal_append: Option<Arc<TerminalAppendGate>>,
     pub(in crate::pipeline) metrics_ready_append: Option<Arc<TerminalAppendGate>>,
     pub(in crate::pipeline) fail_reader: Option<usize>,
     reader_calls: AtomicUsize,
 }
 
-impl<T: JournalEvent> MemoryJournal<T> {
-    pub(in crate::pipeline) fn with_owner(owner: JournalOwner) -> Self {
+impl<T: JournalEvent> ControlledJournal<T> {
+    pub(in crate::pipeline) fn new(inner: Arc<dyn Journal<T>>) -> Self {
         Self {
-            id: JournalId::new(),
-            owner: Some(owner),
-            events: Arc::new(Mutex::new(Vec::new())),
+            inner,
             terminal_append: None,
             metrics_ready_append: None,
             fail_reader: None,
@@ -61,52 +60,23 @@ pub(in crate::pipeline) struct TerminalAppendGate {
     pub(in crate::pipeline) fail: bool,
 }
 
-struct MemoryJournalReader<T: JournalEvent> {
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
-    pos: usize,
-}
-
 #[async_trait]
-impl<T> JournalReader<T> for MemoryJournalReader<T>
-where
-    T: JournalEvent,
-{
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        let guard = self
-            .events
-            .lock()
-            .expect("MemoryJournalReader: poisoned lock");
-        if self.pos >= guard.len() {
-            return Ok(None);
-        }
-        let envelope = guard[self.pos].clone();
-        drop(guard);
-        self.pos += 1;
-        Ok(Some(envelope))
-    }
-
-    fn position(&self) -> u64 {
-        self.pos as u64
-    }
-}
-
-#[async_trait]
-impl<T> Journal<T> for MemoryJournal<T>
+impl<T> Journal<T> for ControlledJournal<T>
 where
     T: JournalEvent + 'static,
 {
     fn id(&self) -> &JournalId {
-        &self.id
+        self.inner.id()
     }
 
     fn owner(&self) -> Option<&JournalOwner> {
-        self.owner.as_ref()
+        self.inner.owner()
     }
 
     async fn append(
         &self,
         event: T,
-        _parent: Option<&EventEnvelope<T>>,
+        parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
         if event.event_type_name() == "system.metrics.ready" {
             if let Some(gate) = &self.metrics_ready_append {
@@ -126,41 +96,65 @@ where
                 }
             }
         }
-        let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
-        let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-        guard.push(envelope.clone());
-        Ok(envelope)
+        self.inner.append(event, parent).await
+    }
+
+    async fn append_group(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        parent: Option<&EventEnvelope<T>>,
+    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.inner.append_group(group_id, events, parent).await
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-        Ok(guard.clone())
+        self.inner.read_all_unordered().await
     }
 
     async fn read_event(
         &self,
         event_id: &obzenflow_core::EventId,
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-        Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
+        self.inner.read_event(event_id).await
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         if self.fail_reader == Some(self.reader_calls.fetch_add(1, Ordering::Relaxed) + 1) {
             return Err(JournalError::Full);
         }
-        Ok(Box::new(MemoryJournalReader {
-            events: Arc::clone(&self.events),
-            pos: position as usize,
-        }))
+        self.inner.reader_from(position).await
     }
 
     async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-        let len = guard.len();
-        let start = len.saturating_sub(count);
-        Ok(guard[start..].iter().rev().cloned().collect())
+        self.inner.read_last_n(count).await
     }
+}
+
+pub(in crate::pipeline) fn new_system_journal(
+    journals: &mut dyn FlowJournalFactory,
+    system_id: SystemId,
+) -> Arc<dyn Journal<SystemEvent>> {
+    journals
+        .create_system_journal(JournalName::System, JournalOwner::system(system_id))
+        .expect("create system journal")
+}
+
+pub(in crate::pipeline) fn new_stage_journal(
+    journals: &mut dyn FlowJournalFactory,
+    stage_id: StageId,
+    name: &str,
+) -> Arc<dyn Journal<ChainEvent>> {
+    journals
+        .create_chain_journal(
+            JournalName::Stage {
+                id: stage_id,
+                stage_type: StageType::Transform,
+                name: name.into(),
+            },
+            JournalOwner::stage(stage_id),
+        )
+        .expect("create stage journal")
 }
 
 pub(in crate::pipeline) fn source_sink_topology_with_source(
@@ -189,7 +183,7 @@ pub(in crate::pipeline) fn empty_topology() -> Arc<obzenflow_topology::Topology>
 }
 
 pub(in crate::pipeline) async fn system_subscription_with(
-    journal: &Arc<MemoryJournal<SystemEvent>>,
+    journal: &Arc<dyn Journal<SystemEvent>>,
     events: impl IntoIterator<Item = SystemEvent>,
 ) -> SystemSubscription<SystemEvent> {
     for event in events {
@@ -199,7 +193,7 @@ pub(in crate::pipeline) async fn system_subscription_with(
 }
 
 pub(in crate::pipeline) async fn empty_system_subscription(
-    journal: &Arc<MemoryJournal<SystemEvent>>,
+    journal: &Arc<dyn Journal<SystemEvent>>,
 ) -> SystemSubscription<SystemEvent> {
     system_subscription_with(journal, std::iter::empty()).await
 }
@@ -207,10 +201,9 @@ pub(in crate::pipeline) async fn empty_system_subscription(
 pub(in crate::pipeline) fn test_context(
     topology: Arc<obzenflow_topology::Topology>,
     system_id: SystemId,
-    system_journal: Arc<MemoryJournal<SystemEvent>>,
+    system_journal: Arc<dyn Journal<SystemEvent>>,
     completion_subscription: Option<SystemSubscription<SystemEvent>>,
 ) -> PipelineContext {
-    let system_journal: Arc<dyn Journal<SystemEvent>> = system_journal;
     PipelineContext {
         system_id,
         topology,
@@ -436,7 +429,7 @@ impl StageHandle for TestPipelineStageHandle {
 
 pub(in crate::pipeline) fn test_supervisor(
     system_id: SystemId,
-    _journal: Arc<MemoryJournal<SystemEvent>>,
+    _journal: Arc<dyn Journal<SystemEvent>>,
 ) -> SystemId {
     system_id
 }
@@ -616,9 +609,11 @@ pub(in crate::pipeline) fn make_context(
     }
 }
 
-pub(in crate::pipeline) fn make_fsm_context() -> PipelineContext {
+pub(in crate::pipeline) fn make_fsm_context(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) -> PipelineContext {
+    let mut journals = make_journals();
     let system_id = SystemId::new();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(LiveJournal::with_owner(JournalOwner::system(system_id)));
+    let system_journal = new_system_journal(&mut *journals, system_id);
     make_context(system_id, system_journal, Vec::new(), None)
 }

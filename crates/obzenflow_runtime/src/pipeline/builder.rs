@@ -454,6 +454,6 @@ impl PipelineBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "tests/builder.rs"]
-mod tests;
+pub(crate) mod tests;

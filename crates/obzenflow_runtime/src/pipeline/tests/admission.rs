@@ -7,15 +7,17 @@
 
 use super::support::{
     empty_topology, make_fsm_context, source_sink_topology_with_source, test_context,
-    MemoryJournal, TestPipelineStageHandle,
+    TestPipelineStageHandle,
 };
 use crate::feed_plan::{FeedKey, FeedRole};
+use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{
     build_pipeline_fsm_with_initial, PipelineAction as A, PipelineDeadline, PipelineFsmEvent as E,
     PipelineFsmState as S,
 };
 use crate::pipeline::resources::{ProducerTail, StageCommand};
 use crate::pipeline::termination::{ExecutionOutcome, PublishedTermination};
+use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::FlowStopMode;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::system_event::SystemFeedRole;
@@ -23,9 +25,7 @@ use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{
     PipelineLifecycleEvent, SystemEvent, SystemEventFactory, SystemEventType,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::{StageId, SystemId};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn live_phases() -> [S; 13] {
@@ -46,8 +46,88 @@ fn live_phases() -> [S; 13] {
     ]
 }
 
-#[tokio::test]
-async fn internal_input_admission_is_phase_specific_even_with_satisfied_guards() {
+pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    use super::support::ControlledJournal;
+    use crate::testing::assert_happens_before;
+    use obzenflow_core::Journal;
+
+    let mut journals = make_journals();
+    let inner = new_system_journal(&mut *journals, SystemId::new());
+    let journal = ControlledJournal::new(inner.clone());
+    assert_eq!(journal.id(), inner.id());
+    assert_eq!(journal.owner(), inner.owner());
+
+    let parent = inner
+        .append(SystemEvent::stage_running(StageId::new()), None)
+        .await
+        .unwrap();
+    let writer = StageId::new();
+    let child = journal
+        .append(SystemEvent::stage_running(writer), Some(&parent))
+        .await
+        .unwrap();
+    assert_happens_before(&parent, &child).unwrap();
+    let group = journal
+        .append_group(
+            "fixture.causal-group",
+            vec![
+                SystemEvent::stage_running(writer),
+                SystemEvent::stage_running(writer),
+            ],
+            Some(&child),
+        )
+        .await
+        .unwrap();
+    assert_eq!(group.len(), 2);
+    assert_happens_before(&child, &group[0]).unwrap();
+    assert_happens_before(&group[0], &group[1]).unwrap();
+    for (index, row) in group.iter().enumerate() {
+        assert_eq!(
+            row.journal_group_id.as_deref(),
+            Some("fixture.causal-group")
+        );
+        let member = row.journal_group_member.as_ref().unwrap();
+        assert_eq!(member.index as usize, index);
+        assert_eq!(member.size, 2);
+    }
+    let found = journal.read_event(&child.event.id).await.unwrap().unwrap();
+    assert_eq!(found.vector_clock, child.vector_clock);
+    let stored = inner.read_all_unordered().await.unwrap();
+    let observed = journal.read_causally_ordered().await.unwrap();
+    assert_eq!(
+        stored.iter().map(|row| row.event.id).collect::<Vec<_>>(),
+        observed.iter().map(|row| row.event.id).collect::<Vec<_>>()
+    );
+
+    let mut reader = journal.reader_from(1).await.unwrap();
+    assert_eq!(reader.position(), 1);
+    for expected in [&child, &group[0], &group[1]] {
+        assert_eq!(
+            reader.next().await.unwrap().unwrap().event.id,
+            expected.event.id
+        );
+    }
+    assert!(reader.next().await.unwrap().is_none());
+    assert!(reader.is_at_end());
+    let later = inner
+        .append(SystemEvent::stage_running(writer), Some(&group[1]))
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.next().await.unwrap().unwrap().event.id,
+        later.event.id
+    );
+    assert_eq!(reader.position(), 5);
+    let tail = journal.read_last_n(2).await.unwrap();
+    assert_eq!(tail[0].event.id, later.event.id);
+    assert_eq!(tail[1].event.id, group[1].event.id);
+}
+
+pub async fn internal_input_admission_is_phase_specific_even_with_satisfied_guards(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for phase in live_phases() {
         for event in [
             E::Bootstrap,
@@ -55,7 +135,7 @@ async fn internal_input_admission_is_phase_specific_even_with_satisfied_guards()
             E::GracefulStopExpired,
             E::StageCleanupExpired,
         ] {
-            let mut ctx = make_fsm_context();
+            let mut ctx = make_fsm_context(make_journals);
             ctx.stop_intent.apply_request(
                 FlowStopMode::Graceful {
                     timeout: Duration::ZERO,
@@ -103,8 +183,9 @@ async fn internal_input_admission_is_phase_specific_even_with_satisfied_guards()
     }
 }
 
-#[tokio::test]
-async fn settlement_in_an_eligible_phase_still_requires_its_resource_predicate() {
+pub async fn settlement_in_an_eligible_phase_still_requires_its_resource_predicate(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for phase in [
         S::Materializing,
         S::SettlingStages,
@@ -112,7 +193,7 @@ async fn settlement_in_an_eligible_phase_still_requires_its_resource_predicate()
         S::FinalisingMetrics,
         S::PublishingFinalMarker,
     ] {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         if matches!(phase, S::Materializing) {
             ctx.resources
                 .delivery
@@ -136,10 +217,11 @@ async fn settlement_in_an_eligible_phase_still_requires_its_resource_predicate()
     }
 }
 
-#[tokio::test]
-async fn execution_deadlines_require_admission_and_expiry_without_mutating_on_rejection() {
+pub async fn execution_deadlines_require_admission_and_expiry_without_mutating_on_rejection(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for future in [false, true] {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         if future {
             ctx.stop_intent.apply_request(
                 FlowStopMode::Graceful {
@@ -161,11 +243,12 @@ async fn execution_deadlines_require_admission_and_expiry_without_mutating_on_re
     }
 }
 
-#[tokio::test]
-async fn metrics_deadline_admission_and_guards_use_the_actual_acknowledgement() {
+pub async fn metrics_deadline_admission_and_guards_use_the_actual_acknowledgement(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::metrics::{MetricsAggregatorEvent, MetricsAggregatorState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder};
-    let mut ctx = make_fsm_context();
+    let mut ctx = make_fsm_context(make_journals);
     for phase in [S::PublishingTerminal, S::FinalisingMetrics] {
         let mut machine = build_pipeline_fsm_with_initial(phase);
         assert!(machine.handle(E::MetricsExpired, &mut ctx).await.is_err());
@@ -173,9 +256,10 @@ async fn metrics_deadline_admission_and_guards_use_the_actual_acknowledgement() 
     let (sender, _receiver, watcher) =
         ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
             .build(MetricsAggregatorState::Running);
-    let task = tokio::spawn(std::future::pending::<
-        Result<(), Box<dyn std::error::Error + Send + Sync>>,
-    >());
+    let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("test_metrics")
+        .spawn_for_test(
+            std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+        );
     let handle = HandleBuilder::new()
         .with_event_sender(sender)
         .with_state_watcher(watcher)
@@ -211,9 +295,10 @@ async fn metrics_deadline_admission_and_guards_use_the_actual_acknowledgement() 
     ctx.resources.metrics.abort_and_join().await.unwrap();
 }
 
-#[tokio::test]
-async fn finished_has_no_outgoing_inputs_including_controls_and_journal_rows() {
-    let mut ctx = make_fsm_context();
+pub async fn finished_has_no_outgoing_inputs_including_controls_and_journal_rows(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
     let mut machine = build_pipeline_fsm_with_initial(S::PublishingFinalMarker);
     ctx.progress.final_marker_seen = true;
     machine
@@ -254,8 +339,9 @@ async fn finished_has_no_outgoing_inputs_including_controls_and_journal_rows() {
     }
 }
 
-#[tokio::test]
-async fn controls_and_operational_failure_follow_the_approved_successor_matrix() {
+pub async fn controls_and_operational_failure_follow_the_approved_successor_matrix(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for phase in live_phases() {
         for event in [
             E::Start,
@@ -270,7 +356,7 @@ async fn controls_and_operational_failure_follow_the_approved_successor_matrix()
                 message: "failure".into(),
             },
         ] {
-            let mut ctx = make_fsm_context();
+            let mut ctx = make_fsm_context(make_journals);
             if !matches!(
                 phase,
                 S::Created | S::Materializing | S::AwaitingStageReadiness | S::ReadyForRun
@@ -331,10 +417,11 @@ fn contract_row(
     )
 }
 
-#[tokio::test]
-async fn unrelated_rows_only_advance_observation_in_every_live_phase() {
+pub async fn unrelated_rows_only_advance_observation_in_every_live_phase(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for phase in live_phases() {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         let upstream = StageId::new();
         let reader = StageId::new();
         let mut machine = build_pipeline_fsm_with_initial(phase.clone());
@@ -362,10 +449,12 @@ async fn unrelated_rows_only_advance_observation_in_every_live_phase() {
     }
 }
 
-#[tokio::test]
-async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role() {
+pub async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, upstream, reader) = source_sink_topology_with_source();
     let mut ctx = test_context(topology, system_id, journal, None);
     let feed = FeedKey::new(upstream, reader, "payment", FeedRole::Input);
@@ -431,8 +520,9 @@ async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role() {
     ));
 }
 
-#[tokio::test]
-async fn empty_topology_cannot_announce_or_consume_all_stage_completion() {
+pub async fn empty_topology_cannot_announce_or_consume_all_stage_completion(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for phase in [
         S::Created,
         S::Materializing,
@@ -440,7 +530,8 @@ async fn empty_topology_cannot_announce_or_consume_all_stage_completion() {
         S::Running,
     ] {
         let id = SystemId::new();
-        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(id)));
+        let mut journals = make_journals();
+        let journal = new_system_journal(&mut *journals, id);
         let mut ctx = test_context(empty_topology(), id, journal, None);
         let mut machine = build_pipeline_fsm_with_initial(phase.clone());
         for event in [
@@ -459,11 +550,13 @@ async fn empty_topology_cannot_announce_or_consume_all_stage_completion() {
     }
 }
 
-#[tokio::test]
-async fn genuine_early_stage_completion_can_settle_without_start_admission() {
+pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for phase in [S::Materializing, S::AwaitingStageReadiness, S::ReadyForRun] {
         let id = SystemId::new();
-        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(id)));
+        let mut journals = make_journals();
+        let journal = new_system_journal(&mut *journals, id);
         let (topology, upstream, stage) = source_sink_topology_with_source();
         let mut ctx = test_context(topology, id, journal, None);
         ctx.stage_supervisors.insert(
@@ -520,10 +613,11 @@ async fn genuine_early_stage_completion_can_settle_without_start_admission() {
     }
 }
 
-#[tokio::test]
-async fn graceful_stop_during_startup_preserves_running_then_drain_authority() {
+pub async fn graceful_stop_during_startup_preserves_running_then_drain_authority(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for cancel in [false, true] {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         let mut machine = build_pipeline_fsm_with_initial(S::ReadyForRun);
         let start = machine.handle(E::Start, &mut ctx).await.unwrap();
         let A::Publish { event: running, .. } = &start[1] else {
@@ -582,9 +676,10 @@ async fn graceful_stop_during_startup_preserves_running_then_drain_authority() {
     }
 }
 
-#[tokio::test]
-async fn terminal_and_final_marker_require_the_authorised_writer_and_identity() {
-    let mut ctx = make_fsm_context();
+pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identity(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
     let selected = SystemEventFactory::new(ctx.system_id).pipeline_not_started();
     ctx.progress.selected_terminal = Some((selected.clone(), ExecutionOutcome::NotStarted));
     let mut machine = build_pipeline_fsm_with_initial(S::PublishingTerminal);
@@ -649,9 +744,10 @@ async fn terminal_and_final_marker_require_the_authorised_writer_and_identity() 
     ));
 }
 
-#[tokio::test]
-async fn final_marker_failure_finishes_with_retained_error_without_another_marker() {
-    let mut ctx = make_fsm_context();
+pub async fn final_marker_failure_finishes_with_retained_error_without_another_marker(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
     let selected = SystemEventFactory::new(ctx.system_id).pipeline_not_started();
     ctx.progress.selected_terminal = Some((selected.clone(), ExecutionOutcome::NotStarted));
     ctx.termination

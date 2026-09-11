@@ -5,6 +5,7 @@
 //! Cancellation, resource settlement and acknowledged terminal publication.
 
 use crate::bootstrap::{bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig};
+use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{
     build_pipeline_fsm_with_initial, PipelineAction, PipelineFsmEvent, PipelineFsmState,
 };
@@ -12,24 +13,24 @@ use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::tests::support::{
     empty_system_subscription, empty_topology, initial_fsm_state, make_fsm_context,
     owned_test_stage, source_sink_topology, source_sink_topology_with_source,
-    spawn_supervisor_loop, test_context, test_supervisor, MemoryJournal, ShutdownProbe,
-    TerminalAppendGate, TestPipelineStageHandle,
+    spawn_supervisor_loop, test_context, test_supervisor, ShutdownProbe, TerminalAppendGate,
+    TestPipelineStageHandle,
 };
+use crate::pipeline::tests::support::{new_stage_journal, new_system_journal, ControlledJournal};
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 use crate::stages::common::stage_handle::StageHandle;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventFactory};
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::SystemId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[tokio::test]
-async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_cleanup_budget() {
+pub async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_cleanup_budget(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         // A timeout escalation must not fall back to this much longer budget.
@@ -38,7 +39,8 @@ async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_clea
     });
 
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink_stage_id) = source_sink_topology();
     let subscription = empty_system_subscription(&system_journal).await;
     let mut context = test_context(
@@ -104,11 +106,13 @@ async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_clea
     );
 }
 
-#[tokio::test]
-async fn abort_publication_rejection_cannot_skip_siblings_or_resume_commands() {
+pub async fn abort_publication_rejection_cannot_skip_siblings_or_resume_commands(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use obzenflow_fsm::FsmAction;
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, source, sink) = source_sink_topology_with_source();
     let mut context = test_context(topology, system_id, journal, None);
     let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
@@ -129,10 +133,9 @@ async fn abort_publication_rejection_cannot_skip_siblings_or_resume_commands() {
         .insert(source, handles[0].clone());
     context.stage_supervisors.insert(sink, handles[1].clone());
     for id in [source, sink] {
-        context.stage_data_journals.push((
-            id,
-            Arc::new(MemoryJournal::with_owner(JournalOwner::stage(id))),
-        ));
+        context
+            .stage_data_journals
+            .push((id, new_stage_journal(&mut *journals, id, "data")));
     }
     context
         .resources
@@ -187,8 +190,9 @@ async fn abort_publication_rejection_cannot_skip_siblings_or_resume_commands() {
     );
 }
 
-#[tokio::test]
-async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expiry() {
+pub async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expiry(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use obzenflow_core::event::{
         PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType,
     };
@@ -198,9 +202,10 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
         release: tokio::sync::Notify::new(),
         fail: false,
     });
-    let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+    let mut journals = make_journals();
+    let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
     journal.terminal_append = Some(gate.clone());
-    let journal = Arc::new(journal);
+    let journal: Arc<dyn obzenflow_core::journal::Journal<SystemEvent>> = Arc::new(journal);
     let (topology, upstream, stage) = source_sink_topology_with_source();
     let mut context = test_context(topology, system_id, journal.clone(), None);
     context.stage_supervisors.insert(
@@ -294,8 +299,9 @@ async fn terminal_publication_retains_its_outcome_while_servicing_graceful_expir
     )));
 }
 
-#[tokio::test]
-async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_failure() {
+pub async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_failure(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for terminal in ["completed", "cancelled", "failed"] {
         for fail in [false, true] {
             let system_id = SystemId::new();
@@ -304,9 +310,10 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
                 release: tokio::sync::Notify::new(),
                 fail,
             });
-            let mut journal = MemoryJournal::with_owner(JournalOwner::system(system_id));
+            let mut journals = make_journals();
+            let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
             journal.terminal_append = Some(gate.clone());
-            let journal = Arc::new(journal);
+            let journal: Arc<dyn obzenflow_core::journal::Journal<SystemEvent>> = Arc::new(journal);
             let (topology, upstream, stage) = source_sink_topology_with_source();
             let mut context = test_context(topology, system_id, journal.clone(), None);
             context.stage_supervisors.insert(
@@ -398,8 +405,9 @@ async fn supervisor_join_waits_for_terminal_publication_and_propagates_append_fa
     }
 }
 
-#[tokio::test]
-async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
+pub async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::pipeline::termination::ExecutionOutcome;
     use obzenflow_fsm::FsmAction;
     for (state, stopping) in [
@@ -412,7 +420,8 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
         (PipelineState::Draining, true),
     ] {
         let system_id = SystemId::new();
-        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let mut journals = make_journals();
+        let journal = new_system_journal(&mut *journals, system_id);
         let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
         context.flow_start_time = Some(std::time::Instant::now());
         if stopping {
@@ -494,12 +503,14 @@ async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop() {
     }
 }
 
-#[tokio::test]
-async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
+pub async fn pre_execution_teardown_is_explicit_and_failures_stay_selected(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::pipeline::termination::{execution_result, ExecutionOutcome};
     for fail in [false, true] {
         let system_id = SystemId::new();
-        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let mut journals = make_journals();
+        let journal = new_system_journal(&mut *journals, system_id);
         let mut context = test_context(empty_topology(), system_id, journal.clone(), None);
         let published = context.termination.published.clone();
         assert!(
@@ -555,10 +566,12 @@ async fn pre_execution_teardown_is_explicit_and_failures_stay_selected() {
     }
 }
 
-#[tokio::test]
-async fn cancellation_catches_up_late_producer_failure_before_selecting_terminal() {
+pub async fn cancellation_catches_up_late_producer_failure_before_selecting_terminal(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink) = source_sink_topology();
     let subscription = empty_system_subscription(&journal).await;
     let mut context = test_context(topology, system_id, journal.clone(), Some(subscription));
@@ -614,11 +627,12 @@ async fn cancellation_catches_up_late_producer_failure_before_selecting_terminal
         .any(|row| row.event.event_type_name() == "system.pipeline.cancelled"));
 }
 
-#[tokio::test]
-async fn final_marker_coalesces_late_controls_without_restarting_finalisation() {
+pub async fn final_marker_coalesces_late_controls_without_restarting_finalisation(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::pipeline::supervisor::PipelineSupervisor;
     use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
-    let mut ctx = make_fsm_context();
+    let mut ctx = make_fsm_context(make_journals);
     ctx.stop_intent.apply_request(
         FlowStopMode::Graceful {
             timeout: std::time::Duration::ZERO,

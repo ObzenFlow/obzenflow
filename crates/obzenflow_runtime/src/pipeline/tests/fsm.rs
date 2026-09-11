@@ -5,19 +5,24 @@
 //! FSM admission rules, state projection, stop intent and contract matching.
 
 use crate::feed_plan::{FeedKey, FeedRole};
+use crate::journal::FlowJournalFactory;
+#[cfg(test)]
 use crate::pipeline::fsm::context::{record_stage_completion, StopIntent, StopRequestOutcome};
 use crate::pipeline::fsm::{
     build_pipeline_fsm_with_initial, PipelineAction, PipelineFsmEvent, PipelineFsmState,
 };
+use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::tests::support::{
-    make_fsm_context, source_sink_topology_with_source, test_context, MemoryJournal,
+    make_fsm_context, source_sink_topology_with_source, test_context,
 };
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
+#[cfg(test)]
 use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_core::event::SystemEventFactory;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::{StageId, SystemId};
-use std::sync::Arc;
+#[cfg(test)]
+use obzenflow_core::StageId;
+use obzenflow_core::SystemId;
+#[cfg(test)]
 use std::time::Duration;
 
 #[test]
@@ -216,10 +221,12 @@ fn record_stage_completion_is_idempotent_for_duplicate_terminal_events() {
     assert_eq!(completed, vec![stage_a, stage_b]);
 }
 
-#[test]
-fn contract_keys_for_stage_pair_returns_all_matching_logical_feeds() {
+pub fn contract_keys_for_stage_pair_returns_all_matching_logical_feeds(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, upstream, downstream) = source_sink_topology_with_source();
     let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
     let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
@@ -234,10 +241,12 @@ fn contract_keys_for_stage_pair_returns_all_matching_logical_feeds() {
     assert!(keys.contains(&second_key));
 }
 
-#[test]
-fn contract_keys_for_contract_event_returns_matching_logical_feed() {
+pub fn contract_keys_for_contract_event_returns_matching_logical_feed(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, upstream, downstream) = source_sink_topology_with_source();
     let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
     let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
@@ -255,10 +264,12 @@ fn contract_keys_for_contract_event_returns_matching_logical_feed() {
     assert_eq!(keys, vec![first_key]);
 }
 
-#[test]
-fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status() {
+pub fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     let system_id = SystemId::new();
-    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let mut journals = make_journals();
+    let system_journal = new_system_journal(&mut *journals, system_id);
     let (topology, upstream, downstream) = source_sink_topology_with_source();
     let context = test_context(topology, system_id, system_journal, None);
 
@@ -268,11 +279,12 @@ fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status() {
     );
 }
 
-#[tokio::test]
-async fn repeated_graceful_controls_have_no_actions_and_cancel_folds_once() {
+pub async fn repeated_graceful_controls_have_no_actions_and_cancel_folds_once(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use std::time::Duration;
     for (first, second) in [(1, 60), (60, 1)] {
-        let mut context = make_fsm_context();
+        let mut context = make_fsm_context(make_journals);
         context.flow_start_time = Some(std::time::Instant::now());
         let mut fsm = build_pipeline_fsm_with_initial(PipelineFsmState::Running);
         let event = |seconds| {
@@ -315,9 +327,10 @@ async fn repeated_graceful_controls_have_no_actions_and_cancel_folds_once() {
     }
 }
 
-#[tokio::test]
-async fn repeated_abort_controls_preserve_the_first_failure_without_new_work() {
-    let mut ctx = make_fsm_context();
+pub async fn repeated_abort_controls_preserve_the_first_failure_without_new_work(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
     let mut machine = build_pipeline_fsm_with_initial(PipelineFsmState::Running);
     let first = machine
         .handle(
@@ -348,9 +361,10 @@ async fn repeated_abort_controls_preserve_the_first_failure_without_new_work() {
     assert!(matches!(machine.state(), PipelineFsmState::SettlingStages));
 }
 
-#[tokio::test]
-async fn readiness_and_start_consume_committed_pipeline_facts() {
-    let mut ctx = make_fsm_context();
+pub async fn readiness_and_start_consume_committed_pipeline_facts(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
     let mut fsm = build_pipeline_fsm_with_initial(PipelineFsmState::AwaitingStageReadiness);
     assert!(fsm
         .handle(PipelineFsmEvent::PhysicalSettlementSatisfied, &mut ctx)
@@ -382,8 +396,9 @@ async fn readiness_and_start_consume_committed_pipeline_facts() {
     assert!(matches!(actions.as_slice(), [PipelineAction::StartSources]));
 }
 
-#[tokio::test]
-async fn pre_ready_and_duplicate_start_controls_do_not_authorise_sources() {
+pub async fn pre_ready_and_duplicate_start_controls_do_not_authorise_sources(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for initial in [
         PipelineFsmState::Created,
         PipelineFsmState::Materializing,
@@ -398,7 +413,7 @@ async fn pre_ready_and_duplicate_start_controls_do_not_authorise_sources() {
         PipelineFsmState::FinalisingMetrics,
         PipelineFsmState::PublishingFinalMarker,
     ] {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         let mut fsm = build_pipeline_fsm_with_initial(initial.clone());
         assert!(fsm
             .handle(PipelineFsmEvent::Start, &mut ctx)
@@ -409,10 +424,11 @@ async fn pre_ready_and_duplicate_start_controls_do_not_authorise_sources() {
     }
 }
 
-#[tokio::test]
-async fn readiness_failure_and_cancel_stay_pending_until_settlement() {
+pub async fn readiness_failure_and_cancel_stay_pending_until_settlement(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     for failure in [false, true] {
-        let mut ctx = make_fsm_context();
+        let mut ctx = make_fsm_context(make_journals);
         let mut fsm = build_pipeline_fsm_with_initial(PipelineFsmState::ReadyForRun);
         let event = if failure {
             PipelineFsmEvent::OperationalFailure {
@@ -437,10 +453,11 @@ async fn readiness_failure_and_cancel_stay_pending_until_settlement() {
     }
 }
 
-#[tokio::test]
-async fn every_private_phase_has_a_truthful_public_projection() {
+pub async fn every_private_phase_has_a_truthful_public_projection(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
     use crate::pipeline::termination::{ExecutionFailure, ExecutionOutcome};
-    let mut ctx = make_fsm_context();
+    let mut ctx = make_fsm_context(make_journals);
     let cases = [
         (PipelineFsmState::Created, PipelineState::Created),
         (

@@ -15,8 +15,8 @@ pub(crate) mod resources;
 pub mod supervisor;
 mod termination;
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod tests;
 
 pub use builder::PipelineBuilder;
 pub use config::{
