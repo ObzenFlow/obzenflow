@@ -67,7 +67,7 @@ impl Supervisor for MetricsAggregatorSupervisor {
     }
 }
 
-// Implement SelfSupervised with ALL the logic - no separate impl blocks!
+// Metrics dispatch and lifecycle hooks for the shared self-supervised runner.
 #[async_trait::async_trait]
 impl SelfSupervised for MetricsAggregatorSupervisor {
     fn writer_id(&self) -> WriterId {
