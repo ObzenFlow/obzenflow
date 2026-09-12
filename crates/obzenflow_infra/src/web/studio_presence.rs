@@ -44,7 +44,7 @@ impl RuntimePresencePhase {
 }
 
 pub(crate) struct RuntimePresenceProjection {
-    reader: crate::lifecycle_observation::Reader,
+    reader: crate::application::lifecycle_observation::Reader,
 }
 
 impl RuntimePresenceProjection {
@@ -53,7 +53,10 @@ impl RuntimePresenceProjection {
         pipeline_writer_id: WriterId,
     ) -> Self {
         Self {
-            reader: crate::lifecycle_observation::Reader::new(journal, pipeline_writer_id),
+            reader: crate::application::lifecycle_observation::Reader::new(
+                journal,
+                pipeline_writer_id,
+            ),
         }
     }
 
@@ -63,12 +66,15 @@ impl RuntimePresenceProjection {
         pipeline_writer_id: WriterId,
     ) -> Self {
         Self {
-            reader: crate::lifecycle_observation::Reader::from_reader(reader, pipeline_writer_id),
+            reader: crate::application::lifecycle_observation::Reader::from_reader(
+                reader,
+                pipeline_writer_id,
+            ),
         }
     }
 
     pub(crate) fn phase(&self) -> RuntimePresencePhase {
-        use crate::lifecycle_observation::{Outcome, Progress};
+        use crate::application::lifecycle_observation::{Outcome, Progress};
         match &self.reader.projection.outcome {
             Some(Outcome::Completed) => RuntimePresencePhase::Completed,
             Some(Outcome::Cancelled) => RuntimePresencePhase::Cancelled,

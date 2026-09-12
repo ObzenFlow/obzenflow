@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::lifecycle_observation::{Progress, Reader};
+use crate::application::lifecycle_observation::{Progress, Reader};
 use obzenflow_core::event::{
     PipelineCancellationCause, PipelineLifecycleEvent as Lifecycle, PipelineStopAdmission,
     SystemEvent, SystemEventType,
@@ -230,7 +230,7 @@ async fn gated_observation(
 
 async fn observe_until(
     reader: &mut Reader,
-    reached: impl Fn(&crate::lifecycle_observation::Projection) -> bool,
+    reached: impl Fn(&crate::application::lifecycle_observation::Projection) -> bool,
 ) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {

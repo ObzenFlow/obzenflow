@@ -10,6 +10,7 @@
 pub(crate) mod config;
 mod error;
 mod flow_application;
+pub(crate) mod lifecycle_observation;
 mod managed_lifecycle;
 mod presentation;
 mod run_mode;

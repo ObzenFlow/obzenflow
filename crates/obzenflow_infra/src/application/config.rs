@@ -1457,7 +1457,7 @@ fn normalise_enum_token(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{env_lock, EnvGuard};
+    use crate::env::test_support::{env_lock, EnvGuard};
     use std::fs;
 
     #[test]

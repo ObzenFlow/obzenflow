@@ -17,13 +17,7 @@ pub mod application;
 pub mod env;
 pub mod http_client;
 pub mod journal;
-pub mod sources;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod verify;
 pub mod web;
-
-#[cfg(test)]
-pub(crate) mod test_support;
-
-mod lifecycle_observation;

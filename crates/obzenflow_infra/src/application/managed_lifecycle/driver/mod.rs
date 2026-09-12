@@ -12,7 +12,9 @@ use super::machine;
 #[cfg(feature = "warp-server")]
 use super::signals;
 
-use crate::lifecycle_observation::{Feed, Health, ObservationError, Outcome as ObservedOutcome};
+use crate::application::lifecycle_observation::{
+    Feed, Health, ObservationError, Outcome as ObservedOutcome,
+};
 use futures::future::BoxFuture;
 use machine::{Action, Context, Event, State, StopCommand, StopInput, StopReason};
 use machine::{FailureOrigin, Outcome};

@@ -494,7 +494,7 @@ enabled = false
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_completion_and_panic_remain_primary_across_application_phases() {
-    use crate::lifecycle_observation::Reader;
+    use crate::application::lifecycle_observation::Reader;
     use crate::web::host_error::ManagedWebHostError;
     use futures::FutureExt;
     use obzenflow_core::event::{PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType};
@@ -1118,7 +1118,7 @@ enabled = false
                         // start() admits Run; it does not wait for execution.
                         // This case exercises stopping an acknowledged running
                         // flow, rather than cancellation overtaking startup.
-                        let mut reader = crate::lifecycle_observation::Reader::new(
+                        let mut reader = crate::application::lifecycle_observation::Reader::new(
                             flow.system_journal().unwrap(),
                             flow.pipeline_writer_id(),
                         );
@@ -1126,7 +1126,7 @@ enabled = false
                             reader.catch_up().await;
                             if matches!(
                                 reader.projection.progress,
-                                crate::lifecycle_observation::Progress::Running
+                                crate::application::lifecycle_observation::Progress::Running
                             ) {
                                 break;
                             }
