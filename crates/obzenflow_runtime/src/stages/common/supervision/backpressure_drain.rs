@@ -299,17 +299,16 @@ pub(crate) async fn drain_one_pending_resolve(
         if pending.scope.is_deterministic_replay() {
             let reservation = backpressure_writer.reserve_tracked(1);
             committer
-                .commit_prebuilt(
+                .commit_reserved_prebuilt(
                     pending.event,
                     pending_parent,
                     CommitOptions {
                         count_output: true,
                         validate_output_contract: false,
                     },
+                    reservation,
                 )
-                .await
-                .map_err(|e| format!("Failed to write pending output: {e}"))?;
-            reservation.commit(1);
+                .await?;
             *backpressure_stall = None;
             return Ok(DrainAttempt::Committed { was_data: true });
         }
@@ -370,18 +369,17 @@ pub(crate) async fn drain_one_pending_resolve(
         };
 
         committer
-            .commit_prebuilt(
+            .commit_reserved_prebuilt(
                 pending.event,
                 pending_parent,
                 CommitOptions {
                     count_output: true,
                     validate_output_contract: false,
                 },
+                reservation,
             )
-            .await
-            .map_err(|e| format!("Failed to write pending output: {e}"))?;
+            .await?;
 
-        reservation.commit(1);
         *backpressure_stall = None;
 
         Ok(DrainAttempt::Committed { was_data: true })
@@ -441,7 +439,8 @@ async fn emit_bypass_pulse_if_needed(
         .with_flow_context(flow_context.clone())
         .with_runtime_context(instrumentation.snapshot_with_control());
 
-        if let Err(e) = data_journal.append(event, None).await {
+        if let Err(e) = crate::supervised_base::publication::append(data_journal, event, None).await
+        {
             tracing::warn!(
                 journal_error = %e,
                 "Failed to append backpressure activity pulse"
@@ -475,7 +474,7 @@ async fn emit_stalled_fact(
     .with_flow_context(flow_context.clone())
     .with_runtime_context(instrumentation.snapshot_with_control());
 
-    if let Err(e) = data_journal.append(event, None).await {
+    if let Err(e) = crate::supervised_base::publication::append(data_journal, event, None).await {
         tracing::warn!(
             journal_error = %e,
             "Failed to append backpressure.stalled fact"
@@ -512,9 +511,9 @@ async fn emit_poison_eof(
 
     event.flow_context = flow_context.clone();
     event.runtime_context = Some(runtime_context);
-    instrumentation.record_emitted(&event);
-
-    if let Err(e) = data_journal.append(event, None).await {
+    if let Err(e) =
+        super::output_committer::commit_control_output(data_journal, instrumentation, event).await
+    {
         tracing::warn!(
             journal_error = %e,
             "Failed to append backpressure poison EOF"
@@ -551,7 +550,8 @@ pub(crate) async fn emit_blocked_pulse(
         .with_flow_context(flow_context.clone())
         .with_runtime_context(instrumentation.snapshot_with_control());
 
-        if let Err(e) = data_journal.append(event, None).await {
+        if let Err(e) = crate::supervised_base::publication::append(data_journal, event, None).await
+        {
             tracing::warn!(
                 journal_error = %e,
                 "Failed to append backpressure activity pulse"

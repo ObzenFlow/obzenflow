@@ -1656,7 +1656,6 @@ where
 
         // Create flow handle using builder pattern
         use crate::prelude::PipelineBuilder;
-        use obzenflow_runtime::supervised_base::SupervisorBuilder;
 
         // FLOWIP-114b: stage_typing_map, join_metadata_map,
         // subgraph_membership_map, subgraphs, and middleware_stacks have

@@ -44,6 +44,138 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
 
+/// Ownership transfer for mandatory receipt accounting during publication.
+/// The suspended caller regains these values only after observing settlement.
+pub(crate) struct ReceiptSettlement {
+    owner_label: String,
+    receipt_aware: bool,
+    reader_stage: Option<StageId>,
+    upstreams: Vec<StageId>,
+    chains: Vec<Option<ContractChain>>,
+    progress: Vec<ReaderProgress>,
+}
+
+impl ReceiptSettlement {
+    pub(crate) fn record(&mut self, receipt: &ChainEvent) -> Option<(SeqNo, EventId, VectorClock)> {
+        record_receipt(
+            receipt,
+            &self.owner_label,
+            self.receipt_aware,
+            self.reader_stage,
+            &self.upstreams,
+            &mut self.chains,
+            &mut self.progress,
+        )
+    }
+}
+
+fn record_receipt(
+    receipt: &ChainEvent,
+    owner_label: &str,
+    receipt_aware: bool,
+    reader_stage: Option<StageId>,
+    upstreams: &[StageId],
+    chains: &mut [Option<ContractChain>],
+    reader_progress: &mut [ReaderProgress],
+) -> Option<(SeqNo, EventId, VectorClock)> {
+    if !receipt_aware {
+        return None;
+    }
+
+    let Some(parent_id) = receipt.causality.parent_ids.first().copied() else {
+        tracing::warn!(
+            owner = %owner_label,
+            receipt_id = %receipt.id,
+            "record_delivery_receipt: receipt missing parent causality"
+        );
+        return None;
+    };
+
+    let Some(index) = reader_progress
+        .iter()
+        .enumerate()
+        .find_map(|(index, progress)| {
+            progress
+                .pending_delivery_inputs
+                .contains_key(&parent_id)
+                .then_some(index)
+        })
+    else {
+        tracing::warn!(
+            owner = %owner_label,
+            receipt_id = %receipt.id,
+            ?parent_id,
+            "record_delivery_receipt: no pending delivered input for parent"
+        );
+        return None;
+    };
+
+    let upstream_stage = reader_progress[index].stage_id;
+    let obzenflow_core::event::ChainEventContent::Delivery(payload) = &receipt.content else {
+        tracing::warn!(
+            owner = %owner_label,
+            receipt_id = %receipt.id,
+            ?upstream_stage,
+            ?parent_id,
+            "record_delivery_receipt: non-delivery event passed to receipt recorder"
+        );
+        return None;
+    };
+
+    let is_accounted_receipt = reader_progress[index]
+        .pending_receipts
+        .contains_key(&parent_id);
+    if is_accounted_receipt {
+        if let Some(reader_stage) = reader_stage {
+            if let Some(slot) = upstreams.iter().position(|id| *id == upstream_stage) {
+                if let Some(Some(chain)) = chains.get_mut(slot) {
+                    chain.on_write(receipt, reader_stage, SeqNo(0));
+                }
+            }
+        }
+    }
+
+    if matches!(&payload.result, DeliveryResult::Buffered { .. }) {
+        return None;
+    }
+
+    reader_progress[index]
+        .pending_delivery_inputs
+        .remove(&parent_id);
+
+    if !is_accounted_receipt {
+        tracing::debug!(
+            owner = %owner_label,
+            ?upstream_stage,
+            ?parent_id,
+            "record_delivery_receipt: terminal forwarded input has no receipt-watermark position"
+        );
+        return None;
+    }
+
+    let previous_seq = reader_progress[index].receipted_seq;
+    if reader_progress[index].mark_receipted(parent_id) {
+        reader_progress[index].last_read_instant = Some(Instant::now());
+        if reader_progress[index].receipted_seq != previous_seq {
+            if let (Some(event_id), Some(vector_clock)) = (
+                reader_progress[index].last_receipted_event_id,
+                reader_progress[index].last_receipted_vector_clock.clone(),
+            ) {
+                return Some((reader_progress[index].receipted_seq, event_id, vector_clock));
+            }
+        }
+    } else {
+        tracing::debug!(
+            owner = %owner_label,
+            ?upstream_stage,
+            ?parent_id,
+            "record_delivery_receipt: parent was not pending when receipt arrived"
+        );
+    }
+
+    None
+}
+
 struct FeedContractChain {
     metadata: SelectedFeedMetadata,
     chain: ContractChain,
@@ -513,96 +645,47 @@ where
         receipt: &ChainEvent,
         reader_progress: &mut [ReaderProgress],
     ) -> Option<(SeqNo, EventId, VectorClock)> {
-        if !self.uses_receipt_watermark() {
-            return None;
+        record_receipt(
+            receipt,
+            &self.owner_label,
+            self.uses_receipt_watermark(),
+            self.contract_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.reader_stage),
+            &self
+                .readers
+                .iter()
+                .map(|slot| slot.stage_id)
+                .collect::<Vec<_>>(),
+            &mut self.contract_chains,
+            reader_progress,
+        )
+    }
+
+    pub(crate) fn take_receipt_settlement(
+        &mut self,
+        progress: &mut Vec<ReaderProgress>,
+    ) -> ReceiptSettlement {
+        ReceiptSettlement {
+            owner_label: self.owner_label.clone(),
+            receipt_aware: self.uses_receipt_watermark(),
+            reader_stage: self
+                .contract_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.reader_stage),
+            upstreams: self.readers.iter().map(|slot| slot.stage_id).collect(),
+            chains: std::mem::take(&mut self.contract_chains),
+            progress: std::mem::take(progress),
         }
+    }
 
-        let Some(parent_id) = receipt.causality.parent_ids.first().copied() else {
-            tracing::warn!(
-                owner = %self.owner_label,
-                receipt_id = %receipt.id,
-                "record_delivery_receipt: receipt missing parent causality"
-            );
-            return None;
-        };
-
-        let Some(index) = reader_progress
-            .iter()
-            .enumerate()
-            .find_map(|(index, progress)| {
-                progress
-                    .pending_delivery_inputs
-                    .contains_key(&parent_id)
-                    .then_some(index)
-            })
-        else {
-            tracing::warn!(
-                owner = %self.owner_label,
-                receipt_id = %receipt.id,
-                ?parent_id,
-                "record_delivery_receipt: no pending delivered input for parent"
-            );
-            return None;
-        };
-
-        let upstream_stage = reader_progress[index].stage_id;
-        let obzenflow_core::event::ChainEventContent::Delivery(payload) = &receipt.content else {
-            tracing::warn!(
-                owner = %self.owner_label,
-                receipt_id = %receipt.id,
-                ?upstream_stage,
-                ?parent_id,
-                "record_delivery_receipt: non-delivery event passed to receipt recorder"
-            );
-            return None;
-        };
-
-        let is_accounted_receipt = reader_progress[index]
-            .pending_receipts
-            .contains_key(&parent_id);
-        if is_accounted_receipt {
-            self.notify_delivery_receipt(receipt, upstream_stage);
-        }
-
-        if matches!(&payload.result, DeliveryResult::Buffered { .. }) {
-            return None;
-        }
-
-        reader_progress[index]
-            .pending_delivery_inputs
-            .remove(&parent_id);
-
-        if !is_accounted_receipt {
-            tracing::debug!(
-                owner = %self.owner_label,
-                ?upstream_stage,
-                ?parent_id,
-                "record_delivery_receipt: terminal forwarded input has no receipt-watermark position"
-            );
-            return None;
-        }
-
-        let previous_seq = reader_progress[index].receipted_seq;
-        if reader_progress[index].mark_receipted(parent_id) {
-            reader_progress[index].last_read_instant = Some(Instant::now());
-            if reader_progress[index].receipted_seq != previous_seq {
-                if let (Some(event_id), Some(vector_clock)) = (
-                    reader_progress[index].last_receipted_event_id,
-                    reader_progress[index].last_receipted_vector_clock.clone(),
-                ) {
-                    return Some((reader_progress[index].receipted_seq, event_id, vector_clock));
-                }
-            }
-        } else {
-            tracing::debug!(
-                owner = %self.owner_label,
-                ?upstream_stage,
-                ?parent_id,
-                "record_delivery_receipt: parent was not pending when receipt arrived"
-            );
-        }
-
-        None
+    pub(crate) fn restore_receipt_settlement(
+        &mut self,
+        progress: &mut Vec<ReaderProgress>,
+        settlement: ReceiptSettlement,
+    ) {
+        self.contract_chains = settlement.chains;
+        *progress = settlement.progress;
     }
 
     pub fn pending_receipt_envelope(

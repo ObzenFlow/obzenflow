@@ -2,6 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::*;
+use obzenflow_runtime::__private::lifecycle;
+
+async fn abort_execution_for_test(flow: &FlowHandle) {
+    drop(lifecycle::guard_execution(flow));
+    let error = lifecycle::wait(flow)
+        .await
+        .expect_err("emergency cancellation retains the aborted result");
+    assert!(std::error::Error::source(&error)
+        .unwrap()
+        .to_string()
+        .contains("aborted"));
+}
+
 #[derive(Clone, Copy, Debug)]
 enum FaultPhase {
     BeforeRun,
@@ -19,12 +33,471 @@ enum HostFault {
     Panic,
 }
 
+#[derive(Clone, Debug)]
+struct PendingLifetimeSource {
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    cancelled: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+struct PendingPollDrop(Option<oneshot::Sender<()>>);
+
+impl Drop for PendingPollDrop {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl obzenflow_runtime::stages::common::handlers::TypedAsyncInfiniteSourceHandler
+    for PendingLifetimeSource
+{
+    type Output = IdlePayload;
+
+    async fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
+        let _drop = PendingPollDrop(self.cancelled.lock().unwrap().take());
+        if let Some(started) = self.started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        std::future::pending().await
+    }
+}
+
+fn pending_lifetime_source() -> (
+    PendingLifetimeSource,
+    oneshot::Receiver<()>,
+    oneshot::Receiver<()>,
+) {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    (
+        PendingLifetimeSource {
+            started: Arc::new(Mutex::new(Some(started_tx))),
+            cancelled: Arc::new(Mutex::new(Some(cancelled_tx))),
+        },
+        started_rx,
+        cancelled_rx,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_application_cancels_runtime_and_pending_stage_work() {
+    use obzenflow_core::event::JournalEvent;
+    use obzenflow_dsl::async_infinite_source;
+
+    for hosted in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(&config, format!(
+            "[server]\nenabled = {hosted}\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n[metrics]\nenabled = false\n"
+        )).unwrap();
+        let (left, left_started, left_cancelled) = pending_lifetime_source();
+        let (right, right_started, right_cancelled) = pending_lifetime_source();
+        let (flow_tx, flow_rx) = oneshot::channel();
+        let flow_tx = Mutex::new(Some(flow_tx));
+        let application = tokio::spawn(FlowApplication::launch(
+            FlowDefinition::materialize(move |_| {
+                let sink = NoopSink;
+                Ok(flow! {
+                    name: "application_drop", journals: crate::journal::memory_journals(),
+                    stages: {
+                        left = async_infinite_source!(IdlePayload => left);
+                        right = async_infinite_source!(IdlePayload => right);
+                        sink = sink!(IdlePayload => sink);
+                    },
+                    topology: { left |> sink; right |> sink; }
+                })
+            }),
+            LaunchParams {
+                cli_args: Some(vec![
+                    "regression".into(),
+                    "--config".into(),
+                    config.into_os_string(),
+                ]),
+                flow_handle_hooks: vec![Box::new(move |flow| {
+                    // Standalone execution must retain unique ownership of its handle.
+                    let observation = (
+                        hosted.then(|| flow.clone()),
+                        flow.state_receiver(),
+                        flow.system_journal().unwrap(),
+                    );
+                    assert!(flow_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(observation)
+                        .is_ok());
+                    Ok(tokio::spawn(async {}))
+                })],
+                ..LaunchParams::default()
+            },
+        ));
+        let (retained_flow, mut states, journal) = flow_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            left_started.await.unwrap();
+            right_started.await.unwrap();
+        })
+        .await
+        .expect("both stage operations must be pending");
+        application.abort();
+        assert!(application.await.unwrap_err().is_cancelled());
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), async {
+            if let Some(flow) = &retained_flow {
+                let error = lifecycle::wait(flow).await.unwrap_err();
+                assert!(std::error::Error::source(&error)
+                    .unwrap()
+                    .to_string()
+                    .contains("aborted"));
+            } else {
+                // No FlowHandle survives standalone execution, so closure also witnesses
+                // release of the pipeline task's state publisher on the live caller runtime.
+                while states.changed().await.is_ok() {}
+            }
+            left_cancelled.await.unwrap();
+            right_cancelled.await.unwrap();
+        })
+        .await;
+        if let Some(flow) = &retained_flow {
+            // Clean up even if the cancellation assertion regresses.
+            abort_execution_for_test(flow).await;
+        }
+        cancelled.expect("application drop must cancel the supervisor and both stage operations");
+        let facts = journal.read_all_unordered().await.unwrap();
+        assert!(
+            !facts.iter().any(|fact| matches!(
+                fact.event.event_type_name(),
+                "system.pipeline.completed" | "system.pipeline.cancelled"
+            )),
+            "emergency cancellation must not invent a published outcome"
+        );
+        if hosted {
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("host listener released");
+            drop(listener);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("obzenflow.toml");
+    let port = available_local_port();
+    std::fs::write(&config, format!(
+        "[server]\nenabled = true\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\n[metrics]\nenabled = false\n"
+    )).unwrap();
+    let (flow_tx, flow_rx) = oneshot::channel();
+    let flow_tx = Mutex::new(Some(flow_tx));
+    let (preparing_tx, preparing_rx) = oneshot::channel();
+    let application = tokio::spawn(FlowApplication::launch(
+        FlowDefinition::materialize(move |_| {
+            let source = IdleInfiniteSource;
+            let sink = NoopSink;
+            Ok(flow! {
+                name: "application_drop_preparation", journals: crate::journal::memory_journals(),
+                stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                topology: { src |> sink; }
+            })
+        }),
+        LaunchParams {
+            cli_args: Some(vec![
+                "regression".into(),
+                "--config".into(),
+                config.into_os_string(),
+            ]),
+            flow_handle_hooks: vec![Box::new(move |flow| {
+                assert!(flow_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(flow.clone())
+                    .is_ok());
+                Ok(tokio::spawn(async {}))
+            })],
+            test_host_task: Some((
+                Box::pin(async move {
+                    preparing_tx.send(()).unwrap();
+                    std::future::pending().await
+                }),
+                true,
+            )),
+            ..LaunchParams::default()
+        },
+    ));
+    let flow = flow_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), preparing_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(flow.is_running());
+    application.abort();
+    assert!(application.await.unwrap_err().is_cancelled());
+    let completed = tokio::time::timeout(Duration::from_secs(2), lifecycle::wait(&flow)).await;
+    abort_execution_for_test(&flow).await;
+    assert!(completed
+        .expect("built flow must be cancelled during host preparation")
+        .is_err());
+    let listener = TcpListener::bind(("127.0.0.1", port)).expect("host listener released");
+    drop(listener);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_start_observes_runtime_exit_before_readiness() {
+    for terminal_mode in ["exit", "park"] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(&config, format!(
+            "[server]\nenabled = true\nhost = \"127.0.0.1\"\nport = {port}\nstartup_mode = \"auto\"\non_terminal = \"{terminal_mode}\"\n[metrics]\nenabled = false\n"
+        )).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), FlowApplication::launch(
+            FlowDefinition::new(move |context| async move {
+                let source = IdleInfiniteSource;
+                let sink = NoopSink;
+                let flow = flow! {
+                    name: "startup_runtime_exit", journals: crate::journal::memory_journals(),
+                    stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                    topology: { src |> sink; }
+                }.build(context).await?;
+                abort_execution_for_test(&flow).await;
+                assert!(!flow.is_running());
+                assert!(!flow.current_state().is_terminal());
+                Ok(flow)
+            }),
+            LaunchParams {
+                cli_args: Some(vec!["regression".into(), "--config".into(), config.into_os_string()]),
+                ..LaunchParams::default()
+            },
+        )).await.expect("hosted startup must observe Runtime termination before readiness");
+        assert!(
+            matches!(result, Err(ApplicationError::FlowExecutionFailed(ref message))
+            if message.contains("Supervisor task was aborted")),
+            "joined Runtime error: {result:?}"
+        );
+        let listener =
+            TcpListener::bind(("127.0.0.1", port)).expect("host must be joined before return");
+        drop(listener);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_startup_signals_withhold_automatic_run() {
+    use obzenflow_core::event::JournalEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[derive(Clone, Debug)]
+    struct CountingSource(Arc<AtomicUsize>);
+    impl TypedInfiniteSourceHandler for CountingSource {
+        type Output = IdlePayload;
+        fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+    for signal in [ShutdownSignal::Sigint, ShutdownSignal::Sigterm] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("obzenflow.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {}
+startup_mode = "auto"
+on_terminal = "exit"
+[metrics]
+enabled = false
+"#,
+                available_local_port()
+            ),
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source_calls = calls.clone();
+        let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
+        let hook_observed = observed.clone();
+        let definition = FlowDefinition::materialize(move |_| {
+            let source = CountingSource(source_calls);
+            let sink = NoopSink;
+            Ok(flow! {
+                name: "startup_signal", journals: crate::journal::memory_journals(),
+                stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+                topology: { src |> sink; }
+            })
+        });
+        let (signal_tx, signal_rx) = oneshot::channel();
+        signal_tx.send(signal).unwrap();
+        FlowApplication::launch(
+            definition,
+            LaunchParams {
+                cli_args: Some(vec![
+                    "regression".into(),
+                    "--config".into(),
+                    config.into_os_string(),
+                ]),
+                flow_handle_hooks: vec![Box::new(move |flow| {
+                    *hook_observed.lock().unwrap() = Some(flow.clone());
+                    Ok(tokio::spawn(async {}))
+                })],
+                test_shutdown_signal: Some(signal_rx),
+                ..LaunchParams::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "{signal:?} must withhold automatic Run"
+        );
+        let flow = observed.lock().unwrap().take().unwrap();
+        let facts = flow
+            .system_journal()
+            .unwrap()
+            .read_all_unordered()
+            .await
+            .unwrap();
+        let terminals: Vec<_> = facts
+            .iter()
+            .map(|event| event.event.event_type_name())
+            .filter(|kind| {
+                matches!(
+                    *kind,
+                    "system.pipeline.cancelled"
+                        | "system.pipeline.completed"
+                        | "system.pipeline.failed"
+                        | "system.pipeline.not_started"
+                )
+            })
+            .collect();
+        assert_eq!(terminals, ["system.pipeline.not_started"]);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_failure_retains_prior_hook_joins_and_the_not_started_journal_outcome() {
+    use obzenflow_core::event::JournalEvent;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("obzenflow.toml");
+    std::fs::write(
+        &config,
+        r#"
+[server]
+enabled = true
+startup_mode = "manual"
+[runtime]
+shutdown_timeout_secs = 1
+[metrics]
+enabled = false
+"#,
+    )
+    .unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (terminated_tx, mut terminated_rx) = oneshot::channel();
+    let task = tokio::task::spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        terminated_tx.send(()).unwrap();
+    });
+    started_rx.await.unwrap();
+    let task = Mutex::new(Some(task));
+    let (flow_tx, flow_rx) = oneshot::channel();
+    let flow_tx = Mutex::new(Some(flow_tx));
+    let definition = FlowDefinition::materialize(move |_| {
+        let source = IdleInfiniteSource;
+        let sink = NoopSink;
+        Ok(flow! {
+            name: "startup_cleanup_join", journals: crate::journal::memory_journals(),
+            stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
+            topology: { src |> sink; }
+        })
+    });
+    let application = tokio::spawn(FlowApplication::launch(
+        definition,
+        LaunchParams {
+            cli_args: Some(vec![
+                "regression".into(),
+                "--config".into(),
+                config.into_os_string(),
+            ]),
+            flow_handle_hooks: vec![
+                Box::new(move |flow| {
+                    assert!(flow_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(flow.clone())
+                        .is_ok());
+                    Ok(task.lock().unwrap().take().unwrap())
+                }),
+                Box::new(|_| {
+                    Err(ApplicationError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "startup failure witness",
+                    )))
+                }),
+            ],
+            ..LaunchParams::default()
+        },
+    ));
+    let flow = flow_rx.await.unwrap();
+    // A live spawn_blocking task suppresses Tokio's automatic clock advance.
+    // Advance explicitly while Runtime settles its pre-execution cancellation.
+    for _ in 0..200 {
+        if !flow.is_running() {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(!flow.is_running(), "pre-execution cancellation must settle");
+    lifecycle::wait(&flow).await.unwrap();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert!(
+        !application.is_finished(),
+        "an expired auxiliary budget cannot release the hook"
+    );
+    let facts = flow
+        .system_journal()
+        .unwrap()
+        .read_all_unordered()
+        .await
+        .unwrap();
+    let terminals: Vec<_> = facts
+        .iter()
+        .map(|event| event.event.event_type_name())
+        .filter(|kind| {
+            matches!(
+                *kind,
+                "system.pipeline.cancelled"
+                    | "system.pipeline.completed"
+                    | "system.pipeline.failed"
+                    | "system.pipeline.not_started"
+            )
+        })
+        .collect();
+    assert_eq!(terminals, ["system.pipeline.not_started"]);
+    release_tx.send(()).unwrap();
+    let result = application.await.unwrap();
+    assert!(matches!(result, Err(ApplicationError::IoError(error))
+        if error.kind() == std::io::ErrorKind::InvalidInput && error.to_string() == "startup failure witness"));
+    assert_eq!(terminated_rx.try_recv(), Ok(()));
+    assert!(!flow.is_running());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_completion_and_panic_remain_primary_across_application_phases() {
+    use crate::lifecycle_observation::Reader;
     use crate::web::host_error::ManagedWebHostError;
     use futures::FutureExt;
-    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEventType};
-    use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
+    use obzenflow_core::event::{PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
@@ -82,8 +555,8 @@ enabled = false
             let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
             let hook_observed = observed.clone();
             let task_observed = observed.clone();
-            let admitted_deadline = Arc::new(Mutex::new(None));
-            let task_deadline = admitted_deadline.clone();
+            let observed_admission = Arc::new(Mutex::new(None));
+            let task_admission = observed_admission.clone();
             let calls = Arc::new(AtomicUsize::new(0));
             let source_calls = calls.clone();
             let (signal, received_signal) = oneshot::channel();
@@ -107,27 +580,40 @@ enabled = false
                     }
                 }
                 if matches!(phase, FaultPhase::Draining | FaultPhase::Cancelling) {
-                    let mut status = lifecycle::observe_stop(&flow);
+                    let mut status = Reader::new(
+                        flow.system_journal().unwrap().clone(),
+                        flow.pipeline_writer_id(),
+                    );
                     if matches!(phase, FaultPhase::Draining) {
                         flow.stop_graceful(Duration::from_secs(60)).await.unwrap();
                     } else {
                         flow.stop_cancel().await.unwrap();
                     }
                     loop {
-                        let admitted = status.snapshot();
-                        if let FlowStopStatus::Graceful { deadline } = admitted {
-                            *task_deadline.lock().unwrap() = Some(deadline);
+                        status.catch_up().await;
+                        let admitted = status.projection.admission.clone();
+                        if matches!(admitted, Some(PipelineStopAdmission::Graceful { .. })) {
+                            *task_admission.lock().unwrap() = admitted;
                             break;
                         }
-                        if matches!(admitted, FlowStopStatus::Cancelling { .. }) {
+                        if matches!(admitted, Some(PipelineStopAdmission::Cancel { .. })) {
                             break;
                         }
-                        status.changed().await.unwrap();
+                        tokio::task::yield_now().await;
                     }
                 }
                 // A terminal-success observation and shutdown signal cannot hide
                 // an independently failed host task.
                 if matches!(phase, FaultPhase::Terminal) {
+                    let mut reader =
+                        Reader::new(flow.system_journal().unwrap(), flow.pipeline_writer_id());
+                    loop {
+                        reader.catch_up().await;
+                        if reader.projection.outcome.is_some() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
                     let _ = task_signal
                         .lock()
                         .unwrap()
@@ -205,17 +691,30 @@ enabled = false
                     "sources must not run after pre-run host failure"
                 );
             }
-            if let Some(deadline) = *admitted_deadline.lock().unwrap() {
-                assert!(
-                    matches!(lifecycle::observe_stop(&flow).snapshot(), FlowStopStatus::Graceful { deadline: final_deadline } if deadline == final_deadline)
-                );
-            }
             let events = flow
                 .system_journal()
                 .unwrap()
                 .read_all_unordered()
                 .await
                 .unwrap();
+            if let Some(admission) = observed_admission.lock().unwrap().as_ref() {
+                let graceful: Vec<_> = events
+                    .iter()
+                    .filter_map(|envelope| match &envelope.event.event {
+                        SystemEventType::PipelineLifecycle(
+                            PipelineLifecycleEvent::StopAdmitted {
+                                admission: value @ PipelineStopAdmission::Graceful { .. },
+                            },
+                        ) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    graceful,
+                    [admission],
+                    "host cleanup must not replace an admitted graceful request"
+                );
+            }
             if matches!(phase, FaultPhase::Terminal) {
                 assert!(
                     events.iter().any(|event| matches!(
@@ -425,9 +924,6 @@ enabled = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signals_preserve_published_failures_and_repeatable_observation() {
     use obzenflow_core::event::JournalEvent;
-    use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
-    use obzenflow_runtime::pipeline::PipelineEvent;
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
     for started in [false, true] {
         for on_terminal in ["park", "exit"] {
             for signal in [ShutdownSignal::Sigint, ShutdownSignal::Sigterm] {
@@ -489,14 +985,10 @@ enabled = false
                                 if started {
                                     flow.start().await.unwrap();
                                 }
-                                flow.send_event(PipelineEvent::Error {
-                                    message: "actual pipeline failure".into(),
-                                })
-                                .await
-                                .unwrap();
+                                flow.abort("actual pipeline failure").await.unwrap();
                                 // In park mode, the signal is strictly later than publication
                                 // and this observer cannot consume the application's join.
-                                assert!(lifecycle::wait(&flow).await.is_err());
+                                assert!(flow.wait_for_completion().await.is_err());
                                 let _ = signal_tx.send(signal);
                             }))
                         })],
@@ -521,17 +1013,17 @@ enabled = false
                     "{result:?}"
                 );
                 assert!(!flow.is_running());
-                assert!(matches!(
-                    lifecycle::observe_stop(&flow).snapshot(),
-                    FlowStopStatus::NotRequested
-                ));
-                assert!(lifecycle::wait(&flow).await.is_err());
+                assert!(flow.wait_for_completion().await.is_err());
                 let events = flow
                     .system_journal()
                     .unwrap()
                     .read_all_unordered()
                     .await
                     .unwrap();
+                assert!(!events
+                    .iter()
+                    .any(|envelope| envelope.event.event_type_name()
+                        == "system.pipeline.stop_admitted"));
                 let terminal: Vec<_> = events
                     .iter()
                     .map(|event| event.event.event_type_name())
@@ -623,6 +1115,23 @@ enabled = false
                     let flow = flow.clone();
                     tokio::spawn(async move {
                         flow.start().await.unwrap();
+                        // start() admits Run; it does not wait for execution.
+                        // This case exercises stopping an acknowledged running
+                        // flow, rather than cancellation overtaking startup.
+                        let mut reader = crate::lifecycle_observation::Reader::new(
+                            flow.system_journal().unwrap(),
+                            flow.pipeline_writer_id(),
+                        );
+                        loop {
+                            reader.catch_up().await;
+                            if matches!(
+                                reader.projection.progress,
+                                crate::lifecycle_observation::Progress::Running
+                            ) {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
                         if cancel {
                             flow.stop_cancel().await.unwrap();
                         } else {

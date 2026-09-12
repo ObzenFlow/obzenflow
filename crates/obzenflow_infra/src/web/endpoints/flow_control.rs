@@ -142,7 +142,9 @@ impl HttpEndpoint for FlowControlEndpoint {
             FlowControlAction::Play => {
                 tracing::info!("FlowControlEndpoint: Play requested");
                 match self.flow_handle.start_if_ready_now().await {
-                    Ok(FlowStartControlOutcome::Started { state }) => {
+                    Ok(FlowStartControlOutcome::Submitted {
+                        observed_state: state,
+                    }) => {
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Accepted,
                             message: "Play accepted".to_string(),
@@ -400,11 +402,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn play_maps_started_runtime_outcome() {
+    async fn play_maps_submitted_runtime_outcome() {
         let target = TestFlowTarget::with_play_outcome(
             PipelineState::Materialized,
-            FlowStartControlOutcome::Started {
-                state: PipelineState::ReadyForRun,
+            FlowStartControlOutcome::Submitted {
+                observed_state: PipelineState::ReadyForRun,
             },
         );
         let endpoint = FlowControlEndpoint::new_for_target(target.clone());

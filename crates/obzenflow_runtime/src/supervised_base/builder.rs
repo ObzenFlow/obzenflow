@@ -10,7 +10,8 @@
 use std::error::Error;
 use std::fmt::Debug;
 
-/// Base trait that all supervisor builders must implement
+/// Builder trait for supervisors exposing a `SupervisorHandle`.
+/// The pipeline uses an inherent builder because its control boundary is opaque.
 ///
 /// The builder pattern ensures:
 /// - Supervisors are created and started atomically
@@ -40,7 +41,7 @@ use std::fmt::Debug;
 ///             .map_err(|e| BuilderError::WriterRegistrationError(e.to_string()))?;
 ///         
 ///         // 2. Create context
-///         let context = Arc::new(MyContext { ... });
+///         let context = MyContext { ... };
 ///         
 ///         // 3. Create channels
 ///         let (event_sender, event_receiver, state_watcher) =
@@ -51,7 +52,7 @@ use std::fmt::Debug;
 ///         
 ///         // 5. Spawn task
 ///         let task = SupervisorTaskBuilder::new("my_supervisor")
-///             .spawn(|| async { supervisor.run().await });
+///             .spawn_self_supervised(supervisor, MyState::Initial, context);
 ///         
 ///         // 6. Build and return handle
 ///         HandleBuilder::new()
@@ -151,7 +152,7 @@ pub enum BuilderError {
 ///         self.state_watcher.current()
 ///     }
 ///     
-///     async fn wait_for_completion(self) -> Result<(), Self::Error> {
+///     async fn wait_for_completion(&self) -> Result<(), Self::Error> {
 ///         // Custom error conversion logic
 ///     }
 /// }
@@ -173,13 +174,33 @@ pub trait SupervisorHandle: Send + Sync {
     /// Get the current state of the supervisor
     fn current_state(&self) -> Self::State;
 
+    /// Request immediate cancellation of owned supervisor tasks without waiting.
+    /// Framework lifetime guards use this when their driving future is dropped.
+    /// Implementations must be idempotent and non-blocking.
+    /// This does not establish termination or select an execution outcome.
+    #[doc(hidden)]
+    fn request_abort(&self);
+
+    /// Publish a pipeline control row through the owning stage's retained
+    /// writer. A closed stage has no remaining control admission.
+    #[doc(hidden)]
+    fn publish_pipeline_control(
+        &self,
+        _journal: std::sync::Arc<
+            dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,
+        >,
+        _event: obzenflow_core::event::ChainEvent,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Err(std::io::Error::other("supervisor does not own a stage publication scope").into())
+    }
+
     /// Wait for the supervisor to complete
     ///
-    /// This consumes the handle and waits for the supervisor task to finish.
+    /// This borrows the handle and waits for all owned resources to finish.
     /// Standard handles report task completion. `FlowHandle` also interprets
     /// the acknowledged execution outcome, so a successfully published flow
     /// failure returns an error even when the supervisor task returned normally.
-    async fn wait_for_completion(self) -> Result<(), Self::Error>;
+    async fn wait_for_completion(&self) -> Result<(), Self::Error>;
 
     /// Abort the supervisor task and join it before returning.
     async fn abort_and_wait(&self) -> Result<(), Self::Error>;
@@ -201,7 +222,7 @@ pub enum HandleError {
     SupervisorAborted,
 
     #[error("Supervisor task failed: {0}")]
-    SupervisorFailed(String),
+    SupervisorFailed(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 }
 
 /// Utility struct for creating channels with proper types

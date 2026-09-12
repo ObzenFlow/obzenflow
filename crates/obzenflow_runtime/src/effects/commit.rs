@@ -27,6 +27,7 @@ impl<T, S> Clone for EffectCommitHandle<T, S> {
 }
 
 struct EffectCommitHandleInner<T, S> {
+    publications: Option<Arc<crate::supervised_base::publication::PublicationScope>>,
     writer_id: WriterId,
     data_journal: Arc<dyn Journal<ChainEvent>>,
     flow_context: Option<FlowContext>,
@@ -95,6 +96,7 @@ where
     pub(super) fn new(params: EffectCommitHandleParams) -> Self {
         Self {
             inner: Arc::new(EffectCommitHandleInner {
+                publications: crate::supervised_base::publication::PublicationScope::current(),
                 writer_id: params.writer_id,
                 data_journal: params.data_journal,
                 flow_context: params.flow_context,
@@ -117,6 +119,24 @@ where
     }
 
     pub async fn commit_success(&self, output: &T) -> Result<(), EffectError> {
+        let handle = self.clone();
+        let output = output.clone();
+        crate::supervised_base::publication::commit_in(
+            self.inner.publications.clone(),
+            async move {
+                handle
+                    .commit_success_inline(&output)
+                    .await
+                    .map_err(|error| {
+                        Box::new(error) as crate::supervised_base::publication::BoxError
+                    })
+            },
+        )
+        .await
+        .map_err(publication_effect_error)
+    }
+
+    async fn commit_success_inline(&self, output: &T) -> Result<(), EffectError> {
         self.ensure_available()?;
 
         let (kind, public_fact_count, events, observation_events) =
@@ -209,7 +229,9 @@ where
                 )
                 .await
             {
-                self.reset_failed_commit();
+                if !crate::supervised_base::publication::is_indeterminate(error.as_ref()) {
+                    self.reset_failed_commit();
+                }
                 return Err(EffectError::Journal(error.to_string()));
             }
         }
@@ -226,6 +248,21 @@ where
     }
 
     pub async fn commit_failure(&self, error: &EffectError) -> Result<(), EffectError> {
+        let handle = self.clone();
+        let error = error.clone();
+        crate::supervised_base::publication::commit_in(
+            self.inner.publications.clone(),
+            async move {
+                handle.commit_failure_inline(&error).await.map_err(|error| {
+                    Box::new(error) as crate::supervised_base::publication::BoxError
+                })
+            },
+        )
+        .await
+        .map_err(publication_effect_error)
+    }
+
+    async fn commit_failure_inline(&self, error: &EffectError) -> Result<(), EffectError> {
         self.commit_outcome(
             EffectOutcomePayload::Failed {
                 error_type: error.error_type(),
@@ -285,7 +322,9 @@ where
                 )
                 .await
             {
-                self.reset_failed_commit();
+                if !crate::supervised_base::publication::is_indeterminate(error.as_ref()) {
+                    self.reset_failed_commit();
+                }
                 return Err(EffectError::Journal(error.to_string()));
             }
         }
@@ -660,4 +699,17 @@ pub(super) fn build_effect_record_event(
     }
 
     Ok(event)
+}
+
+fn publication_effect_error(error: crate::supervised_base::publication::BoxError) -> EffectError {
+    let mut source: &(dyn std::error::Error + 'static) = error.as_ref();
+    loop {
+        if let Some(error) = source.downcast_ref::<EffectError>() {
+            return error.clone();
+        }
+        match source.source() {
+            Some(next) => source = next,
+            None => return EffectError::Journal(error.to_string()),
+        }
+    }
 }

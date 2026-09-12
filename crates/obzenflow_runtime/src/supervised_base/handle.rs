@@ -8,6 +8,7 @@
 //! with consistent behavior and proper trait implementations.
 
 use super::builder::{EventSender, HandleError, StateWatcher, SupervisorHandle};
+use super::publication::PublicationScope;
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
 use std::fmt::Debug;
@@ -15,13 +16,50 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::task::{AbortHandle, JoinHandle};
 
-type SupervisorTask = JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+type Task = JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
+/// Execution task and its accepted publication resources travel together.
+#[doc(hidden)]
+pub struct SupervisorTask {
+    task: Task,
+    publications: Arc<PublicationScope>,
+}
+
+#[cfg(test)]
+impl From<Task> for SupervisorTask {
+    fn from(task: Task) -> Self {
+        Self {
+            task,
+            publications: PublicationScope::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionCancellation {
+    task: AbortHandle,
+    publications: Arc<PublicationScope>,
+    requested: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ExecutionCancellation {
+    pub(crate) fn abort(&self) {
+        self.requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.publications.close();
+        self.task.abort();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
 
 // Physical task completion is retained independently of each observer's wait.
 // Aborted remains distinct even when emergency teardown accepts that result.
 enum SupervisorExit {
     Returned,
-    Failed(Box<dyn std::error::Error + Send + Sync>),
+    Failed(Arc<dyn std::error::Error + Send + Sync>),
     Panicked(tokio::task::JoinError),
     Aborted,
 }
@@ -32,7 +70,7 @@ impl SupervisorExit {
     fn result(&self) -> Result<(), HandleError> {
         match self {
             Self::Returned => Ok(()),
-            Self::Failed(error) => Err(HandleError::SupervisorFailed(error.to_string())),
+            Self::Failed(error) => Err(HandleError::SupervisorFailed(error.clone())),
             Self::Panicked(error) => Err(HandleError::SupervisorPanicked(error.to_string())),
             Self::Aborted => Err(HandleError::SupervisorAborted),
         }
@@ -84,8 +122,8 @@ where
     }
 
     /// Set the supervisor task
-    pub fn with_supervisor_task(mut self, task: SupervisorTask) -> Self {
-        self.supervisor_task = Some(task);
+    pub fn with_supervisor_task(mut self, task: impl Into<SupervisorTask>) -> Self {
+        self.supervisor_task = Some(task.into());
         self
     }
 
@@ -95,13 +133,32 @@ where
         let state_watcher = self.state_watcher.ok_or("State watcher is required")?;
         let supervisor_task = self.supervisor_task.ok_or("Supervisor task is required")?;
 
-        let supervisor_abort = supervisor_task.abort_handle();
+        let SupervisorTask { task, publications } = supervisor_task;
+        let abort_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let supervisor_abort = ExecutionCancellation {
+            task: task.abort_handle(),
+            publications: publications.clone(),
+            requested: abort_requested.clone(),
+        };
         let completion = async move {
-            Arc::new(match supervisor_task.await {
+            let exit = match task.await {
                 Ok(Ok(())) => SupervisorExit::Returned,
-                Ok(Err(error)) => SupervisorExit::Failed(error),
+                Ok(Err(error))
+                    if abort_requested.load(std::sync::atomic::Ordering::Acquire)
+                        && super::publication::is_admission_closed(error.as_ref()) =>
+                {
+                    SupervisorExit::Aborted
+                }
+                Ok(Err(error)) => SupervisorExit::Failed(Arc::from(error)),
                 Err(error) if error.is_cancelled() => SupervisorExit::Aborted,
                 Err(error) => SupervisorExit::Panicked(error),
+            };
+            let settlement = publications.join().await;
+            Arc::new(match (exit, settlement) {
+                (SupervisorExit::Returned | SupervisorExit::Aborted, Err(error)) => {
+                    SupervisorExit::Failed(Arc::new(error))
+                }
+                (exit, _) => exit,
             })
         }
         .boxed()
@@ -131,7 +188,7 @@ where
 pub struct StandardHandle<E, S> {
     event_sender: EventSender<E>,
     state_watcher: StateWatcher<S>,
-    supervisor_abort: AbortHandle,
+    supervisor_abort: ExecutionCancellation,
     // Never await this retained clone directly: every caller observes a clone.
     completion: SupervisorCompletion,
 }
@@ -165,12 +222,17 @@ where
         self.supervisor_abort.abort();
     }
 
+    pub(crate) fn abort_handle(&self) -> ExecutionCancellation {
+        self.supervisor_abort.clone()
+    }
+
     /// Best-effort bounded wait for supervisor completion.
     ///
     /// Returns:
     /// - `Ok(true)` if the supervisor finished within the timeout.
     /// - `Ok(false)` if the wait timed out (task is still running and retained).
     /// - `Err(_)` if the supervisor finished but failed, panicked or was aborted.
+    #[cfg(test)]
     pub(crate) async fn try_wait_for_completion(
         &mut self,
         timeout: std::time::Duration,
@@ -200,7 +262,28 @@ where
         self.state_watcher.current()
     }
 
-    async fn wait_for_completion(self) -> Result<(), Self::Error> {
+    fn request_abort(&self) {
+        self.abort();
+    }
+
+    fn publish_pipeline_control(
+        &self,
+        journal: Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>>,
+        event: obzenflow_core::event::ChainEvent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match self
+            .supervisor_abort
+            .publications
+            .enqueue_control(async move {
+                journal.append(event, None).await?;
+                Ok(())
+            }) {
+            Err(error) if error.is::<super::publication::AdmissionClosed>() => Ok(()),
+            result => result.map(drop),
+        }
+    }
+
+    async fn wait_for_completion(&self) -> Result<(), Self::Error> {
         self.join().await
     }
 
@@ -217,6 +300,7 @@ where
 /// Builder for creating supervisor tasks with proper error handling
 pub struct SupervisorTaskBuilder<S> {
     name: String,
+    publications: Arc<PublicationScope>,
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -228,12 +312,18 @@ where
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            publications: PublicationScope::new(),
             _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Spawn the supervisor task
-    pub fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
+    pub(crate) fn with_publications(mut self, publications: Arc<PublicationScope>) -> Self {
+        self.publications = publications;
+        self
+    }
+
+    /// Spawn an already selected runner. Only typed construction calls this.
+    fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
@@ -254,7 +344,9 @@ where
 
         // Call supervisor_fn OUTSIDE the spawn to see if that's the issue
         tracing::trace!("🔵 About to call supervisor_fn() for {}", name_clone);
-        let future = supervisor_fn();
+        // Keep concrete supervisor futures out of nested task-local wrappers.
+        // Stage contexts can make those futures large in unoptimised builds.
+        let future = supervisor_fn().boxed();
         tracing::trace!("🟢 supervisor_fn() returned future for {}", name_clone);
         tracing::trace!("📦 Future size: {} bytes", std::mem::size_of_val(&future));
 
@@ -276,13 +368,76 @@ where
             result
         };
 
-        let handle = tokio::spawn(wrapped_future);
+        let publications = self.publications;
+        let task_publications = publications.clone();
+        let handle = tokio::spawn(async move {
+            struct CloseOnExit(Arc<PublicationScope>);
+            impl Drop for CloseOnExit {
+                fn drop(&mut self) {
+                    self.0.close();
+                }
+            }
+            let _close = CloseOnExit(task_publications.clone());
+            task_publications.enter(wrapped_future).await
+        });
         tracing::trace!("⚡ tokio::spawn returned for {}", name_clone2);
         tracing::debug!(
             "🚀 SupervisorTaskBuilder::spawn returning handle for {}",
             name_clone4
         );
-        handle
+        SupervisorTask {
+            task: handle,
+            publications,
+        }
+    }
+}
+
+impl<S> SupervisorTaskBuilder<S>
+where
+    S: super::SelfSupervised + Send + 'static,
+    S::State: Send + Sync + 'static,
+    S::Event: Send + Sync + 'static,
+    S::Context: 'static,
+    S::Action: 'static,
+{
+    pub fn spawn_self_supervised(
+        self,
+        supervisor: S,
+        initial_state: S::State,
+        context: S::Context,
+    ) -> SupervisorTask {
+        self.spawn(move || super::SelfSupervisedExt::run(supervisor, initial_state, context))
+    }
+}
+
+impl<S> SupervisorTaskBuilder<S>
+where
+    S: super::HandlerSupervised + Send + 'static,
+    S::State: Send + Sync + 'static,
+    S::Event: Send + Sync + 'static,
+    S::Context: 'static,
+    S::Action: 'static,
+{
+    pub fn spawn_handler_supervised(
+        self,
+        supervisor: S,
+        initial_state: S::State,
+        context: S::Context,
+    ) -> SupervisorTask {
+        self.spawn(move || super::HandlerSupervisedExt::run(supervisor, initial_state, context))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<S: Send + 'static> SupervisorTaskBuilder<S> {
+    pub(crate) fn spawn_for_test<F, Fut>(self, f: F) -> SupervisorTask
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
+            + Send
+            + 'static,
+    {
+        self.spawn(f)
     }
 }
 

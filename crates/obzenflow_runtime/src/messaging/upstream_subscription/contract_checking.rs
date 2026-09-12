@@ -191,7 +191,10 @@ where
                         advertised_writer_seq: Some(feed.advertised_writer_seq),
                     },
                 );
-                if let Err(e) = system_journal.append(result_event, None).await {
+                if let Err(e) =
+                    crate::supervised_base::publication::append(system_journal, result_event, None)
+                        .await
+                {
                     append_ok = false;
                     tracing::error!(
                         target: "flowip-105",
@@ -220,7 +223,10 @@ where
                     reason: feed.reason.clone(),
                 },
             );
-            if let Err(e) = system_journal.append(status_event, None).await {
+            if let Err(e) =
+                crate::supervised_base::publication::append(system_journal, status_event, None)
+                    .await
+            {
                 append_ok = false;
                 tracing::error!(
                     target: "flowip-105",
@@ -323,7 +329,10 @@ where
                         advertised_writer_seq: feed.advertised_writer_seq,
                     },
                 );
-                if let Err(e) = system_journal.append(result_event, None).await {
+                if let Err(e) =
+                    crate::supervised_base::publication::append(&system_journal, result_event, None)
+                        .await
+                {
                     tracing::error!(
                         target: "flowip-105",
                         owner = %self.owner_label,
@@ -545,7 +554,10 @@ where
                         advertised_writer_seq: progress.advertised_writer_seq,
                     },
                 );
-                if let Err(e) = system_journal.append(result_event, None).await {
+                if let Err(e) =
+                    crate::supervised_base::publication::append(system_journal, result_event, None)
+                        .await
+                {
                     tracing::error!(
                         target: "flowip-105",
                         owner = %self.owner_label,
@@ -604,7 +616,13 @@ where
                             reason: Some(cause.clone()),
                         },
                     );
-                    if let Err(e) = system_journal.append(status_event, None).await {
+                    if let Err(e) = crate::supervised_base::publication::append(
+                        system_journal,
+                        status_event,
+                        None,
+                    )
+                    .await
+                    {
                         tracing::error!(
                             target: "flowip-105",
                             owner = %self.owner_label,
@@ -657,7 +675,9 @@ where
                 },
             ));
 
-        match tracker.journal.append(progress_event, None).await {
+        match crate::supervised_base::publication::append(&tracker.journal, progress_event, None)
+            .await
+        {
             Ok(_) => {
                 progress.last_progress_seq = progress_seq;
                 progress.last_progress_instant = Some(now);
@@ -743,7 +763,13 @@ where
                             advertised_writer_seq: progress.advertised_writer_seq,
                         },
                     );
-                    if let Err(e) = system_journal.append(result_event, None).await {
+                    if let Err(e) = crate::supervised_base::publication::append(
+                        system_journal,
+                        result_event,
+                        None,
+                    )
+                    .await
+                    {
                         tracing::error!(
                             target: "flowip-105",
                             owner = %self.owner_label,
@@ -801,7 +827,13 @@ where
                                         progress.stage_id,
                                     ),
                                 );
-                                if let Err(e) = tracker.journal.append(gap_event, None).await {
+                                if let Err(e) = crate::supervised_base::publication::append(
+                                    &tracker.journal,
+                                    gap_event,
+                                    None,
+                                )
+                                .await
+                                {
                                     tracing::error!(
                                         target: "flowip-105",
                                         owner = %self.owner_label,
@@ -837,7 +869,13 @@ where
                             advertised,
                             progress.stage_id,
                         ));
-                    if let Err(e) = tracker.journal.append(gap_event, None).await {
+                    if let Err(e) = crate::supervised_base::publication::append(
+                        &tracker.journal,
+                        gap_event,
+                        None,
+                    )
+                    .await
+                    {
                         tracing::error!(
                             target: "flowip-105",
                             owner = %self.owner_label,
@@ -896,7 +934,13 @@ where
                         progress.advertised_writer_seq,
                     ));
 
-                if let Err(e) = tracker.journal.append(violation_event, None).await {
+                if let Err(e) = crate::supervised_base::publication::append(
+                    &tracker.journal,
+                    violation_event,
+                    None,
+                )
+                .await
+                {
                     tracing::error!(
                         target: "flowip-105",
                         owner = %self.owner_label,
@@ -925,20 +969,23 @@ where
             },
         ));
 
-        let final_append_ok = match tracker.journal.append(final_event, None).await {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::error!(
-                    target: "flowip-105",
-                    owner = %self.owner_label,
-                    upstream = ?progress.stage_id,
-                    reader_index = index,
-                    error = %e,
-                    "Failed to append final event; skipping state update"
-                );
-                false
-            }
-        };
+        let final_append_ok =
+            match crate::supervised_base::publication::append(&tracker.journal, final_event, None)
+                .await
+            {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::error!(
+                        target: "flowip-105",
+                        owner = %self.owner_label,
+                        upstream = ?progress.stage_id,
+                        reader_index = index,
+                        error = %e,
+                        "Failed to append final event; skipping state update"
+                    );
+                    false
+                }
+            };
 
         // Emit contract status to system journal (if available)
         let mut status_append_ok = true;
@@ -969,7 +1016,10 @@ where
                     reason: status_reason,
                 },
             );
-            if let Err(e) = system_journal.append(status_event, None).await {
+            if let Err(e) =
+                crate::supervised_base::publication::append(system_journal, status_event, None)
+                    .await
+            {
                 status_append_ok = false;
                 tracing::error!(
                     target: "flowip-105",
@@ -1035,7 +1085,13 @@ where
                         stalled_duration,
                     ));
 
-                let stalled_append_ok = match tracker.journal.append(stalled_event, None).await {
+                let stalled_append_ok = match crate::supervised_base::publication::append(
+                    &tracker.journal,
+                    stalled_event,
+                    None,
+                )
+                .await
+                {
                     Ok(_) => true,
                     Err(e) => {
                         tracing::error!(

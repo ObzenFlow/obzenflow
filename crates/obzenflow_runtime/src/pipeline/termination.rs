@@ -10,20 +10,20 @@ use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::EventId;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ExecutionFailure {
     pub reason: String,
     pub cause: Option<ViolationCause>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ExecutionOutcome {
     Completed,
     Cancelled {
         reason: String,
     },
     Failed(ExecutionFailure),
-    /// The supervisor completed teardown before any execution or terminal fact.
+    /// The supervisor completed teardown before execution began.
     NotStarted,
 }
 
@@ -46,18 +46,6 @@ impl TerminationState {
         // The first accepted failure survives subsequent cleanup failures/stops.
         self.failure
             .get_or_insert(ExecutionFailure { reason, cause });
-    }
-
-    /// Called synchronously after a successful terminal append (or explicit
-    /// pre-execution teardown). It cannot report unacknowledged publication.
-    pub fn retain(
-        &self,
-        outcome: ExecutionOutcome,
-        event_id: Option<EventId>,
-    ) -> Result<(), std::io::Error> {
-        self.published
-            .set(PublishedTermination { outcome, event_id })
-            .map_err(|_| std::io::Error::other("Pipeline terminal outcome was already retained"))
     }
 }
 

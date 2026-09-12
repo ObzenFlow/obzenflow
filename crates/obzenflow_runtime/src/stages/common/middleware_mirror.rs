@@ -70,7 +70,21 @@ pub async fn mirror_middleware_event_to_system_journal(
         },
     );
 
-    if let Err(e) = system_journal.append(event, None).await {
+    let system_journal = system_journal.clone();
+    let mirror = crate::supervised_base::publication::commit(async move {
+        if let Err(error) = system_journal.append(event, None).await {
+            if crate::supervised_base::publication::is_indeterminate(&error) {
+                return Err(Box::new(error) as crate::supervised_base::publication::BoxError);
+            }
+            // A confirmed rejection of optional telemetry does not undo the
+            // source row or its mandatory accounting. Uncertainty still poisons
+            // the owning publication scope and reaches its join.
+            tracing::warn!(stage_id = %stage_id, journal_error = %error,
+                "Failed to mirror middleware event into system journal");
+        }
+        Ok(())
+    });
+    if let Err(e) = mirror.await {
         tracing::warn!(
             stage_id = %stage_id,
             journal_error = %e,

@@ -73,9 +73,8 @@ pub mod testing;
 /// constructing flows,
 /// [`FlowHandle`](crate::pipeline::FlowHandle) for controlling a running
 /// pipeline, and
-/// [`PipelineState`](crate::pipeline::PipelineState) and
-/// [`PipelineEvent`](crate::pipeline::PipelineEvent) for observing lifecycle
-/// transitions.
+/// [`PipelineState`](crate::pipeline::PipelineState) for latest-state observation,
+/// and [`PipelineControl`](crate::pipeline::PipelineControl) for submitting controls.
 ///
 /// **Message bus** —
 /// [`FsmMessageBus`](crate::message_bus::FsmMessageBus) (the inter-stage
@@ -105,7 +104,7 @@ pub mod prelude {
 
     // Pipeline
     pub use crate::pipeline::{
-        FlowHandle, FlowStopMode, ObserverConfig, PipelineBuilder, PipelineEvent,
+        FlowHandle, FlowStopMode, ObserverConfig, PipelineBuilder, PipelineControl,
         PipelineStageConfig, PipelineState,
     };
 

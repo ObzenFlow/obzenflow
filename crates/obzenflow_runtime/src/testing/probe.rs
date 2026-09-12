@@ -460,8 +460,9 @@ impl JournalProbe {
 mod tests {
     use super::*;
     use crate::id_conversions::StageIdExt;
+    use crate::pipeline::fsm::PipelineFsmEvent;
     use crate::pipeline::handle::FlowHandleExtras;
-    use crate::pipeline::{FlowHandle, PipelineEvent, PipelineState};
+    use crate::pipeline::{FlowHandle, PipelineState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
     use chrono::Utc;
     use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -596,9 +597,11 @@ mod tests {
         topology: Arc<obzenflow_topology::Topology>,
     ) -> FlowTestHarness {
         let (event_sender, _event_receiver, state_watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Created);
+            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Created);
         let supervisor_task = SupervisorTaskBuilder::<PipelineState>::new("dummy_pipeline")
-            .spawn(|| async move { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+            .spawn_for_test(
+                || async move { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) },
+            );
         let standard_handle = HandleBuilder::new()
             .with_event_sender(event_sender)
             .with_state_watcher(state_watcher)
@@ -608,8 +611,9 @@ mod tests {
 
         let extras = FlowHandleExtras {
             stage_cleanup: Vec::new(),
-            stop_status: crate::pipeline::fsm::StopIntent::default().status_receiver(),
             published_outcome: Default::default(),
+            metrics: Default::default(),
+            operational_failure: Default::default(),
             topology: Some(topology),
             flow_name: "dummy".to_string(),
             contract_attachments: None,

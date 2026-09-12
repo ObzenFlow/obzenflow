@@ -2227,7 +2227,7 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
                     error: &error,
                     error_journal: &resources.error_journal,
                     system_journal: &resources.system_journal,
-                    instrumentation: instrumentation.as_ref(),
+                    instrumentation: &instrumentation,
                 })
                 .await
                 .map_err(|record_error| {

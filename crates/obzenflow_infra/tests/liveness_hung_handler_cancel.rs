@@ -309,7 +309,7 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
             SystemEventType::PipelineLifecycle(event) => {
                 pipeline_events.push(format!("{event:?}"));
                 match event {
-                    obzenflow_core::event::PipelineLifecycleEvent::StopRequested { .. } => {
+                    obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { .. } => {
                         saw_stop_requested = true
                     }
                     obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {

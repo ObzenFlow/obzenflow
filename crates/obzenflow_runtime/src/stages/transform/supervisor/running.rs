@@ -651,10 +651,13 @@ async fn dispatch_running_inner<
                                         event_id = %event.id,
                                         "Writing error event to error journal (FLOWIP-082e)"
                                     );
-                                    ctx.error_journal
-                                        .append(event, Some(&envelope))
-                                        .await
-                                        .map_err(|e| format!("Failed to write error event: {e}"))?;
+                                    crate::supervised_base::publication::append(
+                                        &ctx.error_journal,
+                                        event,
+                                        Some(&envelope),
+                                    )
+                                    .await
+                                    .map_err(|e| format!("Failed to write error event: {e}"))?;
                                 } else {
                                     stage_outputs.push_back(
                                         crate::stages::common::supervision::backpressure_drain::PendingOutput {

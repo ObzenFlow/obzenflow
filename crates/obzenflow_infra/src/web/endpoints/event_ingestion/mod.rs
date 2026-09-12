@@ -353,7 +353,6 @@ mod tests {
         InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
         TypedAsyncInfiniteSourceHandler,
     };
-    use obzenflow_runtime::supervised_base::SupervisorHandle;
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
     use std::fs;
@@ -832,6 +831,7 @@ mod tests {
             metrics_store: MetricsStore::default(),
             export_interval_secs: 60,
             system_id: SystemId::new(),
+            pipeline_writer: None,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
             composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),

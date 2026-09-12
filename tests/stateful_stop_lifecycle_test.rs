@@ -24,14 +24,14 @@ struct LifecycleEvent {
 impl TypedPayload for LifecycleEvent {
     const EVENT_TYPE: &'static str = "stateful.lifecycle_event";
 }
+use obzenflow_core::event::{PipelineCancellationCause, PipelineStopAdmission};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::__private::lifecycle::{self, FlowStopStatus};
+use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -368,12 +368,25 @@ async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input()
     }).build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()).await?;
     let journal = handle.system_journal().unwrap();
     tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
-    let mut stop = lifecycle::observe_stop(&handle);
     handle.stop_graceful(Duration::from_secs(2)).await?;
-    while matches!(stop.snapshot(), FlowStopStatus::NotRequested) {
-        stop.changed().await?;
-    }
-    assert!(matches!(stop.snapshot(), FlowStopStatus::Graceful { .. }));
+    let mut reader = journal.reader().await?;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(envelope) = reader.next().await? {
+                if matches!(
+                    envelope.event.event,
+                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
+                        admission: PipelineStopAdmission::Graceful { .. }
+                    })
+                ) {
+                    return Ok::<(), obzenflow_core::journal::JournalError>(());
+                }
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+    })
+    .await??;
     release.notify_one();
     tokio::time::timeout(Duration::from_secs(5), lifecycle::wait(&handle)).await??;
     match terminal_lifecycle_event(journal).await? {
@@ -393,7 +406,7 @@ async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input()
 }
 
 #[tokio::test]
-async fn graceful_timeout_is_admitted_once_with_runtime_and_handle_contenders() -> Result<()> {
+async fn runtime_timeout_is_admitted_once_despite_duplicate_graceful_requests() -> Result<()> {
     let dir = tempdir()?;
     let journal_root = dir.path().join("journals");
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -429,31 +442,27 @@ async fn graceful_timeout_is_admitted_once_with_runtime_and_handle_contenders() 
 
     // Ensure real work is pending before establishing a short graceful deadline.
     tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
-    let mut stop = lifecycle::observe_stop(&handle);
     handle.stop_graceful(Duration::from_millis(50)).await?;
-    let deadline = loop {
-        match stop.snapshot() {
-            FlowStopStatus::Graceful { deadline }
-            | FlowStopStatus::Cancelling {
-                graceful_deadline: Some(deadline),
-                ..
-            } => break deadline,
-            _ => {}
-        }
-        stop.changed().await?;
-    };
-    tokio::time::sleep_until(deadline.into()).await;
-    // Runtime may win this race and terminate first; both contenders use the reducer.
-    let _ = lifecycle::cancel_after_timeout(&handle).await;
+    handle.stop_graceful(Duration::from_secs(60)).await?;
 
     tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
 
     let facts = system_journal.read_all_unordered().await?;
-    let cancel_facts = facts.iter().filter(|fact| matches!(&fact.event.event,
-        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopRequested { mode, .. }) if mode == "cancel"
-    )).count();
+    let cancel_facts = facts
+        .iter()
+        .filter(|fact| {
+            matches!(
+                &fact.event.event,
+                SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
+                    admission: PipelineStopAdmission::Cancel {
+                        cause: PipelineCancellationCause::GracefulTimeout
+                    }
+                })
+            )
+        })
+        .count();
     assert_eq!(
         cancel_facts, 1,
         "timeout cancellation must be admitted once"

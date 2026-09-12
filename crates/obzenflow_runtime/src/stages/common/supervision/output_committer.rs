@@ -102,6 +102,73 @@ fn event_is_authored_by_stage(
 /// output`, and the effects layer wraps it in `EffectError::Journal`.
 pub(crate) type CommitError = Box<dyn std::error::Error + Send + Sync>;
 
+/// A stage control row advances the emitted position only after its append is
+/// acknowledged. It does not advance the authored Data frontier or row count.
+pub(crate) fn commit_control_output(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+    mut event: ChainEvent,
+) -> futures::future::BoxFuture<'static, Result<EventEnvelope<ChainEvent>, CommitError>> {
+    let journal = journal.clone();
+    let instrumentation = instrumentation.clone();
+    crate::supervised_base::publication::commit(async move {
+        if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            writer_id,
+            writer_seq,
+            writer_seq_by_event_type,
+            last_event_id,
+            ..
+        }) = &mut event.content
+        {
+            // Seal only after predecessor publications have finished their
+            // accounting in this stage's writer order.
+            let (seq, by_type, last) = instrumentation.authored_data_frontier();
+            *writer_id = Some(event.writer_id);
+            *writer_seq = Some(seq);
+            *writer_seq_by_event_type = by_type;
+            *last_event_id = last;
+        }
+        let mut snapshot = instrumentation.snapshot_with_control();
+        snapshot.writer_seq = snapshot.writer_seq.saturating_add(1);
+        snapshot.last_emitted_event_id = Some(event.id);
+        snapshot.last_emitted_writer = Some(event.writer_id);
+        event = event.with_runtime_context(snapshot);
+        let written = journal.append(event, None).await?;
+        instrumentation.record_emitted(&written.event);
+        Ok(written)
+    })
+}
+
+/// Error-journal Data participates in emitted-output accounting without
+/// advancing the authored data-journal transport frontier.
+pub(crate) fn commit_error_output(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+    mut event: ChainEvent,
+    parent: Option<&EventEnvelope<ChainEvent>>,
+) -> futures::future::BoxFuture<'static, Result<EventEnvelope<ChainEvent>, CommitError>> {
+    use futures::FutureExt;
+    let journal = journal.clone();
+    let instrumentation = instrumentation.clone();
+    let parent = parent.cloned();
+    crate::supervised_base::publication::commit(async move {
+        let mut snapshot = instrumentation.snapshot_with_control();
+        if event.is_data() {
+            snapshot.events_emitted_total = snapshot.events_emitted_total.saturating_add(1);
+            snapshot.writer_seq = snapshot.writer_seq.saturating_add(1);
+            snapshot.last_emitted_event_id = Some(event.id);
+            snapshot.last_emitted_writer = Some(event.writer_id);
+        }
+        event = event.with_runtime_context(snapshot);
+        let written = journal.append(event, parent.as_ref()).await?;
+        if written.event.is_data() {
+            instrumentation.record_error_journal_output_event(&written.event);
+        }
+        Ok(written)
+    })
+    .boxed()
+}
+
 enum PhysicalDataReservation {
     Legacy(BackpressureReservation),
     Direct(DirectFactClaim),
@@ -112,17 +179,30 @@ enum PhysicalDataReservation {
 }
 
 impl PhysicalDataReservation {
+    fn indeterminate(self) {
+        match self {
+            Self::Legacy(reservation) => reservation.indeterminate(),
+            Self::Direct(claim) => claim.indeterminate(),
+            Self::DirectTracked { claim, reservation } => {
+                claim.indeterminate();
+                reservation.indeterminate();
+            }
+        }
+    }
+
     fn commit(self, rows: u64) -> Result<(), CommitError> {
         match self {
             Self::Legacy(reservation) => {
                 reservation.commit(rows);
                 Ok(())
             }
-            Self::Direct(claim) => claim.commit().map_err(Into::into),
+            Self::Direct(claim) => claim.commit().map_err(|error| {
+                crate::supervised_base::publication::accounting_failed(error.into())
+            }),
             Self::DirectTracked { claim, reservation } => {
-                claim
-                    .commit()
-                    .map_err(|error| -> CommitError { error.into() })?;
+                claim.commit().map_err(|error| {
+                    crate::supervised_base::publication::accounting_failed(error.into())
+                })?;
                 reservation.commit(rows);
                 Ok(())
             }
@@ -250,7 +330,60 @@ pub(crate) struct OutputCommitter<'a> {
     pub observer_scope: MiddlewareExecutionScope,
 }
 
+struct OwnedOutputCommitter {
+    /// The stage data journal every stage-authored event is appended to.
+    pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    /// Wide-event flow context stamped on the committed event. Absent on the
+    /// effects-layer path, which does not enrich effect records today.
+    pub flow_context: Option<FlowContext>,
+    /// System journal for mirroring middleware lifecycle rows. Absent on the
+    /// effects-layer path.
+    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    /// Stage instrumentation for per-type producer counting and the
+    /// runtime-context snapshot. Absent on the effects-layer path.
+    pub instrumentation: Option<Arc<StageInstrumentation>>,
+    /// Heartbeat state, updated with the last committed output id. Absent on the
+    /// effects-layer path.
+    pub heartbeat_state: Option<Arc<HeartbeatState>>,
+    /// Runtime output contract for stage-authored domain `Data` facts. Absent
+    /// on reserved framework append paths and legacy callers.
+    pub output_contract: Option<StageOutputContract>,
+    /// Physical-row accounting for direct `Data` facts. Pending-output drains
+    /// leave this absent because they own an enforced or replay-scoped
+    /// reservation outside the commit helper.
+    pub backpressure_writer: Option<BackpressureWriter>,
+    /// Per-event execution scope for replay-sensitive runtime enrichment.
+    pub observer_scope: MiddlewareExecutionScope,
+}
+impl OwnedOutputCommitter {
+    fn borrowed(&self) -> OutputCommitter<'_> {
+        OutputCommitter {
+            data_journal: &self.data_journal,
+            flow_context: self.flow_context.as_ref(),
+            system_journal: self.system_journal.as_ref(),
+            instrumentation: self.instrumentation.as_ref(),
+            heartbeat_state: self.heartbeat_state.as_ref(),
+            output_contract: self.output_contract.as_ref(),
+            backpressure_writer: self.backpressure_writer.as_ref(),
+            observer_scope: self.observer_scope,
+        }
+    }
+}
+
 impl OutputCommitter<'_> {
+    fn owned(&self) -> OwnedOutputCommitter {
+        OwnedOutputCommitter {
+            data_journal: self.data_journal.clone(),
+            flow_context: self.flow_context.cloned(),
+            system_journal: self.system_journal.cloned(),
+            instrumentation: self.instrumentation.cloned(),
+            heartbeat_state: self.heartbeat_state.cloned(),
+            output_contract: self.output_contract.cloned(),
+            backpressure_writer: self.backpressure_writer.cloned(),
+            observer_scope: self.observer_scope,
+        }
+    }
+
     /// Commit a fully-constructed event to the data journal.
     ///
     /// The event must already carry its content, identity, and any
@@ -283,6 +416,24 @@ impl OutputCommitter<'_> {
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        let owned = self.owned();
+        let parent = parent.cloned();
+        crate::supervised_base::publication::commit(async move {
+            owned
+                .borrowed()
+                .commit_prebuilt_with_intent_inline(event, parent.as_ref(), options, intent)
+                .await
+        })
+        .await
+    }
+
+    async fn commit_prebuilt_with_intent_inline(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+        options: CommitOptions,
+        intent: StageAppendIntent,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
         let event = self
             .prepare_prebuilt_with_intent(event, parent, options, intent)
             .await?;
@@ -293,11 +444,17 @@ impl OutputCommitter<'_> {
         let backpressure_reservation =
             reserve_direct_data_rows(self.backpressure_writer, u64::from(event.is_data()))?;
 
-        let written = self
-            .data_journal
-            .append(event, parent)
-            .await
-            .map_err(|e| -> CommitError { e.to_string().into() })?;
+        let written = match self.data_journal.append(event, parent).await {
+            Ok(written) => written,
+            Err(error) => {
+                if crate::supervised_base::publication::is_indeterminate(&error) {
+                    if let Some(reservation) = backpressure_reservation {
+                        reservation.indeterminate();
+                    }
+                }
+                return Err(Box::new(error));
+            }
+        };
 
         if let Some(reservation) = backpressure_reservation {
             reservation.commit(1)?;
@@ -307,6 +464,43 @@ impl OutputCommitter<'_> {
         Ok(written)
     }
 
+    pub(crate) async fn commit_reserved_prebuilt(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+        options: CommitOptions,
+        reservation: BackpressureReservation,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        let owned = self.owned();
+        let parent = parent.cloned();
+        crate::supervised_base::publication::commit(async move {
+            let committer = owned.borrowed();
+            let event = committer
+                .prepare_prebuilt_with_intent(
+                    event,
+                    parent.as_ref(),
+                    options,
+                    StageAppendIntent::NormalStageData,
+                )
+                .await?;
+            let written = match committer.data_journal.append(event, parent.as_ref()).await {
+                Ok(written) => written,
+                Err(error) => {
+                    if crate::supervised_base::publication::is_indeterminate(&error) {
+                        reservation.indeterminate();
+                    }
+                    return Err(Box::new(error) as CommitError);
+                }
+            };
+            reservation.commit(1);
+            committer
+                .finish_committed(&written, options, StageAppendIntent::NormalStageData)
+                .await;
+            Ok(written)
+        })
+        .await
+    }
+
     /// Seal and commit a framework-owned terminal EOF at the current durable
     /// output frontier.
     ///
@@ -314,6 +508,22 @@ impl OutputCommitter<'_> {
     /// these transport fields because only the commit boundary knows which
     /// preceding Data facts are durably visible.
     pub(crate) async fn commit_authored_terminal(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        let owned = self.owned();
+        let parent = parent.cloned();
+        crate::supervised_base::publication::commit(async move {
+            owned
+                .borrowed()
+                .commit_authored_terminal_inline(event, parent.as_ref())
+                .await
+        })
+        .await
+    }
+
+    async fn commit_authored_terminal_inline(
         &self,
         mut event: ChainEvent,
         parent: Option<&EventEnvelope<ChainEvent>>,
@@ -376,7 +586,7 @@ impl OutputCommitter<'_> {
         *writer_seq_by_event_type = expected_by_type;
         *last_event_id = expected_last_event_id;
 
-        self.commit_prebuilt_with_intent(
+        self.commit_prebuilt_with_intent_inline(
             event,
             parent,
             CommitOptions {
@@ -398,15 +608,44 @@ impl OutputCommitter<'_> {
         entries: Vec<AtomicCommitEntry>,
         parent: Option<&EventEnvelope<ChainEvent>>,
     ) -> Result<Vec<EventEnvelope<ChainEvent>>, CommitError> {
+        let owned = self.owned();
+        let parent = parent.cloned();
+        let group_id = group_id.to_owned();
+        crate::supervised_base::publication::commit(async move {
+            owned
+                .borrowed()
+                .commit_atomic_group_inline(&group_id, entries, parent.as_ref())
+                .await
+        })
+        .await
+    }
+
+    async fn commit_atomic_group_inline(
+        &self,
+        group_id: &str,
+        entries: Vec<AtomicCommitEntry>,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, CommitError> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
         let mut prepared = Vec::with_capacity(entries.len());
         let mut metadata = Vec::with_capacity(entries.len());
+        let mut snapshot = self
+            .instrumentation
+            .map(|instrumentation| instrumentation.snapshot_with_control());
+        if let Some(snapshot) = &mut snapshot {
+            snapshot.terminal_groups_committed_total =
+                snapshot.terminal_groups_committed_total.saturating_add(1);
+        }
         for entry in entries {
-            let event = self
+            let mut event = self
                 .prepare_prebuilt_with_intent(entry.event, parent, entry.options, entry.intent)
                 .await?;
+            if let Some(snapshot) = &mut snapshot {
+                self.project_committed_output(snapshot, &event, entry.options);
+                event = event.with_runtime_context(snapshot.clone());
+            }
             prepared.push(event);
             metadata.push((entry.options, entry.intent));
         }
@@ -434,7 +673,12 @@ impl OutputCommitter<'_> {
                     error = %error,
                     "atomic terminal journal group commit failed"
                 );
-                return Err(error.to_string().into());
+                if crate::supervised_base::publication::is_indeterminate(&error) {
+                    if let Some(reservation) = backpressure_reservation {
+                        reservation.indeterminate();
+                    }
+                }
+                return Err(Box::new(error));
             }
         };
 
@@ -456,15 +700,20 @@ impl OutputCommitter<'_> {
                 returned_envelopes = written.len(),
                 "journal violated atomic-group envelope cardinality"
             );
-            return Err(format!(
-                "atomic journal group '{group_id}' returned {} envelopes for {} members",
-                written.len(),
-                metadata.len()
-            )
-            .into());
+            return Err(crate::supervised_base::publication::accounting_failed(
+                format!(
+                    "atomic journal group '{group_id}' returned {} envelopes for {} members",
+                    written.len(),
+                    metadata.len()
+                )
+                .into(),
+            ));
         }
-        for (envelope, (options, intent)) in written.iter().zip(metadata) {
-            self.finish_committed(envelope, options, intent).await;
+        for (envelope, (options, _)) in written.iter().zip(&metadata) {
+            self.account_committed(envelope, *options);
+        }
+        for (envelope, (_, intent)) in written.iter().zip(metadata) {
+            self.mirror_committed(envelope, intent).await;
         }
         Ok(written)
     }
@@ -530,10 +779,52 @@ impl OutputCommitter<'_> {
             {
                 event.processing_info.processing_time = instrumentation.last_processing_time();
             }
-            event = event.with_runtime_context(instrumentation.snapshot_with_control());
+            let mut snapshot = instrumentation.snapshot_with_control();
+            self.project_committed_output(&mut snapshot, &event, options);
+            event = event.with_runtime_context(snapshot);
         }
 
         Ok(event)
+    }
+
+    /// A visible row describes its committed prefix, including itself. Live
+    /// counters still advance only after append acknowledgement.
+    fn project_committed_output(
+        &self,
+        snapshot: &mut obzenflow_core::event::context::RuntimeContext,
+        event: &ChainEvent,
+        options: CommitOptions,
+    ) {
+        if !options.count_output || !event.is_data() {
+            return;
+        }
+        snapshot.events_emitted_total = snapshot.events_emitted_total.saturating_add(1);
+        snapshot.writer_seq = snapshot.writer_seq.saturating_add(1);
+        snapshot.last_emitted_event_id = Some(event.id);
+        snapshot.last_emitted_writer = Some(event.writer_id);
+        if self
+            .flow_context
+            .is_none_or(|context| event_is_authored_by_stage(event, context, self.observer_scope))
+        {
+            let event_type = event.event_type();
+            if let Some(count) = snapshot
+                .data_outputs_by_event_type
+                .iter_mut()
+                .find(|count| count.event_type.as_str() == event_type)
+            {
+                count.total = count.total.saturating_add(1);
+            } else {
+                snapshot.data_outputs_by_event_type.push(
+                    obzenflow_core::event::context::EventTypeCountContext {
+                        event_type: event_type.into(),
+                        total: 1,
+                    },
+                );
+                snapshot
+                    .data_outputs_by_event_type
+                    .sort_by(|left, right| left.event_type.cmp(&right.event_type));
+            }
+        }
     }
 
     async fn finish_committed(
@@ -542,6 +833,11 @@ impl OutputCommitter<'_> {
         options: CommitOptions,
         intent: StageAppendIntent,
     ) {
+        self.account_committed(written, options);
+        self.mirror_committed(written, intent).await;
+    }
+
+    fn account_committed(&self, written: &EventEnvelope<ChainEvent>, options: CommitOptions) {
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.event.is_data() {
                 let authored_here = self.flow_context.is_none_or(|flow_context| {
@@ -558,7 +854,13 @@ impl OutputCommitter<'_> {
         if let Some(heartbeat) = self.heartbeat_state {
             heartbeat.record_last_output(written.event.id);
         }
+    }
 
+    async fn mirror_committed(
+        &self,
+        written: &EventEnvelope<ChainEvent>,
+        intent: StageAppendIntent,
+    ) {
         if matches!(
             intent.mirror_policy(),
             MirrorPolicy::FrameworkMiddlewareAllowlist

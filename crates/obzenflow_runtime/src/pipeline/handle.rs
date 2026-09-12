@@ -2,19 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::fsm::{FlowStopMode, FlowStopStatus, PipelineEvent, PipelineState};
+use super::fsm::PipelineFsmEvent;
 use super::termination::{execution_result, PublishedOutcome};
-use crate::__private::lifecycle::StopObserver;
+use super::{FlowStartControlOutcome, FlowStopMode, PipelineControl, PipelineState};
 use crate::errors::FlowError;
 use crate::journal::RunSubstrateState;
-use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::stages::LivenessSnapshots;
-use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
+use crate::supervised_base::{StandardHandle, SupervisorHandle};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -24,8 +22,9 @@ type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
 pub(crate) struct FlowHandleExtras {
     pub stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
-    pub stop_status: tokio::sync::watch::Receiver<FlowStopStatus>,
     pub published_outcome: PublishedOutcome,
+    pub metrics: Arc<super::resources::MetricsOwner>,
+    pub operational_failure: super::resources::OperationalFailure,
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
@@ -39,47 +38,6 @@ pub(crate) struct FlowHandleExtras {
     pub flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 }
 
-/// Structural middleware configuration for a stage (FLOWIP-059).
-///
-/// Contains both the ordered list of middleware names and their static configuration
-/// snapshots for the topology observability API.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MiddlewareStackConfig {
-    /// Ordered list of middleware names in the stack
-    pub stack: Vec<String>,
-    /// Circuit breaker static config (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub circuit_breaker: Option<serde_json::Value>,
-    /// Rate limiter static config (if present)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_limiter: Option<serde_json::Value>,
-}
-
-impl MiddlewareStackConfig {
-    /// Create a new middleware stack config with just names (no detailed config)
-    pub fn names_only(stack: Vec<String>) -> Self {
-        Self {
-            stack,
-            circuit_breaker: None,
-            rate_limiter: None,
-        }
-    }
-}
-
-/// Immediate outcome for externally requested pipeline start admission.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FlowStartControlOutcome {
-    /// `Run` was accepted and sent while the pipeline was ready.
-    Started { state: PipelineState },
-    /// The pipeline was already running, so no duplicate `Run` was sent.
-    AlreadyRunning { state: PipelineState },
-    /// The pipeline cannot accept `Run` in the observed state.
-    Rejected {
-        state: PipelineState,
-        reason: &'static str,
-    },
-}
-
 /// Flow handle for external control - the public API returned by the DSL
 ///
 /// This is a wrapper that combines:
@@ -90,10 +48,11 @@ pub enum FlowStartControlOutcome {
 /// so it needs to provide all functionality they might need.
 pub struct FlowHandle {
     stage_cleanup: Vec<Arc<dyn crate::stages::common::stage_handle::StageHandle>>,
-    stop_status: tokio::sync::watch::Receiver<FlowStopStatus>,
     published_outcome: PublishedOutcome,
+    metrics: Arc<super::resources::MetricsOwner>,
+    operational_failure: super::resources::OperationalFailure,
     /// The standard handle for FSM control
-    handle: StandardHandle<PipelineEvent, PipelineState>,
+    handle: StandardHandle<PipelineFsmEvent, PipelineState>,
 
     /// Flow topology for visualization (read-only)
     topology: Option<Arc<Topology>>,
@@ -129,13 +88,14 @@ pub struct FlowHandle {
 impl FlowHandle {
     /// Create a new flow handle from a standard handle and extras
     pub(crate) fn new(
-        handle: StandardHandle<PipelineEvent, PipelineState>,
+        handle: StandardHandle<PipelineFsmEvent, PipelineState>,
         extras: FlowHandleExtras,
     ) -> Self {
         let FlowHandleExtras {
             stage_cleanup,
-            stop_status,
             published_outcome,
+            metrics,
+            operational_failure,
             topology,
             flow_name,
             contract_attachments,
@@ -148,8 +108,9 @@ impl FlowHandle {
 
         Self {
             stage_cleanup,
-            stop_status,
             published_outcome,
+            metrics,
+            operational_failure,
             handle,
             topology,
             flow_name,
@@ -162,18 +123,49 @@ impl FlowHandle {
         }
     }
 
-    pub(crate) fn observe_stop(&self) -> StopObserver {
-        StopObserver::new(self.stop_status.clone())
+    pub(crate) fn execution_guard(&self) -> crate::__private::lifecycle::ExecutionGuard {
+        crate::__private::lifecycle::ExecutionGuard::new(
+            self.handle.abort_handle(),
+            self.stage_cleanup.clone(),
+            self.metrics.clone(),
+        )
     }
 
     /// Every flow completion path joins first, then interprets the same
     /// acknowledged execution outcome. Task failure takes precedence.
     pub(crate) async fn wait_for_execution(&self) -> Result<(), FlowError> {
-        self.handle
+        self.wait_for_resources().await?;
+        execution_result(&self.published_outcome)
+    }
+
+    pub(crate) async fn wait_for_resources(&self) -> Result<(), FlowError> {
+        let mut result = self
+            .handle
             .join()
             .await
-            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))?;
-        execution_result(&self.published_outcome)
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)));
+        for stage in &self.stage_cleanup {
+            stage.request_abort();
+        }
+        for stage in &self.stage_cleanup {
+            let joined = stage.abort_and_join().await;
+            if let Err(error) = joined {
+                if result.is_ok() {
+                    result = Err(FlowError::ExecutionFailed(Box::new(error)));
+                }
+            }
+        }
+        if let Err(error) = self.metrics.abort_and_join().await {
+            if result.is_ok() {
+                result = Err(FlowError::ExecutionFailed(Box::new(error)));
+            }
+        }
+        if result.is_ok() {
+            if let Some(error) = self.operational_failure.get() {
+                result = Err(FlowError::ExecutionFailed(Box::new(error.clone())));
+            }
+        }
+        result
     }
 
     /// The run substrate selected at composition: durable with its current-run
@@ -201,8 +193,10 @@ impl FlowHandle {
         let state = self.current_state();
         match state {
             PipelineState::ReadyForRun => {
-                self.send_event(PipelineEvent::Run).await?;
-                Ok(FlowStartControlOutcome::Started { state })
+                self.send_control(PipelineControl::Start).await?;
+                Ok(FlowStartControlOutcome::Submitted {
+                    observed_state: state,
+                })
             }
             PipelineState::Running => Ok(FlowStartControlOutcome::AlreadyRunning { state }),
             _ => Ok(FlowStartControlOutcome::Rejected {
@@ -285,8 +279,8 @@ impl FlowHandle {
         );
         match current_state {
             PipelineState::ReadyForRun => {
-                tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
-                self.send_event(PipelineEvent::Run).await
+                tracing::debug!("FlowHandle::start() - Sending PipelineFsmEvent::Start to start flow");
+                self.send_control(PipelineControl::Start).await
             }
             PipelineState::Running => {
                 tracing::debug!("FlowHandle::start() - Pipeline already running");
@@ -317,7 +311,7 @@ impl FlowHandle {
     /// already `Running`, it waits for completion without sending another `Run`.
     /// This is the primary method users should call after creating a flow.
     ///
-    /// Like `SupervisorHandle::wait_for_completion`, this joins the supervisor
+    /// Like `FlowHandle::wait_for_completion`, this joins the supervisor
     /// and reports the acknowledged execution result, including when the flow
     /// has already finished. Intentional cancellation succeeds; execution or
     /// task failure and missing terminal publication return an error.
@@ -333,8 +327,7 @@ impl FlowHandle {
 
     /// User-initiated stop request.
     ///
-    /// This is distinct from `PipelineEvent::Shutdown` which represents natural
-    /// source completion detected by the pipeline supervisor.
+    /// Natural source completion is observed through the system journal.
     pub async fn stop(&self) -> Result<(), FlowError> {
         self.stop_cancel().await
     }
@@ -347,20 +340,8 @@ impl FlowHandle {
         if !self.is_running() {
             return Ok(());
         }
-        self.send_event(PipelineEvent::StopRequested {
+        self.send_control(PipelineControl::Stop {
             mode: FlowStopMode::Cancel,
-            reason: None,
-        })
-        .await
-    }
-
-    pub(crate) async fn cancel_after_timeout(&self) -> Result<(), FlowError> {
-        if !self.is_running() {
-            return Ok(());
-        }
-        self.send_event(PipelineEvent::StopRequested {
-            mode: FlowStopMode::Cancel,
-            reason: Some(STOP_REASON_TIMEOUT.to_string()),
         })
         .await
     }
@@ -372,9 +353,8 @@ impl FlowHandle {
         if !self.is_running() {
             return Ok(());
         }
-        self.send_event(PipelineEvent::StopRequested {
+        self.send_control(PipelineControl::Stop {
             mode: FlowStopMode::Graceful { timeout },
-            reason: None,
         })
         .await
     }
@@ -386,8 +366,8 @@ impl FlowHandle {
 
     /// Force shutdown by sending Error event to FSM
     pub async fn abort(&self, reason: &str) -> Result<(), FlowError> {
-        self.send_event(PipelineEvent::Error {
-            message: format!("Force abort: {reason}"),
+        self.send_control(PipelineControl::Abort {
+            reason: reason.into(),
         })
         .await
     }
@@ -448,506 +428,22 @@ impl FlowHandle {
     }
 }
 
-// Custom implementation for SupervisorHandle trait to use FlowError
-#[async_trait::async_trait]
-impl SupervisorHandle for FlowHandle {
-    type Event = PipelineEvent;
-    type State = PipelineState;
-    type Error = FlowError;
-
-    async fn send_event(&self, event: Self::Event) -> Result<(), Self::Error> {
-        self.handle.send_event(event).await.map_err(|e| match e {
-            HandleError::SupervisorNotRunning => {
-                FlowError::ExecutionFailed(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Pipeline supervisor is not running",
-                )))
-            }
-            HandleError::SupervisorFailed(msg) => {
-                FlowError::ExecutionFailed(Box::new(std::io::Error::other(msg)))
-            }
-            HandleError::SupervisorPanicked(msg) => FlowError::ExecutionFailed(Box::new(
-                std::io::Error::other(format!("Task panicked: {msg}")),
-            )),
-            _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
-        })
-    }
-
-    fn current_state(&self) -> Self::State {
-        self.handle.current_state()
+impl FlowHandle {
+    /// Submit a caller control. Admission and lifecycle progression belong to
+    /// the canonical FSM and its committed journal facts.
+    pub async fn send_control(&self, control: PipelineControl) -> Result<(), FlowError> {
+        self.handle
+            .send_event(PipelineFsmEvent::from(control))
+            .await
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))
     }
 
     /// Join the supervisor and report the acknowledged execution result.
-    /// Intentional cancellation succeeds; execution failure does not.
-    async fn wait_for_completion(self) -> Result<(), Self::Error> {
+    pub async fn wait_for_completion(&self) -> Result<(), FlowError> {
         self.wait_for_execution().await
-    }
-
-    async fn abort_and_wait(&self) -> Result<(), Self::Error> {
-        let result = self.handle.abort_and_wait().await.map_err(|error| {
-            FlowError::ExecutionFailed(Box::new(std::io::Error::other(error.to_string())))
-        });
-        for stage in &self.stage_cleanup {
-            if let Err(error) = stage.abort_and_join().await {
-                tracing::warn!(stage = stage.stage_name(), %error, "Emergency stage teardown failed");
-            }
-        }
-        result
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::__private::lifecycle;
-    use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
-    use obzenflow_core::event::types::ViolationCause;
-    use std::error::Error;
-    use tokio::sync::mpsc::error::TryRecvError;
-
-    fn empty_extras() -> FlowHandleExtras {
-        FlowHandleExtras {
-            stage_cleanup: Vec::new(),
-            stop_status: super::super::fsm::StopIntent::default().status_receiver(),
-            published_outcome: Default::default(),
-            topology: None,
-            flow_name: "test_flow".to_string(),
-            contract_attachments: None,
-            system_journal: None,
-            pipeline_writer_id: WriterId::from(obzenflow_core::id::SystemId::new()),
-            flow_effective_config: None,
-            liveness_snapshots: None,
-            run_substrate: RunSubstrateState::Ephemeral,
-        }
-    }
-
-    fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
-        let (event_sender, mut event_receiver, state_watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new()
-                .with_event_buffer(4)
-                .build(PipelineState::ReadyForRun);
-
-        let state_watcher_for_task = state_watcher.clone();
-        let extras = empty_extras();
-        let published = extras.published_outcome.clone();
-        let task = tokio::spawn(async move {
-            match event_receiver.recv().await {
-                Some(PipelineEvent::Run) => {
-                    use super::super::termination::{
-                        ExecutionFailure, ExecutionOutcome, PublishedTermination,
-                    };
-                    let outcome = match &final_state {
-                        PipelineState::Failed {
-                            reason,
-                            failure_cause,
-                        } => ExecutionOutcome::Failed(ExecutionFailure {
-                            reason: reason.clone(),
-                            cause: failure_cause.clone(),
-                        }),
-                        PipelineState::AbortRequested { reason, .. } => {
-                            ExecutionOutcome::Failed(ExecutionFailure {
-                                reason: format!("{reason:?}"),
-                                cause: Some(reason.clone()),
-                            })
-                        }
-                        _ => ExecutionOutcome::Completed,
-                    };
-                    published
-                        .set(PublishedTermination {
-                            outcome,
-                            event_id: Some(obzenflow_core::EventId::new()),
-                        })
-                        .unwrap();
-                    state_watcher_for_task
-                        .update(final_state)
-                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-                    Ok(())
-                }
-                Some(event) => Err(format!("unexpected event: {event:?}").into()),
-                None => Err("event channel closed before Run".into()),
-            }
-        });
-
-        let handle = HandleBuilder::new()
-            .with_event_sender(event_sender)
-            .with_state_watcher(state_watcher)
-            .with_supervisor_task(task)
-            .build_standard()
-            .expect("standard handle should build");
-
-        FlowHandle::new(handle, extras)
-    }
-
-    fn flow_handle_for_start_admission(
-        initial_state: PipelineState,
-    ) -> (FlowHandle, EventReceiver<PipelineEvent>) {
-        let (event_sender, event_receiver, state_watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new()
-                .with_event_buffer(4)
-                .build(initial_state);
-
-        let task = tokio::spawn(async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
-
-        let handle = HandleBuilder::new()
-            .with_event_sender(event_sender)
-            .with_state_watcher(state_watcher)
-            .with_supervisor_task(task)
-            .build_standard()
-            .expect("standard handle should build");
-
-        (FlowHandle::new(handle, empty_extras()), event_receiver)
-    }
-
-    #[tokio::test]
-    async fn start_if_ready_now_dispatches_run_in_ready_for_run() {
-        let (handle, mut event_receiver) =
-            flow_handle_for_start_admission(PipelineState::ReadyForRun);
-
-        let outcome = handle
-            .start_if_ready_now()
-            .await
-            .expect("ReadyForRun admission should succeed");
-
-        assert_eq!(
-            outcome,
-            FlowStartControlOutcome::Started {
-                state: PipelineState::ReadyForRun
-            }
-        );
-        assert!(
-            matches!(event_receiver.try_recv(), Ok(PipelineEvent::Run)),
-            "ReadyForRun admission should dispatch Run"
-        );
-    }
-
-    #[tokio::test]
-    async fn start_if_ready_now_accepts_running_without_dispatch() {
-        let (handle, mut event_receiver) = flow_handle_for_start_admission(PipelineState::Running);
-
-        let outcome = handle
-            .start_if_ready_now()
-            .await
-            .expect("Running admission should succeed");
-
-        assert_eq!(
-            outcome,
-            FlowStartControlOutcome::AlreadyRunning {
-                state: PipelineState::Running
-            }
-        );
-        assert!(
-            matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
-            "Running admission must not dispatch duplicate Run"
-        );
-    }
-
-    #[tokio::test]
-    async fn start_if_ready_now_rejects_non_ready_states_without_dispatch() {
-        let cases = [
-            PipelineState::Created,
-            PipelineState::Materializing,
-            PipelineState::Materialized,
-            PipelineState::SourceCompleted,
-            PipelineState::AbortRequested {
-                reason: ViolationCause::Other("abort".to_string()),
-                upstream: None,
-            },
-            PipelineState::Draining,
-            PipelineState::Drained,
-            PipelineState::Failed {
-                reason: "failed".to_string(),
-                failure_cause: None,
-            },
-        ];
-
-        for state in cases {
-            let (handle, mut event_receiver) = flow_handle_for_start_admission(state.clone());
-
-            let outcome = handle
-                .start_if_ready_now()
-                .await
-                .expect("rejection should be reported as a control outcome");
-
-            assert_eq!(
-                outcome,
-                FlowStartControlOutcome::Rejected {
-                    state,
-                    reason: "pipeline is not ready for run"
-                }
-            );
-            assert!(
-                matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
-                "rejected admission must not dispatch Run"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn wait_for_ready_returns_error_for_terminal_or_aborting_states() {
-        let cases = [
-            PipelineState::SourceCompleted,
-            PipelineState::AbortRequested {
-                reason: ViolationCause::Other("abort".to_string()),
-                upstream: None,
-            },
-            PipelineState::Draining,
-            PipelineState::Drained,
-            PipelineState::Failed {
-                reason: "failed".to_string(),
-                failure_cause: None,
-            },
-        ];
-
-        for state in cases {
-            let (handle, _event_receiver) = flow_handle_for_start_admission(state);
-
-            let result = handle.wait_for_ready().await;
-
-            assert!(result.is_err(), "terminal state must not satisfy readiness");
-        }
-    }
-
-    #[tokio::test]
-    async fn start_accepts_coalesced_running_without_dispatch() {
-        let (handle, mut event_receiver) = flow_handle_for_start_admission(PipelineState::Running);
-
-        handle
-            .start()
-            .await
-            .expect("Running should satisfy start without dispatching Run");
-
-        assert!(
-            matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
-            "start must not dispatch duplicate Run after observing Running"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_returns_failed_terminal_state_as_error() {
-        let handle = flow_handle_that_finishes_in(PipelineState::Failed {
-            reason: "terminal failure".to_string(),
-            failure_cause: None,
-        });
-
-        let result = handle.run().await;
-        assert!(
-            result.is_err(),
-            "Failed terminal state must surface as an error"
-        );
-        let err = result.expect_err("error should be present");
-        let source = err.source().expect("source error should be present");
-
-        assert!(
-            source.to_string().contains("terminal failure"),
-            "unexpected source error: {source}"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_returns_abort_terminal_state_as_error() {
-        let handle = flow_handle_that_finishes_in(PipelineState::AbortRequested {
-            reason: ViolationCause::Other("abort requested".to_string()),
-            upstream: None,
-        });
-
-        let result = handle.run().await;
-        assert!(
-            result.is_err(),
-            "AbortRequested terminal state must surface as an error"
-        );
-        let err = result.expect_err("error should be present");
-        let source = err.source().expect("source error should be present");
-
-        assert!(
-            source.to_string().contains("abort requested"),
-            "unexpected source error: {source}"
-        );
-    }
-
-    #[tokio::test]
-    async fn all_flow_completion_paths_report_execution_and_task_failures_consistently() {
-        use super::super::termination::{ExecutionFailure, ExecutionOutcome, PublishedTermination};
-
-        #[derive(Clone, Copy)]
-        enum Exit {
-            Returned,
-            Failed,
-            Panicked,
-            Aborted,
-        }
-        let failed = PipelineState::Failed {
-            reason: "FSM cleanup state is not the execution result".into(),
-            failure_cause: None,
-        };
-        let cases = [
-            (
-                PipelineState::Drained,
-                Some(ExecutionOutcome::Completed),
-                Exit::Returned,
-                None,
-            ),
-            (
-                failed.clone(),
-                Some(ExecutionOutcome::Cancelled {
-                    reason: "operator stop".into(),
-                }),
-                Exit::Returned,
-                None,
-            ),
-            (
-                failed.clone(),
-                Some(ExecutionOutcome::Cancelled {
-                    reason: STOP_REASON_TIMEOUT.into(),
-                }),
-                Exit::Returned,
-                None,
-            ),
-            (
-                PipelineState::ReadyForRun,
-                Some(ExecutionOutcome::NotStarted),
-                Exit::Returned,
-                None,
-            ),
-            (
-                failed,
-                Some(ExecutionOutcome::Failed(ExecutionFailure {
-                    reason: "acknowledged failure".into(),
-                    cause: None,
-                })),
-                Exit::Returned,
-                Some("acknowledged failure"),
-            ),
-            (
-                PipelineState::Drained,
-                None,
-                Exit::Returned,
-                Some("without an acknowledged terminal outcome"),
-            ),
-            (
-                PipelineState::Created,
-                None,
-                Exit::Failed,
-                Some("task failed before readiness"),
-            ),
-            (
-                PipelineState::Drained,
-                Some(ExecutionOutcome::Completed),
-                Exit::Panicked,
-                Some("failure after publication"),
-            ),
-            (
-                PipelineState::Created,
-                None,
-                Exit::Aborted,
-                Some("Supervisor task was aborted"),
-            ),
-        ];
-        for (state, outcome, exit, expected) in cases {
-            for use_run in [false, true] {
-                let (sender, _receiver, watcher) =
-                    ChannelBuilder::<PipelineEvent, PipelineState>::new().build(state.clone());
-                let extras = empty_extras();
-                let published = extras.published_outcome.clone();
-                let outcome = outcome.clone();
-                let task = tokio::spawn(async move {
-                    if let Some(outcome) = outcome {
-                        let event_id = (!matches!(outcome, ExecutionOutcome::NotStarted))
-                            .then(obzenflow_core::EventId::new);
-                        published
-                            .set(PublishedTermination { outcome, event_id })
-                            .unwrap();
-                    }
-                    match exit {
-                        Exit::Returned => Ok(()),
-                        Exit::Failed => Err("task failed before readiness".into()),
-                        Exit::Panicked => panic!("failure after publication"),
-                        Exit::Aborted => std::future::pending().await,
-                    }
-                });
-                if matches!(exit, Exit::Aborted) {
-                    task.abort();
-                }
-                let handle = FlowHandle::new(
-                    HandleBuilder::new()
-                        .with_event_sender(sender)
-                        .with_state_watcher(watcher)
-                        .with_supervisor_task(task)
-                        .build_standard()
-                        .unwrap(),
-                    extras,
-                );
-                let first = lifecycle::wait(&handle).await;
-                let repeated = lifecycle::wait(&handle).await;
-                let consumed = if use_run {
-                    tokio::time::timeout(Duration::from_secs(1), handle.run())
-                        .await
-                        .expect("completion must not hang waiting for readiness")
-                } else {
-                    handle.wait_for_completion().await
-                };
-                let diagnostic = |result: Result<(), FlowError>| {
-                    result.map_err(|error| error.source().unwrap().to_string())
-                };
-                let first = diagnostic(first);
-                assert_eq!(first, diagnostic(repeated));
-                assert_eq!(first, diagnostic(consumed));
-                match expected {
-                    Some(message) => assert!(first.unwrap_err().contains(message)),
-                    None => first.unwrap(),
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn framework_waits_do_not_consume_completion_or_skip_the_physical_join() {
-        use super::super::termination::{ExecutionOutcome, PublishedTermination};
-        let (sender, _receiver, watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Drained);
-        let extras = empty_extras();
-        extras
-            .published_outcome
-            .set(PublishedTermination {
-                outcome: ExecutionOutcome::Completed,
-                event_id: Some(obzenflow_core::EventId::new()),
-            })
-            .unwrap();
-        let (release, gate) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            gate.await.unwrap();
-            Ok(())
-        });
-        let handle = FlowHandle::new(
-            HandleBuilder::new()
-                .with_event_sender(sender)
-                .with_state_watcher(watcher)
-                .with_supervisor_task(task)
-                .build_standard()
-                .unwrap(),
-            extras,
-        );
-        let mut parked = Box::pin(lifecycle::wait(&handle));
-        assert!(
-            futures::poll!(&mut parked).is_pending(),
-            "publication alone is not completion"
-        );
-        let mut dropped = Box::pin(lifecycle::wait(&handle));
-        assert!(futures::poll!(&mut dropped).is_pending());
-        drop(dropped);
-        release.send(()).unwrap();
-        lifecycle::wait(&handle).await.unwrap();
-        parked.await.unwrap();
-        lifecycle::wait(&handle).await.unwrap();
-        handle.wait_for_completion().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn run_allows_successful_terminal_state() {
-        let handle = flow_handle_that_finishes_in(PipelineState::Drained);
-
-        handle
-            .run()
-            .await
-            .expect("Drained terminal state should remain successful");
-    }
-}
+#[path = "tests/handle.rs"]
+mod tests;

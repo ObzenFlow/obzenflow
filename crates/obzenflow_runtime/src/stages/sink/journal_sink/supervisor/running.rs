@@ -684,12 +684,13 @@ async fn journal_sink_operation_failure<
     .mark_as_error(error.detail(), error.kind());
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
     event = event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
-    ctx.instrumentation
-        .record_error_journal_output_event(&event);
-    Ok(ctx
-        .error_journal
-        .append(event, Some(failed_receipt))
-        .await?)
+    crate::stages::common::supervision::output_committer::commit_error_output(
+        &ctx.error_journal,
+        &ctx.instrumentation,
+        event,
+        Some(failed_receipt),
+    )
+    .await
 }
 
 async fn journal_fresh_error_route<
@@ -700,6 +701,7 @@ async fn journal_fresh_error_route<
     causal_parent: &EventEnvelope<ChainEvent>,
     detail: String,
     kind: ErrorKind,
+    observer_scope: MiddlewareExecutionScope,
 ) -> Result<EventEnvelope<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
     let ChainEventContent::Data {
         event_type,
@@ -729,16 +731,36 @@ async fn journal_fresh_error_route<
     event = event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
     if route_to_error_journal(&event) {
-        if event.is_data() {
-            ctx.instrumentation
-                .record_error_journal_output_event(&event);
-        }
-        Ok(ctx.error_journal.append(event, Some(causal_parent)).await?)
+        crate::stages::common::supervision::output_committer::commit_error_output(
+            &ctx.error_journal,
+            &ctx.instrumentation,
+            event,
+            Some(causal_parent),
+        )
+        .await
     } else {
-        if event.is_data() {
-            ctx.instrumentation.record_output_event(&event);
+        use crate::stages::common::supervision::output_committer::{
+            CommitOptions, OutputCommitter,
+        };
+        OutputCommitter {
+            data_journal: &ctx.data_journal,
+            flow_context: None,
+            system_journal: None,
+            instrumentation: Some(&ctx.instrumentation),
+            heartbeat_state: None,
+            output_contract: None,
+            backpressure_writer: None,
+            observer_scope,
         }
-        Ok(ctx.data_journal.append(event, Some(causal_parent)).await?)
+        .commit_prebuilt(
+            event,
+            Some(causal_parent),
+            CommitOptions {
+                count_output: true,
+                validate_output_contract: false,
+            },
+        )
+        .await
     }
 }
 
@@ -770,7 +792,9 @@ async fn journal_policy_evidence<
         event =
             event.try_with_composite_activations(parent.event.composite_activations().to_vec())?;
         event = event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
-        let written = ctx.data_journal.append(event, Some(parent)).await?;
+        let written =
+            crate::supervised_base::publication::append(&ctx.data_journal, event, Some(parent))
+                .await?;
         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
             &written,
             &ctx.system_journal,
@@ -794,7 +818,8 @@ async fn journal_poisoned_lifecycle<
         snapshot_stage_metrics(ctx.instrumentation.as_ref()),
         causal_event_id,
     );
-    let written = ctx.system_journal.append(event, None).await?;
+    let written =
+        crate::supervised_base::publication::append(&ctx.system_journal, event, None).await?;
     ctx.failure_lifecycle_recorded = true;
     ctx.failure_causal_event_id = Some(causal_event_id);
     Ok(written.event.id)
@@ -1057,6 +1082,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                 &current_receipt,
                 error.to_string(),
                 error.kind(),
+                scope,
             )
             .await?;
         }
@@ -1077,6 +1103,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                 &operation,
                 failure.error().detail(),
                 failure.error().kind(),
+                scope,
             )
             .await?;
             if failure.disposition() == SinkWriteFailureDisposition::Poisoned {
@@ -1224,28 +1251,26 @@ async fn journal_delivery_receipt<
     let delivery_event = delivery_event
         .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())?;
 
-    if delivery_event.is_data() || delivery_event.is_delivery() {
-        ctx.instrumentation.record_output_event(&delivery_event);
-    }
-
-    let delivery_event =
-        delivery_event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
-    let written = ctx
-        .data_journal
-        .append(delivery_event, Some(parent_envelope))
-        .await?;
-    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-        &written,
-        &ctx.system_journal,
-    )
-    .await;
-
-    if let Some((seq, event_id, vector_clock)) =
-        subscription.record_delivery_receipt(&written.event, &mut ctx.contract_state[..])
-    {
-        ctx.instrumentation
-            .record_receipted_position(seq.0, event_id, vector_clock);
-    }
-
+    let data_journal = ctx.data_journal.clone();
+    let system_journal = ctx.system_journal.clone();
+    let instrumentation = ctx.instrumentation.clone();
+    let parent = parent_envelope.clone();
+    let mut settlement = subscription.take_receipt_settlement(&mut ctx.contract_state);
+    let (written, settlement) = crate::supervised_base::publication::commit(async move {
+        let event = super::super::with_committed_receipt_snapshot(delivery_event, &instrumentation);
+        let written = data_journal.append(event, Some(&parent)).await?;
+        instrumentation.record_output_event(&written.event);
+        if let Some((seq, event_id, vector_clock)) = settlement.record(&written.event) {
+            instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
+        }
+        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+            &written,
+            &system_journal,
+        )
+        .await;
+        Ok((written, settlement))
+    })
+    .await?;
+    subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
     Ok(written)
 }

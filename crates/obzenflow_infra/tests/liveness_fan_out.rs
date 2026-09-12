@@ -88,7 +88,7 @@ impl TypedAsyncFiniteSourceHandler for DelayedTwoEventSource {
             }
             _ => {
                 // Keep the resumed edge observable until the test driver sees
-                // recovery. Immediate EOF can otherwise end the fast branch
+                // both recoveries. Immediate EOF can otherwise end a branch
                 // before the watcher samples it, depending on unrelated tasks.
                 self.finish_gate.notified().await;
                 Ok(None)
@@ -278,25 +278,24 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
                 tokio::time::advance(Duration::from_secs(1)).await;
                 tokio::task::yield_now().await;
                 let journal = system_journal_slot.lock().unwrap().clone();
-                let fast = registry_slot.lock().unwrap().as_ref().and_then(|registry| {
+                let readers = registry_slot.lock().unwrap().as_ref().map(|registry| {
                     registry.with_read(|entries| {
-                        entries.iter().find_map(|(id, snapshot)| {
-                            (snapshot.stage_name == "fast").then_some(*id)
+                        ["fast", "slow"].map(|name| {
+                            entries.iter().find_map(|(id, snapshot)| {
+                                (snapshot.stage_name == name).then_some(*id)
+                            })
                         })
                     })
                 });
-                if let (Some(journal), Some(fast)) = (journal, fast) {
-                    if journal
-                        .read_causally_ordered()
-                        .await
-                        .unwrap()
-                        .iter()
-                        .any(|envelope| {
+                if let (Some(journal), Some([Some(fast), Some(slow)])) = (journal, readers) {
+                    let events = journal.read_causally_ordered().await.unwrap();
+                    if [fast, slow].iter().all(|expected_reader| {
+                        events.iter().any(|envelope| {
                             matches!(envelope.event.event, SystemEventType::EdgeLiveness {
                             reader, state: EdgeLivenessState::Recovered, ..
-                        } if reader == fast)
+                        } if reader == *expected_reader)
                         })
-                    {
+                    }) {
                         finish_gate.notify_one();
                     }
                 }

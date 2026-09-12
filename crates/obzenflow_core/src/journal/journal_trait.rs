@@ -34,6 +34,11 @@ where
     /// 1. Generate appropriate vector clock based on writer and parent
     /// 2. Ensure atomic append operation
     /// 3. Return the complete EventEnvelope with causal information
+    /// 4. Retain an initiated physical commit through storage bookkeeping if
+    ///    the caller stops waiting. Cancellation is not rollback.
+    ///
+    /// An error certifies non-commit, except `JournalError::CommitIndeterminate`.
+    /// That result means storage may have committed and must not be retried.
     async fn append(
         &self,
         event: T,
@@ -46,6 +51,8 @@ where
     /// every member invisible, including after recovery from an interrupted
     /// physical write. `group_id` is a deterministic, policy-neutral identity
     /// used by durable implementations for framing and recovery diagnostics.
+    /// The single-append cancellation and indeterminate-error contract applies
+    /// to the complete group.
     ///
     /// The default is deliberately fail-closed for multi-event groups. This
     /// preserves source compatibility for lightweight journals without

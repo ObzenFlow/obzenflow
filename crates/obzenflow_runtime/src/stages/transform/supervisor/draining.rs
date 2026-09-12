@@ -380,10 +380,13 @@ async fn dispatch_draining_inner<
                         event_id = %event.id,
                         "Writing error event to error journal during drain (FLOWIP-082e)"
                     );
-                    ctx.error_journal
-                        .append(event, Some(&envelope))
-                        .await
-                        .map_err(|e| format!("Failed to write error event during drain: {e}"))?;
+                    crate::supervised_base::publication::append(
+                        &ctx.error_journal,
+                        event,
+                        Some(&envelope),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to write error event during drain: {e}"))?;
                 } else {
                     stage_outputs.push_back(
                         crate::stages::common::supervision::backpressure_drain::PendingOutput {

@@ -21,7 +21,9 @@ pub(crate) async fn publish_running_best_effort(
 ) {
     let running_event = SystemEvent::stage_running(stage_id);
 
-    if let Err(e) = system_journal.append(running_event, None).await {
+    if let Err(e) =
+        crate::supervised_base::publication::append(system_journal, running_event, None).await
+    {
         tracing::error!(
             stage_name = %stage_name,
             journal_error = %e,
@@ -60,7 +62,9 @@ pub(crate) async fn send_completion_best_effort(
     };
     let completion_event = SystemEvent::stage_completed_with_metrics(stage_id, metrics);
 
-    if let Err(e) = system_journal.append(completion_event, None).await {
+    if let Err(e) =
+        crate::supervised_base::publication::append(system_journal, completion_event, None).await
+    {
         tracing::error!(
             stage_name = %stage_name,
             journal_error = %e,
@@ -112,7 +116,7 @@ pub(crate) async fn send_failure_best_effort(
         )
     };
 
-    match system_journal.append(system_event, None).await {
+    match crate::supervised_base::publication::append(system_journal, system_event, None).await {
         Ok(_) => {
             if let Some(reason) = cancel_reason {
                 tracing::info!(

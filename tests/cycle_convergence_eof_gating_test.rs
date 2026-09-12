@@ -18,7 +18,6 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use serde::{Deserialize, Serialize};
 

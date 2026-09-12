@@ -27,6 +27,7 @@ obzenflow-topology = { workspace = true }
 obzenflow_runtime = { workspace = true }
 obzenflow_adapters = { workspace = true }
 obzenflow_dsl = { workspace = true }
+obzenflow-fsm = { workspace = true }
 
 # Infrastructure dependencies
 tokio = { workspace = true, features = ["full", "tracing"] }
@@ -93,7 +94,6 @@ tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
-obzenflow-fsm = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tokio_unstable)"] }

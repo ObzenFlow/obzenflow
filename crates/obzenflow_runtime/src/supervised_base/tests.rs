@@ -3,10 +3,11 @@
 // https://obzenflow.dev
 
 use super::base::Supervisor;
+use super::publication::PublicationScope;
 use super::{
-    ChannelBuilder, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
-    HandlerSupervisedExt, HandlerSupervisedWithExternalEvents, SelfSupervised, SelfSupervisedExt,
-    SelfSupervisedWithExternalEvents,
+    ChannelBuilder, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandleBuilder,
+    HandlerSupervised, HandlerSupervisedWithExternalEvents, SelfSupervised,
+    SelfSupervisedWithExternalEvents, SupervisorHandle, SupervisorTaskBuilder,
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::{
@@ -33,15 +34,25 @@ enum TestAction {
 
 struct TestContext {
     failure_actions_executed: Arc<AtomicUsize>,
+    publications: Arc<PublicationScope>,
 }
 
 impl FsmContext for TestContext {}
+
+impl TestContext {
+    fn assert_publication_owner(&self) {
+        let current =
+            PublicationScope::current().expect("the shared runner must install its owner");
+        assert!(Arc::ptr_eq(&self.publications, &current));
+    }
+}
 
 #[async_trait::async_trait]
 impl FsmAction for TestAction {
     type Context = TestContext;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+        ctx.assert_publication_owner();
         match self {
             TestAction::MarkFailed => {
                 ctx.failure_actions_executed.fetch_add(1, Ordering::Relaxed);
@@ -117,8 +128,9 @@ impl SelfSupervised for TestSelfSupervisor {
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        context.assert_publication_owner();
         match state {
             TestState::Running => Err("dispatch_state boom".into()),
             TestState::Failed(_) => Ok(EventLoopDirective::Terminate),
@@ -130,6 +142,7 @@ impl SelfSupervised for TestSelfSupervisor {
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        assert!(PublicationScope::current().is_some());
         self.completion_writes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -170,8 +183,9 @@ impl HandlerSupervised for TestHandlerSupervisor {
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
-        _context: &mut Self::Context,
+        context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+        context.assert_publication_owner();
         match state {
             TestState::Running => Err("dispatch_state boom".into()),
             TestState::Failed(_) => Ok(EventLoopDirective::Terminate),
@@ -187,6 +201,7 @@ impl HandlerSupervised for TestHandlerSupervisor {
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        assert!(PublicationScope::current().is_some());
         self.completion_writes.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -222,6 +237,7 @@ fn supervision_traits_remain_obzenflow_fsm_backed() {
 async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
     let completion_writes = Arc::new(AtomicUsize::new(0));
     let failure_actions_executed = Arc::new(AtomicUsize::new(0));
+    let publications = PublicationScope::new();
 
     let supervisor = TestSelfSupervisor {
         name: "test-self-supervisor".to_string(),
@@ -229,9 +245,20 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
     };
     let ctx = TestContext {
         failure_actions_executed: failure_actions_executed.clone(),
+        publications: publications.clone(),
     };
 
-    let result = SelfSupervisedExt::run(supervisor, TestState::Running, ctx).await;
+    let (sender, _receiver, watcher) = ChannelBuilder::new().build(TestState::Running);
+    let task = SupervisorTaskBuilder::new("test-self-supervisor")
+        .with_publications(publications)
+        .spawn_self_supervised(supervisor, TestState::Running, ctx);
+    let handle = HandleBuilder::<TestEvent, _>::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap();
+    let result = handle.wait_for_completion().await;
     assert!(result.is_ok());
     assert_eq!(failure_actions_executed.load(Ordering::Relaxed), 1);
     assert_eq!(completion_writes.load(Ordering::Relaxed), 1);
@@ -241,6 +268,7 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
 async fn dispatch_state_error_drives_fsm_failure_path_handler_supervised() {
     let completion_writes = Arc::new(AtomicUsize::new(0));
     let failure_actions_executed = Arc::new(AtomicUsize::new(0));
+    let publications = PublicationScope::new();
 
     let supervisor = TestHandlerSupervisor {
         name: "test-handler-supervisor".to_string(),
@@ -249,9 +277,20 @@ async fn dispatch_state_error_drives_fsm_failure_path_handler_supervised() {
     };
     let ctx = TestContext {
         failure_actions_executed: failure_actions_executed.clone(),
+        publications: publications.clone(),
     };
 
-    let result = HandlerSupervisedExt::run(supervisor, TestState::Running, ctx).await;
+    let (sender, _receiver, watcher) = ChannelBuilder::new().build(TestState::Running);
+    let task = SupervisorTaskBuilder::new("test-handler-supervisor")
+        .with_publications(publications)
+        .spawn_handler_supervised(supervisor, TestState::Running, ctx);
+    let handle = HandleBuilder::<TestEvent, _>::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap();
+    let result = handle.wait_for_completion().await;
     assert!(result.is_ok());
     assert_eq!(failure_actions_executed.load(Ordering::Relaxed), 1);
     assert_eq!(completion_writes.load(Ordering::Relaxed), 1);

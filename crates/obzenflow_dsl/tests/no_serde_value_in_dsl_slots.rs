@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 /// path ends with `path_suffix`. The reason is required so that allowlist
 /// growth shows up in code review.
 const ALLOWLIST: &[(&str, &str)] = &[(
-    "crates/obzenflow_infra/src/application/flow_application.rs",
+    "crates/obzenflow_infra/src/application/flow_application/tests/startup.rs",
     "runtime lifecycle test (server_auto_double_run_regression) exercising \
          FlowApplication launch mechanics, not typed authoring; handlers are \
          payload-agnostic by design",

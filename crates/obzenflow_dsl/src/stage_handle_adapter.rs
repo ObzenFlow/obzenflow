@@ -75,6 +75,16 @@ where
         self.stage_type
     }
 
+    fn publish_pipeline_control(
+        &self,
+        journal: Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>>,
+        event: obzenflow_core::event::ChainEvent,
+    ) -> Result<(), StageError> {
+        self.inner
+            .publish_pipeline_control(journal, event)
+            .map_err(|error| StageError::Execution(Arc::from(error)))
+    }
+
     async fn initialize(&self) -> Result<(), StageError> {
         let event = (self.event_translator)(StageEvent::Initialize)
             .map_err(StageError::InitializationFailed)?;
@@ -142,38 +152,32 @@ where
     }
 
     async fn wait_for_completion(&self) -> Result<(), StageError> {
-        use std::time::{Duration, Instant};
-
-        let timeout = obzenflow_runtime::bootstrap::shutdown_timeout();
-
-        let start = Instant::now();
-
-        loop {
-            let status = (self.state_checker)(&self.inner.current_state());
-            match status {
-                StageStatus::Drained | StageStatus::Failed => {
-                    return Ok(());
-                }
-                _ => {
-                    if start.elapsed() >= timeout {
-                        return Err(StageError::Other(format!(
-                            "Timeout waiting for stage {} to complete during shutdown",
-                            self.stage_name
-                        )));
-                    }
-                    // Small backoff to avoid busy-waiting
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
-        }
+        self.inner
+            .wait_for_completion()
+            .await
+            .map_err(stage_execution_error)
     }
 
     async fn abort_and_join(&self) -> Result<(), StageError> {
-        self.inner.abort_and_wait().await.map_err(|error| {
-            StageError::Other(format!(
-                "Failed to abort and join stage {}: {error:?}",
-                self.stage_name
-            ))
-        })
+        self.inner
+            .abort_and_wait()
+            .await
+            .map_err(stage_execution_error)
+    }
+
+    fn request_abort(&self) {
+        self.inner.request_abort();
+    }
+}
+
+fn stage_execution_error(error: impl std::error::Error + Send + Sync + 'static) -> StageError {
+    let source: &(dyn std::error::Error + 'static) = &error;
+    if matches!(
+        source.downcast_ref::<obzenflow_runtime::supervised_base::HandleError>(),
+        Some(obzenflow_runtime::supervised_base::HandleError::SupervisorAborted)
+    ) {
+        StageError::Aborted
+    } else {
+        StageError::Execution(Arc::new(error))
     }
 }

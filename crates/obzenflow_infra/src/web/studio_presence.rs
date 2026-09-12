@@ -7,8 +7,10 @@
 //! This is an adapter-owned read model over journalled pipeline lifecycle
 //! facts. It intentionally does not mirror the runtime FSM.
 
-use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
-use obzenflow_core::journal::{Journal, JournalReader};
+use obzenflow_core::event::{SystemEvent, WriterId};
+use obzenflow_core::journal::Journal;
+#[cfg(test)]
+use obzenflow_core::journal::JournalReader;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -22,6 +24,7 @@ pub(crate) enum RuntimePresencePhase {
     Completed,
     Cancelled,
     Failed,
+    NotStarted,
 }
 
 impl RuntimePresencePhase {
@@ -35,34 +38,13 @@ impl RuntimePresencePhase {
             Self::Completed => "completed",
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
-        }
-    }
-
-    fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Cancelled | Self::Failed)
-    }
-
-    fn fold(self, event: &PipelineLifecycleEvent) -> Self {
-        use PipelineLifecycleEvent as E;
-
-        match event {
-            E::Failed { .. } => Self::Failed,
-            _ if self.is_terminal() => self,
-            E::Completed { .. } => Self::Completed,
-            E::Cancelled { .. } => Self::Cancelled,
-            E::Starting => Self::Starting,
-            E::ReadyForRun { .. } => Self::ReadyForRun,
-            E::Running { .. } => Self::Running,
-            E::Draining { .. } | E::AllStagesCompleted { .. } | E::Drained => Self::Draining,
-            E::StopRequested { .. } => self,
+            Self::NotStarted => "not_started",
         }
     }
 }
 
 pub(crate) struct RuntimePresenceProjection {
-    phase: RuntimePresencePhase,
-    pipeline_writer_id: WriterId,
-    reader: Option<Box<dyn JournalReader<SystemEvent>>>,
+    reader: crate::lifecycle_observation::Reader,
 }
 
 impl RuntimePresenceProjection {
@@ -70,18 +52,8 @@ impl RuntimePresenceProjection {
         journal: Arc<dyn Journal<SystemEvent>>,
         pipeline_writer_id: WriterId,
     ) -> Self {
-        let reader = match journal.reader().await {
-            Ok(reader) => Some(reader),
-            Err(error) => {
-                tracing::warn!(%error, "studio presence projection could not open system journal reader; phase will stay unknown");
-                None
-            }
-        };
-
         Self {
-            phase: RuntimePresencePhase::Unknown,
-            pipeline_writer_id,
-            reader,
+            reader: crate::lifecycle_observation::Reader::new(journal, pipeline_writer_id),
         }
     }
 
@@ -91,40 +63,29 @@ impl RuntimePresenceProjection {
         pipeline_writer_id: WriterId,
     ) -> Self {
         Self {
-            phase: RuntimePresencePhase::Unknown,
-            pipeline_writer_id,
-            reader: Some(reader),
+            reader: crate::lifecycle_observation::Reader::from_reader(reader, pipeline_writer_id),
         }
     }
 
     pub(crate) fn phase(&self) -> RuntimePresencePhase {
-        self.phase
+        use crate::lifecycle_observation::{Outcome, Progress};
+        match &self.reader.projection.outcome {
+            Some(Outcome::Completed) => RuntimePresencePhase::Completed,
+            Some(Outcome::Cancelled) => RuntimePresencePhase::Cancelled,
+            Some(Outcome::Failed(_)) => RuntimePresencePhase::Failed,
+            Some(Outcome::NotStarted) => RuntimePresencePhase::NotStarted,
+            None => match self.reader.projection.progress {
+                Progress::Unknown => RuntimePresencePhase::Unknown,
+                Progress::Starting => RuntimePresencePhase::Starting,
+                Progress::ReadyForRun => RuntimePresencePhase::ReadyForRun,
+                Progress::Running => RuntimePresencePhase::Running,
+                Progress::Draining | Progress::Settled => RuntimePresencePhase::Draining,
+            },
+        }
     }
 
     pub(crate) async fn catch_up(&mut self) {
-        let Some(reader) = self.reader.as_mut() else {
-            return;
-        };
-
-        loop {
-            match reader.next().await {
-                Ok(Some(envelope)) => {
-                    if envelope.event.writer_id != self.pipeline_writer_id {
-                        continue;
-                    }
-
-                    if let SystemEventType::PipelineLifecycle(event) = &envelope.event.event {
-                        self.phase = self.phase.fold(event);
-                    }
-                }
-                Ok(None) => return,
-                Err(error) => {
-                    tracing::warn!(%error, "studio presence projection stopped reading system journal; phase will remain at last known value");
-                    self.reader = None;
-                    return;
-                }
-            }
-        }
+        self.reader.catch_up().await;
     }
 }
 
@@ -132,7 +93,7 @@ impl RuntimePresenceProjection {
 mod tests {
     use super::*;
     use crate::journal::MemoryJournal;
-    use obzenflow_core::event::{SystemEvent, SystemEventType};
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
     use obzenflow_core::id::SystemId;
     use obzenflow_core::metrics::FlowLifecycleMetricsSnapshot;
     use obzenflow_core::JournalOwner;

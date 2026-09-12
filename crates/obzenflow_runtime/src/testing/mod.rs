@@ -18,7 +18,9 @@
 pub mod delivered_order;
 pub mod flow_test_harness;
 pub mod journal_snapshot;
+pub mod metrics;
 pub mod metrics_barrier;
+pub mod pipeline;
 pub mod probe;
 pub mod sink;
 pub mod stage_journal;

@@ -421,12 +421,15 @@ pub(super) async fn dispatch_draining<
 
                             let upstream_stage = subscription.last_delivered_upstream_stage();
                             if route_to_error_journal(&error_event) {
-                                ctx.error_journal
-                                    .append(error_event, Some(&merged_parent))
-                                    .await
-                                    .map_err(|e| {
-                                        format!("Failed to write join drain error event: {e}")
-                                    })?;
+                                crate::supervised_base::publication::append(
+                                    &ctx.error_journal,
+                                    error_event,
+                                    Some(&merged_parent),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write join drain error event: {e}")
+                                })?;
                                 if let Some(upstream) = upstream_stage {
                                     if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                                         reader.ack_consumed(1);

@@ -560,14 +560,17 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             snapshot_stage_metrics(ctx.instrumentation.as_ref()),
                             causal_event_id,
                         );
-                        ctx.system_journal
-                            .append(event, None)
-                            .await
-                            .map_err(|error| {
-                                obzenflow_fsm::FsmError::HandlerError(format!(
-                                    "Failed to write causally linked sink failure: {error}"
-                                ))
-                            })?;
+                        crate::supervised_base::publication::append(
+                            &ctx.system_journal,
+                            event,
+                            None,
+                        )
+                        .await
+                        .map_err(|error| {
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to write causally linked sink failure: {error}"
+                            ))
+                        })?;
                     } else {
                         lifecycle_actions::send_failure_best_effort(
                             "Sink",
@@ -681,7 +684,13 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             .with_flow_context(flow_ctx)
                             .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
-                            ctx.data_journal.append(evt, None).await.map_err(|e| {
+                            crate::supervised_base::publication::append(
+                                &ctx.data_journal,
+                                evt,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| {
                                 obzenflow_fsm::FsmError::HandlerError(format!(
                                     "Failed to write delivery receipt: {e}"
                                 ))
@@ -705,7 +714,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                     error,
                                     error_journal: &ctx.error_journal,
                                     system_journal: &ctx.system_journal,
-                                    instrumentation: ctx.instrumentation.as_ref(),
+                                    instrumentation: &ctx.instrumentation,
                                 },
                             )
                             .await
@@ -798,7 +807,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                         error: operation_error,
                                         error_journal: &ctx.error_journal,
                                         system_journal: &ctx.system_journal,
-                                        instrumentation: ctx.instrumentation.as_ref(),
+                                        instrumentation: &ctx.instrumentation,
                                     },
                                 )
                                 .await
@@ -872,7 +881,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 .with_flow_context(flow_ctx)
                                 .with_runtime_context(ctx.instrumentation.snapshot_with_control());
 
-                        ctx.data_journal.append(evt, None).await.map_err(|e| {
+                        crate::supervised_base::publication::append(&ctx.data_journal, evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to write delivery receipt: {e}"
                             ))
@@ -980,35 +989,34 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())
         .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
-    if evt.is_data() || evt.is_delivery() {
-        ctx.instrumentation.record_output_event(&evt);
-    }
-
-    let evt = evt.with_runtime_context(ctx.instrumentation.snapshot_with_control());
-
-    let written = ctx
-        .data_journal
-        .append(evt, Some(parent_envelope))
-        .await
-        .map_err(|e| {
-            obzenflow_fsm::FsmError::HandlerError(format!(
-                "Failed to write commit delivery receipt: {e}"
-            ))
-        })?;
-
-    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-        &written,
-        &ctx.system_journal,
-    )
-    .await;
-
-    if let Some(subscription) = ctx.subscription.as_mut() {
-        if let Some((seq, event_id, vector_clock)) =
-            subscription.record_delivery_receipt(&written.event, &mut ctx.contract_state[..])
-        {
-            ctx.instrumentation
-                .record_receipted_position(seq.0, event_id, vector_clock);
+    let data_journal = ctx.data_journal.clone();
+    let system_journal = ctx.system_journal.clone();
+    let instrumentation = ctx.instrumentation.clone();
+    let parent = parent_envelope.clone();
+    let mut settlement = ctx
+        .subscription
+        .as_mut()
+        .map(|subscription| subscription.take_receipt_settlement(&mut ctx.contract_state));
+    let settlement = crate::supervised_base::publication::commit(async move {
+        let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
+        let written = data_journal.append(event, Some(&parent)).await?;
+        instrumentation.record_output_event(&written.event);
+        if let Some(settlement) = &mut settlement {
+            if let Some((seq, event_id, vector_clock)) = settlement.record(&written.event) {
+                instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
+            }
         }
+        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+            &written,
+            &system_journal,
+        )
+        .await;
+        Ok(settlement)
+    })
+    .await
+    .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+    if let (Some(subscription), Some(settlement)) = (ctx.subscription.as_mut(), settlement) {
+        subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
     }
 
     Ok(())

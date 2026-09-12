@@ -19,7 +19,6 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::future::pending;
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};

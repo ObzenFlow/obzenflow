@@ -25,3 +25,5 @@ pub mod web;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+mod lifecycle_observation;

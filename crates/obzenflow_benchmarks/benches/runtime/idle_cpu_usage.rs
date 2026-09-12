@@ -19,7 +19,6 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
 use obzenflow_core::TypedPayload;

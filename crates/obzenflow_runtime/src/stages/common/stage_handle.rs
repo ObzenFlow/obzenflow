@@ -36,6 +36,10 @@ pub enum StageError {
     /// This wraps a `HandlerError` from stage logic so the pipeline FSM can
     /// distinguish handler failures from other coordination errors.
     HandlerFailure(crate::stages::common::handler_error::HandlerError),
+    /// Execution was explicitly aborted.
+    Aborted,
+    /// Retained execution/publication failure with its original source.
+    Execution(std::sync::Arc<dyn std::error::Error + Send + Sync>),
     /// Generic error
     Other(String),
 }
@@ -54,12 +58,21 @@ impl fmt::Display for StageError {
             StageError::HandlerFailure(err) => {
                 write!(f, "Stage handler failure: {err:?}")
             }
+            StageError::Aborted => write!(f, "Stage execution was aborted"),
+            StageError::Execution(error) => write!(f, "Stage execution failed: {error}"),
             StageError::Other(msg) => write!(f, "Stage error: {msg}"),
         }
     }
 }
 
-impl std::error::Error for StageError {}
+impl std::error::Error for StageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Execution(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<String> for StageError {
     fn from(s: String) -> Self {
@@ -98,6 +111,11 @@ pub enum StageEvent {
 /// - Identity (stage_id, name)
 /// - Lifecycle control (initialize, start, drain)
 /// - State queries (is_ready, is_drained)
+///
+/// Command methods retain a pending mailbox send until acceptance. Dropping an
+/// unaccepted command future cancels that send; an accepted message belongs to
+/// the receiving stage. Returning from a command does not certify the requested
+/// lifecycle transition: the pipeline observes its committed system-journal fact.
 #[async_trait::async_trait]
 pub trait StageHandle: Send + Sync {
     /// Get the stage ID
@@ -133,16 +151,31 @@ pub trait StageHandle: Send + Sync {
     /// Force shutdown
     async fn force_shutdown(&self) -> Result<(), StageError>;
 
-    /// Wait for the stage to complete its work and reach a terminal state.
-    ///
-    /// Implementations should typically:
-    /// - Observe the underlying supervisor state
-    /// - Treat terminal states (e.g., Drained/Failed) as completion
-    /// - Respect the same shutdown timeout used by the pipeline cleanup path
+    /// Wait for the stage task and every accepted publication to settle.
+    /// A state observation or timeout does not establish resource completion.
     async fn wait_for_completion(&self) -> Result<(), StageError>;
 
     /// Abort the underlying supervisor task and join it deterministically.
     async fn abort_and_join(&self) -> Result<(), StageError>;
+
+    /// Request immediate supervisor cancellation without waiting for its join.
+    /// Used by Runtime lifetime guards; this does not claim stage completion.
+    /// Implementations must be idempotent and non-blocking.
+    #[doc(hidden)]
+    fn request_abort(&self);
+
+    #[doc(hidden)]
+    fn publish_pipeline_control(
+        &self,
+        _journal: std::sync::Arc<
+            dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,
+        >,
+        _event: obzenflow_core::event::ChainEvent,
+    ) -> Result<(), StageError> {
+        Err(StageError::InvalidState(
+            "stage has no retained publication writer".into(),
+        ))
+    }
 }
 
 /// Type-erased stage handle for pipeline storage

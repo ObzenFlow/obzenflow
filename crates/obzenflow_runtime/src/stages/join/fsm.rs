@@ -702,14 +702,15 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 };
                 eof_event.runtime_context = Some(runtime_context);
 
-                ctx.instrumentation.record_emitted(&eof_event);
-
-                ctx.data_journal
-                    .append(eof_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!("Failed to forward EOF: {e}"))
-                    })?;
+                crate::stages::common::supervision::output_committer::commit_control_output(
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                    eof_event,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!("Failed to forward EOF: {e}"))
+                })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

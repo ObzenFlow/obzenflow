@@ -11,6 +11,7 @@
 //! - HTTP server management
 //! - Graceful shutdown handling
 
+use super::managed_lifecycle::{ApplicationLifecycle, ApplicationTask};
 use super::web_surface::label_endpoint;
 use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
@@ -31,7 +32,6 @@ use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
-use obzenflow_runtime::__private::lifecycle;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::journal::CurrentRunLocator;
 use obzenflow_runtime::prelude::FlowHandle;
@@ -44,66 +44,6 @@ use tokio::task::JoinHandle;
 
 type FlowHandleHook =
     Box<dyn Fn(&Arc<FlowHandle>) -> Result<JoinHandle<()>, ApplicationError> + Send + Sync>;
-
-/// Cancels an application-owned task even if launch or shutdown is dropped.
-/// This guard has no reporting or provider responsibilities.
-struct ApplicationTask(JoinHandle<()>);
-
-impl ApplicationTask {
-    async fn stop(mut self) {
-        self.0.abort();
-        let _ = (&mut self.0).await;
-    }
-}
-
-impl Drop for ApplicationTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-#[cfg(test)]
-mod application_task_tests {
-    use super::ApplicationTask;
-    use tokio::sync::oneshot;
-
-    struct Cancelled(Option<oneshot::Sender<()>>);
-
-    impl Drop for Cancelled {
-        fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
-        }
-    }
-
-    async fn pending_task() -> (ApplicationTask, oneshot::Receiver<()>) {
-        let (started_tx, started_rx) = oneshot::channel();
-        let (cancelled_tx, cancelled_rx) = oneshot::channel();
-        let task = ApplicationTask(tokio::spawn(async move {
-            let _cancelled = Cancelled(Some(cancelled_tx));
-            started_tx.send(()).unwrap();
-            std::future::pending::<()>().await;
-        }));
-        started_rx.await.unwrap();
-        (task, cancelled_rx)
-    }
-
-    #[tokio::test]
-    async fn stopping_application_task_joins_its_cleanup() {
-        let (task, mut cancelled) = pending_task().await;
-        task.stop().await;
-        assert_eq!(cancelled.try_recv(), Ok(()));
-    }
-
-    #[tokio::test]
-    async fn dropping_application_task_cancels_pending_work() {
-        let (task, cancelled) = pending_task().await;
-        drop(task);
-        tokio::time::timeout(std::time::Duration::from_secs(1), cancelled)
-            .await
-            .expect("application drop must not leave a detached task")
-            .unwrap();
-    }
-}
 
 #[derive(Default)]
 struct LaunchParams {
@@ -144,693 +84,7 @@ struct HostLifecycle {
 }
 
 #[cfg(all(test, feature = "warp-server"))]
-mod tests {
-    use super::*;
-    use crate::journal::disk_journals;
-    use async_trait::async_trait;
-    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-
-    use obzenflow_dsl::{flow, infinite_source, sink, source};
-    use obzenflow_runtime::pipeline::PipelineState;
-    use obzenflow_runtime::stages::common::handlers::{
-        InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-        TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
-    };
-    use obzenflow_runtime::stages::SourceError;
-    use std::net::TcpListener;
-    use std::sync::Mutex;
-    use tokio::sync::oneshot;
-
-    include!("managed_lifecycle_tests.rs");
-
-    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-    struct IdlePayload;
-
-    impl TypedPayload for IdlePayload {
-        const EVENT_TYPE: &'static str = "flow_application.idle";
-    }
-
-    #[derive(Clone, Debug)]
-    struct IdleInfiniteSource;
-
-    impl TypedInfiniteSourceHandler for IdleInfiniteSource {
-        type Output = IdlePayload;
-
-        fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct OneShotSource {
-        emitted: bool,
-    }
-
-    impl OneShotSource {
-        fn new() -> Self {
-            Self { emitted: false }
-        }
-    }
-
-    impl TypedFiniteSourceHandler for OneShotSource {
-        type Output = IdlePayload;
-
-        fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-            if self.emitted {
-                Ok(None)
-            } else {
-                self.emitted = true;
-                Ok(Some(vec![IdlePayload]))
-            }
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct NoopSink;
-
-    #[async_trait]
-    impl InlineSink for NoopSink {
-        type Input = IdlePayload;
-
-        fn describe(&self) -> SinkDescription {
-            SinkDescription::unspecified()
-        }
-
-        async fn write(
-            &mut self,
-            _input: IdlePayload,
-            _context: SinkWriteContext,
-        ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
-            Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
-                DeliveryMethod::Custom("test".to_string()),
-                None,
-            )))
-        }
-    }
-
-    fn available_local_port() -> u16 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
-        listener.local_addr().expect("local addr").port()
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn authentication_admission_failure_prevents_automatic_run() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone, Debug)]
-        struct CountingSource(Arc<AtomicUsize>);
-        impl TypedInfiniteSourceHandler for CountingSource {
-            type Output = IdlePayload;
-            fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(Vec::new())
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("obzenflow.toml");
-        let missing = format!("OBZENFLOW_AUTH_MISSING_{}", uuid::Uuid::new_v4().simple());
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"
-[server]
-enabled = true
-host = "127.0.0.1"
-port = {}
-startup_mode = "auto"
-[server.control_plane_auth]
-mode = "api_key"
-value_env = "{missing}"
-[metrics]
-enabled = false
-"#,
-                available_local_port()
-            ),
-        )
-        .unwrap();
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let source_calls = calls.clone();
-        let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
-        let hook_observed = observed.clone();
-        let definition = FlowDefinition::new(move |context| async move {
-            let source = CountingSource(source_calls);
-            let sink = NoopSink;
-            let handle = flow! {
-                name: "auth_admission_no_automatic_run",
-                journals: crate::journal::memory_journals(),
-                stages: {
-                    src = infinite_source!(IdlePayload => source);
-                    sink = sink!(IdlePayload => sink);
-                },
-                topology: { src |> sink; }
-            }
-            .build(context)
-            .await?;
-            handle
-                .wait_for_ready()
-                .await
-                .expect("pipeline reaches readiness");
-            assert!(matches!(handle.current_state(), PipelineState::ReadyForRun));
-            Ok(handle)
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            FlowApplication::launch(
-                definition,
-                LaunchParams {
-                    enable_autodiscovery: false,
-                    cli_args: Some(vec![
-                        "obzenflow".into(),
-                        "--config".into(),
-                        config_path.into_os_string(),
-                    ]),
-                    flow_handle_hooks: vec![Box::new(move |handle| {
-                        *hook_observed.lock().unwrap() = Some(handle.clone());
-                        Ok(tokio::spawn(async {}))
-                    })],
-                    ..LaunchParams::default()
-                },
-            ),
-        )
-        .await
-        .expect("auth admission must return promptly");
-        assert!(matches!(
-            result,
-            Err(ApplicationError::ServerStartFailed(_))
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let handle = observed.lock().unwrap().take().unwrap();
-        assert!(
-            !handle.is_running(),
-            "failed admission must stop the waiting supervisor"
-        );
-        assert!(handle.current_state().is_terminal());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn occupied_port_prevents_automatic_run() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone, Debug)]
-        struct CountingSource(Arc<AtomicUsize>);
-        impl TypedInfiniteSourceHandler for CountingSource {
-            type Output = IdlePayload;
-            fn next(&mut self) -> Result<Vec<IdlePayload>, SourceError> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(Vec::new())
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("obzenflow.toml");
-        let journal_dir = dir.path().join("journals");
-        let flow_journal_dir = journal_dir.clone();
-        let occupied = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"
-[server]
-enabled = true
-host = "127.0.0.1"
-port = {}
-startup_mode = "auto"
-[metrics]
-enabled = false
-"#,
-                occupied.local_addr().unwrap().port()
-            ),
-        )
-        .unwrap();
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let source_calls = calls.clone();
-        let observed = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
-        let hook_observed = observed.clone();
-        let definition = FlowDefinition::new(move |context| async move {
-            let source = CountingSource(source_calls);
-            let sink = NoopSink;
-            let handle = flow! {
-                name: "bind_admission_no_automatic_run",
-                journals: disk_journals(flow_journal_dir),
-                stages: {
-                    src = infinite_source!(IdlePayload => source);
-                    sink = sink!(IdlePayload => sink);
-                },
-                topology: { src |> sink; }
-            }
-            .build(context)
-            .await?;
-            handle
-                .wait_for_ready()
-                .await
-                .expect("pipeline reaches readiness");
-            assert!(matches!(handle.current_state(), PipelineState::ReadyForRun));
-            Ok(handle)
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            FlowApplication::launch(
-                definition,
-                LaunchParams {
-                    enable_autodiscovery: false,
-                    cli_args: Some(vec![
-                        "obzenflow".into(),
-                        "--config".into(),
-                        config_path.into_os_string(),
-                    ]),
-                    flow_handle_hooks: vec![Box::new(move |handle| {
-                        *hook_observed.lock().unwrap() = Some(handle.clone());
-                        Ok(tokio::spawn(async {}))
-                    })],
-                    ..LaunchParams::default()
-                },
-            ),
-        )
-        .await
-        .expect("bind admission must return promptly");
-        assert!(matches!(
-            result,
-            Err(ApplicationError::ServerStartFailed(_))
-        ));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let handle = observed.lock().unwrap().take().unwrap();
-        assert!(
-            !handle.is_running(),
-            "failed admission must stop the waiting supervisor"
-        );
-        assert!(handle.current_state().is_terminal());
-        let run_dir = std::fs::read_dir(journal_dir.join("flows"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_dir())
-            .unwrap();
-        let export = dir.path().join("occupied-port.jsonl");
-        crate::journal::disk::inspect::export_jsonl(&run_dir, Some(&export)).unwrap();
-        let records: Vec<serde_json::Value> = std::fs::read_to_string(export)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert!(
-            !records.is_empty(),
-            "the negative witness must inspect actual committed records"
-        );
-        for record in records {
-            let event = &record["event"];
-            assert_ne!(
-                event["pipeline_event"], "running",
-                "failed bind cannot publish Running"
-            );
-            assert_ne!(
-                event["content"]["content_type"], "data",
-                "failed bind cannot commit source data or effect records"
-            );
-            assert_ne!(
-                event["content"]["content_type"], "delivery",
-                "failed bind cannot commit sink receipts"
-            );
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn server_auto_mode_starts_after_host_admission() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let journal_dir = tempdir.path().join("journals");
-        std::fs::create_dir_all(&journal_dir).expect("create journal root");
-        let config_path = tempdir.path().join("obzenflow.toml");
-        let port = available_local_port();
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"
-[server]
-enabled = true
-host = "127.0.0.1"
-port = {port}
-startup_mode = "auto"
-
-[runtime]
-shutdown_timeout_secs = 2
-
-[metrics]
-enabled = false
-"#
-            ),
-        )
-        .expect("write test config");
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
-        let (running_tx, running_rx) = oneshot::channel();
-        let running_tx = Arc::new(Mutex::new(Some(running_tx)));
-
-        let hook_shutdown = Arc::clone(&shutdown_tx);
-        let hook_running = Arc::clone(&running_tx);
-        let hook = move |flow_handle: &Arc<FlowHandle>| {
-            let flow_handle = Arc::clone(flow_handle);
-            let hook_shutdown = Arc::clone(&hook_shutdown);
-            let hook_running = Arc::clone(&hook_running);
-            tokio::spawn(async move {
-                let mut states = flow_handle.state_receiver();
-                loop {
-                    if matches!(*states.borrow(), PipelineState::Running) {
-                        break;
-                    }
-                    if states.changed().await.is_err() {
-                        return;
-                    }
-                }
-
-                if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
-                    let _ = tx.send(());
-                }
-                if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
-                    let _ = tx.send(ShutdownSignal::Sigint);
-                }
-            })
-        };
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            FlowApplication::launch(
-                FlowDefinition::materialize(move |_runtime_config| {
-                    let source = IdleInfiniteSource;
-                    let sink = NoopSink;
-
-                    Ok(flow! {
-                        name: "server_auto_double_run_regression",
-                        journals: disk_journals(journal_dir),
-
-                        stages: {
-                            src = infinite_source!(IdlePayload => source);
-                            sink = sink!(IdlePayload => sink);
-                        },
-
-                        topology: {
-                            src |> sink;
-                        }
-                    })
-                }),
-                LaunchParams {
-                    enable_autodiscovery: false,
-                    flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
-                    cli_args: Some(vec![
-                        OsString::from("obzenflow"),
-                        OsString::from("--config"),
-                        config_path.into_os_string(),
-                    ]),
-                    test_shutdown_signal: Some(shutdown_rx),
-                    ..LaunchParams::default()
-                },
-            ),
-        )
-        .await
-        .expect("FlowApplication should not hang in server auto mode");
-
-        result.expect("server auto mode should shut down cleanly");
-        running_rx.await.expect("flow should reach Running");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn server_on_terminal_exit_waits_for_terminal_journal_fact() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let journal_dir = tempdir.path().join("journals");
-        let flow_journal_dir = journal_dir.clone();
-        std::fs::create_dir_all(&journal_dir).expect("create journal root");
-        let config_path = tempdir.path().join("obzenflow.toml");
-        let port = available_local_port();
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"
-[server]
-enabled = true
-host = "127.0.0.1"
-port = {port}
-startup_mode = "auto"
-on_terminal = "exit"
-
-[runtime]
-shutdown_timeout_secs = 2
-
-[metrics]
-enabled = false
-"#
-            ),
-        )
-        .expect("write test config");
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            FlowApplication::launch(
-                FlowDefinition::materialize(move |_runtime_config| {
-                    let source = OneShotSource::new();
-                    let sink = NoopSink;
-
-                    Ok(flow! {
-                        name: "server_terminal_journal_regression",
-                        journals: disk_journals(flow_journal_dir),
-
-                        stages: {
-                            src = source!(IdlePayload => source);
-                            sink = sink!(IdlePayload => sink);
-                        },
-
-                        topology: {
-                            src |> sink;
-                        }
-                    })
-                }),
-                LaunchParams {
-                    enable_autodiscovery: false,
-                    cli_args: Some(vec![
-                        OsString::from("obzenflow"),
-                        OsString::from("--config"),
-                        config_path.into_os_string(),
-                    ]),
-                    ..LaunchParams::default()
-                },
-            ),
-        )
-        .await
-        .expect("FlowApplication should not hang in on_terminal=exit mode");
-
-        result.expect("finite server flow should exit cleanly");
-
-        let flows_dir = journal_dir.join("flows");
-        let run_dir = std::fs::read_dir(&flows_dir)
-            .expect("flows directory should exist")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| path.is_dir())
-            .expect("one run directory should exist");
-        let system_log =
-            std::fs::read_to_string(run_dir.join("system.log")).expect("system.log readable");
-
-        assert!(
-            system_log.contains(r#""pipeline_event":"completed""#),
-            "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; system.log:\n{system_log}"
-        );
-    }
-
-    // FLOWIP-114d gap 24 regression: on graceful server-mode shutdown the
-    // heartbeat's fenced DELETE must reach the phonebook rather than being
-    // cancelled mid-flight by the generic managed-task abort (which would
-    // leave the entry to linger until lease expiry). Drives a real
-    // FlowApplication in server mode against a stub phonebook, waits until a
-    // registration has landed, then triggers shutdown and asserts the fenced
-    // deregistration arrives.
-    #[cfg(feature = "studio-registration")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn server_mode_deregisters_from_phonebook_on_graceful_shutdown() {
-        use warp::Filter;
-
-        #[derive(Default)]
-        struct Stub {
-            registrations: Mutex<Vec<serde_json::Value>>,
-            deletes: Mutex<Vec<String>>,
-        }
-        let stub = Arc::new(Stub::default());
-
-        let register = {
-            let stub = stub.clone();
-            warp::path!("register")
-                .and(warp::post())
-                .and(warp::body::json())
-                .map(move |body: serde_json::Value| {
-                    stub.registrations
-                        .lock()
-                        .expect("registrations lock")
-                        .push(body);
-                    warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
-                })
-        };
-        let deregister = {
-            let stub = stub.clone();
-            warp::path!("register" / String)
-                .and(warp::delete())
-                .and(warp::query::raw())
-                .map(move |job_id: String, query: String| {
-                    stub.deletes
-                        .lock()
-                        .expect("deletes lock")
-                        .push(format!("{job_id}?{query}"));
-                    warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
-                })
-        };
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let phonebook_addr = listener.local_addr().unwrap();
-        let phonebook_server = warp::serve(register.or(deregister)).incoming(listener);
-        let phonebook_task = tokio::spawn(phonebook_server.run());
-        let phonebook_url = format!("http://{phonebook_addr}");
-
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let journal_dir = tempdir.path().join("journals");
-        std::fs::create_dir_all(&journal_dir).expect("create journal root");
-        let config_path = tempdir.path().join("obzenflow.toml");
-        let port = available_local_port();
-        std::fs::write(
-            &config_path,
-            format!(
-                r#"
-[server]
-enabled = true
-host = "127.0.0.1"
-port = {port}
-startup_mode = "auto"
-
-[server.cors]
-mode = "allow-list"
-allow_origins = ["{phonebook_url}"]
-
-[studio]
-enabled = true
-phonebook_url = "{phonebook_url}"
-job_id = "gap24_demo"
-advertise_url = "http://127.0.0.1:{port}"
-lease_ttl_secs = 30
-renew_interval_secs = 1
-
-[runtime]
-shutdown_timeout_secs = 2
-"#
-            ),
-        )
-        .expect("write test config");
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
-        let (running_tx, running_rx) = oneshot::channel();
-        let running_tx = Arc::new(Mutex::new(Some(running_tx)));
-
-        // The hook waits for Running, then for the first registration to land
-        // at the stub, and only then triggers shutdown, so registration always
-        // precedes deregistration deterministically.
-        let hook_shutdown = Arc::clone(&shutdown_tx);
-        let hook_running = Arc::clone(&running_tx);
-        let hook_stub = Arc::clone(&stub);
-        let hook = move |flow_handle: &Arc<FlowHandle>| {
-            let flow_handle = Arc::clone(flow_handle);
-            let hook_shutdown = Arc::clone(&hook_shutdown);
-            let hook_running = Arc::clone(&hook_running);
-            let hook_stub = Arc::clone(&hook_stub);
-            tokio::spawn(async move {
-                let mut states = flow_handle.state_receiver();
-                loop {
-                    if matches!(*states.borrow(), PipelineState::Running) {
-                        break;
-                    }
-                    if states.changed().await.is_err() {
-                        return;
-                    }
-                }
-                if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
-                    let _ = tx.send(());
-                }
-                // Bounded wait for the heartbeat's first registration.
-                for _ in 0..100 {
-                    if !hook_stub
-                        .registrations
-                        .lock()
-                        .expect("registrations lock")
-                        .is_empty()
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
-                    let _ = tx.send(ShutdownSignal::Sigint);
-                }
-            })
-        };
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            FlowApplication::launch(
-                FlowDefinition::materialize(move |_runtime_config| {
-                    let source = IdleInfiniteSource;
-                    let sink = NoopSink;
-
-                    Ok(flow! {
-                        name: "gap24_deregister_regression",
-                        journals: disk_journals(journal_dir),
-
-                        stages: {
-                            src = infinite_source!(IdlePayload => source);
-                            sink = sink!(IdlePayload => sink);
-                        },
-
-                        topology: {
-                            src |> sink;
-                        }
-                    })
-                }),
-                LaunchParams {
-                    enable_autodiscovery: false,
-                    flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
-                    cli_args: Some(vec![
-                        OsString::from("obzenflow"),
-                        OsString::from("--config"),
-                        config_path.into_os_string(),
-                    ]),
-                    test_shutdown_signal: Some(shutdown_rx),
-                    ..LaunchParams::default()
-                },
-            ),
-        )
-        .await
-        .expect("FlowApplication should not hang in server studio mode");
-
-        result.expect("server studio mode should shut down cleanly");
-        running_rx.await.expect("flow should reach Running");
-
-        assert!(
-            !stub
-                .registrations
-                .lock()
-                .expect("registrations lock")
-                .is_empty(),
-            "runtime should have registered with the phonebook"
-        );
-        let deletes = stub.deletes.lock().expect("deletes lock");
-        let prefix = "gap24_demo?runtime_instance_id=";
-        assert!(
-            deletes
-                .iter()
-                .any(|d| d.starts_with(prefix) && d.len() > prefix.len()),
-            "graceful shutdown must send a fenced deregistration rather than \
-             relying on lease expiry; got {deletes:?}"
-        );
-
-        phonebook_task.abort();
-    }
-}
+mod tests;
 
 #[cfg(feature = "warp-server")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1388,22 +642,13 @@ impl FlowApplication {
         #[cfg(feature = "warp-server")]
         let surface_metrics_interval = config.runtime.surface_metrics_interval;
 
-        // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
-        // These must not be allowed to outlive FlowApplication, even on early-return paths.
-        let mut managed_tasks: Vec<ApplicationTask> = Vec::new();
+        // One private owner retains every resource from preparation through joined cleanup.
+        let mut application = ApplicationLifecycle::new(grace_timeout, config.server.on_terminal);
         let metrics_model = (cfg!(feature = "prometheus") && config.metrics.enabled)
             .then(|| Arc::new(MetricsReadModel::default()));
         let metrics_exporter = metrics_model
             .as_ref()
             .map(|model| model.clone() as Arc<dyn MetricsSnapshotExporter>);
-        let mut metrics_collector: Option<ApplicationTask> = None;
-        // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
-        // `managed_tasks` so the shutdown sequence can join its fenced deregistration
-        // before the generic managed-task abort would cancel the in-flight DELETE.
-        #[cfg(feature = "studio-registration")]
-        let mut heartbeat_task: Option<ApplicationTask> = None;
-        #[cfg(feature = "warp-server")]
-        let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
         if let Some(presentation) = &presentation {
             let rendered = presentation.render_banner(&run_mode);
@@ -1507,6 +752,8 @@ impl FlowApplication {
                 }
             };
 
+            application.protect_flow(&flow_handle);
+
             // The selected run substrate (FLOWIP-120u): durable with its locator,
             // or ephemeral with none. An ephemeral resume never reaches here;
             // the build refuses it (F13).
@@ -1523,10 +770,10 @@ impl FlowApplication {
 
             for hook in &flow_handle_hooks {
                 match hook(&flow_handle) {
-                    Ok(task) => managed_tasks.push(ApplicationTask(task)),
+                    Ok(task) => application.tasks.push(ApplicationTask(task)),
                     Err(err) => {
-                        Self::stop_before_run(&flow_handle, grace_timeout).await;
-                        break 'run (Err(err), Some(flow_name.clone()), run_state, false);
+                        let result = application.fail_before_run(flow_handle.clone(), err).await;
+                        break 'run (result, Some(flow_name.clone()), run_state, false);
                     }
                 }
             }
@@ -1539,7 +786,7 @@ impl FlowApplication {
                     liveness,
                     config.runtime.surface_metrics_interval,
                 );
-                metrics_collector = Some(ApplicationTask(collector));
+                application.metrics_collector = Some(ApplicationTask(collector));
             }
 
             #[cfg(feature = "warp-server")]
@@ -1558,10 +805,10 @@ impl FlowApplication {
                     (surface_metrics_collector.clone(), system_journal)
                 {
                     let emitter = HttpSurfaceMetricsEmitter::new(collector, system_journal);
-                    managed_tasks.push(ApplicationTask(
+                    application.tasks.push(ApplicationTask(
                         emitter.spawn_periodic(surface_metrics_interval),
                     ));
-                    surface_metrics_emitter = Some(emitter);
+                    application.metrics_emitter = Some(emitter);
                 }
 
                 surface_metrics_collector
@@ -1576,18 +823,16 @@ impl FlowApplication {
                 // silently running without its configured ingress identity.
                 if let Some(slot) = ingress_slot {
                     if !slot.is_filled() {
-                        Self::stop_before_run(&flow_handle, grace_timeout).await;
-                        break 'run (
-                            Err(ApplicationError::FlowBuildFailed(format!(
-                                "hosted ingress surface '{surface_name}' (ingress key '{}') was \
+                        let error = ApplicationError::FlowBuildFailed(format!(
+                            "hosted ingress surface '{surface_name}' (ingress key '{}') was \
                                  registered but its source half was not placed in the flow \
                                  topology; place the http_ingress source in flow!",
-                                slot.ingress_key()
-                            ))),
-                            Some(flow_name.clone()),
-                            run_state,
-                            false,
-                        );
+                            slot.ingress_key()
+                        ));
+                        let result = application
+                            .fail_before_run(flow_handle.clone(), error)
+                            .await;
+                        break 'run (result, Some(flow_name.clone()), run_state, false);
                     }
                 }
                 for endpoint in endpoints {
@@ -1601,12 +846,13 @@ impl FlowApplication {
                         // refusal recording enabled fails startup here if it is None.
                         system_journal: flow_handle.system_journal(),
                     }) {
-                        Ok(wired) => {
-                            managed_tasks.extend(wired.tasks.into_iter().map(ApplicationTask))
-                        }
+                        Ok(wired) => application
+                            .tasks
+                            .extend(wired.tasks.into_iter().map(ApplicationTask)),
                         Err(err) => {
-                            Self::stop_before_run(&flow_handle, grace_timeout).await;
-                            break 'run (Err(err), Some(flow_name.clone()), run_state, false);
+                            let result =
+                                application.fail_before_run(flow_handle.clone(), err).await;
+                            break 'run (result, Some(flow_name.clone()), run_state, false);
                         }
                     }
                 }
@@ -1630,7 +876,7 @@ impl FlowApplication {
                 server_config.max_body_size = Some(config.server.max_body_size_bytes);
                 server_config.request_timeout_secs = Some(config.server.request_timeout_secs);
                 server_config.control_plane_auth = config.server.control_plane_auth.clone();
-                let mut host = match Self::start_server(
+                let host = match Self::start_server(
                     &flow_handle,
                     server_config,
                     all_extra_endpoints,
@@ -1649,11 +895,15 @@ impl FlowApplication {
                 {
                     Ok(host) => host,
                     Err(error) => {
-                        Self::stop_before_run(&flow_handle, grace_timeout).await;
-                        break 'run (Err(error), Some(flow_name), run_state, false);
+                        let result = application
+                            .fail_before_run(flow_handle.clone(), error)
+                            .await;
+                        break 'run (result, Some(flow_name), run_state, false);
                     }
                 };
 
+                #[cfg(any(test, feature = "studio-registration"))]
+                let mut host = host;
                 #[cfg(test)]
                 if let Some((future, complete_before_run)) = test_host_task {
                     host.replace_serving_for_test(future, complete_before_run)
@@ -1677,7 +927,7 @@ impl FlowApplication {
                             ) => Some(presence),
                         };
                         if let Some(presence) = presence {
-                            heartbeat_task = Some(ApplicationTask(
+                            application.heartbeat = Some(ApplicationTask(
                                 crate::web::studio_registration::spawn_heartbeat(
                                     crate::web::studio_registration::HeartbeatContext {
                                         studio,
@@ -1694,69 +944,22 @@ impl FlowApplication {
                     }
                 }
 
-                let mut result = super::managed_lifecycle::supervise(
-                    &mut host,
-                    &flow_handle,
-                    config.server.startup_mode,
-                    config.server.on_terminal,
-                    grace_timeout,
-                    initial_failure,
-                    #[cfg(test)]
-                    test_shutdown_signal,
-                )
-                .await;
-                if let Some(task) = metrics_collector.take() {
-                    task.stop().await;
-                }
-                if let Err(error) = host.close().await {
-                    let has_host_failure = matches!(&result, Err(ApplicationError::Other(primary))
-                        if primary.is::<crate::web::host_error::ManagedWebHostError>());
-                    if has_host_failure {
-                        tracing::warn!(%error, "Managed host close also failed");
-                    } else {
-                        if let Err(secondary) = result {
-                            tracing::warn!(%secondary, "Flow cleanup also failed before managed host close");
-                        }
-                        result = Err(ApplicationError::Other(Box::new(error)));
-                    }
-                }
-                #[cfg(feature = "studio-registration")]
-                if let Some(mut heartbeat) = heartbeat_task.take() {
-                    const DEREGISTER_GRACE: Duration = Duration::from_secs(5);
-                    if tokio::time::timeout(DEREGISTER_GRACE, &mut heartbeat.0)
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("Studio deregistration deadline expired; lease expiry will remove the registration");
-                        heartbeat.0.abort();
-                        let _ = (&mut heartbeat.0).await;
-                    }
-                }
+                let result = application
+                    .run_hosted(
+                        host,
+                        flow_handle,
+                        config.server.startup_mode,
+                        initial_failure,
+                        #[cfg(test)]
+                        test_shutdown_signal,
+                    )
+                    .await;
                 break 'run (result, Some(flow_name), run_state, true);
             }
 
             // Non-server mode: preserve existing behaviour (run to completion, no HTTP server)
             tracing::info!("▶️  Starting flow execution (no server)");
-            let handle = match Arc::try_unwrap(flow_handle) {
-                Ok(handle) => handle,
-                Err(_) => {
-                    break 'run (
-                        Err(ApplicationError::FlowExecutionFailed(
-                            "Failed to unwrap FlowHandle for non-server execution".to_string(),
-                        )),
-                        Some(flow_name),
-                        run_state,
-                        false,
-                    );
-                }
-            };
-            let result = handle
-                .run()
-                .await
-                .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
-            if let Some(task) = metrics_collector.take() {
-                task.stop().await;
-            }
+            let result = application.run_standalone(flow_handle).await;
             if result.is_ok() && !presentation_enabled {
                 if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
                     print_replay_hint(locator);
@@ -1765,27 +968,7 @@ impl FlowApplication {
             break 'run (result, Some(flow_name), run_state, false);
         };
 
-        if let Some(task) = metrics_collector.take() {
-            task.stop().await;
-        }
-
-        #[cfg(feature = "warp-server")]
-        if let Some(emitter) = &surface_metrics_emitter {
-            let _ = tokio::time::timeout(grace_timeout, emitter.flush()).await;
-        }
-
-        // FLOWIP-114d gap 24: a non-graceful exit (an early break during server
-        // setup) can leave the heartbeat unjoined; the shared close path above
-        // already took it on every normal exit. Abort any leftover so it cannot
-        // outlive FlowApplication; lease expiry covers deregistration here.
-        #[cfg(feature = "studio-registration")]
-        if let Some(heartbeat) = heartbeat_task.take() {
-            let _ = tokio::time::timeout(grace_timeout, heartbeat.stop()).await;
-        }
-
-        // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
-        // lifetime, even if we exited early due to a startup failure or "no server" fallback.
-        Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
+        let result = application.finish(result).await;
 
         match (result, flow_name, run_state, stopped) {
             (Ok(()), flow_name, run_state, stopped) => {
@@ -1917,23 +1100,6 @@ impl FlowApplication {
         }
     }
 
-    async fn cancel_and_join_tasks(tasks: Vec<ApplicationTask>, timeout: Duration) {
-        if tasks.is_empty() {
-            return;
-        }
-
-        for task in &tasks {
-            task.0.abort();
-        }
-
-        let _ = tokio::time::timeout(timeout, async move {
-            for task in tasks {
-                task.stop().await;
-            }
-        })
-        .await;
-    }
-
     fn build_infra_snapshot(
         liveness_snapshots: Option<&LivenessSnapshots>,
     ) -> InfraMetricsSnapshot {
@@ -2050,26 +1216,5 @@ impl FlowApplication {
         tracing::info!("   /ready         - Readiness status");
 
         Ok(handle)
-    }
-
-    /// Stop a materialised pipeline before the bootstrap guard can restore auto-run.
-    async fn stop_before_run(flow: &FlowHandle, grace: Duration) {
-        use obzenflow_runtime::supervised_base::SupervisorHandle;
-        let cleanup = async {
-            if flow.is_running() && !flow.current_state().is_terminal() {
-                flow.stop_cancel().await?;
-            }
-            lifecycle::wait(flow).await
-        };
-        match tokio::time::timeout(grace + grace, cleanup).await {
-            Ok(Ok(())) => {}
-            result => {
-                tracing::warn!(
-                    ?result,
-                    "Pre-run pipeline cleanup did not complete normally"
-                );
-                let _ = flow.abort_and_wait().await;
-            }
-        }
     }
 }

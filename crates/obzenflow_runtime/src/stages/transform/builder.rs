@@ -22,8 +22,8 @@ use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, Heartbe
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
-    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
-    HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
+    BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedWithExternalEvents,
+    SupervisorBuilder, SupervisorTaskBuilder,
 };
 
 use super::config::TransformConfig;
@@ -106,6 +106,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         let cycle_guard_config = self.config.cycle_guard.clone();
+        let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
 
         let heartbeat = if self
@@ -118,15 +119,17 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             None
         } else {
             let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
-            Some(spawn_heartbeat(
-                self.config.stage_id,
-                self.config.stage_name.clone(),
-                self.resources.system_journal.clone(),
-                self.resources.liveness_snapshots.clone(),
-                heartbeat_state,
-                heartbeat_config,
-                self.resources.runtime_execution.clone(),
-            ))
+            Some(publications.enter_sync(|| {
+                spawn_heartbeat(
+                    self.config.stage_id,
+                    self.config.stage_name.clone(),
+                    self.resources.system_journal.clone(),
+                    self.resources.liveness_snapshots.clone(),
+                    heartbeat_state,
+                    heartbeat_config,
+                    self.resources.runtime_execution.clone(),
+                )
+            }))
         };
 
         // Create context with bound subscription factory from resources.
@@ -203,23 +206,18 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
         // Spawn the supervisor task
         let supervisor_name = format!("transform_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<TransformSupervisor<H>>::new(&supervisor_name).spawn(
-            move || async move {
-                let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
-                    supervisor,
-                    event_receiver,
-                    state_watcher_for_task,
-                );
-
-                // Run with the wrapper
-                HandlerSupervisedExt::run(
-                    supervisor_with_events,
-                    TransformState::<H>::Created,
-                    context,
-                )
-                .await
-            },
+        let supervisor_with_events = HandlerSupervisedWithExternalEvents::new(
+            supervisor,
+            event_receiver,
+            state_watcher_for_task,
         );
+        let task = SupervisorTaskBuilder::new(&supervisor_name)
+            .with_publications(publications)
+            .spawn_handler_supervised(
+                supervisor_with_events,
+                TransformState::<H>::Created,
+                context,
+            );
 
         // Build and return handle
         HandleBuilder::new()

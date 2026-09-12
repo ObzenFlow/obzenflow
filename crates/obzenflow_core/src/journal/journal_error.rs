@@ -5,6 +5,14 @@
 /// Journal errors (domain-level, not I/O specific)
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
+    /// Storage may have committed. Callers must neither retry nor refund
+    /// committed-output reservations as if rollback had been established.
+    #[error("journal commit outcome is indeterminate")]
+    CommitIndeterminate {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("Journal is full")]
     Full,
 

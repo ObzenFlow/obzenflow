@@ -15,7 +15,7 @@ use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerOpenTrigger, MetricsLifecycle, MiddlewareLifecycle,
     ObservabilityPayload,
 };
-use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{JournalEvent, SinkOperationFailed, SinkOperationPhase, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::ingress::IngressKey;
@@ -34,8 +34,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-
-use crate::metrics::tail_read;
 
 /// FSM states for metrics aggregator lifecycle
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -167,6 +165,8 @@ pub struct MetricsAggregatorContext {
     pub metrics_store: MetricsStore,
     pub export_interval_secs: u64,
     pub system_id: SystemId,
+    #[doc(hidden)]
+    pub pipeline_writer: Option<WriterId>,
     pub stage_metadata: HashMap<StageId, StageMetadata>,
     /// Composite boundaries (FLOWIP-128a B4), built once from the subgraph
     /// registry; each export projects composite RED metrics from them.
@@ -179,10 +179,8 @@ pub struct MetricsAggregatorContext {
 }
 
 pub(crate) struct MetricsAggregatorIo {
-    pub(crate) data_subscription:
-        crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>,
-    pub(crate) error_subscription:
-        Option<crate::messaging::upstream_subscription::UpstreamSubscription<ChainEvent>>,
+    pub(crate) data_subscription: super::subscription::MetricsSubscription,
+    pub(crate) error_subscription: Option<super::subscription::MetricsSubscription>,
     pub(crate) system_subscription: crate::messaging::system_subscription::SystemSubscription<
         obzenflow_core::event::SystemEvent,
     >,
@@ -331,6 +329,10 @@ impl StageMetrics {
                 .unwrap_or(0)
                 .max(runtime_ctx.errors_total),
         );
+        for (kind, count) in &runtime_ctx.errors_by_kind {
+            let current = self.errors_by_kind.entry(kind.clone()).or_insert(0);
+            *current = (*current).max(*count);
+        }
         self.event_loops_total = self.event_loops_total.max(runtime_ctx.event_loops_total);
         self.event_loops_with_work_total = self
             .event_loops_with_work_total
@@ -391,6 +393,7 @@ impl BoundaryMetricsView for MetricsStore {
 /// Fold the exact historical data-journal prefix captured before the live
 /// tail subscription is attached. A later append begins at the returned
 /// position, so prefix and tail form one gap-free projection input.
+#[cfg(test)]
 async fn fold_composite_duration_prefix(
     reader: &mut dyn obzenflow_core::journal::journal_reader::JournalReader<ChainEvent>,
     journal_stage: StageId,
@@ -427,267 +430,20 @@ impl MetricsAggregatorContext {
         stage_metadata: HashMap<StageId, StageMetadata>,
         composite_boundaries: Vec<obzenflow_core::metrics::CompositeBoundary>,
     ) -> Result<(Self, MetricsAggregatorIo), String> {
-        // Initialize in-memory metrics store so we can seed snapshot fields
-        // before constructing subscriptions (FLOWIP-059 Phase 6).
-        let mut metrics_store = MetricsStore::default();
-        let mut composite_durations = CompositeDurationAccumulator::default();
-
-        // Helper to attach stage names to journals for better diagnostics
-        let with_names = |journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)]| {
-            journals
-                .iter()
-                .map(|(id, journal)| {
-                    let name = stage_metadata
-                        .get(id)
-                        .map(|m| m.name.clone())
-                        .unwrap_or_else(|| format!("{id:?}"));
-                    (*id, name, journal.clone())
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // Phase 6/059d: wide-event snapshot seeding and tail-aware start for data journals.
-        let data_with_names = with_names(&inputs.stage_data_journals);
-        let mut data_start_positions = Vec::with_capacity(data_with_names.len());
-
-        for (stage_id, stage_name, journal) in &data_with_names {
-            // Tail-read last event with runtime_context, if any.
-            let tail_snapshot = match journal.read_last_n(1).await {
-                Ok(mut events) => events
-                    .drain(..)
-                    .find(|env| env.event.runtime_context.is_some()),
-                Err(e) => {
-                    tracing::warn!(
-                        target: "flowip-059",
-                        owner = "metrics_aggregator",
-                        stage_id = ?stage_id,
-                        stage_name = stage_name,
-                        error = ?e,
-                        "Failed to tail-read data journal for snapshot; seeding skipped for this stage"
-                    );
-                    None
-                }
-            };
-
-            if let Some(envelope) = &tail_snapshot {
-                if let Some(runtime_ctx) = &envelope.event.runtime_context {
-                    {
-                        let metrics = metrics_store
-                            .stage_metrics
-                            .entry(*stage_id)
-                            .or_insert_with(StageMetrics::default);
-
-                        metrics.merge_runtime_context(runtime_ctx);
-                    }
-
-                    metrics_store
-                        .update_control_metrics_from_runtime_context(*stage_id, runtime_ctx);
-                }
-
-                // Seed per-stage vector clock watermark from the last envelope
-                let writer_id = *envelope.event.writer_id();
-                let writer_key = writer_id.to_string();
-                let seq = envelope.vector_clock.get(&writer_key);
-                let entry = metrics_store
-                    .stage_vector_clocks
-                    .entry(*stage_id)
-                    .or_insert(0);
-                *entry = (*entry).max(seq);
-            }
-
-            // Determine starting position for data subscription by streaming to EOF.
-            // This is O(n) in time but O(1) in memory and keeps semantics simple.
-            let start_position = match journal.reader().await {
-                Ok(mut reader) => {
-                    match fold_composite_duration_prefix(
-                        reader.as_mut(),
-                        *stage_id,
-                        &composite_boundaries,
-                        &mut composite_durations,
-                    )
-                    .await
-                    {
-                        Ok(position) => position,
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "flowip-059",
-                                owner = "metrics_aggregator",
-                                stage_id = ?stage_id,
-                                stage_name = stage_name,
-                                error = ?e,
-                                "Failed while streaming data journal to determine tail position; starting from 0"
-                            );
-                            0
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "flowip-059",
-                        owner = "metrics_aggregator",
-                        stage_id = ?stage_id,
-                        stage_name = stage_name,
-                        error = ?e,
-                        "Failed to create reader for data journal; starting from 0"
-                    );
-                    0
-                }
-            };
-
-            data_start_positions.push(start_position);
-        }
-
-        tracing::info!(
-            upstream_count = inputs.stage_data_journals.len(),
-            upstream_stages = tracing::field::debug(
-                &inputs
-                    .stage_data_journals
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect::<Vec<_>>(),
-            ),
-            "MetricsAggregator creating data subscription (tail-start)"
-        );
-        // Create subscription for data journals starting at tail positions.
-        // Readers are treated as logically at EOF for historical data
-        // (baseline_at_tail = true) while still observing any new events
-        // appended after subscription creation (FLOWIP-059d).
+        let metrics_store = MetricsStore::default();
+        let composite_durations = CompositeDurationAccumulator::default();
         let data_subscription =
-            crate::messaging::upstream_subscription::UpstreamSubscription::new_at_tail(
-                "metrics_aggregator",
-                &data_with_names,
-                &data_start_positions,
-            )
-            .await
-            .map_err(|e| format!("Failed to create data subscription: {e}"))?;
-
-        // Also seed wide-event snapshots from error journals (late error snapshots),
-        // using the same tail-aware helper. This keeps StageMetrics consistent even
-        // when the last wide event for a stage is written to an error journal.
-        let error_with_names = with_names(&inputs.error_journals);
-        for (stage_id, stage_name, journal) in &error_with_names {
-            match journal.read_last_n(1).await {
-                Ok(mut events) => {
-                    if let Some(envelope) = events
-                        .drain(..)
-                        .find(|env| env.event.runtime_context.is_some())
-                    {
-                        if let Some(runtime_ctx) = &envelope.event.runtime_context {
-                            {
-                                let metrics = metrics_store
-                                    .stage_metrics
-                                    .entry(*stage_id)
-                                    .or_insert_with(StageMetrics::default);
-
-                                metrics.merge_runtime_context(runtime_ctx);
-                            }
-
-                            metrics_store.update_control_metrics_from_runtime_context(
-                                *stage_id,
-                                runtime_ctx,
-                            );
-                        }
-
-                        let writer_id = *envelope.event.writer_id();
-                        let writer_key = writer_id.to_string();
-                        let seq = envelope.vector_clock.get(&writer_key);
-                        let entry = metrics_store
-                            .stage_vector_clocks
-                            .entry(*stage_id)
-                            .or_insert(0);
-                        *entry = (*entry).max(seq);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "flowip-059",
-                        owner = "metrics_aggregator",
-                        stage_id = ?stage_id,
-                        stage_name = stage_name,
-                        error = ?e,
-                        "Failed to tail-read error journal for snapshot; seeding skipped for this stage"
-                    );
-                }
-            }
-        }
-
-        // Determine starting positions for error subscriptions by streaming to EOF.
-        // This mirrors the data journal behavior and ensures error subscriptions
-        // can start from tail while still observing any new events appended after
-        // the metrics aggregator is created.
-        let mut error_start_positions = Vec::with_capacity(error_with_names.len());
-        for (stage_id, stage_name, journal) in &error_with_names {
-            let start_position = match journal.reader().await {
-                Ok(mut reader) => {
-                    let mut pos: u64 = 0;
-                    loop {
-                        match reader.next().await {
-                            Ok(Some(_)) => {
-                                pos += 1;
-                            }
-                            Ok(None) => break,
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "flowip-059",
-                                    owner = "metrics_aggregator",
-                                    stage_id = ?stage_id,
-                                    stage_name = stage_name,
-                                    error = ?e,
-                                    "Failed while streaming error journal to determine tail position; starting from 0"
-                                );
-                                pos = 0;
-                                break;
-                            }
-                        }
-                    }
-                    pos
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "flowip-059",
-                        owner = "metrics_aggregator",
-                        stage_id = ?stage_id,
-                        stage_name = stage_name,
-                        error = ?e,
-                        "Failed to create reader for error journal; starting from 0"
-                    );
-                    0
-                }
-            };
-
-            error_start_positions.push(start_position);
-        }
-
-        if !inputs.error_journals.is_empty() {
-            tracing::info!(
-                upstream_count = inputs.error_journals.len(),
-                upstream_stages = tracing::field::debug(
-                    &inputs
-                        .error_journals
-                        .iter()
-                        .map(|(id, _)| *id)
-                        .collect::<Vec<_>>(),
-                ),
-                "MetricsAggregator creating error subscription (tail-start)"
-            );
-        }
-
-        // Create subscription for error journals (FLOWIP-082g), starting at
-        // computed tail positions so they are treated as logically at EOF for
-        // historical data while still observing any new events appended after
-        // subscription creation.
-        let error_subscription = if !inputs.error_journals.is_empty() {
-            Some(
-                crate::messaging::upstream_subscription::UpstreamSubscription::new_at_tail(
-                    "metrics_aggregator",
-                    &error_with_names,
-                    &error_start_positions,
-                )
+            super::subscription::MetricsSubscription::new(&inputs.stage_data_journals)
                 .await
-                .map_err(|e| format!("Failed to create error subscription: {e}"))?,
-            )
-        } else {
+                .map_err(|error| error.to_string())?;
+        let error_subscription = if inputs.error_journals.is_empty() {
             None
+        } else {
+            Some(
+                super::subscription::MetricsSubscription::new(&inputs.error_journals)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
         };
 
         // Create reader for system journal to receive lifecycle events (FLOWIP-059b)
@@ -724,6 +480,7 @@ impl MetricsAggregatorContext {
             metrics_store,
             export_interval_secs,
             system_id,
+            pipeline_writer: None,
             stage_metadata,
             composite_boundaries,
             composite_durations,
@@ -1216,12 +973,7 @@ impl MetricsStore {
     pub fn pipeline_terminal(&self) -> bool {
         matches!(
             self.pipeline_state.as_str(),
-            "completed"
-                | "failed"
-                | "cancelled"
-                | "drained"
-                | "all_stages_completed"
-                | "stop_requested"
+            "completed" | "failed" | "cancelled" | "not_started"
         )
     }
 
@@ -1429,17 +1181,21 @@ impl FsmAction for MetricsAggregatorAction {
                             _ => {} // Skip draining, drained for now
                         }
                     }
-                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event)
+                        if ctx
+                            .pipeline_writer
+                            .is_none_or(|writer| writer == envelope.event.writer_id) =>
+                    {
                         // Track only essential pipeline events, with monotonic semantics:
                         // - "failed" is sticky and never regresses.
                         // - "completed" never regresses to "drained".
                         // - "drained" is only used when no explicit outcome was ever observed.
                         match event {
-                            obzenflow_core::event::PipelineLifecycleEvent::StopRequested {
+                            obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted {
                                 ..
                             } => {
                                 if store.pipeline_state.is_empty() {
-                                    store.pipeline_state = "stop_requested".to_string();
+                                    store.pipeline_state = "stop_admitted".to_string();
                                 }
                                 tracing::info!("Pipeline: stop requested (metrics view)");
                             }
@@ -1451,6 +1207,11 @@ impl FsmAction for MetricsAggregatorAction {
                                     store.pipeline_state = "all_stages_completed".to_string();
                                 }
                                 tracing::info!("Pipeline: all stages completed (metrics view)");
+                            }
+                            obzenflow_core::event::PipelineLifecycleEvent::NotStarted => {
+                                if !store.pipeline_terminal() {
+                                    store.pipeline_state = "not_started".into();
+                                }
                             }
                             obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
                                 if store.pipeline_state != "failed" {
@@ -1485,7 +1246,7 @@ impl FsmAction for MetricsAggregatorAction {
                                 // Drained is a termination marker only; do not override an
                                 // explicit completed/failed outcome.
                                 match store.pipeline_state.as_str() {
-                                    "failed" | "completed" => {
+                                    "failed" | "completed" | "cancelled" | "not_started" => {
                                         tracing::info!(
                                             "Pipeline: drained event observed after terminal outcome; \
                                              keeping {} as terminal state (metrics view)",
@@ -1887,11 +1648,9 @@ impl FsmAction for MetricsAggregatorAction {
                         metrics.merge_runtime_context(runtime_ctx);
                     }
 
-                    // Track error kinds for breakdown (total bounded later by snapshot errors_total)
-                    if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
-                        let key = kind.clone().unwrap_or(ErrorKind::Unknown);
-                        *metrics.errors_by_kind.entry(key).or_insert(0) += 1;
-                    }
+                    // Error totals and kinds come from the same cumulative
+                    // snapshot. Counting error-marked rows again would duplicate
+                    // errors across forwarded rows and tail refreshes.
                 } // metrics reference dropped here
 
                 if let Some(runtime_ctx) = &event.runtime_context {
@@ -1902,102 +1661,37 @@ impl FsmAction for MetricsAggregatorAction {
 
             MetricsAggregatorAction::ExportMetrics => {
                 tracing::debug!("ExportMetrics action triggered");
-                // Refresh in-memory stage metrics from journal tails before export so
-                // `/metrics` reflects delivery truth even if subscriptions lag.
-                for (stage_id, data_journal) in &ctx.stage_data_journals {
-                    let error_journal = ctx.stage_error_journals.get(stage_id);
-                    if let Some(snapshot) = tail_read::read_stage_metrics_from_tail(
-                        data_journal,
-                        error_journal,
-                        *stage_id,
-                    )
-                    .await
-                    {
-                        let metrics = ctx
-                            .metrics_store
-                            .stage_metrics
-                            .entry(*stage_id)
-                            .or_default();
-
-                        metrics.latest_events_processed_total = Some(
-                            metrics
-                                .latest_events_processed_total
-                                .unwrap_or(0)
-                                .max(snapshot.events_processed_total),
-                        );
-                        metrics.latest_events_accumulated_total = Some(
-                            metrics
-                                .latest_events_accumulated_total
-                                .unwrap_or(0)
-                                .max(snapshot.events_accumulated_total),
-                        );
-                        metrics.latest_events_emitted_total = Some(
-                            metrics
-                                .latest_events_emitted_total
-                                .unwrap_or(0)
-                                .max(snapshot.events_emitted_total),
-                        );
-                        metrics.latest_errors_total = Some(
-                            metrics
-                                .latest_errors_total
-                                .unwrap_or(0)
-                                .max(snapshot.errors_total),
-                        );
-
-                        // Use tail-read error breakdown as authoritative for this stage.
-                        metrics.errors_by_kind = snapshot.errors_by_kind.clone();
-                        metrics.last_in_flight = Some(snapshot.in_flight);
-                        metrics.snapshot_p50_ms = Some(snapshot.recent_p50_ms);
-                        metrics.snapshot_p90_ms = Some(snapshot.recent_p90_ms);
-                        metrics.snapshot_p95_ms = Some(snapshot.recent_p95_ms);
-                        metrics.snapshot_p99_ms = Some(snapshot.recent_p99_ms);
-                        metrics.snapshot_p999_ms = Some(snapshot.recent_p999_ms);
-
-                        // Actual sum - never reconstructed from percentiles
-                        metrics.processing_time_sum_nanos =
-                            Some(snapshot.processing_time_sum_nanos);
-                    }
-
-                    // Refresh control middleware cumulative metrics from the latest runtime_context.
+                // Keep wide metrics current even when the physical cursors lag.
+                // This refresh does not advance input coverage or its watermark:
+                // only the collector's sequential reads can authorise Drained.
+                for (stage_id, journal) in ctx
+                    .stage_data_journals
+                    .iter()
+                    .chain(ctx.stage_error_journals.iter())
+                {
                     if let Some(runtime_ctx) =
-                        tail_read::read_latest_runtime_context_for_stage(data_journal, *stage_id)
-                            .await
+                        crate::metrics::tail_read::read_latest_runtime_context_for_stage(
+                            journal, *stage_id,
+                        )
+                        .await
                     {
                         if let Some(meta) = ctx.stage_metadata.get_mut(stage_id) {
                             if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
-                                if let Some(mode) =
-                                    infer_join_reference_mode_from_fsm_state(&runtime_ctx.fsm_state)
-                                {
-                                    meta.reference_mode = Some(mode.to_string());
-                                }
+                                meta.reference_mode = infer_join_reference_mode_from_fsm_state(
+                                    &runtime_ctx.fsm_state,
+                                )
+                                .map(str::to_owned);
                             }
                         }
-                        if let Some(metrics) = ctx.metrics_store.stage_metrics.get_mut(stage_id) {
-                            metrics.merge_runtime_context(&runtime_ctx);
-                        }
+                        ctx.metrics_store
+                            .stage_metrics
+                            .entry(*stage_id)
+                            .or_default()
+                            .merge_runtime_context(&runtime_ctx);
                         ctx.metrics_store
                             .update_control_metrics_from_runtime_context(*stage_id, &runtime_ctx);
                     }
-                    if let Some(error_journal) = error_journal {
-                        if let Some(runtime_ctx) = tail_read::read_latest_runtime_context_for_stage(
-                            error_journal,
-                            *stage_id,
-                        )
-                        .await
-                        {
-                            if let Some(metrics) = ctx.metrics_store.stage_metrics.get_mut(stage_id)
-                            {
-                                metrics.merge_runtime_context(&runtime_ctx);
-                            }
-                            ctx.metrics_store
-                                .update_control_metrics_from_runtime_context(
-                                    *stage_id,
-                                    &runtime_ctx,
-                                );
-                        }
-                    }
                 }
-
                 ctx.metrics_exporter
                     .publish_app_snapshot(ctx.build_app_metrics_snapshot());
 
@@ -2021,12 +1715,13 @@ impl FsmAction for MetricsAggregatorAction {
                     ),
                 );
 
-                if let Err(e) = ctx.system_journal.append(export_event, None).await {
-                    tracing::warn!(
-                        journal_error = %e,
-                        "Failed to publish metrics watermark event; continuing without system journal entry"
-                    );
-                }
+                crate::supervised_base::publication::append(
+                    &ctx.system_journal,
+                    export_event,
+                    None,
+                )
+                .await
+                .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
                 Ok(())
             }
@@ -2050,8 +1745,7 @@ impl FsmAction for MetricsAggregatorAction {
                 );
 
                 // Publish to system journal
-                ctx.system_journal
-                    .append(drain_event, None)
+                crate::supervised_base::publication::append(&ctx.system_journal, drain_event, None)
                     .await
                     .map(|_| ())
                     .map_err(|e| {
@@ -2129,12 +1823,12 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 
                 on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                     let event = event.clone();
-                    let last_event_id = ctx.metrics_store.last_event_id;
                     Box::pin(async move {
                         match event {
                             MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
                                 let pipeline_event = match &envelope.event.event {
-                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event)
+                                        if ctx.pipeline_writer.is_none_or(|writer| writer == envelope.event.writer_id) => {
                                         Some(event)
                                     }
                                     _ => None,
@@ -2153,23 +1847,15 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                     Some(
                                         obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
                                             | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
-                                            | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::NotStarted
                                     )
                                 );
 
                                 if should_finalize {
-                                    let publish_last_event_id = last_event_id;
                                     return Ok(Transition {
-                                        next_state: MetricsAggregatorState::Drained { last_event_id },
-                                        actions: vec![
-                                            MetricsAggregatorAction::ProcessSystemEvent {
-                                                envelope: envelope.clone(),
-                                            },
-                                            MetricsAggregatorAction::ExportMetrics,
-                                            MetricsAggregatorAction::PublishDrainComplete {
-                                                last_event_id: publish_last_event_id,
-                                            },
-                                        ],
+                                        next_state: MetricsAggregatorState::Draining,
+                                        actions: vec![MetricsAggregatorAction::ProcessSystemEvent { envelope: envelope.clone() }],
                                     });
                                 }
 
@@ -2257,6 +1943,15 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
         }
 
             state MetricsAggregatorState::Draining {
+            on MetricsAggregatorEvent::ExportMetrics => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                Box::pin(async move {
+                    Ok(Transition {
+                        next_state: MetricsAggregatorState::Draining,
+                        actions: vec![MetricsAggregatorAction::ExportMetrics],
+                    })
+                })
+            };
+
             on MetricsAggregatorEvent::FlowTerminal => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                 Box::pin(async move {
                     let last_event_id = ctx.metrics_store.last_event_id;
@@ -2275,12 +1970,12 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 
                 on MetricsAggregatorEvent::ProcessSystemEvent => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
                     let event = event.clone();
-                    let last_event_id = ctx.metrics_store.last_event_id;
                     Box::pin(async move {
                         match event {
                             MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
                                 let pipeline_event = match &envelope.event.event {
-                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => {
+                                    obzenflow_core::event::SystemEventType::PipelineLifecycle(event)
+                                        if ctx.pipeline_writer.is_none_or(|writer| writer == envelope.event.writer_id) => {
                                         Some(event)
                                     }
                                     _ => None,
@@ -2299,23 +1994,15 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                     Some(
                                         obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
                                             | obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
-                                            | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                                            | obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. }
+                                            | obzenflow_core::event::PipelineLifecycleEvent::NotStarted
                                     )
                                 );
 
                                 if should_finalize {
-                                    let publish_last_event_id = last_event_id;
                                     return Ok(Transition {
-                                        next_state: MetricsAggregatorState::Drained { last_event_id },
-                                        actions: vec![
-                                            MetricsAggregatorAction::ProcessSystemEvent {
-                                                envelope: envelope.clone(),
-                                            },
-                                            MetricsAggregatorAction::ExportMetrics,
-                                            MetricsAggregatorAction::PublishDrainComplete {
-                                                last_event_id: publish_last_event_id,
-                                            },
-                                        ],
+                                        next_state: MetricsAggregatorState::Draining,
+                                        actions: vec![MetricsAggregatorAction::ProcessSystemEvent { envelope: envelope.clone() }],
                                     });
                                 }
 
@@ -2870,6 +2557,7 @@ mod tests {
             metrics_store: store,
             export_interval_secs: 10,
             system_id: obzenflow_core::SystemId::new(),
+            pipeline_writer: None,
             stage_metadata,
             composite_boundaries: vec![obzenflow_core::metrics::CompositeBoundary {
                 composite_id: obzenflow_core::id::CompositeId::new("saga:checkout"),

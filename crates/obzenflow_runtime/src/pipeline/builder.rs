@@ -8,9 +8,11 @@
 //! to the FSM architecture patterns, returning only a FlowHandle for control.
 
 use super::{
-    fsm::{PipelineContext, PipelineEvent, PipelineState},
+    fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState},
     handle::{FlowHandle, FlowHandleExtras},
+    metrics::prepare_metrics,
     supervisor::PipelineSupervisor,
+    PipelineState,
 };
 use crate::journal::RunSubstrateState;
 use crate::{
@@ -19,10 +21,7 @@ use crate::{
     id_conversions::StageIdExt,
     stages::common::stage_handle::BoxedStageHandle,
     stages::LivenessSnapshots,
-    supervised_base::{
-        BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt,
-        SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
-    },
+    supervised_base::{BuilderError, ChannelBuilder, HandleBuilder, SupervisorTaskBuilder},
 };
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
@@ -194,13 +193,9 @@ impl PipelineBuilder {
     }
 }
 
-#[async_trait::async_trait]
-impl SupervisorBuilder for PipelineBuilder {
-    type Handle = FlowHandle;
-    type Error = BuilderError;
-
+impl PipelineBuilder {
     /// Build and start the pipeline, returning a FlowHandle
-    async fn build(self) -> Result<Self::Handle, Self::Error> {
+    pub async fn build(self) -> Result<FlowHandle, BuilderError> {
         // FD preflight for disk journals runs at the factory seam via
         // FlowJournalFactory::resource_preflight (FLOWIP-086n, moved by
         // FLOWIP-120u), before any journal is created.
@@ -325,12 +320,12 @@ impl SupervisorBuilder for PipelineBuilder {
 
         // Retain the existing stage teardown handles for emergency cleanup if
         // the pipeline supervisor itself must be aborted during publication.
-        let stage_cleanup = stage_map
+        let stage_cleanup: Vec<_> = stage_map
             .values()
             .chain(source_map.values())
             .cloned()
             .collect();
-        let pipeline_context = PipelineContext {
+        let mut pipeline_context = PipelineContext {
             system_id,
             topology: self.topology.clone(),
             flow_name: flow_name.clone(),
@@ -345,7 +340,8 @@ impl SupervisorBuilder for PipelineBuilder {
             backpressure_registry: self.backpressure_registry.clone(),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
-            metrics_handle: None,
+            resources: Default::default(),
+            progress: Default::default(),
             contract_status: HashMap::new(),
             contract_pairs: HashMap::new(),
             expected_contract_pairs,
@@ -361,7 +357,7 @@ impl SupervisorBuilder for PipelineBuilder {
                 .flow_effective_config
                 .as_ref()
                 .map(|cfg| {
-                    crate::pipeline::supervisor::SourceContractStrictMode::from_token(
+                    super::config::SourceContractStrictMode::from_token(
                         cfg.source_contract_strict_mode(),
                     )
                 })
@@ -373,72 +369,49 @@ impl SupervisorBuilder for PipelineBuilder {
                 .unwrap_or(5_000),
         };
 
-        let stop_status = pipeline_context.stop_intent.status_receiver();
-        let published_outcome = pipeline_context.termination.published.clone();
-
-        // Create channels using the common infrastructure
-        let (event_sender, event_receiver, state_watcher) =
-            ChannelBuilder::<PipelineEvent, PipelineState>::new()
-                .with_event_buffer(100)
-                .build(PipelineState::Created);
-
-        // Create supervisor (note: no public new() method)
-        let supervisor = PipelineSupervisor {
-            name: "pipeline_supervisor".to_string(),
-            system_id,
-            system_journal: self.system_journal.clone(),
-            last_barrier_log: None,
-            last_manual_wait_log: None,
-            drain_idle_iters: 0,
-        };
-
-        // Clone what we need for the task
-        let state_watcher_for_task = state_watcher.clone();
-
-        // Spawn the supervisor task with proper FSM lifecycle
-        tracing::debug!("About to create pipeline supervisor task");
-
-        // Wrap the supervisor so external control events can be injected
-        // consistently (FLOWIP-086i, FLOWIP-051m Phase 1c).
-        let supervisor_with_events = SelfSupervisedWithExternalEvents::new(
-            supervisor,
-            event_receiver,
-            state_watcher_for_task,
-        );
-
-        let supervisor_task = SupervisorTaskBuilder::<PipelineSupervisor>::new(
-            "pipeline_supervisor",
-        )
-        .spawn(move || async move {
-            tracing::debug!("Pipeline supervisor task starting");
-
-            // Run the supervisor with FSM control
-            let result = SelfSupervisedExt::run(
-                supervisor_with_events,
-                PipelineState::Created,
-                pipeline_context,
-            )
-            .await;
-
-            match &result {
-                Ok(()) => tracing::info!("Pipeline supervisor run() completed successfully"),
-                Err(e) => tracing::error!("Pipeline supervisor run() failed: {}", e),
+        // Establish context Drop ownership before the first fallible await.
+        // A returned failure joins supplied stages; dropping this build future
+        // requests cancellation through that same context fallback.
+        let preparation = async {
+            pipeline_context.completion_subscription =
+                Some(crate::messaging::SystemSubscription::new(
+                    self.system_journal
+                        .reader()
+                        .await
+                        .map_err(|e| BuilderError::ContextCreationError(e.to_string()))?,
+                    "pipeline_supervisor".into(),
+                ));
+            pipeline_context.resources.prepared_metrics =
+                prepare_metrics(&pipeline_context).await?;
+            Ok::<(), BuilderError>(())
+        }
+        .await;
+        if let Err(error) = preparation {
+            for handle in &stage_cleanup {
+                handle.request_abort();
             }
-            result
-        });
-        tracing::debug!("Pipeline supervisor task handle created");
-
-        // Give the supervisor task a chance to start before sending events
-        tokio::task::yield_now().await;
-        tracing::debug!("Yielded to allow pipeline supervisor to start");
-
-        // Send initial Materialize event to bootstrap the pipeline
-        tracing::debug!("About to send Materialize event");
-        event_sender
-            .send(PipelineEvent::Materialize)
-            .await
-            .map_err(|_| BuilderError::Other("Failed to send materialize event".to_string()))?;
-        tracing::debug!("Materialize event sent");
+            for handle in &stage_cleanup {
+                if let Err(join_error) = handle.abort_and_join().await {
+                    tracing::error!(%join_error, "Stage failed during pipeline construction cleanup");
+                }
+            }
+            return Err(error);
+        }
+        let published_outcome = pipeline_context.termination.published.clone();
+        let metrics = pipeline_context.resources.metrics.clone();
+        let operational_failure = pipeline_context.resources.failure.clone();
+        let publications = pipeline_context.resources.publications.clone();
+        let (event_sender, event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Created);
+        let supervisor = PipelineSupervisor::new(
+            system_id,
+            event_receiver,
+            state_watcher.clone(),
+            operational_failure.clone(),
+        );
+        let supervisor_task = SupervisorTaskBuilder::new("pipeline_supervisor")
+            .with_publications(publications)
+            .spawn_self_supervised(supervisor, PipelineFsmState::Created, pipeline_context);
 
         // Build the standard handle first
         let standard_handle = HandleBuilder::new()
@@ -462,7 +435,8 @@ impl SupervisorBuilder for PipelineBuilder {
             standard_handle,
             FlowHandleExtras {
                 stage_cleanup,
-                stop_status,
+                metrics,
+                operational_failure,
                 published_outcome,
                 topology,
                 flow_name,
@@ -480,85 +454,6 @@ impl SupervisorBuilder for PipelineBuilder {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::feed_plan::{FactVisibility, FeedRole, LogicalFeed, PayloadTypeDescriptor};
-    use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, StageType, TypeHintInfo};
-
-    #[test]
-    fn expected_contract_keys_preserve_multiple_logical_feeds_for_stage_pair() {
-        let upstream = StageId::new();
-        let downstream = StageId::new();
-        let upstream_topology_id = upstream.to_topology_id();
-        let downstream_topology_id = downstream.to_topology_id();
-        let topology = Topology::new_unvalidated(
-            vec![
-                StageInfo::new(upstream_topology_id, "upstream", StageType::Transform),
-                StageInfo::new(downstream_topology_id, "downstream", StageType::Join),
-            ],
-            vec![DirectedEdge::new(
-                upstream_topology_id,
-                downstream_topology_id,
-                EdgeKind::Forward,
-            )],
-        )
-        .expect("topology");
-
-        let first_type = TypeHintInfo::exact("crate::FirstFact");
-        let second_type = TypeHintInfo::exact("crate::SecondFact");
-        let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
-        let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
-        let feed_plan = FeedPlan::new(
-            HashMap::new(),
-            vec![
-                LogicalFeed {
-                    key: first_key.clone(),
-                    selected_payload: PayloadTypeDescriptor::from_type_hint(
-                        first_type,
-                        FactVisibility::Routable,
-                    ),
-                },
-                LogicalFeed {
-                    key: second_key.clone(),
-                    selected_payload: PayloadTypeDescriptor::from_type_hint(
-                        second_type,
-                        FactVisibility::Routable,
-                    ),
-                },
-            ],
-        );
-
-        let keys = derive_expected_contract_keys(&topology, &feed_plan);
-
-        assert_eq!(keys.len(), 2);
-        assert!(keys.contains(&first_key));
-        assert!(keys.contains(&second_key));
-        assert!(!keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
-    }
-
-    #[test]
-    fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
-        let upstream = StageId::new();
-        let downstream = StageId::new();
-        let upstream_topology_id = upstream.to_topology_id();
-        let downstream_topology_id = downstream.to_topology_id();
-        let topology = Topology::new_unvalidated(
-            vec![
-                StageInfo::new(upstream_topology_id, "upstream", StageType::Transform),
-                StageInfo::new(downstream_topology_id, "downstream", StageType::Sink),
-            ],
-            vec![DirectedEdge::new(
-                upstream_topology_id,
-                downstream_topology_id,
-                EdgeKind::Forward,
-            )],
-        )
-        .expect("topology");
-
-        let keys = derive_expected_contract_keys(&topology, &FeedPlan::default());
-
-        assert_eq!(keys.len(), 1);
-        assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
-    }
-}
+#[cfg(any(test, feature = "test-support"))]
+#[path = "tests/builder.rs"]
+pub(crate) mod tests;
