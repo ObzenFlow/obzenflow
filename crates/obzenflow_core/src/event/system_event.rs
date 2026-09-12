@@ -470,7 +470,13 @@ pub enum MetricsCoordinationEvent {
     DrainRequested,
     Drained,
     Shutdown,
-    Exported { watermark: VectorClock },
+    /// Stage keys cover only the bound stage writer's sequentially folded
+    /// data-journal component. Error rails and archived/foreign writers are
+    /// not represented as stage-data coverage. System keys cover system facts.
+    /// Complete physical observation requires successful metrics Drained.
+    Exported {
+        watermark: VectorClock,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

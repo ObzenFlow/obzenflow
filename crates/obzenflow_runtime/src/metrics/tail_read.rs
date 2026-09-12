@@ -4,10 +4,9 @@
 
 //! Shared tail-read utilities for metrics.
 //!
-//! These helpers provide a single, journal-based source of truth for
-//! stage- and flow-level metrics. Both the metrics aggregator and
-//! supervisors should use these functions so that `/metrics` and SSE
-//! lifecycle events report consistent data.
+//! Stateless stage and flow lifecycle projections read wide journal snapshots
+//! through these helpers. The collector's cached refresh shares their search
+//! windows and stage qualification, retaining its own observation state.
 
 use obzenflow_core::event::context::{RuntimeContext, StageType};
 use obzenflow_core::event::ChainEvent;
@@ -39,14 +38,18 @@ pub async fn read_latest_runtime_context(
     // In most flows, the last few events contain a runtime_context snapshot.
     // However, some stages can end with a large number of control or forwarded
     // events that omit runtime_context, so we expand the search window.
-    for n in [1, 5, 20, 100, 500, 2_000, 10_000, 50_000] {
+    for n in super::snapshot::SEARCH_WINDOWS {
         match journal.read_last_n(n).await {
             Ok(events) => {
+                let reached_beginning = events.len() < n;
                 // IMPORTANT: read_last_n returns most recent first (API contract).
                 for env in events.into_iter() {
                     if let Some(ctx) = env.event.runtime_context {
                         return Some(ctx);
                     }
+                }
+                if reached_beginning {
+                    break;
                 }
             }
             Err(e) => {
@@ -72,15 +75,19 @@ pub async fn read_latest_runtime_context_for_stage(
     // See read_latest_runtime_context. The stage-filtered variant can be more
     // sensitive to "tail noise" because forwarded events often re-stamp
     // flow_context but omit runtime_context.
-    for n in [1, 5, 20, 100, 500, 2_000, 10_000, 50_000] {
+    for n in super::snapshot::SEARCH_WINDOWS {
         match journal.read_last_n(n).await {
             Ok(events) => {
+                let reached_beginning = events.len() < n;
                 for env in events.into_iter() {
                     if let Some(ctx) = env.event.runtime_context.clone() {
                         if env.event.flow_context.stage_id == stage_id {
                             return Some(ctx);
                         }
                     }
+                }
+                if reached_beginning {
+                    break;
                 }
             }
             Err(e) => {

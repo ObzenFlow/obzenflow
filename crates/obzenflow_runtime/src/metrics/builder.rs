@@ -167,7 +167,7 @@ impl PreparedMetricsAggregator {
             data_subscription: Some(metrics_io.data_subscription),
             error_subscription: metrics_io.error_subscription,
             system_subscription: Some(metrics_io.system_subscription),
-            export_timer: None,
+            system_retry_at: None,
             next_input: 0,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),

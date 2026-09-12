@@ -7,12 +7,11 @@
 //! The supervisor owns the FSM directly and runs autonomously.
 //! Once started, all communication happens through journal events only.
 
-use super::subscription::MetricsSubscription;
+use super::subscription::{MetricsSubscription, IDLE_BACKOFF};
 use crate::messaging::system_subscription::SystemSubscription;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
-use futures::FutureExt;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::id::SystemId;
@@ -23,8 +22,6 @@ use super::fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
     MetricsAggregatorState, MetricsJournalKind,
 };
-
-const IDLE_BACKOFF_MS: u64 = 10;
 
 /// The supervisor that manages the metrics aggregator
 pub(crate) struct MetricsAggregatorSupervisor {
@@ -40,7 +37,7 @@ pub(crate) struct MetricsAggregatorSupervisor {
     pub(crate) data_subscription: Option<MetricsSubscription>,
     pub(crate) error_subscription: Option<MetricsSubscription>,
     pub(crate) system_subscription: Option<SystemSubscription<SystemEvent>>,
-    pub(crate) export_timer: Option<tokio::time::Interval>,
+    pub(crate) system_retry_at: Option<tokio::time::Instant>,
     pub(crate) next_input: usize,
 
     pub(crate) state_watcher: StateWatcher<MetricsAggregatorState>,
@@ -134,81 +131,130 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             }
 
             MetricsAggregatorState::Running | MetricsAggregatorState::Draining => {
-                let timer = self.export_timer.get_or_insert_with(|| {
-                    let mut timer = tokio::time::interval(std::time::Duration::from_secs(
-                        ctx.export_interval_secs.max(1),
-                    ));
-                    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    timer
-                });
-                if timer.tick().now_or_never().is_some() {
-                    return Ok(EventLoopDirective::Transition(
-                        MetricsAggregatorEvent::ExportMetrics,
-                    ));
+                use tokio::time::Instant;
+                let terminal = ctx.metrics_store.pipeline_terminal();
+                if terminal {
+                    for subscription in [&mut self.data_subscription, &mut self.error_subscription]
+                        .into_iter()
+                        .flatten()
+                    {
+                        subscription.observe_terminal();
+                    }
                 }
-                // The current pipeline terminal fixes the system endpoint. All
-                // stage producers have settled before it can be committed.
-                for _ in 0..3 {
+                let export_at = ctx
+                    .metrics_store
+                    .last_export_completed
+                    .map(|at| at + std::time::Duration::from_secs(ctx.export_interval_secs.max(1)));
+                // Input and export eligibility share one rotation. Each read
+                // settles before advancing; actions fold the entire batch before
+                // this supervisor is dispatched again.
+                for _ in 0..4 {
                     let input = self.next_input;
-                    self.next_input = (input + 1) % 3;
                     if input == 0 {
-                        if !ctx.metrics_store.pipeline_terminal() {
+                        if !terminal && self.system_retry_at.is_none_or(|at| at <= Instant::now()) {
                             if let Some(subscription) = &mut self.system_subscription {
-                                match subscription.poll_next().await {
+                                let result = subscription.poll_next().await;
+                                self.next_input = 1;
+                                match result {
                                     PollResult::Event(envelope) => {
+                                        self.system_retry_at = None;
                                         return Ok(EventLoopDirective::Transition(
                                             MetricsAggregatorEvent::ProcessSystemEvent {
                                                 envelope: Box::new(envelope),
                                             },
-                                        ))
+                                        ));
                                     }
                                     PollResult::Error(error) => {
                                         return Ok(EventLoopDirective::Transition(
                                             MetricsAggregatorEvent::Error(error.to_string()),
                                         ))
                                     }
-                                    _ => {}
+                                    _ => self.system_retry_at = Some(Instant::now() + IDLE_BACKOFF),
                                 }
                             }
                         }
-                        continue;
-                    }
-                    let (subscription, journal_kind) = if input == 1 {
-                        (&mut self.data_subscription, MetricsJournalKind::Data)
+                        self.next_input = 1;
+                    } else if input < 3 {
+                        let (subscription, journal_kind) = if input == 1 {
+                            (&mut self.data_subscription, MetricsJournalKind::Data)
+                        } else {
+                            (&mut self.error_subscription, MetricsJournalKind::Error)
+                        };
+                        if let Some(subscription) = subscription {
+                            let result = subscription.poll_batch().await;
+                            self.next_input = input + 1;
+                            match result {
+                                Ok(Some(batch)) => {
+                                    return Ok(EventLoopDirective::Transition(
+                                        MetricsAggregatorEvent::ProcessBatch {
+                                            events: batch.events,
+                                            journal_kind,
+                                            journal_stage: batch.stage,
+                                        },
+                                    ))
+                                }
+                                Err(error) => {
+                                    return Ok(EventLoopDirective::Transition(
+                                        MetricsAggregatorEvent::Error(error.to_string()),
+                                    ))
+                                }
+                                Ok(None) => {}
+                            }
+                        }
+                        self.next_input = input + 1;
                     } else {
-                        (&mut self.error_subscription, MetricsJournalKind::Error)
-                    };
-                    if let Some(subscription) = subscription {
-                        match subscription.poll_next().await {
-                            PollResult::Event(envelope) => {
-                                return Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::ProcessBatch {
-                                        events: vec![envelope],
-                                        journal_kind,
-                                        journal_stage: subscription
-                                            .last_delivered_upstream_stage()
-                                            .expect("physical reader identity"),
-                                    },
-                                ))
-                            }
-                            PollResult::Error(error) => {
-                                return Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::Error(error.to_string()),
-                                ))
-                            }
-                            _ => {}
+                        self.next_input = 0;
+                        // Ready memory reads need not yield. Give cancellation
+                        // and other tasks service at the rotation boundary.
+                        tokio::task::yield_now().await;
+                        if terminal
+                            && [&self.data_subscription, &self.error_subscription]
+                                .into_iter()
+                                .flatten()
+                                .all(MetricsSubscription::is_complete)
+                        {
+                            ctx.metrics_store.ensure_snapshots_reconciled()?;
+                            ctx.metrics_store.inputs_covered = true;
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::FlowTerminal,
+                            ));
+                        }
+                        if export_at.is_none_or(|at| at <= Instant::now()) {
+                            return Ok(EventLoopDirective::Transition(
+                                MetricsAggregatorEvent::ExportMetrics,
+                            ));
                         }
                     }
                 }
-                if ctx.metrics_store.pipeline_terminal() {
+                // A rotation that began at export eligibility may discover
+                // its last ends afterwards. Finalisation must not sleep until
+                // the next periodic export in that case either.
+                if terminal
+                    && [&self.data_subscription, &self.error_subscription]
+                        .into_iter()
+                        .flatten()
+                        .all(MetricsSubscription::is_complete)
+                {
+                    ctx.metrics_store.ensure_snapshots_reconciled()?;
+                    ctx.metrics_store.inputs_covered = true;
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::FlowTerminal,
                     ));
                 }
-                tokio::select! {
-                    _ = self.export_timer.as_mut().expect("initialised").tick() => Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::ExportMetrics)),
-                    _ = idle_backoff() => Ok(EventLoopDirective::Continue),
+                let mut wake_at = export_at.unwrap_or_else(Instant::now);
+                if !terminal {
+                    wake_at = wake_at.min(self.system_retry_at.unwrap_or_else(Instant::now));
                 }
+                for subscription in [&self.data_subscription, &self.error_subscription]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(at) = subscription.next_probe() {
+                        wake_at = wake_at.min(at);
+                    }
+                }
+                tokio::time::sleep_until(wake_at).await;
+                Ok(EventLoopDirective::Continue)
             }
 
             MetricsAggregatorState::Drained { .. } => {
@@ -226,10 +272,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     }
 }
 
-#[inline]
-async fn idle_backoff() {
-    tokio::time::sleep(std::time::Duration::from_millis(IDLE_BACKOFF_MS)).await;
-}
 // All business logic has been moved to FSM actions - no free functions needed!
 
 impl Drop for MetricsAggregatorSupervisor {
@@ -353,7 +395,7 @@ mod tests {
             data_subscription: None,
             error_subscription: None,
             system_subscription: None,
-            export_timer: None,
+            system_retry_at: None,
             next_input: 0,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),

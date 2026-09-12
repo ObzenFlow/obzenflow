@@ -9,8 +9,7 @@
 //! The barrier consumes [`crate::pipeline::FlowHandle::system_journal`] and
 //! filters for `MetricsCoordination::Exported` / `MetricsCoordination::Drained`
 //! events. It does not invent a new aggregator surface; the events it relies
-//! on are emitted by the production code at
-//! `obzenflow_runtime/src/metrics/fsm.rs:1830-1907`.
+//! on are emitted by the production actions in `metrics/fsm.rs`.
 //!
 //! Cursor semantic is catch-up-then-poll: construction records a baseline
 //! over the system journal and the wait loops scan from that baseline so a
@@ -63,8 +62,8 @@ pub enum MetricsBarrierError {
 pub struct MetricsBarrier {
     system_journal: Arc<dyn Journal<SystemEvent>>,
     /// Writer key the watermark map uses for this stage, or `None` for the
-    /// flow-wide drain barrier. Matches the production export loop at
-    /// `metrics/fsm.rs:1846-1848`, which inserts entries with
+    /// flow-wide drain barrier. Matches the production ExportMetrics action,
+    /// which inserts entries with
     /// `WriterId::from(*stage_id).to_string()`.
     stage_writer_key: Option<String>,
     /// Catch-up baseline: total envelopes already present on the system
@@ -113,7 +112,9 @@ impl MetricsBarrier {
     }
 
     /// Wait until the metrics aggregator has exported a snapshot covering
-    /// this stage's writer up to `target_seq`.
+    /// this stage's writer in its own data journal up to `target_seq`.
+    /// Error-rail or archived-writer sequences cannot be used as this target.
+    /// This watermark does not prove complete physical input coverage.
     ///
     /// Catch-up-then-poll: scans the system journal from the construction
     /// baseline first, so a covering `Exported` event appended before this
@@ -152,6 +153,8 @@ impl MetricsBarrier {
     /// signal. Resolves on either `MetricsCoordination::Drained` or
     /// `MetricsCoordination::Shutdown` to match the existing
     /// historical drain polling contract.
+    /// Shutdown alone also follows failure. Completion acceptance must inspect
+    /// successful Drained and the final Exported/Shutdown settlement ordering.
     pub async fn wait_for_drained(&self) -> Result<(), MetricsBarrierError> {
         let mut scan_from = self.baseline_offset;
         loop {

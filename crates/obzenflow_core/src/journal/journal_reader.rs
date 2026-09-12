@@ -41,6 +41,11 @@ where
     ///
     /// This is a hint - `next()` may still return None even if this returns false
     /// (e.g., if new events are being written concurrently).
+    /// Metrics completion requires a completed `next() == Ok(None)` followed
+    /// by a positive end indication after the current pipeline terminal fact.
+    /// Providers and reader decorators used by metrics must implement/delegate
+    /// this indication. The default false leaves completion unproven; it is
+    /// never a licence to convert an unknown or partial-frame tail into success.
     fn is_at_end(&self) -> bool {
         // Default implementation - can be overridden for efficiency
         false

@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime journal scenarios composed with the canonical Infra memory backend.
+//! Runtime pipeline scenarios composed with Infra memory journals; metrics
+//! collector conformance also exercises the canonical disk backend.
 //! Every scenario remains a separately discovered test with its original name.
 
 use obzenflow_core::FlowId;
@@ -313,4 +314,87 @@ async fn subscription_or_metrics_preparation_failure_joins_every_supplied_stage(
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_coverage() {
     obzenflow_runtime::testing::metrics::metrics_tail_refresh_keeps_counts_current_without_advancing_input_coverage(journals).await;
+}
+
+async fn metrics_backends<F, Fut>(scenario: F)
+where
+    F: Fn(Box<dyn FlowJournalFactory>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    for disk in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let factory: Box<dyn FlowJournalFactory> = if disk {
+            Box::new(
+                obzenflow_infra::journal::DiskJournalFactory::new(
+                    dir.path().to_path_buf(),
+                    FlowId::new(),
+                )
+                .unwrap(),
+            )
+        } else {
+            journals()
+        };
+        println!("metrics backend: {}", if disk { "disk" } else { "memory" });
+        scenario(factory).await;
+    }
+}
+
+#[tokio::test]
+async fn metrics_cache_bounds_negative_search_and_reuses_examined_heads() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_cache_bounds_negative_search_and_reuses_examined_heads).await;
+}
+
+#[tokio::test]
+async fn metrics_snapshot_selection_survives_both_refresh_failure_orders() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_snapshot_selection_survives_both_refresh_failure_orders).await;
+}
+
+#[tokio::test]
+async fn metrics_capped_search_keeps_sequential_selection_and_search_uncertainty() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_capped_search_keeps_sequential_selection_and_search_uncertainty).await;
+}
+
+#[tokio::test]
+async fn metrics_tail_results_bind_to_the_window_actually_examined() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_tail_results_bind_to_the_window_actually_examined).await;
+}
+
+#[tokio::test]
+async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence).await;
+}
+
+#[tokio::test]
+async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_publication() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_publication).await;
+}
+
+#[tokio::test]
+async fn metrics_physical_completion_folds_all_rails_through_the_current_terminal() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_physical_completion_folds_all_rails_through_the_current_terminal).await;
+}
+
+#[tokio::test]
+async fn metrics_final_refresh_inconsistency_fails_without_successful_drained() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_final_refresh_inconsistency_fails_without_successful_drained).await;
+}
+
+#[tokio::test]
+async fn metrics_pending_read_cancellation_never_publishes_drained() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_pending_read_cancellation_never_publishes_drained).await;
+}
+
+#[tokio::test]
+async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_watermarks_exclude_each_forwarded_control_and_error_witness).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not_wait_for_export() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not_wait_for_export).await;
 }

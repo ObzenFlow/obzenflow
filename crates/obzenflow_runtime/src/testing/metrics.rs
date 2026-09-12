@@ -4,6 +4,8 @@
 
 //! Metrics journal scenarios supplied with real journals by outer tests.
 
+pub use crate::metrics::tests::*;
+
 use crate::journal::FlowJournalFactory;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::journal_name::JournalName;
@@ -112,8 +114,8 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
     }
     assert!(context.metrics_store.last_event_id.is_none());
     assert!(matches!(
-        io.data_subscription.poll_next().await,
-        crate::messaging::PollResult::Event(row) if row.event.id == rows[0].1.event.id
+        io.data_subscription.poll_batch().await,
+        Ok(Some(batch)) if batch.events[0].event.id == rows[0].1.event.id
     ));
     assert!(!system
         .read_all_unordered()

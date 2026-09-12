@@ -228,6 +228,8 @@ pub struct AppMetricsSnapshot {
     /// Per-stage vector clock watermark (FLOWIP-059c).
     /// This mirrors MetricsStore.stage_vector_clocks and is used by exporters
     /// to expose obzenflow_stage_vector_clock metrics.
+    /// Each value covers this stage writer in its own data journal only;
+    /// error/foreign/replay rows cannot manufacture current-stage coverage.
     pub stage_vector_clocks: HashMap<StageId, u64>,
 
     /// Exact logical throughput at connected named composite ports
