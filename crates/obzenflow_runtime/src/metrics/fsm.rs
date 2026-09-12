@@ -8,6 +8,7 @@
 //! Initializing -> Running -> Draining -> Drained
 //! Event processing happens directly without FSM state tracking
 
+use super::snapshot::{JournalBinding, SnapshotObservation};
 use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::{HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot};
@@ -99,7 +100,7 @@ pub enum MetricsAggregatorEvent {
 
 /// Durable journal rail from which a metrics event was read. Composite
 /// boundary duration observes only committed data-journal facts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MetricsJournalKind {
     Data,
     Error,
@@ -190,6 +191,9 @@ pub(crate) struct MetricsAggregatorIo {
 #[derive(Default)]
 #[doc(hidden)]
 pub struct MetricsStore {
+    pub(crate) snapshot_observations: HashMap<JournalBinding, SnapshotObservation>,
+    pub(crate) last_export_completed: Option<tokio::time::Instant>,
+    pub(crate) inputs_covered: bool,
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
     pub last_event_id: Option<EventId>,
     pub flow_start_time: Option<std::time::Instant>,
@@ -201,7 +205,8 @@ pub struct MetricsStore {
     pub sink_operation_failures: HashMap<(StageId, SinkOperationPhase, ErrorKind), u64>,
 
     /// Per-stage vector clock watermark (FLOWIP-059c)
-    /// Tracks the highest writer sequence observed for each stage's journal writer.
+    /// Highest bound-stage writer component folded from that stage's data journal.
+    /// Foreign writers and error rails never advance this coverage watermark.
     pub stage_vector_clocks: HashMap<StageId, u64>,
 
     /// Per-system vector clock watermark (FLOWIP-059c).
@@ -307,7 +312,11 @@ impl StageMetrics {
         runtime_ctx: &obzenflow_core::runtime_context::RuntimeContext,
     ) {
         self.last_in_flight = Some(runtime_ctx.in_flight);
-        self.last_failures_total = Some(runtime_ctx.failures_total);
+        self.last_failures_total = Some(
+            self.last_failures_total
+                .unwrap_or(0)
+                .max(runtime_ctx.failures_total),
+        );
         self.join_reference_since_last_stream = Some(runtime_ctx.join_reference_since_last_stream);
         self.latest_events_processed_total = Some(
             self.latest_events_processed_total
@@ -342,7 +351,11 @@ impl StageMetrics {
         self.snapshot_p95_ms = Some(runtime_ctx.recent_p95_ms);
         self.snapshot_p99_ms = Some(runtime_ctx.recent_p99_ms);
         self.snapshot_p999_ms = Some(runtime_ctx.recent_p999_ms);
-        self.processing_time_sum_nanos = Some(runtime_ctx.processing_time_sum_nanos);
+        self.processing_time_sum_nanos = Some(
+            self.processing_time_sum_nanos
+                .unwrap_or(0)
+                .max(runtime_ctx.processing_time_sum_nanos),
+        );
 
         for count in &runtime_ctx.data_outputs_by_event_type {
             let current = self
@@ -358,6 +371,20 @@ impl StageMetrics {
                 .or_insert(0);
             *current = (*current).max(count.total);
         }
+    }
+}
+
+impl MetricsStore {
+    pub(crate) fn ensure_snapshots_reconciled(&self) -> Result<(), obzenflow_fsm::FsmError> {
+        for (binding, observation) in &self.snapshot_observations {
+            if observation.is_ahead_of_fold() {
+                return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                    "Metrics tail snapshot was not folded at certified end: journal={}, stage={}, rail={:?}",
+                    binding.journal, binding.stage, binding.kind,
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1398,16 +1425,43 @@ impl FsmAction for MetricsAggregatorAction {
                 );
 
                 let store = &mut ctx.metrics_store;
+                if event.runtime_context.is_some() && stage_id == *journal_stage {
+                    let journals = match journal_kind {
+                        MetricsJournalKind::Data => &ctx.stage_data_journals,
+                        MetricsJournalKind::Error => &ctx.stage_error_journals,
+                    };
+                    if let Some(journal) = journals.get(journal_stage) {
+                        store
+                            .snapshot_observations
+                            .entry(JournalBinding {
+                                journal: *journal.id(),
+                                stage: *journal_stage,
+                                kind: *journal_kind,
+                            })
+                            .or_default()
+                            .fold(envelope, *journal_stage)
+                            .map_err(|error| {
+                                obzenflow_fsm::FsmError::HandlerError(error.to_string())
+                            })?;
+                    }
+                }
                 // Update last event ID
                 store.last_event_id = Some(event.id);
 
-                // Update per-stage vector clock watermark (FLOWIP-059c).
-                // We use the event writer_id component from the envelope's vector clock.
-                let writer_id = *event.writer_id();
-                let writer_key = writer_id.to_string();
-                let seq = envelope.vector_clock.get(&writer_key);
-                let entry = store.stage_vector_clocks.entry(stage_id).or_insert(0);
-                *entry = (*entry).max(seq);
+                // Physical data coverage belongs only to this journal's bound
+                // stage writer. Forwarded and error-rail clocks prove no such coverage.
+                if *journal_kind == MetricsJournalKind::Data
+                    && event.writer_id == WriterId::from(*journal_stage)
+                {
+                    if let Some(seq) = envelope
+                        .vector_clock
+                        .clocks
+                        .get(&event.writer_id.to_string())
+                    {
+                        let entry = store.stage_vector_clocks.entry(*journal_stage).or_insert(0);
+                        *entry = (*entry).max(*seq);
+                    }
+                }
 
                 // Capture flow_id for joinability (FLOWIP-059a) when it becomes available.
                 if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
@@ -1664,17 +1718,30 @@ impl FsmAction for MetricsAggregatorAction {
                 // Keep wide metrics current even when the physical cursors lag.
                 // This refresh does not advance input coverage or its watermark:
                 // only the collector's sequential reads can authorise Drained.
-                for (stage_id, journal) in ctx
+                for (stage_id, journal, kind) in ctx
                     .stage_data_journals
                     .iter()
-                    .chain(ctx.stage_error_journals.iter())
+                    .map(|(stage, journal)| (stage, journal, MetricsJournalKind::Data))
+                    .chain(
+                        ctx.stage_error_journals
+                            .iter()
+                            .map(|(stage, journal)| (stage, journal, MetricsJournalKind::Error)),
+                    )
                 {
-                    if let Some(runtime_ctx) =
-                        crate::metrics::tail_read::read_latest_runtime_context_for_stage(
-                            journal, *stage_id,
-                        )
-                        .await
-                    {
+                    let observation = ctx
+                        .metrics_store
+                        .snapshot_observations
+                        .entry(JournalBinding {
+                            journal: *journal.id(),
+                            stage: *stage_id,
+                            kind,
+                        })
+                        .or_default();
+                    if let Err(error) = observation.refresh(journal.as_ref(), *stage_id).await {
+                        tracing::debug!(journal_id = %journal.id(), stage_id = %stage_id, ?kind, %error,
+                            "Failed to refresh metrics journal tail; retaining selected snapshot");
+                    }
+                    if let Some(runtime_ctx) = observation.selected().cloned() {
                         if let Some(meta) = ctx.stage_metadata.get_mut(stage_id) {
                             if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
                                 meta.reference_mode = infer_join_reference_mode_from_fsm_state(
@@ -1691,6 +1758,9 @@ impl FsmAction for MetricsAggregatorAction {
                         ctx.metrics_store
                             .update_control_metrics_from_runtime_context(*stage_id, &runtime_ctx);
                     }
+                }
+                if ctx.metrics_store.inputs_covered {
+                    ctx.metrics_store.ensure_snapshots_reconciled()?;
                 }
                 ctx.metrics_exporter
                     .publish_app_snapshot(ctx.build_app_metrics_snapshot());
@@ -1723,10 +1793,17 @@ impl FsmAction for MetricsAggregatorAction {
                 .await
                 .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
+                ctx.metrics_store.last_export_completed = Some(tokio::time::Instant::now());
                 Ok(())
             }
 
             MetricsAggregatorAction::PublishDrainComplete { last_event_id } => {
+                if !ctx.metrics_store.inputs_covered {
+                    return Err(obzenflow_fsm::FsmError::HandlerError(
+                        "Metrics physical inputs are not covered".into(),
+                    ));
+                }
+                ctx.metrics_store.ensure_snapshots_reconciled()?;
                 // Get writer ID from context
                 let system_writer_id = WriterId::from(ctx.system_id);
 
@@ -1866,7 +1943,6 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                             MetricsAggregatorAction::ProcessSystemEvent {
                                                 envelope: envelope.clone(),
                                             },
-                                            MetricsAggregatorAction::ExportMetrics,
                                         ],
                                     });
                                 }
@@ -1981,14 +2057,6 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                     _ => None,
                                 };
 
-                                let should_export = matches!(
-                                    pipeline_event,
-                                    Some(
-                                        obzenflow_core::event::PipelineLifecycleEvent::Draining { .. }
-                                            | obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted { .. }
-                                    )
-                                );
-
                                 let should_finalize = matches!(
                                     pipeline_event,
                                     Some(
@@ -2006,12 +2074,9 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                                     });
                                 }
 
-                                let mut actions = vec![MetricsAggregatorAction::ProcessSystemEvent {
+                                let actions = vec![MetricsAggregatorAction::ProcessSystemEvent {
                                     envelope: envelope.clone(),
                                 }];
-                                if should_export {
-                                    actions.push(MetricsAggregatorAction::ExportMetrics);
-                                }
 
                                 Ok(Transition {
                                     next_state: MetricsAggregatorState::Draining,
@@ -2073,8 +2138,21 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
             };
         }
 
-        // Drained state (terminal) - no transitions
-        state MetricsAggregatorState::Drained { }
+        // Final actions run after entering Drained. Their failure must still
+        // reach the existing metrics failure path, without a successful marker.
+        state MetricsAggregatorState::Drained {
+            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    match event {
+                        MetricsAggregatorEvent::Error(error) => Ok(Transition {
+                            next_state: MetricsAggregatorState::Failed { error }, actions: vec![],
+                        }),
+                        _ => Err(obzenflow_fsm::FsmError::HandlerError("Invalid final metrics failure".into())),
+                    }
+                })
+            };
+        }
 
         // Failed state (terminal) - no transitions
         state MetricsAggregatorState::Failed { }

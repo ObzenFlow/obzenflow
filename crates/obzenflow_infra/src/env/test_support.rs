@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+//! Shared environment guards for Infra unit tests.
+
 use std::ffi::OsString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 

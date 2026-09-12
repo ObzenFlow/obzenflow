@@ -467,7 +467,10 @@ mod managed_lifecycle_regressions {
         })
     }
 
-    fn assert_final_example_metrics(model: &obzenflow_adapters::monitoring::MetricsReadModel) {
+    fn assert_final_example_metrics(
+        model: &obzenflow_adapters::monitoring::MetricsReadModel,
+        count: u64,
+    ) {
         let view = model.snapshot();
         let snapshot = view
             .app
@@ -484,10 +487,13 @@ mod managed_lifecycle_regressions {
         assert_eq!(snapshot.pipeline_state, "completed");
         assert_eq!(
             snapshot.events_emitted_total[&id("high_volume_source")],
-            100
+            count
         );
-        assert_eq!(snapshot.error_counts[&id("error_processor")], 1);
-        assert_eq!(snapshot.events_accumulated_total[&id("event_counter")], 99);
+        assert_eq!(snapshot.error_counts[&id("error_processor")], count / 100);
+        assert_eq!(
+            snapshot.events_accumulated_total[&id("event_counter")],
+            count - count / 100
+        );
         assert_eq!(snapshot.events_emitted_total[&id("event_counter")], 1);
         let text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
             .render(&view)
@@ -496,19 +502,19 @@ mod managed_lifecycle_regressions {
             .lines()
             .any(|line| line.starts_with("obzenflow_errors_total{")
                 && line.contains("stage=\"error_processor\"")
-                && line.ends_with(" 1")));
+                && line.ends_with(&format!(" {}", count / 100))));
     }
 
     /// FLOWIP-142a: the shipped example, real Play route, supported export and
     /// certified current-build replay all traverse the application lifecycle.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manual_prometheus_example_exports_100_inputs_and_replays_without_a_host() {
-        prometheus_example_journal_and_metrics_proof(true).await;
+        prometheus_example_journal_and_metrics_proof(true, 100, true).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unhosted_prometheus_example_exports_100_inputs_and_replays_with_final_metrics() {
-        prometheus_example_journal_and_metrics_proof(false).await;
+        prometheus_example_journal_and_metrics_proof(false, 100, true).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -622,16 +628,46 @@ mod managed_lifecycle_regressions {
         );
     }
 
-    async fn prometheus_example_journal_and_metrics_proof(hosted: bool) {
-        use obzenflow_core::event::{chain_event::ChainEventContent, JournalEvent, SystemEvent};
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prometheus_example_100k_completes_without_reporting() {
+        prometheus_example_journal_and_metrics_proof(false, 100_000, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prometheus_example_100k_completes_with_reporting() {
+        prometheus_example_journal_and_metrics_proof(true, 100_000, true).await;
+    }
+
+    async fn prometheus_example_journal_and_metrics_proof(
+        hosted: bool,
+        count: u64,
+        reporting: bool,
+    ) {
+        use obzenflow_core::event::{
+            chain_event::ChainEventContent, JournalEvent, SystemEvent, SystemEventType,
+        };
         use obzenflow_infra::journal::disk::log_record::LogRecord;
         use std::collections::BTreeSet;
         use std::ffi::OsString;
+        use std::io::BufRead;
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let dir = tempfile::tempdir_in("target").unwrap();
-        let config = dir.path().join("hosted.toml");
+        let scratch = tempfile::Builder::new()
+            .prefix(&format!("flowip-130b-{count}-{reporting}-"))
+            .tempdir_in("target")
+            .unwrap();
+        let dir = scratch.path().to_path_buf();
+        let _cleanup = if count == 100_000 {
+            println!(
+                "Retaining full-volume journal proof at {}",
+                scratch.keep().display()
+            );
+            None
+        } else {
+            Some(scratch)
+        };
+        let config = dir.join("hosted.toml");
         let address = if hosted {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.local_addr().unwrap()
@@ -649,7 +685,7 @@ port = {}
 startup_mode = "manual"
 on_terminal = "exit"
 [metrics]
-enabled = true
+enabled = {reporting}
 "#,
                 address.port()
             ),
@@ -661,7 +697,11 @@ enabled = true
         let app = FlowApplication::builder()
             .with_config_file(config)
             .with_cli_args(["prometheus-lifecycle-proof"])
-            .with_log_level(LogLevel::Error)
+            .with_log_level(if count == 100_000 {
+                LogLevel::Warn
+            } else {
+                LogLevel::Error
+            })
             .with_flow_handle_hook(move |flow| {
                 assert!(flow_tx
                     .lock()
@@ -672,10 +712,13 @@ enabled = true
                     .is_ok());
                 tokio::spawn(async {})
             });
-        let application = tokio::spawn(app.run_async(observe_exports(
-            prometheus_demo::flow_definition(100, dir.path().join("live")),
-            model.clone(),
-        )));
+        let definition = prometheus_demo::flow_definition(count as usize, dir.join("live"));
+        let definition = if reporting {
+            observe_exports(definition, model.clone())
+        } else {
+            definition
+        };
+        let application = tokio::spawn(app.run_async(definition));
         let flow = match flow_rx.await {
             Ok(flow) => flow,
             Err(error) => panic!(
@@ -700,22 +743,51 @@ enabled = true
             socket.read_to_string(&mut response).await.unwrap();
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         }
-        tokio::time::timeout(Duration::from_secs(10), application)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        // The shipped source admits 1,000 inputs/second; the full-volume run needs
+        // its execution time as well as the unchanged five-second finalisation budget.
+        tokio::time::timeout(
+            Duration::from_secs(if count == 100 { 10 } else { 180 }),
+            application,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
         let _rebound = hosted.then(|| std::net::TcpListener::bind(address).unwrap());
-        assert_final_example_metrics(&model);
+        if reporting {
+            assert_final_example_metrics(&model, count);
+        } else {
+            assert!(model.snapshot().app.is_none());
+        }
         let archive = flow.run_substrate().locator().unwrap().path().to_path_buf();
-        let export = dir.path().join("hosted.jsonl");
+        let export = dir.join("hosted.jsonl");
         obzenflow_infra::journal::disk::inspect::export_jsonl(&archive, Some(&export)).unwrap();
-        let jsonl = std::fs::read_to_string(export).unwrap();
+        let reader = std::io::BufReader::new(std::fs::File::open(&export).unwrap());
+        let mut systems = Vec::<LogRecord<SystemEvent>>::new();
+        let mut event_ids = BTreeSet::new();
+        let mut parents = Vec::new();
+        let mut receipts = 0;
         let mut inputs = BTreeSet::new();
         let mut successes = BTreeSet::new();
         let mut errors = BTreeSet::new();
         let mut summaries = Vec::new();
-        for event in super::exported_jsonl::chain_events(&jsonl) {
+        for line in reader.lines() {
+            let line = line.unwrap();
+            let event = match serde_json::from_str::<LogRecord<obzenflow_core::ChainEvent>>(&line) {
+                Ok(row) => row.event,
+                Err(_) => {
+                    let row: LogRecord<SystemEvent> = serde_json::from_str(&line)
+                        .expect("valid typed system or chain export row");
+                    event_ids.insert(row.event.id);
+                    systems.push(row);
+                    continue;
+                }
+            };
+            event_ids.insert(event.id);
+            parents.extend(event.causality.parent_ids.iter().copied());
+            if matches!(&event.content, ChainEventContent::Delivery(_)) {
+                receipts += 1;
+            }
             if let ChainEventContent::Data { payload, .. } = &event.content {
                 // Error routing retains the failed parent's source context.
                 // Count its payload identity independently of the producing stage.
@@ -735,14 +807,18 @@ enabled = true
                 }
             }
         }
-        assert_eq!(inputs, (0..100).collect());
-        assert_eq!(successes, (1..100).collect());
-        assert_eq!(errors, BTreeSet::from([0]));
-        assert_eq!(summaries, [99]);
-        let systems: Vec<_> = jsonl
-            .lines()
-            .filter_map(|line| serde_json::from_str::<LogRecord<SystemEvent>>(line).ok())
-            .collect();
+        assert_eq!(inputs, (0..count).collect());
+        assert_eq!(
+            successes,
+            (0..count).filter(|id| !id.is_multiple_of(100)).collect()
+        );
+        assert_eq!(errors, (0..count).step_by(100).collect());
+        assert_eq!(summaries, [count - count / 100]);
+        assert_eq!(receipts, count - count / 100 + 1);
+        assert!(
+            parents.iter().all(|parent| event_ids.contains(parent)),
+            "all committed business parents resolve"
+        );
         let terminals: Vec<_> = systems
             .iter()
             .map(|row| row.event.event_type_name())
@@ -756,9 +832,19 @@ enabled = true
             })
             .collect();
         assert_eq!(terminals, ["system.pipeline.completed"]);
-        assert!(systems
+        let passed_feeds: BTreeSet<_> = systems
             .iter()
-            .any(|row| row.event.event_type_name() == "system.contract.pass"));
+            .filter_map(|row| match &row.event.event {
+                SystemEventType::ContractStatus {
+                    upstream,
+                    reader,
+                    pass: true,
+                    ..
+                } => Some((*upstream, *reader)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(passed_feeds.len(), 4);
         assert!(!systems.iter().any(|row| matches!(
             row.event.event_type_name(),
             "system.contract.fail" | "system.contract.result.failed"
@@ -767,18 +853,68 @@ enabled = true
             systems
                 .iter()
                 .position(|row| row.event.event_type_name() == name)
-                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing {name}; archive={}; latest metrics={:?}",
+                        archive.display(),
+                        model
+                            .snapshot()
+                            .app
+                            .as_ref()
+                            .map(|snapshot| &snapshot.stage_vector_clocks)
+                    )
+                })
         };
-        let terminal = position("system.pipeline.completed");
-        let drained = position("system.metrics.drained");
-        assert!(terminal < drained);
-        assert!(systems[terminal + 1..drained]
-            .iter()
-            .any(|row| row.event.event_type_name() == "system.metrics.exported"));
-        assert!(drained < position("system.pipeline.drained"));
+        if reporting {
+            let terminal = position("system.pipeline.completed");
+            let drained = position("system.metrics.drained");
+            assert!(terminal < drained);
+            assert!(systems[terminal + 1..drained]
+                .iter()
+                .any(|row| row.event.event_type_name() == "system.metrics.exported"));
+            let shutdown = position("system.metrics.shutdown");
+            assert!(drained < shutdown && shutdown < position("system.pipeline.drained"));
+            let finalisation_ms = systems[drained]
+                .timestamp
+                .signed_duration_since(systems[terminal].timestamp)
+                .num_milliseconds();
+            assert!(
+                (0..5_000).contains(&finalisation_ms),
+                "metrics must finish inside the existing five-second attempt: {finalisation_ms}ms"
+            );
+            if count == 100_000 {
+                let snapshot = model.snapshot();
+                let transform = snapshot
+                    .app
+                    .as_ref()
+                    .unwrap()
+                    .stage_metadata
+                    .iter()
+                    .find(|(_, metadata)| metadata.name == "error_processor")
+                    .unwrap()
+                    .0;
+                let key = obzenflow_core::WriterId::from(*transform).to_string();
+                assert!(systems[..terminal].iter().any(|row| matches!(&row.event.event,
+                    SystemEventType::MetricsCoordination(obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark })
+                        if watermark.clocks.get(&key).is_some_and(|sequence| *sequence > 0))), "live collection must advance before finalisation");
+            }
+            println!("Prometheus proof: {count} inputs, reporting={reporting}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());
+        } else {
+            assert!(!systems
+                .iter()
+                .any(|row| matches!(row.event.event, SystemEventType::MetricsCoordination(_))));
+            println!(
+                "Prometheus proof: {count} inputs, reporting={reporting}, archive={}",
+                archive.display()
+            );
+        }
         drop(flow);
+        // Existing 100-input cases retain the current-schema replay proof.
+        if count != 100 {
+            return;
+        }
 
-        let replay_config = dir.path().join("replay.toml");
+        let replay_config = dir.join("replay.toml");
         std::fs::write(
             &replay_config,
             "[server]\nenabled = false\n[metrics]\nenabled = true\n",
@@ -798,12 +934,12 @@ enabled = true
             ])
             .with_log_level(LogLevel::Error)
             .run_async(observe_exports(
-                prometheus_demo::flow_definition(0, dir.path().join("replay")),
+                prometheus_demo::flow_definition(0, dir.join("replay")),
                 replay_model.clone(),
             ))
             .await
             .expect("certified replay must report zero differences (verification exit code 0)");
-        assert_final_example_metrics(&replay_model);
+        assert_final_example_metrics(&replay_model, count);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

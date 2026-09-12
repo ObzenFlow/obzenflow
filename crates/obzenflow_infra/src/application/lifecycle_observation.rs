@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Infra's lifecycle read model. Folding is synchronous and has no Runtime
+//! Application lifecycle read model. Folding is synchronous and has no Runtime
 //! handles, clocks, controls or permission to classify unpublished execution.
 
 use obzenflow_core::event::{

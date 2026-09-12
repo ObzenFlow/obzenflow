@@ -4,9 +4,9 @@
 
 //! Cursor-based reader for DiskJournal
 //!
-//! Tracks logical position and byte offset. Live polls open a fresh read handle
-//! at the tracked offset so cancellation-heavy observer loops cannot leave a
-//! stored file handle mid-frame.
+//! Tracks logical position and byte offset. Complete buffered frames can be
+//! reused between polls. A poll takes ownership of the buffer before awaiting;
+//! cancellation discards it and the next poll reopens at the committed offset.
 
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
@@ -29,6 +29,10 @@ use tokio::sync::RwLock;
 /// crashed writer is treated as a hard error rather than an endless retry
 /// (FLOWIP-120q). Sealed readers never reach this path.
 const MAX_STALL_POLLS: u32 = 5;
+
+// Amortise open/seek/read costs across ordinary wide-event frames. Only fully
+// buffered, terminated frames are reused; a partial tail is always reread.
+const READ_BUFFER_BYTES: usize = 64 * 1024;
 
 fn open_readable_std_file(path: &Path) -> Result<StdFile, JournalError> {
     if path.exists() {
@@ -83,6 +87,11 @@ pub struct DiskJournalReader<T: JournalEvent> {
     policy: ReadPolicy,
     /// Reusable byte buffer for the framed-line reader.
     buf: Vec<u8>,
+    /// Taken out before any read await, restored only after a settled frame.
+    /// No journal lock is retained with this buffer.
+    buffered_reader: Option<BufReader<File>>,
+    #[cfg(test)]
+    frame_read_gate: Option<Arc<tests::FrameReadGate>>,
     /// Remaining logical records from an already committed atomic-group frame.
     /// `read_offset` advances past the physical frame as soon as it is parsed;
     /// these members are then yielded one-by-one without another disk read.
@@ -121,6 +130,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 stall_polls: 0,
                 policy: ReadPolicy::LiveTail,
                 buf: Vec::new(),
+                buffered_reader: None,
+                #[cfg(test)]
+                frame_read_gate: None,
                 pending: VecDeque::new(),
                 pending_group_id: None,
                 pending_group_size: None,
@@ -135,8 +147,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             });
         }
 
-        // Validate that the file is readable. Actual reads use a fresh handle
-        // per poll so cancelled observer polls cannot poison stored file state.
+        // Validate that the file is readable. Polls lease their buffered handle;
+        // cancellation forces a fresh handle at the committed cursor.
         let _std_file = StdFile::open(&path).map_err(|e| {
             tracing::error!(
                 path = %path.display(),
@@ -155,6 +167,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             stall_polls: 0,
             policy: ReadPolicy::LiveTail,
             buf: Vec::new(),
+            buffered_reader: None,
+            #[cfg(test)]
+            frame_read_gate: None,
             pending: VecDeque::new(),
             pending_group_id: None,
             pending_group_size: None,
@@ -196,6 +211,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             stall_polls: 0,
             policy,
             buf: Vec::new(),
+            buffered_reader: None,
+            #[cfg(test)]
+            frame_read_gate: None,
             pending: VecDeque::new(),
             pending_group_id: None,
             pending_group_size: None,
@@ -266,6 +284,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 }
             }
         }
+        self.buffered_reader = Some(reader);
         Ok(())
     }
 
@@ -319,6 +338,12 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             else {
                 return Ok((Disposition::EndOfCommittedRecords, frame_start));
             };
+
+            #[cfg(test)]
+            if let Some(gate) = self.frame_read_gate.take() {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
 
             if self.buf.iter().all(u8::is_ascii_whitespace) {
                 self.read_offset += consumed as u64;
@@ -388,7 +413,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         } else {
             open_existing_std_file(&self.path)?
         };
-        let mut reader = BufReader::new(File::from_std(std_file));
+        let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, File::from_std(std_file));
         reader
             .seek(SeekFrom::Start(self.read_offset))
             .await
@@ -404,15 +429,38 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
         // Don't permanently latch at_end: a live-tail reader retries after EOF to
-        // pick up new appends. A fresh read handle per poll keeps a cancelled
-        // observer poll from leaving the stored cursor mid-frame.
+        // pick up new appends. Only previously buffered complete frames can be
+        // reused. A partial buffered suffix may have been repaired since the
+        // last poll, so reopen from read_offset before reading that suffix.
         // Lock through a cloned Arc so the guard borrows a local, not `self`,
         // leaving `self` free for the `&mut self` advance below.
         let lock = self.read_write_lock.clone();
         let _read_guard = lock.read().await;
-        let mut reader = self.reader_at_offset().await?;
+        let mut reader = match self.buffered_reader.take() {
+            Some(reader)
+                if !self.pending.is_empty()
+                    || reader
+                        .buffer()
+                        .split_inclusive(|byte| *byte == b'\n')
+                        .any(|line| {
+                            line.last() == Some(&b'\n') && !line.iter().all(u8::is_ascii_whitespace)
+                        }) =>
+            {
+                reader
+            }
+            _ => self.reader_at_offset().await?,
+        };
 
         let (disposition, frame_start) = self.advance_one(&mut reader).await?;
+        // There is no await between committed cursor advancement and returning
+        // the record. An interrupted I/O await leaves buffered_reader empty;
+        // read_offset still identifies the next unconsumed physical frame.
+        if matches!(
+            &disposition,
+            Disposition::Yield(_) | Disposition::Corrupt(_)
+        ) {
+            self.buffered_reader = Some(reader);
+        }
         match disposition {
             Disposition::Yield(frame) => {
                 let journal_group_id = frame.group_id().map(str::to_string);
@@ -514,6 +562,158 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
     use ulid::Ulid;
+
+    #[derive(Default)]
+    pub(super) struct FrameReadGate {
+        pub(super) entered: tokio::sync::Notify,
+        pub(super) release: tokio::sync::Notify,
+    }
+
+    #[tokio::test]
+    async fn cancelled_buffered_read_reopens_at_committed_cursor_and_preserves_group_members() {
+        use crate::journal::disk::DiskJournal;
+        use obzenflow_core::Journal;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancelled.log");
+        let stage = StageId::new();
+        let journal = DiskJournal::<ChainEvent>::with_owner(
+            path.clone(),
+            obzenflow_core::JournalOwner::stage(stage),
+        )
+        .unwrap();
+        let first = journal
+            .append(
+                ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
+                None,
+            )
+            .await
+            .unwrap();
+        let large = journal
+            .append(
+                ChainEventFactory::data_event(
+                    stage.into(),
+                    "large",
+                    serde_json::json!({"body": "x".repeat(READ_BUFFER_BYTES * 3)}),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let group = journal
+            .append_group(
+                "after-cancel",
+                (0..2)
+                    .map(|i| {
+                        ChainEventFactory::data_event(
+                            stage.into(),
+                            "member",
+                            serde_json::json!({"i": i}),
+                        )
+                    })
+                    .collect(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut reader =
+            DiskJournalReader::<ChainEvent>::new(path, *journal.id(), Arc::new(RwLock::new(())))
+                .await
+                .unwrap();
+        assert_eq!(
+            reader.next().await.unwrap().unwrap().event.id,
+            first.event.id
+        );
+        let gate = Arc::new(FrameReadGate::default());
+        reader.frame_read_gate = Some(gate.clone());
+        tokio::select! {
+            result = reader.next() => panic!("read must pause before cursor commitment: {result:?}"),
+            _ = gate.entered.notified() => {}
+        }
+        assert_eq!(reader.position(), 1);
+        assert!(
+            reader.buffered_reader.is_none(),
+            "cancellation must not retain a stream positioned after the unconsumed frame"
+        );
+        assert_eq!(
+            reader.next().await.unwrap().unwrap().event.id,
+            large.event.id
+        );
+        for (index, expected) in group.iter().enumerate() {
+            let row = reader.next().await.unwrap().unwrap();
+            assert_eq!(row.event.id, expected.event.id);
+            assert_eq!(
+                row.journal_group_member,
+                Some(JournalGroupMember {
+                    index: index as u32,
+                    size: 2
+                })
+            );
+        }
+        assert_eq!(reader.position(), 4);
+        assert!(reader.next().await.unwrap().is_none());
+        assert!(reader.is_at_end());
+    }
+
+    #[tokio::test]
+    async fn buffered_partial_tail_is_reread_after_repair_and_after_live_eof() {
+        use std::io::Seek;
+        for observe_partial in [false, true] {
+            let mut file = NamedTempFile::new().unwrap();
+            let journal_id = JournalId::new();
+            let stage = StageId::new();
+            let make_record = || {
+                let event =
+                    ChainEventFactory::data_event(stage.into(), "tail", serde_json::json!({}));
+                LogRecord {
+                    event_id: Ulid::new(),
+                    writer_id: stage.into(),
+                    journal_id,
+                    vector_clock: VectorClock::new(),
+                    timestamp: Utc::now(),
+                    event,
+                }
+            };
+            let first = make_record();
+            write_framed_record(&mut file, &first);
+            let committed_end = file.as_file().metadata().unwrap().len();
+            file.write_all(b"100:123:uncommitted tail").unwrap();
+            let mut reader = DiskJournalReader::<ChainEvent>::new(
+                file.path().to_path_buf(),
+                journal_id,
+                Arc::new(RwLock::new(())),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                reader.next().await.unwrap().unwrap().event.id,
+                first.event.id
+            );
+            if observe_partial {
+                assert!(reader.next().await.unwrap().is_none());
+                assert!(!reader.is_at_end());
+                assert_eq!(reader.position(), 1);
+            }
+            file.as_file_mut().set_len(committed_end).unwrap();
+            file.as_file_mut()
+                .seek(SeekFrom::Start(committed_end))
+                .unwrap();
+            let second = make_record();
+            write_framed_record(&mut file, &second);
+            assert_eq!(
+                reader.next().await.unwrap().unwrap().event.id,
+                second.event.id
+            );
+            assert!(reader.next().await.unwrap().is_none());
+            assert!(reader.is_at_end());
+            let third = make_record();
+            write_framed_record(&mut file, &third);
+            assert_eq!(
+                reader.next().await.unwrap().unwrap().event.id,
+                third.event.id
+            );
+            assert_eq!(reader.position(), 3);
+        }
+    }
 
     fn write_framed_record<T: JournalEvent>(file: &mut NamedTempFile, record: &LogRecord<T>) {
         let json_body = serialize_record(record).unwrap();

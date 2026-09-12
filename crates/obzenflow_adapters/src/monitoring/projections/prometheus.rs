@@ -1954,7 +1954,7 @@ impl PrometheusProjection {
         if !snapshot.stage_vector_clocks.is_empty() {
             writeln!(
                 output,
-                "# HELP obzenflow_stage_vector_clock Last vector clock sequence observed for this stage"
+                "# HELP obzenflow_stage_vector_clock Highest stage-writer sequence folded from this stage's data journal"
             )?;
             writeln!(output, "# TYPE obzenflow_stage_vector_clock gauge")?;
 

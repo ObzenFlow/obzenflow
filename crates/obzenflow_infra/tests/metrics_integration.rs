@@ -128,7 +128,7 @@ async fn export_snapshot_sanity_from_metrics_store() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publish_drain_complete_writes_drained_event() {
+async fn publish_drain_complete_requires_physical_coverage() {
     let stage_id = StageId::new();
     let system_id = SystemId::new();
     let system_journal = make_system_journal(system_id);
@@ -136,7 +136,7 @@ async fn publish_drain_complete_writes_drained_event() {
 
     let mut ctx = make_empty_context(system_id, system_journal.clone(), exporter, stage_id);
 
-    // Execute the PublishDrainComplete action with a synthetic last_event_id.
+    // A synthetic last_event_id cannot authorise physical coverage.
     let last_event_id = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "test.event",
@@ -149,9 +149,9 @@ async fn publish_drain_complete_writes_drained_event() {
     }
     .execute(&mut ctx)
     .await
-    .unwrap();
+    .expect_err("uncovered physical inputs cannot publish successful Drained");
 
-    // Verify that a MetricsCoordination::Drained event was written to system journal.
+    // Verify that no success marker was written to the system journal.
     let events = system_journal
         .read_causally_ordered()
         .await
@@ -167,8 +167,8 @@ async fn publish_drain_complete_writes_drained_event() {
     });
 
     assert!(
-        drained,
-        "expected MetricsCoordination::Drained event in system journal"
+        !drained,
+        "uncovered inputs must not publish MetricsCoordination::Drained"
     );
 }
 

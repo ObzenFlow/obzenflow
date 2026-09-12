@@ -774,7 +774,7 @@ fn admit_resume_view_cli(set: &mut CandidateSet, cli: &FlowConfig) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{env_lock, EnvGuard};
+    use crate::env::test_support::{env_lock, EnvGuard};
     use clap::Parser;
     use obzenflow_core::event::EffectType;
     use obzenflow_core::StageKey;

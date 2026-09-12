@@ -63,4 +63,4 @@ pub use obzenflow_adapters::sources::{
 pub use obzenflow_core::http_client::{HeaderMap, RequestSpec, Url};
 
 /// Default HTTP pull and poll configuration composed by the infra layer.
-pub use obzenflow_infra::sources::{http_poll_config, http_pull_config};
+pub use obzenflow_infra::http_client::{http_poll_config, http_pull_config};

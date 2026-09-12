@@ -4,6 +4,9 @@
 
 //! Typed environment-variable parsing helpers.
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::any::type_name;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
@@ -142,7 +145,7 @@ fn expected_type_name<T>() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{env_lock, EnvGuard};
+    use crate::env::test_support::{env_lock, EnvGuard};
 
     #[test]
     fn env_var_returns_none_when_missing() {
