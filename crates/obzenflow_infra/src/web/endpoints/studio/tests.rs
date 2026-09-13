@@ -5,7 +5,7 @@
 use super::*;
 use crate::journal::MemoryJournal;
 use futures::StreamExt;
-use obzenflow_adapters::monitoring::flow_events::ContractBoundaryAliases;
+use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
@@ -40,12 +40,12 @@ async fn append(
 fn endpoint(
     journal: Arc<dyn Journal<SystemEvent>>,
     definitions: Vec<CompositeDefinition>,
-) -> (FlowEventsEndpoint, watch::Sender<bool>) {
+) -> (StudioUpdatesEndpoint, watch::Sender<bool>) {
     let (closing, receiver) = watch::channel(false);
     (
-        FlowEventsEndpoint::new(
+        StudioUpdatesEndpoint::new(
             journal,
-            FlowEventsProjection::new(definitions, ContractBoundaryAliases::default()).unwrap(),
+            StudioProjection::new(definitions, ContractBoundaryAliases::default()).unwrap(),
             Some(RuntimeInstanceId::new()),
             receiver,
         ),
@@ -53,7 +53,7 @@ fn endpoint(
     )
 }
 
-async fn open(endpoint: &FlowEventsEndpoint, cursor: Option<&str>) -> SseBody {
+async fn open(endpoint: &StudioUpdatesEndpoint, cursor: Option<&str>) -> SseBody {
     let mut request = Request::new(HttpMethod::Get, endpoint.path().into());
     if let Some(cursor) = cursor {
         request
@@ -67,7 +67,7 @@ async fn open(endpoint: &FlowEventsEndpoint, cursor: Option<&str>) -> SseBody {
 }
 
 pub(super) async fn collect_closing(
-    endpoint: &FlowEventsEndpoint,
+    endpoint: &StudioUpdatesEndpoint,
     closing: watch::Sender<bool>,
     cursor: Option<&str>,
 ) -> Vec<SseFrame> {
@@ -311,7 +311,7 @@ impl Drop for PendingOpenGuard {
 }
 
 #[tokio::test]
-async fn dropping_flow_events_response_cancels_pending_journal_open() {
+async fn dropping_studio_response_cancels_pending_journal_open() {
     let mut journal = ScriptedJournal::new(SystemId::new());
     let probe = Arc::new(PendingOpen::default());
     journal.pending_open = Some(probe.clone());

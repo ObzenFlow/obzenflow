@@ -6,7 +6,7 @@
 
 use crate::web::host_config::HostConfig;
 use crate::web::host_error::ManagedWebHostError;
-use obzenflow_adapters::monitoring::flow_events::FlowEventsProjection;
+use obzenflow_adapters::studio::StudioProjection;
 use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::id::{CompositeId, RoleId};
 use obzenflow_core::web::EndpointError;
@@ -208,9 +208,9 @@ pub(crate) async fn bind_managed_host(
     validate_extra_endpoints(&extra_endpoints)?;
 
     let mut server = super::warp::WarpWebHost::new();
-    let projection = FlowEventsProjection::new(
+    let projection = StudioProjection::new(
         composite_definitions_from_topology(&topology)?,
-        super::endpoints::flow_events::topology::contract_boundary_aliases(&topology)?,
+        super::endpoints::studio::topology::contract_boundary_aliases(&topology)?,
     )
     .map_err(|error| ManagedWebHostError::Implementation {
         message: format!("invalid composite lifecycle projection: {error}"),
@@ -278,7 +278,7 @@ pub(crate) async fn bind_managed_host(
 
     if let Some(journal) = flow_handle.system_journal() {
         server.register_endpoint(Box::new(
-            super::endpoints::flow_events::FlowEventsEndpoint::new(
+            super::endpoints::studio::StudioUpdatesEndpoint::new(
                 journal,
                 projection,
                 Some(runtime_instance_id),

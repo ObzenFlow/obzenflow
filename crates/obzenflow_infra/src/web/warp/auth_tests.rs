@@ -347,7 +347,7 @@ async fn admitted_routes_enforce_their_own_credentials_before_handlers() {
 async fn sse_rejects_invalid_current_material_before_opening_a_stream() {
     if !with_auth_env("web::warp::warp_server::auth_tests::sse_rejects_invalid_current_material_before_opening_a_stream") { return; }
     let mut server = WarpWebHost::new();
-    let (endpoint, _closing) = flow_events_endpoint();
+    let (endpoint, _closing) = studio_updates_endpoint();
     server.register_endpoint(Box::new(endpoint)).unwrap();
     // Exercise the request boundary directly; production admission rejects this policy earlier.
     let filter = server
@@ -368,13 +368,13 @@ async fn sse_rejects_invalid_current_material_before_opening_a_stream() {
     assert_eq!(response.status(), 500);
 }
 
-struct CountedFlowEvents {
-    inner: crate::web::endpoints::flow_events::FlowEventsEndpoint,
+struct CountedStudioUpdates {
+    inner: crate::web::endpoints::studio::StudioUpdatesEndpoint,
     calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl HttpEndpoint for CountedFlowEvents {
+impl HttpEndpoint for CountedStudioUpdates {
     fn path(&self) -> &str {
         self.inner.path()
     }
@@ -388,12 +388,10 @@ impl HttpEndpoint for CountedFlowEvents {
 }
 
 #[tokio::test]
-async fn registered_flow_events_auth_rejections_never_invoke_or_open_and_valid_keys_admit() {
-    if !with_auth_env("web::warp::warp_server::auth_tests::registered_flow_events_auth_rejections_never_invoke_or_open_and_valid_keys_admit") { return; }
-    use crate::web::endpoints::flow_events::{tests::ScriptedJournal, FlowEventsEndpoint};
-    use obzenflow_adapters::monitoring::flow_events::{
-        ContractBoundaryAliases, FlowEventsProjection,
-    };
+async fn registered_studio_updates_auth_rejections_never_invoke_or_open_and_valid_keys_admit() {
+    if !with_auth_env("web::warp::warp_server::auth_tests::registered_studio_updates_auth_rejections_never_invoke_or_open_and_valid_keys_admit") { return; }
+    use crate::web::endpoints::studio::{tests::ScriptedJournal, StudioUpdatesEndpoint};
+    use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
     use obzenflow_core::id::SystemId;
 
     let capture = Capture::default();
@@ -432,10 +430,10 @@ async fn registered_flow_events_auth_rejections_never_invoke_or_open_and_valid_k
             let journal = Arc::new(ScriptedJournal::new(SystemId::new()));
             let (closing, receiver) = tokio::sync::watch::channel(false);
             let mut host = WarpWebHost::new();
-            host.register_endpoint(Box::new(CountedFlowEvents {
-                inner: FlowEventsEndpoint::new(
+            host.register_endpoint(Box::new(CountedStudioUpdates {
+                inner: StudioUpdatesEndpoint::new(
                     journal.clone(),
-                    FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
+                    StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
                     None,
                     receiver,
                 ),
@@ -549,19 +547,17 @@ async fn invalid_authentication_reaches_the_startup_caller_before_spawn() {
 }
 
 // Registration uses exactly the common endpoint surface exercised by applications.
-pub(super) fn flow_events_endpoint() -> (
-    crate::web::endpoints::flow_events::FlowEventsEndpoint,
+pub(super) fn studio_updates_endpoint() -> (
+    crate::web::endpoints::studio::StudioUpdatesEndpoint,
     tokio::sync::watch::Sender<bool>,
 ) {
-    use crate::web::endpoints::flow_events::FlowEventsEndpoint;
-    use obzenflow_adapters::monitoring::flow_events::{
-        ContractBoundaryAliases, FlowEventsProjection,
-    };
+    use crate::web::endpoints::studio::StudioUpdatesEndpoint;
+    use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
     let (closing, receiver) = tokio::sync::watch::channel(false);
     (
-        FlowEventsEndpoint::new(
+        StudioUpdatesEndpoint::new(
             Arc::new(crate::journal::MemoryJournal::new()),
-            FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
+            StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
             None,
             receiver,
         ),

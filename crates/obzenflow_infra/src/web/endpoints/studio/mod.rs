@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The built-in lifecycle endpoint, independent of the HTTP framework.
+//! The Studio lifecycle stream, hosted through the portable HTTP endpoint contract.
 
 mod stream;
 #[cfg(feature = "warp-server")]
 pub(crate) mod topology;
 
 use async_trait::async_trait;
-use obzenflow_adapters::monitoring::flow_events::FlowEventsProjection;
+use obzenflow_adapters::studio::StudioProjection;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
@@ -20,17 +20,17 @@ use tokio::sync::watch;
 
 use crate::web::RuntimeInstanceId;
 
-pub(crate) struct FlowEventsEndpoint {
+pub(crate) struct StudioUpdatesEndpoint {
     journal: Arc<dyn Journal<SystemEvent>>,
-    projection: FlowEventsProjection,
+    projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
 }
 
-impl FlowEventsEndpoint {
+impl StudioUpdatesEndpoint {
     pub(crate) fn new(
         journal: Arc<dyn Journal<SystemEvent>>,
-        projection: FlowEventsProjection,
+        projection: StudioProjection,
         runtime_instance_id: Option<RuntimeInstanceId>,
         closing: watch::Receiver<bool>,
     ) -> Self {
@@ -44,7 +44,7 @@ impl FlowEventsEndpoint {
 }
 
 #[async_trait]
-impl HttpEndpoint for FlowEventsEndpoint {
+impl HttpEndpoint for StudioUpdatesEndpoint {
     fn path(&self) -> &str {
         "/api/flow/events"
     }

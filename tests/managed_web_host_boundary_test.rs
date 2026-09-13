@@ -121,7 +121,7 @@ fn core_web_stays_portable_and_managed_host_stays_private() {
 }
 
 #[test]
-fn flow_events_projection_and_reader_stay_outside_transport() {
+fn studio_projection_and_reader_stay_outside_transport() {
     struct Identifiers(Vec<String>);
     impl<'ast> syn::visit::Visit<'ast> for Identifiers {
         fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
@@ -138,14 +138,14 @@ fn flow_events_projection_and_reader_stay_outside_transport() {
                 "Journal",
                 "JournalReader",
                 "CompositeLifecycleProjection",
-                "FlowEventsProjection",
+                "StudioProjection",
                 "build_flow_events_route",
                 "ContractBoundaryAliases",
-                "MiddlewareSseState",
+                "MiddlewareView",
             ][..],
         ),
         (
-            "crates/obzenflow_adapters/src/monitoring/flow_events",
+            "crates/obzenflow_adapters/src/studio",
             &[
                 "warp",
                 "hyper",
@@ -157,7 +157,7 @@ fn flow_events_projection_and_reader_stay_outside_transport() {
             ][..],
         ),
         (
-            "crates/obzenflow_infra/src/web/endpoints/flow_events",
+            "crates/obzenflow_infra/src/web/endpoints/studio",
             &["warp", "hyper", "FlowHandle", "TcpListener", "WarpWebHost"][..],
         ),
     ] {
@@ -175,7 +175,7 @@ fn flow_events_projection_and_reader_stay_outside_transport() {
             for token in forbidden {
                 assert!(
                     !identifiers.0.iter().any(|ident| ident == token),
-                    "{token} violates the flow-events boundary in {}",
+                    "{token} violates the Studio projection boundary in {}",
                     path.display()
                 );
             }
@@ -183,18 +183,18 @@ fn flow_events_projection_and_reader_stay_outside_transport() {
     }
     let assembly =
         std::fs::read_to_string(root.join("crates/obzenflow_infra/src/web/web_server.rs")).unwrap();
-    assert_eq!(assembly.matches("FlowEventsEndpoint::new(").count(), 1);
+    assert_eq!(assembly.matches("StudioUpdatesEndpoint::new(").count(), 1);
     let endpoint = std::fs::read_to_string(
-        root.join("crates/obzenflow_infra/src/web/endpoints/flow_events/mod.rs"),
+        root.join("crates/obzenflow_infra/src/web/endpoints/studio/mod.rs"),
     )
     .unwrap();
-    assert!(endpoint.contains("impl HttpEndpoint for FlowEventsEndpoint"));
+    assert!(endpoint.contains("impl HttpEndpoint for StudioUpdatesEndpoint"));
     assert!(
         !endpoint.contains("fn managed_route("),
         "built-in auth must retain the common host fallback"
     );
     let stream = std::fs::read_to_string(
-        root.join("crates/obzenflow_infra/src/web/endpoints/flow_events/stream.rs"),
+        root.join("crates/obzenflow_infra/src/web/endpoints/studio/stream.rs"),
     )
     .unwrap();
     assert!(!stream.contains(".append("));
@@ -236,8 +236,8 @@ fn package_file_lists_exclude_the_retired_host_spi_and_factory() {
         assert!(files.lines().any(|path| path == "src/web/mod.rs"));
         if package == "obzenflow_infra" {
             for path in [
-                "src/web/endpoints/flow_events/mod.rs",
-                "src/web/endpoints/flow_events/stream.rs",
+                "src/web/endpoints/studio/mod.rs",
+                "src/web/endpoints/studio/stream.rs",
             ] {
                 assert!(
                     files.lines().any(|file| file == path),

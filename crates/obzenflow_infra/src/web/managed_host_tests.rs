@@ -291,13 +291,11 @@ async fn http2_stream_tasks_belong_to_the_host_scope() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn registered_flow_events_survive_admission_timeout_keep_alive_and_flush_before_close() {
+async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flush_before_close() {
     use crate::journal::MemoryJournal;
-    use crate::web::endpoints::flow_events::FlowEventsEndpoint;
+    use crate::web::endpoints::studio::StudioUpdatesEndpoint;
     use crate::web::surface_metrics::HttpSurfaceMetricsCollector;
-    use obzenflow_adapters::monitoring::flow_events::{
-        ContractBoundaryAliases, FlowEventsProjection,
-    };
+    use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
     use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
     use obzenflow_core::{id::SystemId, Journal, JournalOwner};
 
@@ -321,9 +319,9 @@ async fn registered_flow_events_survive_admission_timeout_keep_alive_and_flush_b
     let metrics = Arc::new(HttpSurfaceMetricsCollector::new());
     routes.with_surface_metrics(metrics.clone());
     routes
-        .register_endpoint(Box::new(FlowEventsEndpoint::new(
+        .register_endpoint(Box::new(StudioUpdatesEndpoint::new(
             journal.clone(),
-            FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
+            StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
             Some(crate::web::RuntimeInstanceId::new()),
             receiver,
         )))

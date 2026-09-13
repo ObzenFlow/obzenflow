@@ -38,19 +38,11 @@ impl ContractBoundaryAliases {
             by_edge: Arc::new(by_edge),
         }
     }
-}
 
-pub(super) fn attach_contract_boundary_aliases(
-    data: &mut serde_json::Value,
-    aliases: &ContractBoundaryAliases,
-    upstream: StageId,
-    reader: StageId,
-) {
-    if let Some(aliases) = aliases
-        .by_edge
-        .get(&(upstream, reader))
-        .filter(|v| !v.is_empty())
-    {
-        data["composite_boundaries"] = serde_json::json!(aliases);
+    pub(super) fn for_edge(&self, upstream: StageId, reader: StageId) -> &[ContractBoundaryAlias] {
+        self.by_edge
+            .get(&(upstream, reader))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 }

@@ -6,7 +6,7 @@
 
 use super::*;
 use futures::Stream;
-use obzenflow_adapters::monitoring::flow_events::{bootstrap, server_shutdown, FlowEventsError};
+use obzenflow_adapters::studio::{bootstrap, server_shutdown, StudioStreamError};
 use obzenflow_core::{journal::JournalReader, web::SseFrame, EventId};
 use std::{
     collections::VecDeque,
@@ -31,7 +31,7 @@ enum Reader {
 struct Connection {
     reader: Reader,
     phase: Phase,
-    projection: FlowEventsProjection,
+    projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
     checkpoint: Option<EventId>,
@@ -40,7 +40,7 @@ struct Connection {
 
 pub(super) fn connection(
     journal: Arc<dyn Journal<SystemEvent>>,
-    projection: FlowEventsProjection,
+    projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
     cursor: Option<&str>,
@@ -49,7 +49,7 @@ pub(super) fn connection(
     let phase = match cursor.map(EventId::from_string) {
         Some(Ok(id)) => Phase::Resume(id),
         Some(Err(error)) => {
-            pending.push_back(FlowEventsError::InvalidCursor(error.to_string()).frame());
+            pending.push_back(StudioStreamError::InvalidCursor(error.to_string()).frame());
             Phase::Fresh
         }
         None => Phase::Fresh,
@@ -101,7 +101,7 @@ impl Connection {
                     Ok(reader) => self.reader = Reader::Tailing(reader),
                     Err(error) => {
                         self.phase = Phase::Closed;
-                        return Some(FlowEventsError::JournalOpen(error.to_string()).frame());
+                        return Some(StudioStreamError::JournalOpen(error.to_string()).frame());
                     }
                 }
             }
@@ -132,7 +132,7 @@ impl Connection {
                         let fresh = matches!(self.phase, Phase::Fresh);
                         if !fresh {
                             self.pending
-                                .push_back(FlowEventsError::UnknownCursor.frame());
+                                .push_back(StudioStreamError::UnknownCursor.frame());
                         }
                         self.pending.extend(self.projection.snapshots());
                         self.pending.push_back(bootstrap(
@@ -152,7 +152,7 @@ impl Connection {
                 },
                 Err(error) => {
                     self.phase = Phase::Closed;
-                    return Some(FlowEventsError::JournalRead(error.to_string()).frame());
+                    return Some(StudioStreamError::JournalRead(error.to_string()).frame());
                 }
             }
         }

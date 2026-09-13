@@ -2441,15 +2441,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_plane_auth_covers_registered_flow_events() {
+    async fn control_plane_auth_covers_registered_studio_updates() {
         if !super::auth_tests::with_auth_env(
-            "web::warp::warp_server::tests::control_plane_auth_covers_registered_flow_events",
+            "web::warp::warp_server::tests::control_plane_auth_covers_registered_studio_updates",
         ) {
             return;
         }
 
         let mut server = WarpWebHost::new();
-        let (endpoint, _closing) = super::auth_tests::flow_events_endpoint();
+        let (endpoint, _closing) = super::auth_tests::studio_updates_endpoint();
         server.register_endpoint(Box::new(endpoint)).unwrap();
         let filter = server
             .build_filter(HostPolicy {

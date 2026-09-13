@@ -16,3 +16,4 @@ pub mod middleware;
 pub mod monitoring;
 pub mod sinks;
 pub mod sources;
+pub mod studio;

@@ -530,9 +530,7 @@ mod managed_lifecycle_regressions {
             obzenflow_core::event::SystemEvent,
         >],
     ) {
-        use obzenflow_adapters::monitoring::flow_events::{
-            ContractBoundaryAliases, FlowEventsProjection,
-        };
+        use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
         let actual: Vec<_> = frames
             .iter()
             .filter(|frame| frame.id.is_some())
@@ -545,7 +543,7 @@ mod managed_lifecycle_regressions {
             .as_deref()
             .unwrap();
         let mut projection =
-            FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+            StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
         let mut expected = Vec::new();
         let mut resumed = false;
         for row in systems {

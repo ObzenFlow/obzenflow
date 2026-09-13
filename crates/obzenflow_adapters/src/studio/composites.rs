@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! SSE readout of the existing Core composite lifecycle contract.
+//! Studio readout of the existing Core composite lifecycle contract.
 
+use super::messages::{CompositeStatusPayloadV1, CompositeStatusWireV1, StudioMessage};
 #[cfg(test)]
 use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::composite::{CompositeLifecycleProjection, CompositeStatus};
@@ -27,7 +28,7 @@ pub(super) struct CompositeStatusSnapshot {
 /// The state is disposable and rebuilt from the system journal. Projected
 /// frames never become journal events or independent SSE resume cursors.
 #[derive(Clone)]
-pub(super) struct CompositeLifecycleSseState {
+pub(super) struct CompositeLifecycleView {
     projection: CompositeLifecycleProjection,
     latest_by_composite:
         std::collections::BTreeMap<obzenflow_core::id::CompositeId, CompositeStatusSnapshot>,
@@ -37,7 +38,7 @@ pub(super) struct CompositeLifecycleSseState {
     as_of_timestamp_ms: u64,
 }
 
-impl CompositeLifecycleSseState {
+impl CompositeLifecycleView {
     pub(super) fn new(projection: CompositeLifecycleProjection) -> Self {
         let latest_by_composite = projection
             .statuses()
@@ -134,39 +135,9 @@ impl CompositeLifecycleSseState {
 
 const COMPOSITE_STATUS_SCHEMA_V1: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CompositeStatusWireV1 {
-    Waiting,
-    Running,
-    Completed,
-    Cancelled,
-    Failed,
-    Invalid,
-}
-
-/// Typed v1 producer DTO. This is an Adapter wire value, not a core domain
-/// event and not a second journal identity.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-struct CompositeStatusPayloadV1 {
-    schema_version: u32,
-    message_type: &'static str,
-    composite_id: String,
-    status: CompositeStatusWireV1,
-    revision: u64,
-    as_of_event_id: Option<String>,
-    timestamp_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("composite status has no schema-v1 wire representation")]
-struct UnsupportedCompositeStatusV1;
+pub(super) struct UnsupportedCompositeStatusV1;
 
 impl TryFrom<&CompositeStatusSnapshot> for CompositeStatusPayloadV1 {
     type Error = UnsupportedCompositeStatusV1;
@@ -224,9 +195,7 @@ pub(super) fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) ->
             return None;
         }
     };
-    let data = serde_json::to_string(&payload)
-        .expect("schema-v1 composite status DTO contains only serializable fields");
-    Some(SseFrame::event("composite_status", data))
+    Some(StudioMessage::CompositeStatus(payload).frame(None))
 }
 
 #[cfg(test)]
@@ -259,8 +228,8 @@ mod composite_status_projection_tests {
         )
     }
 
-    fn state(map: StageId, finish: StageId) -> CompositeLifecycleSseState {
-        CompositeLifecycleSseState::new(
+    fn state(map: StageId, finish: StageId) -> CompositeLifecycleView {
+        CompositeLifecycleView::new(
             CompositeLifecycleProjection::new(vec![CompositeDefinition::new(
                 CompositeId::new("ai_map_reduce:digest"),
                 vec![(map, RoleId::new("map")), (finish, RoleId::new("finalize"))],

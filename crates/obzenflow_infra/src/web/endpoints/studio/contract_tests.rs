@@ -6,7 +6,7 @@ use super::tests::{collect_closing, frame_payload, frames};
 use super::topology::contract_boundary_aliases;
 use super::*;
 use crate::journal::MemoryJournal;
-use obzenflow_adapters::monitoring::flow_events::ContractBoundaryAliases;
+use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::event::system_event::{
     ContractName, ContractResultStatusLabel, MetricsCoordinationEvent, PipelineLifecycleEvent,
     SystemFeedRole,
@@ -116,7 +116,7 @@ async fn contract_frame_keeps_one_physical_cursor_and_both_composite_aliases() {
     let reader = StageId::from_ulid(reader.ulid());
     let envelope = contract_result_envelope(upstream, reader).await;
 
-    let mut projection = FlowEventsProjection::new(vec![], aliases).unwrap();
+    let mut projection = StudioProjection::new(vec![], aliases).unwrap();
     let events = projection.project(&envelope, 0);
     assert_eq!(events.len(), 1);
     let frame = &events[0];
@@ -200,9 +200,9 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         .unwrap();
 
     let (closing, receiver) = watch::channel(false);
-    let endpoint = FlowEventsEndpoint::new(
+    let endpoint = StudioUpdatesEndpoint::new(
         journal,
-        FlowEventsProjection::new(vec![], contract_boundary_aliases(&topology).unwrap()).unwrap(),
+        StudioProjection::new(vec![], contract_boundary_aliases(&topology).unwrap()).unwrap(),
         None,
         receiver,
     );
@@ -233,8 +233,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
 #[tokio::test]
 async fn ordinary_physical_edge_omits_unavailable_aliases() {
     let envelope = contract_result_envelope(StageId::new(), StageId::new()).await;
-    let mut projection =
-        FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+    let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let frames = projection.project(&envelope, 0);
     assert_eq!(frames.len(), 1);
     assert!(frame_payload(&frames[0])

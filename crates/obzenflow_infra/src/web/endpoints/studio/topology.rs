@@ -5,7 +5,7 @@
 //! Prepare validated immutable topology inputs before binding the host.
 
 use crate::web::host_error::ManagedWebHostError;
-use obzenflow_adapters::monitoring::flow_events::{
+use obzenflow_adapters::studio::{
     ContractBoundaryAlias, ContractBoundaryAliases, ContractBoundaryDirection,
 };
 use obzenflow_core::StageId;
