@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Logical aliases enrich one physical contract occurrence without adding cursors.
+//! Stores the composite ports for connections between stages. Studio uses these
+//! labels to show delivery check results on the group's input and output ports.
 
 use obzenflow_core::{id::CompositeId, StageId};
 use std::{collections::HashMap, sync::Arc};
@@ -14,7 +15,6 @@ pub enum ContractBoundaryDirection {
     Outbound,
 }
 
-/// One validated topology boundary, prepared by application assembly.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct ContractBoundaryAlias {
     pub composite_id: CompositeId,
@@ -28,7 +28,6 @@ pub struct ContractBoundaryAliases {
 }
 
 impl ContractBoundaryAliases {
-    /// Retain immutable aliases in deterministic order for each physical edge.
     pub fn new(mut by_edge: HashMap<(StageId, StageId), Vec<ContractBoundaryAlias>>) -> Self {
         for aliases in by_edge.values_mut() {
             aliases.sort();

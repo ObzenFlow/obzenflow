@@ -72,7 +72,7 @@ pub(super) async fn collect_closing(
     cursor: Option<&str>,
 ) -> Vec<SseFrame> {
     let body = open(endpoint, cursor).await;
-    // Admission already succeeded; now exercise the normal terminal close path.
+    // Set shutdown after opening; an endpoint already closing would return HTTP 204.
     closing.send(true).unwrap();
     tokio::time::timeout(Duration::from_secs(2), body.collect())
         .await
@@ -479,7 +479,7 @@ async fn empty_bootstrap_and_closing_admission_do_not_fabricate_cursors() {
     assert_eq!(endpoint.methods(), &[HttpMethod::Get]);
     assert!(endpoint.managed_route().is_none());
 
-    // Merely admitting a body does not open a reader.
+    // Creating the response leaves the reader unopened until the body is polled.
     drop(open(&endpoint, None).await);
     assert_eq!(journal.opens.load(Ordering::SeqCst), 0);
     let mut body = open(&endpoint, None).await;
@@ -631,7 +631,8 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
         fact.id.as_deref(),
         Some(running.event.id.to_string().as_str())
     );
-    // Drop between the identified fact and its cursorless composite update.
+    // Disconnect after receiving the stage message and its reconnect ID, but
+    // before receiving the accompanying composite status.
     drop(fast);
     let mut resumed = open(&endpoint, Some(&running.event.id.to_string())).await;
     let repaired = resumed.next().await.unwrap();
@@ -747,8 +748,8 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
         }
         let duration = duration.expect("terminal lifecycle fact must exist without a reporter");
 
-        // Resume an attached session's cursor after the entire finite run has
-        // completed. No periodic metrics scrape is needed for these totals.
+        // Connect after the run finishes, using its first entry as `Last-Event-ID`.
+        // The completion message must include totals even without a metrics scrape.
         let body = request_body(journal, vec![], Some(cursor)).await;
         let payload = frames(&body, "flow_lifecycle")
             .into_iter()

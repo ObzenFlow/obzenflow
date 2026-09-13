@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One response owns all reader state and pending reads. No producer task exists.
+//! Reads the system journal for one Studio connection. Reconnects resume after
+//! a known `Last-Event-ID`; otherwise, the connection starts with status snapshots.
+//! Dropping the response releases its journal reader and saved state.
 
 use super::*;
 use futures::Stream;
@@ -24,8 +26,8 @@ enum Phase {
 }
 
 enum Reader {
-    Opening(Arc<dyn Journal<SystemEvent>>),
-    Tailing(Box<dyn JournalReader<SystemEvent>>),
+    Unopened(Arc<dyn Journal<SystemEvent>>),
+    Open(Box<dyn JournalReader<SystemEvent>>),
 }
 
 struct Connection {
@@ -55,7 +57,7 @@ pub(super) fn connection(
         None => Phase::Fresh,
     };
     let state = Connection {
-        reader: Reader::Opening(journal),
+        reader: Reader::Unopened(journal),
         phase,
         projection,
         runtime_instance_id,
@@ -72,7 +74,7 @@ impl Connection {
     async fn next_frame(&mut self) -> Option<SseFrame> {
         let mut scanned = 0;
         loop {
-            // Complete a fact's derived frames before considering shutdown.
+            // Send accompanying composite updates before the shutdown notice.
             if let Some(frame) = self.pending.pop_front() {
                 return Some(frame);
             }
@@ -90,22 +92,21 @@ impl Connection {
                         .map(RuntimeInstanceId::as_str),
                 ));
             }
-            // JournalReader may complete synchronously for every historical row.
-            // Bound work per executor turn even before the first bootstrap frame.
+            // Large journals can satisfy reads immediately; let other tasks run.
             if scanned == CATCH_UP_QUANTUM {
                 tokio::task::yield_now().await;
                 scanned = 0;
             }
-            if let Reader::Opening(journal) = &self.reader {
+            if let Reader::Unopened(journal) = &self.reader {
                 match journal.reader().await {
-                    Ok(reader) => self.reader = Reader::Tailing(reader),
+                    Ok(reader) => self.reader = Reader::Open(reader),
                     Err(error) => {
                         self.phase = Phase::Closed;
                         return Some(StudioStreamError::JournalOpen(error.to_string()).frame());
                     }
                 }
             }
-            let Reader::Tailing(reader) = &mut self.reader else {
+            let Reader::Open(reader) = &mut self.reader else {
                 unreachable!("reader opened above");
             };
             match reader.next().await {
@@ -127,6 +128,7 @@ impl Connection {
                         Phase::Closed => unreachable!("closed connections do not read"),
                     }
                 }
+                // None means caught up for now; further entries may arrive later.
                 Ok(None) => match self.phase {
                     Phase::Fresh | Phase::Resume(_) => {
                         let fresh = matches!(self.phase, Phase::Fresh);

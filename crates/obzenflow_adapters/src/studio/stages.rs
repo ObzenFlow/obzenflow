@@ -2,17 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Latest lifecycle snapshots by stage identity.
+//! Keeps each stage's latest status and any final metrics for Studio's initial
+//! display, including stages that finished before the browser connected.
 
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::web::SseFrame;
 
 #[derive(Clone, Default)]
 pub(super) struct StageLifecycleView {
-    /// Latest lifecycle envelope per stage (best-effort).
-    ///
-    /// Used to bootstrap new SSE clients so the UI can render stage state even
-    /// if it connected after the original stage_running events were emitted.
     latest_by_stage: std::collections::BTreeMap<obzenflow_core::StageId, SystemEventEnvelope>,
 }
 
@@ -25,9 +22,8 @@ impl StageLifecycleView {
             return;
         };
 
-        // Prefer terminal lifecycle events with metrics when duplicates exist
-        // (some stages write both a supervisor completion marker and a later
-        // metrics-enriched completion event).
+        // A stage can report the same outcome again without metrics. Preserve the
+        // earlier totals so a newly connected browser still sees them.
         let should_replace = match (self.latest_by_stage.get(stage_id), event) {
             (None, _) => true,
             (Some(prev), StageLifecycleEvent::Completed { metrics: None }) => !matches!(
@@ -65,7 +61,7 @@ impl StageLifecycleView {
         }
     }
 
-    pub(super) fn build_snapshot_sse_events(&self) -> Vec<SseFrame> {
+    pub(super) fn snapshot_frames(&self) -> Vec<SseFrame> {
         self.latest_by_stage
             .values()
             .filter_map(super::facts::stage_message)

@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Studio lifecycle updates reconstructed from committed system-journal facts.
+//! Builds the status updates Studio uses to display a flow.
 //!
-//! Callers supply ordered committed facts, validated topology and observation time.
-//! This module performs no journal, clock, listener or network operations.
+//! `StudioProjection` turns system journal entries into the messages defined in
+//! `messages.rs`. It also keeps stage, composite and middleware state so a browser
+//! can show the current status when it connects.
 //!
-//! Start with `messages.rs` for the Studio vocabulary and `StudioProjection`
-//! below for replay/live behaviour. Infra owns the journal reader and HTTP body.
+//! Infra reads the journal and delivers the messages over HTTP. Core defines
+//! how member stage statuses combine into a composite status.
 
 mod composites;
 mod contracts;
@@ -21,7 +22,7 @@ mod tests;
 
 pub use contracts::{ContractBoundaryAlias, ContractBoundaryAliases, ContractBoundaryDirection};
 
-use composites::{map_composite_status_to_sse, CompositeLifecycleView, CompositeStatusSnapshot};
+use composites::{composite_status_frame, CompositeLifecycleView, CompositeStatusSnapshot};
 use messages::{BootstrapUpdate, StreamErrorKind, StudioMessage};
 use middleware::MiddlewareView;
 use obzenflow_core::composite::{
@@ -34,22 +35,21 @@ use obzenflow_core::{web::SseFrame, EventId};
 use stages::StageLifecycleView;
 
 #[derive(Clone, Copy, Default)]
-enum PipelineReadout {
+enum ObservedFlowState {
     #[default]
     Inactive,
     Active,
     Terminal,
 }
 
-/// A validated empty projection can be cloned for each independent connection.
-/// Rebuilding and live projection use the same state and Core composite semantics.
+/// Current state and message builder for one Studio connection.
 #[derive(Clone)]
 pub struct StudioProjection {
     stages: StageLifecycleView,
     composites: CompositeLifecycleView,
     middleware: MiddlewareView,
     aliases: ContractBoundaryAliases,
-    pipeline: PipelineReadout,
+    flow_state: ObservedFlowState,
 }
 
 impl StudioProjection {
@@ -64,23 +64,23 @@ impl StudioProjection {
             )?),
             middleware: MiddlewareView::default(),
             aliases,
-            pipeline: PipelineReadout::Inactive,
+            flow_state: ObservedFlowState::Inactive,
         })
     }
 
-    /// Rebuild history without publishing its original frames to a fresh browser.
+    /// Apply a past journal entry without producing messages.
     pub fn rebuild(&mut self, envelope: &SystemEventEnvelope) {
         self.observe(envelope);
     }
 
-    /// Project one live fact, followed by its cursorless derived frames.
+    /// Apply a journal entry and return its messages. Only middleware snapshots
+    /// use `timestamp_ms`; event messages keep their recorded timestamps.
     pub fn project(&mut self, envelope: &SystemEventEnvelope, timestamp_ms: u64) -> Vec<SseFrame> {
-        // A transition describes its prior state. Encode it before the shared
-        // fold, then publish derived snapshots of the updated state.
+        // `state_from` must describe the circuit breaker before this entry is applied.
         let mut frames = Vec::new();
         frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
         let composite = self.observe(envelope);
-        frames.extend(composite.as_ref().and_then(map_composite_status_to_sse));
+        frames.extend(composite.as_ref().and_then(composite_status_frame));
         if matches!(
             &envelope.event.event,
             SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running { .. })
@@ -91,26 +91,27 @@ impl StudioProjection {
     }
 
     pub fn snapshots(&self) -> Vec<SseFrame> {
-        let mut frames = self.stages.build_snapshot_sse_events();
+        let mut frames = self.stages.snapshot_frames();
         frames.extend(self.resume_snapshots());
         frames
     }
 
-    /// Repair a disconnect between an identified fact and its derived status.
+    /// A browser may receive a stage event and disconnect before its composite
+    /// update arrives. Resend group statuses when it resumes after that event ID.
     pub fn resume_snapshots(&self) -> Vec<SseFrame> {
-        self.composites.build_snapshot_sse_events()
+        self.composites.snapshot_frames()
     }
 
     pub fn middleware_snapshot(&self, timestamp_ms: u64) -> Option<SseFrame> {
-        self.middleware.build_snapshot_sse_event(timestamp_ms)
+        self.middleware.snapshot_frame(timestamp_ms)
     }
 
     pub fn terminal_observed(&self) -> bool {
-        matches!(self.pipeline, PipelineReadout::Terminal)
+        matches!(self.flow_state, ObservedFlowState::Terminal)
     }
 
     pub fn active_observed(&self) -> bool {
-        matches!(self.pipeline, PipelineReadout::Active)
+        matches!(self.flow_state, ObservedFlowState::Active)
     }
 
     fn observe(&mut self, envelope: &SystemEventEnvelope) -> Option<CompositeStatusSnapshot> {
@@ -125,20 +126,19 @@ impl StudioProjection {
         let SystemEventType::PipelineLifecycle(event) = &envelope.event.event else {
             return;
         };
-        self.pipeline = match event {
+        self.flow_state = match event {
             PipelineLifecycleEvent::Running { .. }
             | PipelineLifecycleEvent::Draining { .. }
-            | PipelineLifecycleEvent::AllStagesCompleted { .. } => PipelineReadout::Active,
+            | PipelineLifecycleEvent::AllStagesCompleted { .. } => ObservedFlowState::Active,
             PipelineLifecycleEvent::Drained
             | PipelineLifecycleEvent::Completed { .. }
             | PipelineLifecycleEvent::Cancelled { .. }
-            | PipelineLifecycleEvent::Failed { .. } => PipelineReadout::Terminal,
-            // Preserve the existing close boundary: NotStarted is followed by
-            // Runtime's final Drained marker before normal application close.
+            | PipelineLifecycleEvent::Failed { .. } => ObservedFlowState::Terminal,
+            // NotStarted is followed by Drained; keep reading until cleanup ends.
             PipelineLifecycleEvent::Starting
             | PipelineLifecycleEvent::ReadyForRun { .. }
             | PipelineLifecycleEvent::StopAdmitted { .. }
-            | PipelineLifecycleEvent::NotStarted => PipelineReadout::Inactive,
+            | PipelineLifecycleEvent::NotStarted => ObservedFlowState::Inactive,
         };
     }
 }
@@ -159,7 +159,7 @@ pub fn server_shutdown(runtime_instance_id: Option<&str>) -> SseFrame {
     .frame(None)
 }
 
-/// Existing connection-local error vocabulary; no error is an execution fact.
+/// Errors reported to this Studio connection when reading or resuming fails.
 pub enum StudioStreamError {
     InvalidCursor(String),
     UnknownCursor,

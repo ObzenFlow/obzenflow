@@ -2,10 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The messages Studio receives. Wire names remain compatible with `/api/flow/events`.
-//!
-//! Journal facts carry a source cursor; snapshots and connection notices do not
-//! invent one. These presentation types are private to the Studio adapter.
+//! JSON payloads and event names for Studio's `/api/flow/events` stream.
 
 use super::contracts::ContractBoundaryAlias;
 use obzenflow_core::event::{
@@ -120,7 +117,6 @@ pub(super) enum StudioMessage<'a> {
     ServerShutdown {
         runtime_instance_id: Option<&'a str>,
     },
-    // These existing wire messages have no `system_event_type` field.
     #[serde(untagged)]
     CompositeStatus(CompositeStatusPayloadV1),
     #[serde(untagged)]
@@ -141,6 +137,8 @@ pub(super) enum StudioMessage<'a> {
 }
 
 impl StudioMessage<'_> {
+    /// `cursor` sets the journal entry the browser resumes after on reconnect.
+    /// Pass `None` for snapshots and other messages that leave this position unchanged.
     pub(super) fn frame(&self, cursor: Option<EventId>) -> SseFrame {
         let event = match self {
             Self::StageLifecycle { .. } => "stage_lifecycle",
@@ -192,8 +190,8 @@ pub(super) struct ContractEdge<'a> {
     pub composite_boundaries: &'a [ContractBoundaryAlias],
 }
 
-// Serde's remote derives describe the Studio representation of Core lifecycle
-// enums without copying their values or changing the journal's own schema.
+// Core records `lifecycle_event: "running"`; Studio expects
+// `event_type: "stage_running"`. The Serde definitions below translate the names.
 #[derive(Serialize)]
 #[serde(remote = "StageLifecycleEvent", tag = "event_type")]
 enum StageUpdate {
@@ -493,18 +491,20 @@ pub(super) struct CompositeStatusPayloadV1 {
     pub message_type: &'static str,
     pub composite_id: String,
     pub status: CompositeStatusWireV1,
+    /// Counts group status changes, allowing Studio to ignore older updates.
     pub revision: u64,
     pub as_of_event_id: Option<String>,
     pub timestamp_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Member role where the first failure occurred, such as `map`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-// StageId's journal serialization is a bare ULID; Studio uses `stage_<ULID>`.
+// Studio needs the `stage_` prefix; StageId's default JSON encoding omits it.
 fn display<T: std::fmt::Display, S: Serializer>(
     value: &T,
     serializer: S,

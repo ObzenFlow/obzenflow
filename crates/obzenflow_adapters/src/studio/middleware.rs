@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Studio's current middleware state, folded from the same updates sent live.
+//! Builds Studio's circuit breaker and rate limiter messages, and keeps their
+//! latest state so a browser can display it without waiting for another change.
 
 use super::messages::{
     CircuitBreakerSnapshot, CircuitBreakerUpdate, CircuitSummary, CircuitTotals, CircuitTransition,
@@ -115,7 +116,6 @@ impl MiddlewareView {
         }
     }
 
-    /// Read the prior state to describe a transition, without applying it.
     pub(super) fn message<'a>(
         &'a self,
         stage_id: StageId,
@@ -200,7 +200,6 @@ impl MiddlewareView {
                             },
                         },
                     },
-                    // High-volume or unsupported variants are not Studio updates.
                     _ => return None,
                 })
             }
@@ -248,7 +247,7 @@ impl MiddlewareView {
         })
     }
 
-    pub(super) fn build_snapshot_sse_event(&self, timestamp_ms: u64) -> Option<SseFrame> {
+    pub(super) fn snapshot_frame(&self, timestamp_ms: u64) -> Option<SseFrame> {
         if self.circuit_breakers.is_empty() && self.rate_limiters.is_empty() {
             return None;
         }

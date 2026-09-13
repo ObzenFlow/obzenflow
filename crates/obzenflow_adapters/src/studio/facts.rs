@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Select the Studio message for a committed fact. Encoding never changes state.
+//! Converts system journal entries into the message types in `messages.rs`.
+//! `stages.rs` also uses `stage_message` to build snapshots with the same JSON.
 
 use super::messages::{ContractEdge, MetricsUpdate, Observation, StudioMessage};
 use super::{middleware::MiddlewareView, ContractBoundaryAliases};
@@ -149,7 +150,6 @@ pub(super) fn frame(
             },
             at,
         },
-        // High-volume telemetry and ingress refusals belong to the metrics view.
         SystemEventType::StageHeartbeat { .. }
         | SystemEventType::HttpSurfaceSnapshot { .. }
         | SystemEventType::IngressRefusal { .. } => return None,

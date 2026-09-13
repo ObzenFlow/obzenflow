@@ -180,8 +180,7 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
 
 #[test]
 fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
-    // Inputs use journal field names; expected messages use Studio field names.
-    // These are deliberately distinct schemas, including omitted optional fields.
+    // Each pair is a journal event followed by the JSON Studio should receive.
     let flow_cases = [
         (
             json!({"pipeline_event": "starting"}),

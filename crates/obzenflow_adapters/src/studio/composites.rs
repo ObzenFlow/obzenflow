@@ -2,7 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Studio readout of the existing Core composite lifecycle contract.
+//! Provides the status Studio displays for a composite group.
+//!
+//! Core combines member-stage events into a group status; this module prepares
+//! the `composite_status` messages. A group can still be running after one member
+//! completes, so Studio needs its status as well as each stage's status.
 
 use super::messages::{CompositeStatusPayloadV1, CompositeStatusWireV1, StudioMessage};
 #[cfg(test)]
@@ -23,17 +27,12 @@ pub(super) struct CompositeStatusSnapshot {
     timestamp_ms: u64,
 }
 
-/// Per-SSE-connection Moore projection over the ordered member lifecycle tape.
-///
-/// The state is disposable and rebuilt from the system journal. Projected
-/// frames never become journal events or independent SSE resume cursors.
 #[derive(Clone)]
 pub(super) struct CompositeLifecycleView {
     projection: CompositeLifecycleProjection,
     latest_by_composite:
         std::collections::BTreeMap<obzenflow_core::id::CompositeId, CompositeStatusSnapshot>,
-    /// Raw system-journal position through which this disposable view has been
-    /// rebuilt. This remains a source cursor; projected frames never own one.
+    // Snapshots identify the last entry read, even if no group status changed.
     as_of_event_id: Option<EventId>,
     as_of_timestamp_ms: u64,
 }
@@ -65,7 +64,6 @@ impl CompositeLifecycleView {
         }
     }
 
-    /// Fold one source fact and return a view update only when status changes.
     pub(super) fn observe(
         &mut self,
         envelope: &SystemEventEnvelope,
@@ -125,10 +123,10 @@ impl CompositeLifecycleView {
             .collect()
     }
 
-    pub(super) fn build_snapshot_sse_events(&self) -> Vec<SseFrame> {
+    pub(super) fn snapshot_frames(&self) -> Vec<SseFrame> {
         self.snapshots()
             .iter()
-            .filter_map(map_composite_status_to_sse)
+            .filter_map(composite_status_frame)
             .collect()
     }
 }
@@ -183,7 +181,7 @@ impl TryFrom<&CompositeStatusSnapshot> for CompositeStatusPayloadV1 {
     }
 }
 
-pub(super) fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) -> Option<SseFrame> {
+pub(super) fn composite_status_frame(snapshot: &CompositeStatusSnapshot) -> Option<SseFrame> {
     let payload = match CompositeStatusPayloadV1::try_from(snapshot) {
         Ok(payload) => payload,
         Err(error) => {
@@ -195,6 +193,7 @@ pub(super) fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) ->
             return None;
         }
     };
+    // Reconnect IDs must refer to journal entries; this summary has no entry of its own.
     Some(StudioMessage::CompositeStatus(payload).frame(None))
 }
 
@@ -399,7 +398,7 @@ mod composite_status_projection_tests {
             as_of_event_id: Some(EventId::new()),
             timestamp_ms: 178,
         };
-        let frame = map_composite_status_to_sse(&snapshot).unwrap();
+        let frame = composite_status_frame(&snapshot).unwrap();
         assert_eq!(frame.event.as_deref(), Some("composite_status"));
         assert_eq!(frame.id, None);
         assert_eq!(

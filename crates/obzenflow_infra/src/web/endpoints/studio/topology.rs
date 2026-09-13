@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Prepare validated immutable topology inputs before binding the host.
+//! Finds the composite input and output ports for each connection between stages.
+//! The web host builds this lookup once and passes it to the Studio adapter.
 
 use crate::web::host_error::ManagedWebHostError;
 use obzenflow_adapters::studio::{

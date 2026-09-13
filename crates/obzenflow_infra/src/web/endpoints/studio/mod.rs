@@ -2,7 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The Studio lifecycle stream, hosted through the portable HTTP endpoint contract.
+//! Serves Studio updates at `GET /api/flow/events`.
+//!
+//! Each connection gets its own journal reader and `StudioProjection`.
+//! `stream.rs` handles reading and reconnects; the Studio adapters build the
+//! messages sent to the browser.
 
 mod stream;
 #[cfg(feature = "warp-server")]
@@ -53,8 +57,7 @@ impl HttpEndpoint for StudioUpdatesEndpoint {
         &[HttpMethod::Get]
     }
 
-    // Leave managed_route() absent, just like topology and metrics: the common
-    // dispatcher applies the host's existing built-in control-plane policy.
+    // Omitting managed_route() retains the host's authentication policy for built-ins.
     async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
         if *self.closing.borrow() {
             return Ok(Response::new(204).into());
