@@ -294,7 +294,7 @@ async fn admitted_routes_enforce_their_own_credentials_before_handlers() {
         ..HostConfig::localhost(0)
     };
     let filter = server
-        .build_filter(build_host_policy(&config, &server.endpoints, false).unwrap())
+        .build_filter(build_host_policy(&config, &server.endpoints).unwrap())
         .unwrap();
     for method in ["GET", "POST"] {
         for (path, key, other) in [
@@ -347,7 +347,8 @@ async fn admitted_routes_enforce_their_own_credentials_before_handlers() {
 async fn sse_rejects_invalid_current_material_before_opening_a_stream() {
     if !with_auth_env("web::warp::warp_server::auth_tests::sse_rejects_invalid_current_material_before_opening_a_stream") { return; }
     let mut server = WarpWebHost::new();
-    server.with_system_journal(Arc::new(crate::journal::MemoryJournal::<SystemEvent>::new()));
+    let (endpoint, _closing) = flow_events_endpoint();
+    server.register_endpoint(Box::new(endpoint)).unwrap();
     // Exercise the request boundary directly; production admission rejects this policy earlier.
     let filter = server
         .build_filter(HostPolicy {
@@ -365,6 +366,138 @@ async fn sse_rejects_invalid_current_material_before_opening_a_stream() {
     .await
     .expect("invalid auth must reject before opening SSE");
     assert_eq!(response.status(), 500);
+}
+
+struct CountedFlowEvents {
+    inner: crate::web::endpoints::flow_events::FlowEventsEndpoint,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl HttpEndpoint for CountedFlowEvents {
+    fn path(&self) -> &str {
+        self.inner.path()
+    }
+    fn methods(&self) -> &[HttpMethod] {
+        self.inner.methods()
+    }
+    async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.handle(request).await
+    }
+}
+
+#[tokio::test]
+async fn registered_flow_events_auth_rejections_never_invoke_or_open_and_valid_keys_admit() {
+    if !with_auth_env("web::warp::warp_server::auth_tests::registered_flow_events_auth_rejections_never_invoke_or_open_and_valid_keys_admit") { return; }
+    use crate::web::endpoints::flow_events::{tests::ScriptedJournal, FlowEventsEndpoint};
+    use obzenflow_adapters::monitoring::flow_events::{
+        ContractBoundaryAliases, FlowEventsProjection,
+    };
+    use obzenflow_core::id::SystemId;
+
+    let capture = Capture::default();
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    for (policy, header, valid) in [
+        (api_key(KEY_A), "x-api-key", SECRET_A.to_string()),
+        (
+            hmac(KEY_A),
+            "x-signature",
+            ring::hmac::sign(
+                &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, SECRET_A.as_bytes()),
+                b"",
+            )
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        ),
+    ] {
+        for unusable in [None, Some(MISSING), Some(EMPTY), Some(NON_UNICODE)] {
+            if unusable == Some(NON_UNICODE) && !cfg!(unix) {
+                continue;
+            }
+            let policy = match (&policy, unusable) {
+                (AuthPolicy::ApiKey { .. }, Some(name)) => api_key(name),
+                (AuthPolicy::HmacSha256 { .. }, Some(name)) => hmac(name),
+                _ => policy.clone(),
+            };
+            let calls = Arc::new(AtomicUsize::new(0));
+            let journal = Arc::new(ScriptedJournal::new(SystemId::new()));
+            let (closing, receiver) = tokio::sync::watch::channel(false);
+            let mut host = WarpWebHost::new();
+            host.register_endpoint(Box::new(CountedFlowEvents {
+                inner: FlowEventsEndpoint::new(
+                    journal.clone(),
+                    FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
+                    None,
+                    receiver,
+                ),
+                calls: calls.clone(),
+            }))
+            .unwrap();
+            // Request-time material resolution remains fail closed even if a
+            // credential becomes unusable after host startup.
+            let filter = host
+                .build_filter(HostPolicy {
+                    max_body_size_bytes: 100,
+                    request_timeout: None,
+                    control_plane_auth: Some(policy),
+                })
+                .unwrap();
+            for candidate in [None, Some(SECRET_B), Some("")] {
+                let request = warp::test::request().path("/api/flow/events");
+                let request = if let Some(candidate) = candidate {
+                    request.header(header, candidate)
+                } else {
+                    request
+                };
+                let response = request.reply(&filter).await;
+                assert_eq!(
+                    response.status(),
+                    if unusable.is_some() { 500 } else { 401 }
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert_eq!(journal.opens.load(Ordering::SeqCst), 0);
+                assert_eq!(journal.reads.load(Ordering::SeqCst), 0);
+                assert!(!String::from_utf8_lossy(response.body()).contains(SECRET_B));
+            }
+            if unusable.is_none() {
+                let reply = warp::test::request()
+                    .path("/api/flow/events")
+                    .header(header, &valid)
+                    .filter(&filter)
+                    .await
+                    .unwrap()
+                    .into_response();
+                assert_eq!(reply.status(), 200);
+                assert_eq!(reply.headers()["content-type"], "text/event-stream");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                drop(reply);
+                // Closing admission is still protected, then returns 204.
+                closing.send(true).unwrap();
+                assert_eq!(
+                    warp::test::request()
+                        .path("/api/flow/events")
+                        .header(header, &valid)
+                        .reply(&filter)
+                        .await
+                        .status(),
+                    204
+                );
+            }
+        }
+    }
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    for secret in [SECRET_A, SECRET_B, NON_UNICODE_SENTINEL] {
+        assert!(!logs.contains(secret));
+    }
 }
 
 #[tokio::test]
@@ -413,4 +546,25 @@ async fn invalid_authentication_reaches_the_startup_caller_before_spawn() {
             assert!(matches!(error, ManagedWebHostError::StartupFailed { .. }));
         }
     }
+}
+
+// Registration uses exactly the common endpoint surface exercised by applications.
+pub(super) fn flow_events_endpoint() -> (
+    crate::web::endpoints::flow_events::FlowEventsEndpoint,
+    tokio::sync::watch::Sender<bool>,
+) {
+    use crate::web::endpoints::flow_events::FlowEventsEndpoint;
+    use obzenflow_adapters::monitoring::flow_events::{
+        ContractBoundaryAliases, FlowEventsProjection,
+    };
+    let (closing, receiver) = tokio::sync::watch::channel(false);
+    (
+        FlowEventsEndpoint::new(
+            Arc::new(crate::journal::MemoryJournal::new()),
+            FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
+            None,
+            receiver,
+        ),
+        closing,
+    )
 }

@@ -6,7 +6,8 @@
 
 use crate::web::host_config::HostConfig;
 use crate::web::host_error::ManagedWebHostError;
-use obzenflow_core::composite::{CompositeDefinition, CompositeLifecycleProjection};
+use obzenflow_adapters::monitoring::flow_events::FlowEventsProjection;
+use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::id::{CompositeId, RoleId};
 use obzenflow_core::web::EndpointError;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod};
@@ -91,13 +92,6 @@ fn composite_definitions_from_topology(
             members,
         ));
     }
-
-    CompositeLifecycleProjection::new(definitions.clone()).map_err(|error| {
-        ManagedWebHostError::Implementation {
-            message: format!("invalid composite lifecycle projection: {error}"),
-            source: Some(Box::new(error)),
-        }
-    })?;
 
     Ok(definitions)
 }
@@ -214,12 +208,17 @@ pub(crate) async fn bind_managed_host(
     validate_extra_endpoints(&extra_endpoints)?;
 
     let mut server = super::warp::WarpWebHost::new();
-    server.with_composite_definitions(composite_definitions_from_topology(&topology)?);
-    server.with_contract_boundary_aliases(&topology)?;
+    let projection = FlowEventsProjection::new(
+        composite_definitions_from_topology(&topology)?,
+        super::endpoints::flow_events::topology::contract_boundary_aliases(&topology)?,
+    )
+    .map_err(|error| ManagedWebHostError::Implementation {
+        message: format!("invalid composite lifecycle projection: {error}"),
+        source: Some(Box::new(error)),
+    })?;
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
     }
-    server.with_runtime_instance_id(runtime_instance_id);
     let pipeline_state = flow_handle.state_receiver();
 
     // Initial per-stage runtime status; the canonical topology already
@@ -278,7 +277,14 @@ pub(crate) async fn bind_managed_host(
     }
 
     if let Some(journal) = flow_handle.system_journal() {
-        server.with_system_journal(journal);
+        server.register_endpoint(Box::new(
+            super::endpoints::flow_events::FlowEventsEndpoint::new(
+                journal,
+                projection,
+                Some(runtime_instance_id),
+                shutdown.subscribe(),
+            ),
+        ))?;
     }
     server.register_endpoint(Box::new(FlowControlEndpoint::new(flow_handle)))?;
 
@@ -350,6 +356,7 @@ impl HttpEndpoint for PipelineReadyEndpoint {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use obzenflow_core::composite::CompositeLifecycleProjection;
     use obzenflow_core::event::StageLifecycleEvent;
     use obzenflow_topology::{StageSubgraphMembership, TopologyBuilder, TopologySubgraphInfo};
 

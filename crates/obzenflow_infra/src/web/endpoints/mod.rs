@@ -7,6 +7,8 @@
 pub mod config;
 pub mod event_ingestion;
 pub mod flow_control;
+#[cfg(any(test, feature = "warp-server"))]
+pub(crate) mod flow_events;
 #[cfg(feature = "prometheus")]
 pub mod metrics;
 pub mod topology;

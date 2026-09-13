@@ -8,6 +8,7 @@ use crate::web::surface_metrics::HttpSurfaceMetricsEmitter;
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{EndpointMetadata, RoutePolicy};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

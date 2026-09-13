@@ -433,6 +433,174 @@ mod managed_lifecycle_regressions {
 
     use super::prometheus_demo;
 
+    /// Read the shipped endpoint in this existing finite-example proof. HTTP/1.0
+    /// supplies a close-delimited body; HTTP/1.1 transport framing and keep-alives
+    /// are covered by the Infra managed-host tests.
+    struct ExampleEvents(tokio::io::BufReader<tokio::net::TcpStream>);
+
+    impl ExampleEvents {
+        async fn connect(address: std::net::SocketAddr, cursor: Option<&str>) -> Self {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let cursor = cursor
+                .map(|id| format!("Last-Event-ID: {id}\r\n"))
+                .unwrap_or_default();
+            socket.write_all(format!("GET /api/flow/events HTTP/1.0\r\nHost: localhost\r\n{cursor}Connection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut reader = tokio::io::BufReader::new(socket);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            assert!(headers.starts_with("HTTP/1.0 200"), "{headers}");
+            assert!(headers.contains("content-type: text/event-stream"));
+            assert!(!headers.contains("transfer-encoding"));
+            Self(reader)
+        }
+
+        async fn next(&mut self) -> Option<obzenflow_core::web::SseFrame> {
+            use tokio::io::AsyncBufReadExt;
+            let mut frame = obzenflow_core::web::SseFrame::data("");
+            loop {
+                let mut line = String::new();
+                if self.0.read_line(&mut line).await.unwrap() == 0 {
+                    return None;
+                }
+                let line = line.trim_end_matches(['\r', '\n']);
+                if line.is_empty() {
+                    return Some(frame);
+                }
+                if let Some(id) = line.strip_prefix("id:") {
+                    frame.id = Some(id.into());
+                } else if let Some(event) = line.strip_prefix("event:") {
+                    frame.event = Some(event.into());
+                } else if let Some(data) = line.strip_prefix("data:") {
+                    frame.data = data.into();
+                } else if let Some(comment) = line.strip_prefix(':') {
+                    frame.comment = Some(comment.into());
+                } else {
+                    panic!("unexpected example SSE field: {line}");
+                }
+            }
+        }
+
+        async fn bootstrap(&mut self, unknown: bool) -> String {
+            let mut saw_error = false;
+            while let Some(frame) = self.next().await {
+                match frame.event.as_deref() {
+                    Some("error") => {
+                        assert_eq!(
+                            serde_json::from_str::<serde_json::Value>(&frame.data).unwrap()
+                                ["error_type"],
+                            "journal_resume_not_found"
+                        );
+                        saw_error = true;
+                    }
+                    Some("bootstrap") => {
+                        assert_eq!(saw_error, unknown);
+                        let payload: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
+                        assert!(payload["runtime_instance_id"].as_str().is_some());
+                        assert_eq!(payload["checkpoint_event_id"].as_str(), frame.id.as_deref());
+                        return frame.id.unwrap();
+                    }
+                    Some("stage_lifecycle" | "composite_status") => assert!(frame.id.is_none()),
+                    other => panic!("unexpected bootstrap frame {other:?}"),
+                }
+            }
+            panic!("stream ended before bootstrap")
+        }
+
+        async fn collect(mut self) -> Vec<obzenflow_core::web::SseFrame> {
+            let mut frames = Vec::new();
+            while let Some(frame) = self.next().await {
+                frames.push(frame);
+            }
+            frames
+        }
+    }
+
+    fn assert_example_stream_matches_export(
+        frames: &[obzenflow_core::web::SseFrame],
+        cursor: &str,
+        systems: &[obzenflow_infra::journal::disk::log_record::LogRecord<
+            obzenflow_core::event::SystemEvent,
+        >],
+    ) {
+        use obzenflow_adapters::monitoring::flow_events::{
+            ContractBoundaryAliases, FlowEventsProjection,
+        };
+        let actual: Vec<_> = frames
+            .iter()
+            .filter(|frame| frame.id.is_some())
+            .cloned()
+            .collect();
+        let last_id = actual
+            .last()
+            .expect("live events before shutdown")
+            .id
+            .as_deref()
+            .unwrap();
+        let mut projection =
+            FlowEventsProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+        let mut expected = Vec::new();
+        let mut resumed = false;
+        for row in systems {
+            let envelope = obzenflow_core::event::event_envelope::SystemEventEnvelope {
+                journal_writer_id: row.journal_id.into(),
+                vector_clock: row.vector_clock.clone(),
+                timestamp: row.timestamp,
+                journal_group_id: None,
+                journal_group_member: None,
+                event: row.event.clone(),
+            };
+            if resumed {
+                expected.extend(
+                    projection
+                        .project(&envelope, 0)
+                        .into_iter()
+                        .filter(|frame| frame.id.is_some()),
+                );
+            } else {
+                projection.rebuild(&envelope);
+                resumed = row.event.id.to_string() == cursor;
+            }
+            if row.event.id.to_string() == last_id {
+                break;
+            }
+        }
+        assert!(
+            resumed,
+            "bootstrap cursor must name an exported durable fact"
+        );
+        assert_eq!(
+            actual, expected,
+            "hosted events must be the complete projected journal suffix"
+        );
+        let completed = frames
+            .iter()
+            .position(|frame| {
+                frame.event.as_deref() == Some("flow_lifecycle")
+                    && serde_json::from_str::<serde_json::Value>(&frame.data).unwrap()["event_type"]
+                        == "flow_completed"
+            })
+            .expect("terminal execution is visible before listener close");
+        let payload: serde_json::Value = serde_json::from_str(&frames[completed].data).unwrap();
+        assert_eq!(
+            payload["metrics"],
+            serde_json::json!({"events_in_total": 100, "events_out_total": 100, "errors_total": 1})
+        );
+        assert!(completed < frames.len() - 1);
+        assert_eq!(
+            frames.last().unwrap().event.as_deref(),
+            Some("server_shutdown")
+        );
+        assert!(frames.last().unwrap().id.is_none());
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum MetricsProofMode {
         HostedReporting,
@@ -748,6 +916,7 @@ enabled = {hosted}
                 application.await
             ),
         };
+        let mut event_clients = Vec::new();
         if hosted {
             flow.wait_for_ready().await.unwrap();
             let mut socket = tokio::time::timeout(Duration::from_secs(2), async {
@@ -760,6 +929,20 @@ enabled = {hosted}
             })
             .await
             .unwrap();
+            if count == 100 {
+                let mut fresh = ExampleEvents::connect(address, None).await;
+                let cursor = fresh.bootstrap(false).await;
+                drop(fresh);
+                let resumed = ExampleEvents::connect(address, Some(&cursor)).await;
+                event_clients.push((cursor, tokio::spawn(resumed.collect())));
+                let mut unknown = ExampleEvents::connect(
+                    address,
+                    Some(&obzenflow_core::EventId::new().to_string()),
+                )
+                .await;
+                let cursor = unknown.bootstrap(true).await;
+                event_clients.push((cursor, tokio::spawn(unknown.collect())));
+            }
             socket.write_all(b"POST /api/flow/control HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 17\r\nConnection: close\r\n\r\n{\"action\":\"play\"}").await.unwrap();
             let mut response = String::new();
             socket.read_to_string(&mut response).await.unwrap();
@@ -854,6 +1037,13 @@ enabled = {hosted}
             })
             .collect();
         assert_eq!(terminals, ["system.pipeline.completed"]);
+        for (cursor, client) in event_clients {
+            let frames = tokio::time::timeout(Duration::from_secs(2), client)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_example_stream_matches_export(&frames, &cursor, &systems);
+        }
         let passed_feeds: BTreeSet<_> = systems
             .iter()
             .filter_map(|row| match &row.event.event {
