@@ -946,16 +946,15 @@ enabled = {hosted}
             socket.read_to_string(&mut response).await.unwrap();
             assert!(response.starts_with("HTTP/1.1 200"), "{response}");
         }
-        // The shipped source admits 1,000 inputs/second; the full-volume run needs
-        // its execution time as well as the unchanged five-second finalisation budget.
-        tokio::time::timeout(
-            Duration::from_secs(if count == 100 { 10 } else { 180 }),
-            application,
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        let result = if count == 100 {
+            tokio::time::timeout(Duration::from_secs(10), application)
+                .await
+                .expect("100-input example must complete within ten seconds")
+        } else {
+            // Nextest bounds the full-volume run, including journal verification.
+            application.await
+        };
+        result.unwrap().unwrap();
         let _rebound = hosted.then(|| std::net::TcpListener::bind(address).unwrap());
         if collecting {
             assert_final_example_metrics(&model, count);

@@ -5,13 +5,17 @@ retries = 0
 [profile.ci-fast]
 slow-timeout = { period = "60s", terminate-after = 1 }
 retries = 1
-# ci-fast excludes measured long-running binaries by binary name.
-# Audit-driven refinements live in FLOWIP-114k.
-default-filter = "not binary(/^(prometheus_100k_error_kinds_test|circuit_breaker_metrics_e2e_test)$/)"
+# PRs and main select the same tests; only their execution budgets differ.
 
 [profile.ci-full]
 slow-timeout = { period = "300s", terminate-after = 2 }
 retries = 2
+
+# The 100k proofs include rate-limited execution and full journal verification.
+# Use the main-branch time budget when running them before merge.
+[[profile.ci-fast.overrides]]
+filter = "binary(=prometheus_100k_error_kinds_test) & test(prometheus_example_100k_completes_)"
+slow-timeout = { period = "300s", terminate-after = 2 }
 
 [[profile.ci-fast.overrides]]
 filter = "binary(/metrics/)"

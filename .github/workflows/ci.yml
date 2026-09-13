@@ -252,9 +252,8 @@ jobs:
         # hand-maintained binary filter here silently excluded new test
         # binaries and masked a regression for an entire FLOWIP cycle
         # (the 054j group_by lineage test after 120b's versioned-emission
-        # change). Exclude a genuinely slow binary via the profile's
-        # default-filter, with a comment, so the exclusion is explicit
-        # and reviewed.
+        # change). Keep PR and main test selection identical; give slow tests
+        # an explicit time budget in the profile instead of excluding them.
         # Include the optional managed host so authentication and startup
         # regressions execute in CI rather than only compiling under Clippy.
         run: |
