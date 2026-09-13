@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::tests::{collect_closing, frame_payload, frames};
-use super::topology::contract_boundary_aliases;
-use super::*;
+use super::super::topology::contract_boundary_aliases;
+use super::super::*;
+use super::stream::{collect_closing, frame_payload, frames};
 use crate::journal::MemoryJournal;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::event::system_event::{

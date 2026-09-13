@@ -77,7 +77,5 @@ impl HttpEndpoint for StudioUpdatesEndpoint {
     }
 }
 
-#[cfg(all(test, feature = "warp-server"))]
-mod contract_tests;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::*;
+use super::super::*;
 use crate::journal::MemoryJournal;
 use futures::StreamExt;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
