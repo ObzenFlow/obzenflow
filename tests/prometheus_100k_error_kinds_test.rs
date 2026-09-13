@@ -433,6 +433,13 @@ mod managed_lifecycle_regressions {
 
     use super::prometheus_demo;
 
+    #[derive(Clone, Copy, Debug)]
+    enum MetricsProofMode {
+        HostedReporting,
+        InjectedSnapshots,
+        Disabled,
+    }
+
     struct ObservedExporter {
         application: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
         observed: Arc<obzenflow_adapters::monitoring::MetricsReadModel>,
@@ -463,6 +470,21 @@ mod managed_lifecycle_regressions {
                     application,
                     observed,
                 })))
+                .await
+        })
+    }
+
+    // An unhosted lifecycle/replay proof supplies only the existing Core sink.
+    // Application reporting remains disabled; this is distinct from the control
+    // run with no sink and no Runtime metrics aggregator.
+    fn inject_snapshots(
+        definition: obzenflow_dsl::FlowDefinition,
+        observed: Arc<obzenflow_adapters::monitoring::MetricsReadModel>,
+    ) -> obzenflow_dsl::FlowDefinition {
+        obzenflow_dsl::FlowDefinition::new(move |context| async move {
+            assert!(context.metrics_exporter().is_none());
+            definition
+                .build(context.with_metrics_exporter(observed))
                 .await
         })
     }
@@ -509,12 +531,13 @@ mod managed_lifecycle_regressions {
     /// certified current-build replay all traverse the application lifecycle.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manual_prometheus_example_exports_100_inputs_and_replays_without_a_host() {
-        prometheus_example_journal_and_metrics_proof(true, 100, true).await;
+        prometheus_example_journal_and_metrics_proof(MetricsProofMode::HostedReporting, 100).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unhosted_prometheus_example_exports_100_inputs_and_replays_with_final_metrics() {
-        prometheus_example_journal_and_metrics_proof(false, 100, true).await;
+        prometheus_example_journal_and_metrics_proof(MetricsProofMode::InjectedSnapshots, 100)
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -531,7 +554,7 @@ mod managed_lifecycle_regressions {
         let config = dir.path().join("stopped.toml");
         std::fs::write(
             &config,
-            "[server]\nenabled = false\n[metrics]\nenabled = true\n",
+            "[server]\nenabled = false\n[metrics]\nenabled = false\n",
         )
         .unwrap();
         let captured = Arc::new(Mutex::new(None::<Arc<FlowHandle>>));
@@ -568,7 +591,7 @@ mod managed_lifecycle_regressions {
                     .unwrap();
                 })
             })
-            .run_async(observe_exports(
+            .run_async(inject_snapshots(
                 prometheus_demo::flow_definition(100_000, dir.path().join("stopped")),
                 model.clone(),
             ));
@@ -630,19 +653,16 @@ mod managed_lifecycle_regressions {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prometheus_example_100k_completes_without_reporting() {
-        prometheus_example_journal_and_metrics_proof(false, 100_000, false).await;
+        prometheus_example_journal_and_metrics_proof(MetricsProofMode::Disabled, 100_000).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prometheus_example_100k_completes_with_reporting() {
-        prometheus_example_journal_and_metrics_proof(true, 100_000, true).await;
+        prometheus_example_journal_and_metrics_proof(MetricsProofMode::HostedReporting, 100_000)
+            .await;
     }
 
-    async fn prometheus_example_journal_and_metrics_proof(
-        hosted: bool,
-        count: u64,
-        reporting: bool,
-    ) {
+    async fn prometheus_example_journal_and_metrics_proof(mode: MetricsProofMode, count: u64) {
         use obzenflow_core::event::{
             chain_event::ChainEventContent, JournalEvent, SystemEvent, SystemEventType,
         };
@@ -653,8 +673,10 @@ mod managed_lifecycle_regressions {
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        let hosted = matches!(mode, MetricsProofMode::HostedReporting);
+        let collecting = !matches!(mode, MetricsProofMode::Disabled);
         let scratch = tempfile::Builder::new()
-            .prefix(&format!("flowip-130b-{count}-{reporting}-"))
+            .prefix(&format!("prometheus-proof-{count}-{mode:?}-"))
             .tempdir_in("target")
             .unwrap();
         let dir = scratch.path().to_path_buf();
@@ -685,7 +707,7 @@ port = {}
 startup_mode = "manual"
 on_terminal = "exit"
 [metrics]
-enabled = {reporting}
+enabled = {hosted}
 "#,
                 address.port()
             ),
@@ -713,10 +735,10 @@ enabled = {reporting}
                 tokio::spawn(async {})
             });
         let definition = prometheus_demo::flow_definition(count as usize, dir.join("live"));
-        let definition = if reporting {
-            observe_exports(definition, model.clone())
-        } else {
-            definition
+        let definition = match mode {
+            MetricsProofMode::HostedReporting => observe_exports(definition, model.clone()),
+            MetricsProofMode::InjectedSnapshots => inject_snapshots(definition, model.clone()),
+            MetricsProofMode::Disabled => definition,
         };
         let application = tokio::spawn(app.run_async(definition));
         let flow = match flow_rx.await {
@@ -754,7 +776,7 @@ enabled = {reporting}
         .unwrap()
         .unwrap();
         let _rebound = hosted.then(|| std::net::TcpListener::bind(address).unwrap());
-        if reporting {
+        if collecting {
             assert_final_example_metrics(&model, count);
         } else {
             assert!(model.snapshot().app.is_none());
@@ -865,7 +887,7 @@ enabled = {reporting}
                     )
                 })
         };
-        if reporting {
+        if collecting {
             let terminal = position("system.pipeline.completed");
             let drained = position("system.metrics.drained");
             assert!(terminal < drained);
@@ -898,13 +920,13 @@ enabled = {reporting}
                     SystemEventType::MetricsCoordination(obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark })
                         if watermark.clocks.get(&key).is_some_and(|sequence| *sequence > 0))), "live collection must advance before finalisation");
             }
-            println!("Prometheus proof: {count} inputs, reporting={reporting}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());
+            println!("Prometheus proof: {count} inputs, mode={mode:?}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());
         } else {
             assert!(!systems
                 .iter()
                 .any(|row| matches!(row.event.event, SystemEventType::MetricsCoordination(_))));
             println!(
-                "Prometheus proof: {count} inputs, reporting={reporting}, archive={}",
+                "Prometheus proof: {count} inputs, mode={mode:?}, archive={}",
                 archive.display()
             );
         }
@@ -917,7 +939,7 @@ enabled = {reporting}
         let replay_config = dir.join("replay.toml");
         std::fs::write(
             &replay_config,
-            "[server]\nenabled = false\n[metrics]\nenabled = true\n",
+            "[server]\nenabled = false\n[metrics]\nenabled = false\n",
         )
         .unwrap();
         // Keeping the old port bound also proves replay needs no listener.
@@ -933,7 +955,7 @@ enabled = {reporting}
                 OsString::from("--verify"),
             ])
             .with_log_level(LogLevel::Error)
-            .run_async(observe_exports(
+            .run_async(inject_snapshots(
                 prometheus_demo::flow_definition(0, dir.join("replay")),
                 replay_model.clone(),
             ))

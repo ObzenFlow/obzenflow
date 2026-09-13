@@ -9,6 +9,17 @@ From an onion-architecture perspective, this crate sits on the outside of the on
 
 ## Benchmark Harness (Criterion)
 
+The `pipeline_execution` target also measures Prometheus rendering for 100 stages and
+paired application/infrastructure publication with zero or four concurrent scrapers:
+
+```sh
+cargo bench -p obzenflow_benchmarks --bench pipeline_execution -- metrics_reporting
+```
+
+Publication timings include snapshot cloning, allocation and retirement, and exclude worker
+startup and joining. These are local cost measurements; the existing
+`monitoring_injection_test` separately proves flow settlement and journal totals during scrapes.
+
 Benchmarks in this crate use `criterion` (with `async_tokio`) rather than the default `libtest` harness:
 
 - Each file in `benches/` is a standalone Criterion benchmark binary (`harness = false` in `Cargo.toml`).

@@ -9,46 +9,32 @@ Quick setup for monitoring ObzenFlow metrics with Prometheus and Grafana.
 
 ## Quick Start
 
-We provide examples that demonstrate how to run ObzenFlow with a pluggable metrics server. The examples expose metrics through your choice of web server (Warp is provided, but you can implement your own). The `setup.sh` script builds a default Grafana installation with pre-configured dashboards.
-
-### Option 1: Basic Demo (Quick)
-The `web_metrics_demo` runs quickly and shows final metrics:
+The shipped `prometheus_demo` exposes the framework's supported Prometheus format through
+the managed HTTP host. Reporting requires both compiled capabilities and explicit configuration.
+The `setup.sh` script starts Prometheus and Grafana with pre-configured dashboards.
 
 ```bash
-# 1. Start ObzenFlow with metrics (in another terminal)
-cargo run -p obzenflow --example web_metrics_demo --features obzenflow_infra/warp-server
+# 1. Start the example from the repository root; it waits for Play.
+cargo run -p obzenflow --example prometheus_demo --features prometheus,web-host -- \
+  --config examples/prometheus_demo/obzenflow.prometheus.toml
 
-# 2. Set up and start the monitoring stack
+# 2. In another terminal, start the monitoring stack.
 cd monitoring
 ./setup.sh
 
-# 3. Access dashboards
-open http://localhost:3000  # Login: admin/admin
-```
+# 3. Start processing after Prometheus and Grafana are ready.
+curl -X POST http://localhost:9090/api/flow/control \
+  -H 'Content-Type: application/json' -d '{"action":"play"}'
 
-### Option 2: Live Metrics Demo (Recommended)
-The `prometheus_100k_demo` processes 100,000 events with rate limiting, allowing you to observe metrics updating in real-time:
-
-```bash
-# 1. Start the long-running demo with concurrent metrics (in another terminal)
-cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server
-
-# 2. Set up and start the monitoring stack
-cd monitoring
-./setup.sh
-
-# 3. Access dashboards and watch metrics update live
-open http://localhost:3000  # Login: admin/admin
-
-# 4. Or query metrics directly while the flow runs
+# 4. Query metrics while the flow runs, or open Grafana at localhost:3000.
 curl http://localhost:9090/metrics
 ```
 
-The 100k demo includes:
-- **100,000 events** processed with progress updates every 10k
-- **Rate limiting** (100ms delay) making it run for several minutes
-- **Live metrics** served concurrently during flow execution
-- **Error simulation** on every 100th event for realistic metrics
+The example processes 100,000 inputs by default with a source intake rate limit of 1,000 per second.
+Every 100th input produces an intentional processing error. The supplied configuration
+closes the host after completion; Prometheus retains the samples it collected. Set
+`PROMETHEUS_EVENT_COUNT=100` before the launch command for a short verification run.
+See [the example guide](../examples/prometheus_demo/README.md) for disabled reporting and replay.
 
 ## What's Included
 
