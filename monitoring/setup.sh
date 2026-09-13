@@ -23,7 +23,7 @@ if curl -s http://localhost:9090/metrics > /dev/null 2>&1; then
     echo "✅ ObzenFlow metrics endpoint is accessible at http://localhost:9090/metrics"
 else
     echo "⚠️  ObzenFlow metrics endpoint not accessible at http://localhost:9090/metrics"
-    echo "   Please start ObzenFlow first with: cargo run --example web_metrics_demo"
+    echo "   Please start ObzenFlow first with: cargo run --example prometheus_demo --features prometheus,web-host -- --config examples/prometheus_demo/obzenflow.prometheus.toml"
     echo ""
     read -p "Do you want to continue anyway? (y/n) " -n 1 -r
     echo ""

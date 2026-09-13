@@ -289,3 +289,86 @@ async fn http2_stream_tasks_belong_to_the_host_scope() {
     connection.abort();
     let _ = connection.await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flush_before_close() {
+    use crate::journal::MemoryJournal;
+    use crate::web::endpoints::studio::StudioUpdatesEndpoint;
+    use crate::web::surface_metrics::HttpSurfaceMetricsCollector;
+    use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
+    use obzenflow_core::{id::SystemId, Journal, JournalOwner};
+
+    async fn read_through(socket: &mut TcpStream, marker: &str) -> String {
+        let mut bytes = Vec::new();
+        while !String::from_utf8_lossy(&bytes).contains(marker) {
+            let mut buffer = [0; 2048];
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "stream ended before {marker}");
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    let system = SystemId::new();
+    let journal = Arc::new(MemoryJournal::<SystemEvent>::with_owner(
+        JournalOwner::system(system),
+    ));
+    let (closing, receiver) = watch::channel(false);
+    let mut routes = WarpWebHost::new();
+    let metrics = Arc::new(HttpSurfaceMetricsCollector::new());
+    routes.with_surface_metrics(metrics.clone());
+    routes
+        .register_endpoint(Box::new(StudioUpdatesEndpoint::new(
+            journal.clone(),
+            StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap(),
+            Some(crate::web::RuntimeInstanceId::new()),
+            receiver,
+        )))
+        .unwrap();
+    let host = routes
+        .bind(
+            HostConfig {
+                request_timeout_secs: Some(1),
+                ..HostConfig::localhost(0)
+            },
+            closing,
+        )
+        .await
+        .unwrap();
+    let mut socket = connect(&host, "/api/flow/events").await;
+    let initial = read_through(&mut socket, "event:bootstrap").await;
+    assert!(initial.starts_with("HTTP/1.1 200"));
+    assert!(initial.contains("content-type: text/event-stream"));
+    tokio::time::advance(Duration::from_secs(16)).await;
+    let heartbeat = read_through(&mut socket, ":\n\n").await;
+    assert!(!heartbeat.contains("event:"));
+    assert_eq!(
+        metrics.total_requests(),
+        0,
+        "stream lifetime is not unary request latency"
+    );
+    let terminal = journal
+        .append(
+            SystemEvent::new(
+                WriterId::from(system),
+                SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    let tasks = host.tasks.clone();
+    let address = host.address();
+    let close = tokio::spawn(host.close());
+    let mut tail = String::new();
+    socket.read_to_string(&mut tail).await.unwrap();
+    close.await.unwrap().unwrap();
+    assert!(tail.contains(&format!("id:{}", terminal.event.id)));
+    assert!(
+        tail.find("event:flow_lifecycle").unwrap() < tail.find("event:server_shutdown").unwrap()
+    );
+    assert!(tasks.is_empty());
+    assert_eq!(journal.read_all_unordered().await.unwrap().len(), 1);
+    let _rebound = TcpListener::bind(address).await.unwrap();
+}

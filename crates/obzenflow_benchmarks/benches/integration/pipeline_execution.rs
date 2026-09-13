@@ -8,9 +8,11 @@
 //! through the entire pipeline. This is different from per-event latency as
 //! it measures overall system performance for batch processing scenarios.
 
+use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -19,9 +21,6 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-// Monitoring removed per FLOWIP-056-666
-use async_trait::async_trait;
-use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -363,9 +362,104 @@ fn bench_execution_time_per_event(c: &mut Criterion) {
     group.finish();
 }
 
+/// FLOWIP-140h: measure the production read model and projection independently
+/// of journal aggregation. Each publication pair replaces both owned snapshots;
+/// background scrapers keep rendering throughout the measured publication loop.
+fn bench_metrics_reporting(c: &mut Criterion) {
+    use obzenflow_adapters::monitoring::{projections::PrometheusProjection, MetricsReadModel};
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::metrics::{
+        AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
+    };
+    use obzenflow_core::StageId;
+    use std::hint::black_box;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Barrier;
+
+    let mut app = AppMetricsSnapshot::default();
+    app.pipeline_state = "running".into();
+    for index in 0..100 {
+        let stage = StageId::new();
+        app.stage_metadata.insert(
+            stage,
+            StageMetadata {
+                name: format!("stage_{index}"),
+                stage_type: StageType::Transform,
+                reference_mode: None,
+                flow_name: "metrics_benchmark".into(),
+                flow_id: None,
+            },
+        );
+        app.event_counts.insert(stage, 1_000);
+        app.events_emitted_total.insert(stage, 1_000);
+        app.error_counts.insert(stage, 1);
+    }
+    let infra = InfraMetricsSnapshot::default();
+    let model = MetricsReadModel::default();
+    model.publish_app_snapshot(app.clone());
+    model.publish_infra_snapshot(infra.clone());
+
+    let mut group = c.benchmark_group("metrics_reporting");
+    group.sample_size(20);
+    group.bench_function("render_100_stages", |b| {
+        b.iter(|| {
+            black_box(
+                PrometheusProjection::new()
+                    .render(black_box(&model.snapshot()))
+                    .unwrap(),
+            );
+        });
+    });
+    for readers in [0, 4] {
+        group.bench_with_input(
+            BenchmarkId::new("publish_pair_100_stages", readers),
+            &readers,
+            |b, &readers| {
+                b.iter_custom(|iterations| {
+                    let stop = AtomicBool::new(false);
+                    let started = Barrier::new(readers + 1);
+                    std::thread::scope(|scope| {
+                        for _ in 0..readers {
+                            let model = &model;
+                            let stop = &stop;
+                            let started = &started;
+                            scope.spawn(move || {
+                                black_box(
+                                    PrometheusProjection::new()
+                                        .render(&model.snapshot())
+                                        .unwrap(),
+                                );
+                                started.wait();
+                                while !stop.load(Ordering::Relaxed) {
+                                    black_box(
+                                        PrometheusProjection::new()
+                                            .render(&model.snapshot())
+                                            .unwrap(),
+                                    );
+                                }
+                            });
+                        }
+                        started.wait();
+                        let begin = Instant::now();
+                        for _ in 0..iterations {
+                            model.publish_app_snapshot(black_box(app.clone()));
+                            model.publish_infra_snapshot(black_box(infra.clone()));
+                        }
+                        let elapsed = begin.elapsed();
+                        stop.store(true, Ordering::Relaxed);
+                        elapsed
+                    })
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_total_execution_time,
-    bench_execution_time_per_event
+    bench_execution_time_per_event,
+    bench_metrics_reporting
 );
 criterion_main!(benches);

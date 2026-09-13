@@ -9,6 +9,8 @@ pub mod event_ingestion;
 pub mod flow_control;
 #[cfg(feature = "prometheus")]
 pub mod metrics;
+#[cfg(any(test, feature = "warp-server"))]
+pub(crate) mod studio;
 pub mod topology;
 
 pub use config::{ConfigHttpEndpoint, ConfigReadModel, ConfigRoute};

@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Ordered, rebuildable lifecycle view for first-class composites.
+//! Combines member-stage lifecycle events into each composite's current status.
 
 use crate::event::StageLifecycleEvent;
 use crate::id::{CompositeId, RoleId, StageId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One composite's manifest-derived lifecycle definition.
+/// The stages that form a composite and the role each stage plays in the group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeDefinition {
     composite_id: CompositeId,
@@ -16,7 +16,7 @@ pub struct CompositeDefinition {
 }
 
 impl CompositeDefinition {
-    /// Build a definition from the composite identity and its member-role map.
+    /// Name the composite and pair each member stage with its role, such as `map`.
     pub fn new(composite_id: CompositeId, members: Vec<(StageId, RoleId)>) -> Self {
         Self {
             composite_id,
@@ -24,25 +24,34 @@ impl CompositeDefinition {
         }
     }
 
-    /// The manifest identity this definition describes.
+    /// The composite ID used to look up this group's status.
     pub fn composite_id(&self) -> &CompositeId {
         &self.composite_id
     }
 }
 
-/// State-derived lifecycle output for a composite binding.
+/// The group's status based on the member events read so far.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompositeStatus {
     Waiting,
     Running,
     Completed,
-    Cancelled { reason: String },
-    Failed { at: RoleId, error: String },
-    Invalid { error: String },
+    Cancelled {
+        reason: String,
+    },
+    Failed {
+        at: RoleId,
+        error: String,
+    },
+    /// A member reported conflicting outcomes, such as completed then cancelled.
+    Invalid {
+        error: String,
+    },
 }
 
-/// A malformed definition or contradictory member lifecycle tape.
+/// Invalid group membership or conflicting outcomes reported by a member, such
+/// as the same stage reporting both successful completion and cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CompositeProjectionError {
@@ -285,7 +294,7 @@ impl CompositeState {
     }
 }
 
-/// Pure lifecycle read model over all composites in one topology.
+/// Tracks member outcomes and calculates each composite's status.
 #[derive(Debug, Clone)]
 pub struct CompositeLifecycleProjection {
     states: BTreeMap<CompositeId, CompositeState>,
@@ -293,7 +302,7 @@ pub struct CompositeLifecycleProjection {
 }
 
 impl CompositeLifecycleProjection {
-    /// Build and validate the manifest-derived definitions.
+    /// Validate group membership and start each group in the waiting state.
     pub fn new(
         definitions: impl IntoIterator<Item = CompositeDefinition>,
     ) -> Result<Self, CompositeProjectionError> {
@@ -333,7 +342,7 @@ impl CompositeLifecycleProjection {
         self.composite_by_stage.get(&stage)
     }
 
-    /// Fold one member lifecycle fact in caller-supplied append order.
+    /// Apply events in journal order: the first recorded failure supplies the cause.
     pub fn apply(
         &mut self,
         stage: StageId,
@@ -348,12 +357,12 @@ impl CompositeLifecycleProjection {
             .apply(stage, event)
     }
 
-    /// Current state-derived status for one composite.
+    /// The group's status after all events applied so far.
     pub fn status(&self, composite_id: &CompositeId) -> Option<CompositeStatus> {
         self.states.get(composite_id).map(CompositeState::status)
     }
 
-    /// Deterministically ordered snapshot of every composite status.
+    /// Current statuses of all groups, sorted by composite ID.
     pub fn statuses(&self) -> Vec<(CompositeId, CompositeStatus)> {
         self.states
             .iter()

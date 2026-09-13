@@ -45,7 +45,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # Tests
 cargo nextest run --workspace --profile ci-fast
 cargo nextest run --workspace --profile ci-full
-cargo nextest run --workspace --profile ci-fast --features tokio-console,http-pull,ai,postgres
+cargo nextest run --workspace --profile ci-fast --features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio
 
 # Dependency policy checks (CI runs these)
 cargo deny --all-features check
@@ -59,59 +59,41 @@ ObzenFlow uses `cargo-nextest` as the supported workspace test runner. The CI te
 | CI job / matrix entry | Pull requests | Pushes to `main` and manual dispatch | What it proves |
 | --- | --- | --- | --- |
 | `test` / `default` | `ci-fast`, no extra features | `ci-full`, no extra features | The workspace passes without optional production features. |
-| `test` / `production-features` | `ci-fast`, `--features tokio-console,http-pull,ai,postgres` | `ci-full`, `--features tokio-console,http-pull,ai,postgres` | The explicitly supported production feature set passes. |
-| `test-test-support` | `ci-fast`, `--features test-support`, targeted integration-test binaries | `ci-full`, `--features test-support`, targeted integration-test binaries | The test-only support helpers compile and work in real tests. |
+| `test` / `production-features` | `ci-fast`, `--features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio` | `ci-full`, same features | The explicitly supported production feature set passes. |
+| `test-test-support` | `ci-fast`, `--features test-support,obzenflow_infra/warp-server`, whole workspace | `ci-full`, same features and scope | The test-only support helpers and managed-host regressions work in real tests. |
 
-`ci-fast` is the required PR gate. `ci-full` is the merge/manual gate and includes the long-running binaries excluded from `ci-fast`. The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
+`ci-fast` is the required PR gate. `ci-full` runs on pushes to `main` and manual dispatch. Both select the same tests; their time limits and retry counts differ. The two 5k Prometheus proofs use the same ten-minute whole-test limit in both profiles, including journal verification. Their five-second metrics-finalisation assertion remains separate.
+
+The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
 
 Expanded, the normal PR test matrix is:
 
 ```bash
 cargo nextest run --workspace --locked --profile ci-fast
-cargo nextest run --workspace --locked --profile ci-fast --features tokio-console,http-pull,ai,postgres
+cargo nextest run --workspace --locked --profile ci-fast --features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio
+cargo nextest run --workspace --locked --profile ci-fast --features test-support,obzenflow_infra/warp-server
 ```
 
-The separate `test-test-support` job is narrower than the normal matrix. It exists only to prove that test-only helpers behind `--features test-support` still compile and work. It runs these integration-test binaries:
+The separate `test-test-support` job runs the whole workspace with test helpers and the managed host enabled. Do not maintain a binary allowlist: new tests must join CI automatically.
 
-- `stateful_metrics_integration_test`: stateful flow metrics coverage.
-- `metrics_exporter_integration_test`: metrics exporter integration coverage.
-- `rate_limiter_integration_test`: rate-limiter integration coverage that uses test-support helpers.
-- `divergence_mid_flight_abort_test`: paused-time contract-evaluation abort coverage (system journal assertions).
-- `cycle_unified_guard_test`: paused-time cycle guard / SCC max-iteration coverage.
-- `cycle_convergence_eof_gating_test`: paused-time cycle EOF gating coverage.
-
-If you change `obzenflow_runtime::testing`, the `test-support` feature, or one of those three files, also run:
-
-```bash
-cargo nextest run --workspace --locked --profile ci-fast --features test-support \
-  -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test)$/)'
-```
-
-Before opening a PR that touches runtime or tests, run the same profile that CI will run for your branch:
-
-```bash
-cargo nextest run --workspace --locked --profile ci-fast
-cargo nextest run --workspace --locked --profile ci-fast --features tokio-console,http-pull,ai,postgres
-```
-
-Use `ci-full` locally when you change slow e2e coverage, nextest filters, test groups, or timeout policy.
+Before opening a PR that touches runtime or tests, verify the affected coverage with CI's feature sets and `ci-fast` profile. For changes to profiles, test groups or timeout policy, also check that `ci-full` retains the same coverage and the intended execution limits.
 
 Classify time-sensitive tests before adding sleeps or timeouts:
 
 - **Semantic timing assertion**: the test asserts time-driven behaviour. Prefer `tokio::test(start_paused = true)` and `obzenflow_runtime::testing::TestClock` when the production code uses Tokio time.
 - **Synchronisation barrier**: the test waits for work to become observable. Prefer `JournalProbe`, `MetricsBarrier`, channel/notify readiness, or a state receiver instead of fixed sleeps.
-- **Hang guard**: the timeout only bounds a test that could otherwise hang. Keep it as wall-clock `tokio::time::timeout`, and add a nextest override if it legitimately exceeds the profile default.
+- **Hang guard**: use nextest to bound the whole test, with an override when the workload needs more than the profile default. Keep `tokio::time::timeout` for specific operations that need their own bound.
 - **Benchmark**: keep benchmark timing out of `ci-fast`; benchmark code belongs under the benchmark crate and `cargo bench` flow.
 
 Use shared-resource groups in `.config/nextest.toml` when tests contend for a hard-coded port, hard-coded disk journal path, process-global singleton, or other resource that cannot be safely parallelised. Add the group selector in the same PR as the test that needs it. Use per-test `slow-timeout` overrides only for tests with a documented reason to exceed the profile default.
 
 Tier long-running e2e tests deliberately:
 
-- Use a nextest profile filter when the test should still run automatically in `ci-full`.
+- Keep automated regressions in both CI profiles. Give slow tests an explicit time budget instead of excluding them from PRs.
 - Use `#[ignore]` when the test should compile normally but run only on demand.
 - Use `cfg(feature = "e2e")` only when the whole test binary needs external services, credentials, heavyweight optional dependencies, or compile-time-gated setup.
 
-Production CI must not use `--all-features` for tests. The workflow enumerates production features explicitly and verifies that list against the root `Cargo.toml` with `cargo metadata --no-deps`. Test-only features such as `test-support` are exercised by targeted commands.
+Production CI must not use `--all-features` for tests. The workflow enumerates production features explicitly and verifies that list against the root `Cargo.toml` with `cargo metadata --no-deps`. Test-only features such as `test-support` are exercised by their own workspace lane.
 
 When adding a root Cargo feature, decide whether it is production or test-only:
 
