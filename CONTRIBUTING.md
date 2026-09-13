@@ -62,7 +62,7 @@ ObzenFlow uses `cargo-nextest` as the supported workspace test runner. The CI te
 | `test` / `production-features` | `ci-fast`, `--features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio` | `ci-full`, same features | The explicitly supported production feature set passes. |
 | `test-test-support` | `ci-fast`, `--features test-support,obzenflow_infra/warp-server`, whole workspace | `ci-full`, same features and scope | The test-only support helpers and managed-host regressions work in real tests. |
 
-`ci-fast` is the required PR gate. `ci-full` runs on pushes to `main` and manual dispatch. Both select the same tests; their time limits and retry counts differ. The two 100k Prometheus proofs use the same ten-minute whole-test limit in both profiles, including journal verification. Their five-second metrics-finalisation assertion remains separate.
+`ci-fast` is the required PR gate. `ci-full` runs on pushes to `main` and manual dispatch. Both select the same tests; their time limits and retry counts differ. The two 5k Prometheus proofs use the same ten-minute whole-test limit in both profiles, including journal verification. Their five-second metrics-finalisation assertion remains separate.
 
 The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
 

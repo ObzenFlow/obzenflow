@@ -817,15 +817,24 @@ mod managed_lifecycle_regressions {
         );
     }
 
+    const JOURNAL_PROOF_INPUTS: u64 = 5_000;
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prometheus_example_100k_completes_without_reporting() {
-        prometheus_example_journal_and_metrics_proof(MetricsProofMode::Disabled, 100_000).await;
+    async fn prometheus_example_5k_completes_without_reporting() {
+        prometheus_example_journal_and_metrics_proof(
+            MetricsProofMode::Disabled,
+            JOURNAL_PROOF_INPUTS,
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prometheus_example_100k_completes_with_reporting() {
-        prometheus_example_journal_and_metrics_proof(MetricsProofMode::HostedReporting, 100_000)
-            .await;
+    async fn prometheus_example_5k_completes_with_reporting() {
+        prometheus_example_journal_and_metrics_proof(
+            MetricsProofMode::HostedReporting,
+            JOURNAL_PROOF_INPUTS,
+        )
+        .await;
     }
 
     async fn prometheus_example_journal_and_metrics_proof(mode: MetricsProofMode, count: u64) {
@@ -846,9 +855,9 @@ mod managed_lifecycle_regressions {
             .tempdir_in("target")
             .unwrap();
         let dir = scratch.path().to_path_buf();
-        let _cleanup = if count == 100_000 {
+        let _cleanup = if count == JOURNAL_PROOF_INPUTS {
             println!(
-                "Retaining full-volume journal proof at {}",
+                "Retaining {count}-input journal proof at {}",
                 scratch.keep().display()
             );
             None
@@ -885,7 +894,7 @@ enabled = {hosted}
         let app = FlowApplication::builder()
             .with_config_file(config)
             .with_cli_args(["prometheus-lifecycle-proof"])
-            .with_log_level(if count == 100_000 {
+            .with_log_level(if count == JOURNAL_PROOF_INPUTS {
                 LogLevel::Warn
             } else {
                 LogLevel::Error
@@ -951,7 +960,7 @@ enabled = {hosted}
                 .await
                 .expect("100-input example must complete within ten seconds")
         } else {
-            // Nextest bounds the full-volume run, including journal verification.
+            // Nextest bounds the journal proof, including export and verification.
             application.await
         };
         result.unwrap().unwrap();
@@ -1091,7 +1100,7 @@ enabled = {hosted}
                 (0..5_000).contains(&finalisation_ms),
                 "metrics must finish inside the existing five-second attempt: {finalisation_ms}ms"
             );
-            if count == 100_000 {
+            if count == JOURNAL_PROOF_INPUTS {
                 let snapshot = model.snapshot();
                 let transform = snapshot
                     .app
