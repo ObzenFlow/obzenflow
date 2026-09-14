@@ -101,7 +101,7 @@ impl fmt::Display for RefusalReason {
                 supported,
             } => write!(
                 f,
-                "run manifest version '{found}' at {} is unsupported (supported: {supported}); re-record the run with this build of ObzenFlow",
+                "unsupported provenance schema version: {found} at {} (supported: {supported}); re-record the run with this build of ObzenFlow",
                 path.display()
             ),
             Self::FlowNameMismatch {

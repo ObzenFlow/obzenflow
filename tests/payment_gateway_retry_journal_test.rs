@@ -28,7 +28,7 @@ use obzenflow_runtime::runtime_config::{
     RESILIENCE_RETRY_MAX_BACKOFF_MS_KEY,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -517,25 +517,6 @@ fn last_payment_limiter_counts(jsonl: &str) -> LimiterCounts {
     last.expect("payment limiter metrics should appear in the exported journal")
 }
 
-fn payment_failure_limiter_snapshots(jsonl: &str) -> Vec<(EffectCursor, LimiterCounts)> {
-    exported_chain_events(jsonl)
-        .filter_map(|event| {
-            let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload
-            else {
-                return None;
-            };
-            if record.descriptor.effect_type.as_str() != "payment.authorize"
-                || !matches!(record.outcome, EffectOutcomePayload::Failed { .. })
-            {
-                return None;
-            }
-            let snapshot = payment_limiter_counts(&event)
-                .expect("live payment failure record should carry its limiter snapshot");
-            Some((record.cursor.clone(), snapshot))
-        })
-        .collect()
-}
-
 #[test]
 fn payment_gateway_configuration_faithful_release_portfolio() {
     // Breaker-only release witness: five dependency calls at one per second.
@@ -884,22 +865,22 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         .expect("the rejected effect record must share its cursor with recovery completion");
     assert_eq!(rejected_completion.total_attempts, 0);
     assert_eq!(rejected_completion.backoff_elapsed_ms, 0);
-    let failure_limiter_snapshots = payment_failure_limiter_snapshots(&open);
-    let rejected_snapshot_index = failure_limiter_snapshots
+    // FLOWIP-145a: optional snapshots need not accompany each failure. Prove
+    // the exact attempted cursor set from the protected outcome/attempt rows,
+    // alongside the five dependency calls and retained limiter totals above.
+    let physical_failure_cursors: HashSet<_> = open_failures
         .iter()
-        .position(|(cursor, _)| cursor == &rejected_failure.cursor)
-        .expect("the rejected cursor must carry a limiter snapshot");
-    let (_, preceding_snapshot) = failure_limiter_snapshots
-        .get(
-            rejected_snapshot_index
-                .checked_sub(1)
-                .expect("open rejection must follow the physical failures that opened it"),
-        )
-        .expect("preceding physical failure snapshot");
-    let (_, rejected_snapshot) = &failure_limiter_snapshots[rejected_snapshot_index];
+        .filter(|failure| failure.cursor != rejected_failure.cursor)
+        .map(|failure| &failure.cursor)
+        .collect();
+    assert_eq!(physical_failure_cursors.len(), 5);
     assert_eq!(
-        rejected_snapshot, preceding_snapshot,
-        "an open rejection must not mutate any per-effect limiter counter"
+        open_attempts
+            .iter()
+            .map(|attempt| &attempt.cursor)
+            .collect::<HashSet<_>>(),
+        physical_failure_cursors,
+        "only the five dependency failures have physical attempts"
     );
     assert_eq!(
         last_payment_limiter_counts(&open).tokens,

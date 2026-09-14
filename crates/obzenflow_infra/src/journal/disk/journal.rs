@@ -832,18 +832,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 },
             ) {
                 Disposition::Yield(frame) => {
-                    let journal_group_id = frame.group_id().map(str::to_string);
-                    let records = frame.into_records();
-                    let _group_size = journal_group_id.as_ref().map(|_| {
-                        u32::try_from(records.len())
-                            .expect("a materialised journal frame fits in addressable memory")
-                    });
-                    events.extend(
-                        records
-                            .into_iter()
-                            .enumerate()
-                            .map(|(_index, record)| record),
-                    );
+                    events.extend(frame.into_records());
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {

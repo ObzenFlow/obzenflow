@@ -163,8 +163,9 @@ async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
         .with_metrics_exporter(metrics_model.clone());
-    // Use a dedicated journal directory for this test run.
-    let journal_root = std::path::PathBuf::from("target/prometheus_100k_error_kinds_test_journal");
+    // Own a unique directory for the entire run, including metrics finalisation.
+    let journals = tempfile::tempdir_in("target")?;
+    let journal_root = journals.path().to_path_buf();
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
         // Build a minimal flow that mirrors the prometheus_100k_demo core path:
@@ -258,12 +259,16 @@ fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
     use obzenflow_core::WriterId;
     use obzenflow_infra::application::{FlowApplication, LogLevel};
     use serde_json::{json, Value};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    let root = tempfile::tempdir_in("target").expect("example test fixture");
+    let root = tempfile::Builder::new()
+        .prefix("flowip-145a-omission-")
+        .tempdir_in("target")
+        .expect("example test fixture")
+        .keep();
     let mut runs = Vec::new();
     for hosted in [false, true] {
-        let directory = root.path().join(if hosted { "hosted" } else { "plain" });
+        let directory = root.join(if hosted { "hosted" } else { "plain" });
         std::fs::create_dir(&directory).unwrap();
         let config = directory.join("obzenflow.toml");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -336,7 +341,29 @@ enabled = false
         let mut data_types = BTreeMap::<String, usize>::new();
         let mut deliveries = 0;
         let mut errors = 0;
+        let mut inputs = BTreeSet::new();
+        let mut outputs = BTreeSet::new();
+        let mut failed_inputs = BTreeSet::new();
+        let mut summaries = Vec::new();
         for event in exported_jsonl::chain_events(&jsonl) {
+            if let ChainPayload::Fact(payload) = &event.payload {
+                if !event.processing.status.is_success() {
+                    failed_inputs.insert(payload["id"].as_u64().unwrap());
+                } else {
+                    match event.flow_context.stage_name.as_str() {
+                        "high_volume_source" => {
+                            inputs.insert(payload["id"].as_u64().unwrap());
+                        }
+                        "error_processor" => {
+                            outputs.insert(payload["id"].as_u64().unwrap());
+                        }
+                        "event_counter" => {
+                            summaries.push(payload["event_count"].as_u64().unwrap());
+                        }
+                        _ => {}
+                    }
+                }
+            }
             if matches!(event.payload, ChainPayload::FlowControl(_)) {
                 let context = &event.flow_context;
                 let stage = &manifest["stages"][&context.stage_name];
@@ -422,10 +449,15 @@ enabled = false
             deliveries, 991,
             "both sinks must retain every delivery receipt"
         );
-        assert!(
-            errors >= 10,
-            "the deterministic input failures must be present"
+        assert_eq!(inputs, (0..1_000).collect());
+        assert_eq!(
+            outputs,
+            (0_u64..1_000)
+                .filter(|id| !id.is_multiple_of(100))
+                .collect()
         );
+        assert_eq!(failed_inputs, (0..1_000).step_by(100).collect());
+        assert_eq!(summaries, [990]);
         assert!(
             !data_types
                 .keys()
@@ -437,6 +469,10 @@ enabled = false
     assert_eq!(
         runs[0], runs[1],
         "hosting must preserve the finite example's durable results"
+    );
+    println!(
+        "FLOWIP-145a full/selected/omitted export proof: {}",
+        root.display()
     );
 }
 
@@ -771,10 +807,28 @@ mod managed_lifecycle_regressions {
                 prometheus_demo::flow_definition(100_000, dir.path().join("stopped")),
                 model.clone(),
             ));
-        tokio::time::timeout(Duration::from_secs(10), application)
-            .await
-            .unwrap()
-            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(10), application).await;
+        if outcome.is_err() {
+            let flow = captured.lock().unwrap().as_ref().cloned().unwrap();
+            let events = flow
+                .system_journal()
+                .unwrap()
+                .read_all_unordered()
+                .await
+                .unwrap();
+            let facts: Vec<_> = events
+                .iter()
+                .map(|record| {
+                    (
+                        record.event_type_name().to_string(),
+                        record.writer_id().to_string(),
+                    )
+                })
+                .collect();
+            let retained = dir.keep();
+            panic!("stopped application did not terminate; proof={}; pipeline_writer={}; system facts={facts:?}", retained.display(), flow.pipeline_writer_id());
+        }
+        outcome.unwrap().unwrap();
         let flow = captured.lock().unwrap().take().unwrap();
         let archive = flow.run_substrate().locator().unwrap().path();
         let export = dir.path().join("stopped.jsonl");

@@ -424,12 +424,11 @@ pub struct FlowMetricsSnapshot {
     pub event_loops_with_work_total: Option<u64>,
 }
 
-/// Stage-level metrics snapshot for lifecycle events (UI-focused)
+/// Stage metrics projection for lifecycle views.
 ///
-/// This is a narrow, UI-oriented view of stage metrics derived from
-/// `RuntimeContext` / `StageInstrumentation`. It intentionally exposes only
-/// the fields needed to render topology cards and lifecycle transitions,
-/// not the full Prometheus schema.
+/// Combines protected execution accounting with retained optional observations
+/// for topology cards and lifecycle views. Terminal authors capture accounting
+/// directly from the stage owner; this projection does not author durable facts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageMetricsSnapshot {
     pub processing_time_count: Option<u64>,

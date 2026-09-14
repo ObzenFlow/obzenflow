@@ -132,15 +132,13 @@ impl Serialize for SystemEvent {
 impl<'de> Deserialize<'de> for SystemEvent {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Authored {
-            envelope: crate::event::provenance::AuthoredEnvelope<
+        let raw = crate::event::record_serde::deserialize::<
+            _,
+            crate::event::provenance::AuthoredEnvelope<
                 crate::event::provenance::SystemEventProvenance,
             >,
-            payload: SystemPayload,
-        }
-        let raw = Authored::deserialize(deserializer)?;
+            SystemPayload,
+        >(deserializer)?;
         crate::event::journal_record::JournalPayload::validate(
             &raw.payload,
             &raw.envelope.provenance.event,

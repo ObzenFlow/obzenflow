@@ -1149,29 +1149,22 @@ mod tests {
         // EOF transitions directly to Drained, before flushing has happened.
         ctx.instrumentation.transition_to_state("Running");
         let mut fsm = supervisor.build_state_machine(JournalSinkState::Running);
-        let before = ctx
-            .data_journal
-            .read_causally_ordered()
-            .await
-            .unwrap()
-            .len();
+        // This assertion concerns the newly appended suffix. Independent
+        // fixture records may change position under causal sorting.
+        let before = ctx.data_journal.read_all_unordered().await.unwrap().len();
         let actions = fsm
             .handle(JournalSinkEvent::ReceivedEOF, &mut ctx)
             .await
             .unwrap();
         assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Drained");
         assert_eq!(
-            ctx.data_journal
-                .read_causally_ordered()
-                .await
-                .unwrap()
-                .len(),
+            ctx.data_journal.read_all_unordered().await.unwrap().len(),
             before
         );
         for action in actions {
             action.execute(&mut ctx).await.unwrap();
         }
-        let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+        let rows = ctx.data_journal.read_all_unordered().await.unwrap();
         let snapshots: Vec<_> = rows[before..]
             .iter()
             .filter_map(|env| env.envelope.provenance.event.runtime.as_ref())

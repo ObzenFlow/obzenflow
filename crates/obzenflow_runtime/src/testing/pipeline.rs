@@ -70,6 +70,7 @@ pub use crate::pipeline::tests::supervisor::{
     graceful_deadline_bounds_a_stalled_source_control_send,
     pending_journal_read_survives_controls_and_gets_bounded_service,
     persistent_controls_cannot_starve_command_delivery_or_stage_joins,
+    producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer,
     queued_controls_cannot_starve_bootstrap_or_automatic_start,
     ready_stage_joins_cannot_starve_other_resource_completions,
 };

@@ -301,6 +301,12 @@ async fn pending_journal_read_survives_controls_and_gets_bounded_service() {
 }
 
 #[tokio::test]
+async fn producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer() {
+    pipeline::producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer(journals)
+        .await;
+}
+
+#[tokio::test]
 async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
     pipeline::expired_stop_is_dispatched_before_a_full_external_control_queue(journals).await;
 }

@@ -119,6 +119,64 @@ fn required_record_roots_do_not_confuse_absence_with_business_null() {
 }
 
 #[test]
+fn malformed_records_report_the_boundary_and_field_path() {
+    let original = serde_json::to_value(chain_record(
+        ChainPayload::Fact(Value::Null),
+        "business.null.v1",
+    ))
+    .unwrap();
+    for (path, value, diagnostic) in [
+        (
+            "/envelope/provenance/event/event_kind",
+            json!("data"),
+            "invalid provenance at envelope.provenance.event.event_kind:",
+        ),
+        (
+            "/envelope/provenance/journal/vector_clock",
+            json!(42),
+            "invalid provenance at envelope.provenance.journal.vector_clock:",
+        ),
+        (
+            "/envelope/observability/runtime",
+            json!({"in_flight": 0, "custom": 1}),
+            "unknown observability field at envelope.observability.runtime.custom",
+        ),
+        (
+            "/envelope/observability",
+            json!({"custom": {"anything": true}}),
+            "unknown observability field at envelope.observability.custom",
+        ),
+    ] {
+        let mut invalid = original.clone();
+        *invalid.pointer_mut(path).unwrap() = value;
+        let error = serde_json::from_value::<JournalRecord<ChainPayload>>(invalid).unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+    }
+    for root in ["envelope", "payload"] {
+        let mut invalid = original.clone();
+        invalid.as_object_mut().unwrap().remove(root);
+        let error = serde_json::from_value::<JournalRecord<ChainPayload>>(invalid).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid record shape: expected envelope and payload"),
+            "{error}"
+        );
+    }
+    let extra_root = original.to_string().replacen('{', "{\"event\": {},", 1);
+    let duplicate_root = original.to_string().replacen('{', "{\"payload\": null,", 1);
+    for invalid in [extra_root, duplicate_root] {
+        let error = serde_json::from_str::<JournalRecord<ChainPayload>>(&invalid).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid record shape: expected envelope and payload"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn removing_observations_preserves_complete_provenance_and_atomic_membership() {
     let original = serde_json::to_value(chain_record(
         ChainPayload::Fact(json!({"ok":true})),

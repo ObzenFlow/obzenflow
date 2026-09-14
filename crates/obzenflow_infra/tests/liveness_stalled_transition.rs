@@ -209,14 +209,11 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         .iter()
         .any(|(_, _, state)| *state == EdgeLivenessState::Recovered);
     for envelope in envelopes {
-        match &envelope.payload {
-            SystemPayload::ContractStatus { pass, .. } => {
-                assert!(
-                    *pass,
-                    "unexpected ContractStatus(pass=false) while exercising stalled transition"
-                );
-            }
-            _ => {}
+        if let SystemPayload::ContractStatus { pass, .. } = &envelope.payload {
+            assert!(
+                *pass,
+                "unexpected ContractStatus(pass=false) while exercising stalled transition"
+            );
         }
     }
 

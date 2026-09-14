@@ -63,8 +63,8 @@ async fn assert_tail(
             "newest-first event identity"
         );
         assert_eq!(
-            serde_json::to_value(&actual.authored()).unwrap(),
-            serde_json::to_value(&expected.authored()).unwrap(),
+            serde_json::to_value(actual.authored()).unwrap(),
+            serde_json::to_value(expected.authored()).unwrap(),
         );
         assert_eq!(
             actual.envelope.provenance.journal.journal_group_id,

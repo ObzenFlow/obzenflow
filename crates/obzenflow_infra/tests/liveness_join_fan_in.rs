@@ -282,14 +282,11 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         .map(|(upstream, _, _)| *upstream)
         .collect();
     for envelope in envelopes {
-        match &envelope.payload {
-            SystemPayload::ContractStatus { pass, .. } => {
-                assert!(
-                    *pass,
-                    "unexpected ContractStatus(pass=false) while exercising join liveness"
-                );
-            }
-            _ => {}
+        if let SystemPayload::ContractStatus { pass, .. } = &envelope.payload {
+            assert!(
+                *pass,
+                "unexpected ContractStatus(pass=false) while exercising join liveness"
+            );
         }
     }
 

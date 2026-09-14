@@ -138,13 +138,9 @@ impl<P: JournalPayload> Serialize for JournalRecord<P> {
 impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Record<E> {
-            envelope: EventEnvelope<E>,
-            payload: Value,
-        }
-        let record = Record::<P::Provenance>::deserialize(deserializer)?;
+        let record = super::record_serde::deserialize::<_, EventEnvelope<P::Provenance>, Value>(
+            deserializer,
+        )?;
         let payload = P::decode(&record.envelope.provenance.event, record.payload)
             .map_err(D::Error::custom)?;
         payload

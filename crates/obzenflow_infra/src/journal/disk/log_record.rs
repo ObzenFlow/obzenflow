@@ -19,6 +19,9 @@ pub type LogRecord<T> = JournalRecord<<T as JournalEvent>::Payload>;
 /// envelope: ordinary appends carry one record and atomic groups carry all
 /// members that become visible at the envelope's single commit marker.
 #[derive(Debug)]
+// These transient scanner values keep the existing inline record handoff;
+// boxing would add an allocation to every ordinary journal read.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum LogFrame<T: JournalEvent> {
     Record(LogRecord<T>),
     AtomicGroup {

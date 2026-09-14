@@ -15,7 +15,7 @@ use obzenflow_core::event::{
     StageLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION};
+use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME};
 use obzenflow_core::metrics::SinkOperationFailureMetric;
 use obzenflow_core::{AdmissionSeq, EventId, StageId, TypedPayload};
 use obzenflow_dsl::FlowDefinition;
@@ -974,16 +974,10 @@ fn validate_write_operation_cardinality(
 fn parse_current_manifest(raw: &str) -> Result<RunManifest, SinkConformanceFailure> {
     let raw_value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|error| failure("archive", "manifest-json", error.to_string()))?;
-    let version = raw_value.get("manifest_version");
-    if version != Some(&serde_json::Value::String(RUN_MANIFEST_VERSION.to_string())) {
-        let found = version
-            .map(serde_json::Value::to_string)
-            .unwrap_or_else(|| "<missing>".to_string());
-        return Err(failure(
-            "archive",
-            "manifest-version",
-            format!("unsupported manifest version {found}"),
-        ));
+    if let Err(error) =
+        crate::journal::disk::manifest_gate::require_current_manifest_version(&raw_value)
+    {
+        return Err(failure("archive", "manifest-version", error.to_string()));
     }
     serde_json::from_value(raw_value)
         .map_err(|error| failure("archive", "manifest-shape", error.to_string()))

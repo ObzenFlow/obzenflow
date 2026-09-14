@@ -96,15 +96,13 @@ impl Serialize for ChainEvent {
 impl<'de> Deserialize<'de> for ChainEvent {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Authored {
-            envelope: crate::event::provenance::AuthoredEnvelope<
+        let raw = crate::event::record_serde::deserialize::<
+            _,
+            crate::event::provenance::AuthoredEnvelope<
                 crate::event::provenance::ChainEventProvenance,
             >,
-            payload: Value,
-        }
-        let raw = Authored::deserialize(deserializer)?;
+            Value,
+        >(deserializer)?;
         let payload = ChainPayload::decode(
             raw.envelope.provenance.event.event_kind,
             &raw.envelope.provenance.event.event_type,

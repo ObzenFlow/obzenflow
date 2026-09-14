@@ -109,6 +109,7 @@ pub struct RateLimiterMeasurements {
 
 /// Cumulative circuit breaker metrics for one declared effect (FLOWIP-120c).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectCircuitBreakerContext {
     pub effect_type: String,
     pub cb_requests_total: u64,
@@ -127,6 +128,7 @@ pub struct EffectCircuitBreakerContext {
 
 /// Cumulative rate limiter metrics for one declared effect (FLOWIP-120c).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectRateLimiterContext {
     pub effect_type: String,
     pub rl_events_total: u64,

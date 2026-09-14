@@ -23,6 +23,7 @@ pub mod context;
 pub mod identity;
 pub mod payloads;
 pub mod provenance;
+mod record_serde;
 pub mod schema;
 pub mod status;
 pub mod utils;

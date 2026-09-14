@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Snapshot of metrics at event creation time
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsSnapshot {
     pub events_processed: u64,
     pub events_in_flight: u32,
@@ -20,6 +21,7 @@ pub struct MetricsSnapshot {
 
 /// Service level indicator snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SliSnapshot {
     pub availability: f64,
     pub error_budget_remaining: f64,

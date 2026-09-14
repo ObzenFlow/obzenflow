@@ -169,9 +169,7 @@ impl PipelineSupervisor {
         ctx: &mut PipelineContext,
         cx: &mut Context<'_>,
     ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        if ctx.progress.journal_failed
-            || matches!(ctx.resources.producer_tail, ProducerTail::Reading(_))
-        {
+        if ctx.progress.journal_failed {
             return Poll::Pending;
         }
         let pending = self
@@ -179,6 +177,13 @@ impl PipelineSupervisor {
             .get_mut()
             .unwrap_or_else(|e| e.into_inner());
         if pending.is_none() {
+            // Finish any already-owned read before capturing the producer
+            // tail, but do not start another. A suspended read may hold the
+            // journal lock; freezing it can deadlock tail capture behind a
+            // queued writer. The resource turn waits for this read to finish.
+            if matches!(ctx.resources.producer_tail, ProducerTail::Reading(_)) {
+                return Poll::Pending;
+            }
             if let Some(idle) = &mut self.idle {
                 if idle.as_mut().poll(cx).is_pending() {
                     return Poll::Pending;
@@ -264,7 +269,21 @@ impl PipelineSupervisor {
             let result = match input {
                 ResourceInput::StageJoin => Self::poll_stage_join(ctx, cx),
                 ResourceInput::PublicationSettlement => Self::poll_publication_settlement(ctx, cx),
-                ResourceInput::ProducerTail => Self::poll_producer_tail(ctx, cx),
+                ResourceInput::ProducerTail => {
+                    // Do not begin capture until the owned read has returned
+                    // and its result has been folded. Once capture begins,
+                    // poll_journal cannot start a read that overtakes it.
+                    if self
+                        .pending_read
+                        .get_mut()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some()
+                    {
+                        Poll::Pending
+                    } else {
+                        Self::poll_producer_tail(ctx, cx)
+                    }
+                }
                 ResourceInput::MetricsJoin => Self::poll_metrics_join(ctx, cx),
             };
             if result.is_ready() {

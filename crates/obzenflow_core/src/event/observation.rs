@@ -84,7 +84,11 @@ impl ObservabilityContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "observation_type", rename_all = "snake_case")]
+#[serde(
+    tag = "observation_type",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum ObservationRecord {
     Llm {
         metadata: crate::ai::LlmObservability,

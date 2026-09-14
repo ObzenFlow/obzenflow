@@ -265,10 +265,7 @@ fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
     if let Err(version) = require_current_manifest_version(&value) {
         return Err(JournalInspectError::Manifest {
             path: manifest_path,
-            message: format!(
-                "unsupported manifest_version {:?} (supported: {RUN_MANIFEST_VERSION})",
-                version.found()
-            ),
+            message: format!("{version} (supported: {RUN_MANIFEST_VERSION})"),
         });
     }
     let journal_format_version = value.get("journal_format_version").and_then(|v| v.as_u64());

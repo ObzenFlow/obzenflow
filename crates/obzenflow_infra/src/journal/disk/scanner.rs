@@ -32,6 +32,8 @@ pub(crate) enum LineTermination {
 }
 
 /// Classification of a single framed line (I/O-free).
+// Pass the decoded frame inline through classification and disposition.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ParseOutcome<R: JournalEvent> {
     /// A committed-shape record: full body, valid CRC, valid JSON.
     Complete(LogFrame<R>),
@@ -99,6 +101,7 @@ pub(crate) enum ReadPolicy {
 }
 
 /// What a reader should do with a classified frame under its policy.
+#[allow(clippy::large_enum_variant)] // Preserve the scanner's inline frame handoff.
 pub(crate) enum Disposition<R: JournalEvent> {
     /// A committed record to hand to the caller.
     Yield(LogFrame<R>),

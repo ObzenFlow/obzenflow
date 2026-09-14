@@ -237,14 +237,11 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
         .expect("read system journal");
 
     for envelope in envelopes {
-        match &envelope.payload {
-            SystemPayload::ContractStatus { pass, .. } => {
-                assert!(
-                    *pass,
-                    "unexpected ContractStatus(pass=false) while exercising slow-but-healthy handler"
-                );
-            }
-            _ => {}
+        if let SystemPayload::ContractStatus { pass, .. } = &envelope.payload {
+            assert!(
+                *pass,
+                "unexpected ContractStatus(pass=false) while exercising slow-but-healthy handler"
+            );
         }
     }
 

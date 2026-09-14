@@ -340,14 +340,11 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     }
 
     for envelope in envelopes {
-        match &envelope.payload {
-            SystemPayload::ContractStatus { pass, .. } => {
-                assert!(
-                    *pass,
-                    "unexpected ContractStatus(pass=false) while exercising fan-out liveness"
-                );
-            }
-            _ => {}
+        if let SystemPayload::ContractStatus { pass, .. } = &envelope.payload {
+            assert!(
+                *pass,
+                "unexpected ContractStatus(pass=false) while exercising fan-out liveness"
+            );
         }
     }
 

@@ -52,7 +52,7 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
-    ChainPayload, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload, EffectRecord,
+    ChainPayload, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload,
     EffectRecoveryAbandoned, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
@@ -936,8 +936,15 @@ fn assert_generated_chunk_authorship(
         .collect::<Vec<_>>();
     assert_eq!(
         generated.len(),
-        expected_map_inputs + 2,
-        "one snapshot, N map inputs, and one manifest form the generated protocol"
+        expected_map_inputs + 1,
+        "N map inputs and one complete planning manifest form the generated protocol"
+    );
+    assert!(
+        !chunk_events.iter().any(|record| matches!(
+            record.payload,
+            ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(_))
+        )),
+        "the generated manifest carries the complete plan without a second planning row"
     );
 
     let chunk_clock_key = chunk_writer.to_string();
@@ -1831,8 +1838,12 @@ async fn zero_chunk_jobs_skip_map_but_finalise_live_and_replay_without_live_chat
 
 #[tokio::test]
 async fn live_history_replays_without_resolving_or_invoking_chat() {
-    let temp = tempfile::tempdir().expect("temporary journal root");
-    let journal_base = temp.path().join("journals");
+    let proof = tempfile::Builder::new()
+        .prefix("flowip-145a-hn-replay-")
+        .tempdir_in("target")
+        .expect("temporary journal root")
+        .keep();
+    let journal_base = proof.join("journals");
     let live_resolutions = Arc::new(AtomicUsize::new(0));
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -2120,6 +2131,8 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         "{}\n{verification_details}",
         obzenflow_infra::verify::render_verdict(&verification),
     );
+    std::fs::write(proof.join("verification.json"), verification_details)
+        .expect("retain the omission replay verdict");
 
     let empty_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
@@ -2161,6 +2174,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         .await
         .expect("strict replay never invokes an eager panic client");
     assert_eq!(eager_calls.load(Ordering::SeqCst), 0);
+    println!("FLOWIP-145a HN omission/replay proof: {}", proof.display());
 }
 
 #[tokio::test]
@@ -2438,7 +2452,7 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
 }
 
 #[tokio::test]
-async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifest() {
+async fn resume_closes_a_generated_plan_interrupted_before_its_manifest() {
     let temp = tempfile::tempdir().expect("temporary chunk-interruption journal root");
     let journal_base = temp.path().join("journals");
     let gate = BackpressureAckGate::install("interrupt_digest__chunk", "interrupt_digest__map", 0)
@@ -2475,8 +2489,8 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
                 AiMapReducePlanningManifest::from_event(&envelope.authored())
             })
             .count(),
-        1,
-        "the complete manifest is durable before its withheld acknowledgement"
+        0,
+        "the manifest follows all map inputs and is not committed at this interrupted cut"
     );
     assert_eq!(
         interrupted_chunk
@@ -3178,11 +3192,9 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
         .iter()
         .find(|envelope| envelope.event_type() == EFFECT_RECORD_EVENT_TYPE)
         .expect("post-Start invariant commits a generic failed outcome");
-    let ChainPayload::Fact(payload) = &failed.payload else {
-        panic!("effect failure is a data fact");
+    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &failed.payload else {
+        panic!("effect failure is a typed execution record");
     };
-    let record: EffectRecord =
-        serde_json::from_value(payload.clone()).expect("effect failure record decodes");
     let EffectOutcomePayload::Failed {
         detail:
             Some(EffectFailureDetail::PortBindingInvariantViolation {
