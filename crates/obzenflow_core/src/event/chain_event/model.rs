@@ -5,10 +5,12 @@
 use super::factory::ChainEventFactory;
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::{FlowContext, RuntimeProvenance};
+use crate::event::journal_record::JournalPayload;
 use crate::event::observation::ObservabilityContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::effect_payload::EffectProvenance;
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
+use crate::event::provenance::{AuthoredEnvelope, ChainEventProvenance};
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::CorrelationId;
 use crate::ingress::IngressContext;
@@ -59,15 +61,14 @@ impl CorrelationContext {
 /// An authored chain record. Only the journal can supply commitment provenance.
 #[derive(Debug, Clone)]
 pub struct ChainEvent {
-    pub envelope:
-        crate::event::provenance::AuthoredEnvelope<crate::event::provenance::ChainEventProvenance>,
+    pub envelope: AuthoredEnvelope<ChainEventProvenance>,
     pub payload: ChainPayload,
 }
 
 pub use crate::event::payloads::chain_payload::ChainPayload;
 
 impl std::ops::Deref for ChainEvent {
-    type Target = crate::event::provenance::ChainEventProvenance;
+    type Target = ChainEventProvenance;
     fn deref(&self) -> &Self::Target {
         &self.envelope.provenance.event
     }
@@ -81,11 +82,8 @@ impl std::ops::DerefMut for ChainEvent {
 impl Serialize for ChainEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::{Error, SerializeStruct};
-        crate::event::journal_record::JournalPayload::validate(
-            &self.payload,
-            &self.envelope.provenance.event,
-        )
-        .map_err(S::Error::custom)?;
+        JournalPayload::validate(&self.payload, &self.envelope.provenance.event)
+            .map_err(S::Error::custom)?;
         let mut event = serializer.serialize_struct("ChainEvent", 2)?;
         event.serialize_field("envelope", &self.envelope)?;
         event.serialize_field("payload", &self.payload)?;
@@ -98,9 +96,7 @@ impl<'de> Deserialize<'de> for ChainEvent {
         use serde::de::Error;
         let raw = crate::event::record_serde::deserialize::<
             _,
-            crate::event::provenance::AuthoredEnvelope<
-                crate::event::provenance::ChainEventProvenance,
-            >,
+            AuthoredEnvelope<ChainEventProvenance>,
             Value,
         >(deserializer)?;
         let payload = ChainPayload::decode(
@@ -109,11 +105,8 @@ impl<'de> Deserialize<'de> for ChainEvent {
             raw.payload,
         )
         .map_err(D::Error::custom)?;
-        crate::event::journal_record::JournalPayload::validate(
-            &payload,
-            &raw.envelope.provenance.event,
-        )
-        .map_err(D::Error::custom)?;
+        JournalPayload::validate(&payload, &raw.envelope.provenance.event)
+            .map_err(D::Error::custom)?;
         Ok(Self {
             envelope: raw.envelope,
             payload,

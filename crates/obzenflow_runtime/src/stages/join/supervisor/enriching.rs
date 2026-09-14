@@ -16,7 +16,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, JournalRecord};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
@@ -76,7 +76,7 @@ pub(super) async fn dispatch_enriching<
                 .fetch_add(1, Ordering::Relaxed);
 
             let directive = match &envelope.payload {
-                obzenflow_core::event::ChainPayload::FlowControl(signal) => {
+                ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; the join authors its own at
                     // the flip.
@@ -498,7 +498,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
-    pending_parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pending_parent: Option<&JournalRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {

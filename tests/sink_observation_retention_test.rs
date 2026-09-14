@@ -320,11 +320,7 @@ fn manifest(run: &Path) -> serde_json::Value {
     .expect("manifest is valid JSON")
 }
 
-async fn read_stage(
-    run: &Path,
-    stage: &str,
-    field: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage(run: &Path, stage: &str, field: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = manifest(run);
     let file = manifest["stages"][stage][field]
         .as_str()
@@ -338,7 +334,7 @@ async fn read_stage(
         .expect("stage journal reads")
 }
 
-async fn read_system(run: &Path) -> Vec<JournalRecord<obzenflow_core::event::SystemPayload>> {
+async fn read_system(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
     let manifest = manifest(run);
     let file = manifest["system_journal_file"]
         .as_str()

@@ -11,6 +11,7 @@
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::WriterId;
 
 use super::admission_core::RateLimitDelayEvent;
@@ -20,7 +21,7 @@ use super::admission_core::RateLimitDelayEvent;
 pub(super) fn rate_limiter_event(writer_id: WriterId, event: RateLimiterFact) -> ChainEvent {
     ChainEventFactory::create_event(
         writer_id,
-        obzenflow_core::event::ChainPayload::Execution(ExecutionPayload::RateLimiter(event)),
+        ChainPayload::Execution(ExecutionPayload::RateLimiter(event)),
     )
 }
 

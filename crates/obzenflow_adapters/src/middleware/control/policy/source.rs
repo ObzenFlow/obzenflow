@@ -9,6 +9,7 @@
 
 use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, WriterId};
@@ -17,7 +18,7 @@ use obzenflow_runtime::stages::source::{
     SourceBoundary, SourceBoundaryFuture, SourceBoundaryOutcome, SourceBoundaryReport,
     SourcePollCompletion, SourcePollExecution, SourcePollReport, SourcePollResult,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// RAII guard returned by source-policy admission for reserved resources.
@@ -167,25 +168,22 @@ pub trait SourcePolicy: Send + Sync {
 
 /// Source boundary backed by a declared-order policy chain.
 pub struct PerSourcePolicyBoundary {
-    recorder: std::sync::OnceLock<
-        std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    >,
+    recorder: OnceLock<Arc<dyn ObservationRecorder>>,
     policies: Arc<Vec<Arc<dyn SourcePolicy>>>,
     writer_id: WriterId,
 }
 
 impl PerSourcePolicyBoundary {
-    fn observation_recorder(
-        &self,
-    ) -> std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder> {
-        self.recorder.get().cloned().unwrap_or_else(|| {
-            std::sync::Arc::new(obzenflow_core::event::observation::NoObservations)
-        })
+    fn observation_recorder(&self) -> Arc<dyn ObservationRecorder> {
+        self.recorder
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(NoObservations))
     }
 
     pub fn new(policies: Vec<Arc<dyn SourcePolicy>>, writer_id: WriterId) -> Self {
         Self {
-            recorder: std::sync::OnceLock::new(),
+            recorder: OnceLock::new(),
             policies: Arc::new(policies),
             writer_id,
         }
@@ -199,10 +197,7 @@ impl PerSourcePolicyBoundary {
 type SourceAdmitGuard = Option<Box<dyn SourceAdmissionGuard>>;
 
 impl SourceBoundary for PerSourcePolicyBoundary {
-    fn install_observation_recorder(
-        &self,
-        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
+    fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
         let _ = self.recorder.set(recorder);
     }
 

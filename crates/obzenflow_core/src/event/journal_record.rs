@@ -8,11 +8,12 @@
 use super::journal_event::JournalEvent;
 use super::payloads::chain_payload::{ChainPayload, EventKind};
 use super::provenance::{
-    AuthoredEnvelope, ChainEventProvenance, EventEnvelope, JournalProvenance, Provenance,
-    SystemEventProvenance,
+    AuthoredEnvelope, AuthoredProvenance, ChainEventProvenance, EventEnvelope, JournalProvenance,
+    Provenance, RecordProvenance, SystemEventProvenance,
 };
-use super::provenance::{AuthoredProvenance, RecordProvenance};
 use super::system_event::SystemPayload;
+use crate::event::CorrelationId;
+use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -44,10 +45,7 @@ pub struct JournalRecord<P: JournalPayload> {
 }
 
 impl<P: JournalPayload> JournalRecord<P> {
-    pub fn new<E: JournalEvent<Payload = P>>(
-        journal_writer_id: crate::JournalWriterId,
-        event: E,
-    ) -> Self {
+    pub fn new<E: JournalEvent<Payload = P>>(journal_writer_id: JournalWriterId, event: E) -> Self {
         let (authored, payload) = event.into_parts();
         Self {
             envelope: EventEnvelope {
@@ -76,16 +74,16 @@ impl<P: JournalPayload> JournalRecord<P> {
         Self::commit(authored, payload, journal)
     }
 
-    pub fn id(&self) -> &crate::EventId {
+    pub fn id(&self) -> &EventId {
         self.envelope.provenance.event.id()
     }
-    pub fn writer_id(&self) -> &crate::WriterId {
+    pub fn writer_id(&self) -> &WriterId {
         self.envelope.provenance.event.writer_id()
     }
     pub fn event_type_name(&self) -> &str {
         self.envelope.provenance.event.event_type()
     }
-    pub fn admission_seq(&self) -> Option<crate::AdmissionSeq> {
+    pub fn admission_seq(&self) -> Option<AdmissionSeq> {
         self.envelope.provenance.event.admission_seq()
     }
     pub fn into_authored(self) -> P::Event {
@@ -252,7 +250,7 @@ impl JournalRecord<ChainPayload> {
     pub fn composite_activations(&self) -> &[super::context::CompositeActivationContext] {
         &self.envelope.provenance.event.composite_activations
     }
-    pub fn correlation_ids(&self) -> Option<&[crate::event::CorrelationId]> {
+    pub fn correlation_ids(&self) -> Option<&[CorrelationId]> {
         self.envelope
             .provenance
             .event
@@ -260,7 +258,7 @@ impl JournalRecord<ChainPayload> {
             .as_ref()
             .map(|c| c.ids.as_slice())
     }
-    pub fn correlation_id(&self) -> Option<crate::event::CorrelationId> {
+    pub fn correlation_id(&self) -> Option<CorrelationId> {
         self.envelope
             .provenance
             .event

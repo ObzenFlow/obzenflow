@@ -4,7 +4,7 @@
 
 use crate::event::journal_record::JournalRecord;
 use crate::event::types::EventId;
-use crate::event::JournalWriterId;
+use crate::event::{ChainPayload, JournalWriterId};
 
 /// Filter for creating subscriptions - pure data filtering
 #[derive(Clone, Debug)]
@@ -40,7 +40,7 @@ impl EventFilter {
     }
 
     /// Check if an event matches this filter
-    pub fn matches(&self, envelope: &JournalRecord<crate::event::ChainPayload>) -> bool {
+    pub fn matches(&self, envelope: &JournalRecord<ChainPayload>) -> bool {
         // If no filters specified, match all
         if self.event_types.is_empty() && self.journal_writer_ids.is_empty() {
             return true;

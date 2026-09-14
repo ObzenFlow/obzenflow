@@ -7,11 +7,11 @@
 //! This module provides a separate context that flows through middleware
 //! during event processing, preserving the immutability of ChainEvent.
 
-use obzenflow_core::ChainEvent;
-use obzenflow_core::MiddlewareContextKey;
-use obzenflow_core::MiddlewareExecutionScope;
+use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::{ChainEvent, MiddlewareContextKey, MiddlewareExecutionScope};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Ephemeral context that flows through middleware during processing
 ///
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 pub struct MiddlewareContext {
     // NOTE: All fields are private; use helper methods.
     control_events: Vec<ChainEvent>,
-    recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
     slots: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     /// Execution scope for this event (FLOWIP-120a). Defaults to `LiveHandler`,
     /// so any context not explicitly scoped behaves exactly as before: live, no
@@ -36,17 +36,14 @@ impl MiddlewareContext {
     pub fn with_scope(scope: MiddlewareExecutionScope) -> Self {
         Self {
             control_events: Vec::new(),
-            recorder: std::sync::Arc::new(obzenflow_core::event::observation::NoObservations),
+            recorder: Arc::new(NoObservations),
             slots: HashMap::new(),
             execution_scope: scope,
             effect_subject: None,
         }
     }
 
-    pub fn with_observation_recorder(
-        mut self,
-        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) -> Self {
+    pub fn with_observation_recorder(mut self, recorder: Arc<dyn ObservationRecorder>) -> Self {
         self.recorder = recorder;
         self
     }
@@ -56,8 +53,7 @@ impl MiddlewareContext {
         self
     }
 
-    pub fn observe(&self, mut record: obzenflow_core::event::observation::ObservationRecord) {
-        use obzenflow_core::event::observation::ObservationRecord;
+    pub fn observe(&self, mut record: ObservationRecord) {
         match &mut record {
             ObservationRecord::CircuitBreakerSummary { effect_type, .. }
             | ObservationRecord::RateLimiterActivity { effect_type, .. }
@@ -154,6 +150,7 @@ impl std::fmt::Debug for MiddlewareContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::observation::ObservationRecord;
     use obzenflow_core::event::payloads::execution_payload::CircuitBreakerOpenTrigger;
     use obzenflow_core::event::{ChainEventFactory, CircuitBreakerOpenedEventParams};
     use obzenflow_core::WriterId;
@@ -205,13 +202,11 @@ mod tests {
         ));
 
         // Offering optional evidence cannot add a control event.
-        ctx.observe(
-            obzenflow_core::event::observation::ObservationRecord::ResourceUsage {
-                cpu_percent: 0.0,
-                memory_bytes: 42,
-                thread_count: None,
-            },
-        );
+        ctx.observe(ObservationRecord::ResourceUsage {
+            cpu_percent: 0.0,
+            memory_bytes: 42,
+            thread_count: None,
+        });
         assert_eq!(ctx.control_events().len(), 1);
         assert!(ctx.control_events()[0].is_lifecycle());
     }

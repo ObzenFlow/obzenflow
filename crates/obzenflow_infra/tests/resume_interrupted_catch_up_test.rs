@@ -224,7 +224,7 @@ async fn wait_for_journal<F>(
     predicate: F,
 ) -> Result<()>
 where
-    F: Fn(&[JournalRecord<obzenflow_core::event::ChainPayload>]) -> bool,
+    F: Fn(&[JournalRecord<ChainPayload>]) -> bool,
 {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -245,7 +245,7 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-fn resume_rows(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<ResumeRow> {
+fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -264,7 +264,7 @@ fn resume_rows(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>])
         .collect()
 }
 
-fn has_watermark(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> bool {
+fn has_watermark(envelopes: &[JournalRecord<ChainPayload>]) -> bool {
     envelopes.iter().any(|envelope| {
         matches!(
             &envelope.payload,
@@ -273,7 +273,7 @@ fn has_watermark(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>
     })
 }
 
-fn data_count(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> usize {
+fn data_count(envelopes: &[JournalRecord<ChainPayload>]) -> usize {
     envelopes
         .iter()
         .filter(|envelope| envelope.consumes_data_credit())
@@ -427,9 +427,8 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
         wait_for_running(&handle).await?;
         let r2 = replay_testkit::latest_run_dir(&journal_base);
         assert_ne!(r1, r2);
-        let complete_resume = |envelopes: &[JournalRecord<
-            obzenflow_core::event::ChainPayload,
-        >]| resume_rows(envelopes) == expected_xform;
+        let complete_resume =
+            |envelopes: &[JournalRecord<ChainPayload>]| resume_rows(envelopes) == expected_xform;
         wait_for_journal(
             &r2,
             "xform",
@@ -547,17 +546,16 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         .map_err(|e| anyhow!("resume of the torn archive failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
         let r2 = replay_testkit::latest_run_dir(&journal_base);
-        let live_tail_complete =
-            |envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]| {
-                resume_rows(envelopes)
-                    .iter()
-                    .filter(|row| {
-                        matches!(row, ResumeRow::Data(payload)
+        let live_tail_complete = |envelopes: &[JournalRecord<ChainPayload>]| {
+            resume_rows(envelopes)
+                .iter()
+                .filter(|row| {
+                    matches!(row, ResumeRow::Data(payload)
                         if payload["n"].as_u64().is_some_and(|n| n > RECORDED))
-                    })
-                    .count() as u64
-                    == R2_LIVE
-            };
+                })
+                .count() as u64
+                == R2_LIVE
+        };
         wait_for_journal(&r2, "xform", "the live tail", live_tail_complete).await?;
         stop_and_wait(handle).await?;
     }

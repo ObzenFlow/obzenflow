@@ -479,6 +479,7 @@ enabled = false
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
 mod managed_lifecycle_regressions {
     use futures::FutureExt;
+    use obzenflow_core::event::MetricsCoordinationEvent;
     use obzenflow_infra::application::{ApplicationError, FlowApplication, LogLevel};
     use obzenflow_runtime::__private::lifecycle;
     use obzenflow_runtime::pipeline::FlowHandle;
@@ -1178,7 +1179,7 @@ enabled = {hosted}
                     .0;
                 let key = obzenflow_core::WriterId::from(*transform).to_string();
                 assert!(systems[..terminal].iter().any(|row| matches!(&row.payload,
-                    SystemPayload::MetricsCoordination(obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark })
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark })
                         if watermark.clocks.get(&key).is_some_and(|sequence| *sequence > 0))), "live collection must advance before finalisation");
             }
             println!("Prometheus proof: {count} inputs, mode={mode:?}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());

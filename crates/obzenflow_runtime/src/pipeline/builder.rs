@@ -15,6 +15,7 @@ use super::{
     PipelineState,
 };
 use crate::journal::RunSubstrateState;
+use crate::metrics::observations::ObservationHub;
 use crate::{
     backpressure::BackpressureRegistry,
     feed_plan::{FeedKey, FeedPlan},
@@ -23,12 +24,12 @@ use crate::{
     stages::LivenessSnapshots,
     supervised_base::{BuilderError, ChannelBuilder, HandleBuilder, SupervisorTaskBuilder},
 };
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsSnapshotExporter;
-use obzenflow_core::StageId;
-use obzenflow_core::{DeliveryContract, SourceContract, TransportContract};
+use obzenflow_core::{DeliveryContract, SourceContract, StageId, TransportContract};
 use obzenflow_topology::Topology;
 use std::{
     collections::{HashMap, HashSet},
@@ -73,8 +74,8 @@ pub struct PipelineBuilder {
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
-    observations: Arc<crate::metrics::observations::ObservationHub>,
-    host_observations: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    observations: Arc<ObservationHub>,
+    host_observations: Arc<dyn ObservationRecorder>,
     feed_plan: FeedPlan,
     run_substrate: Option<RunSubstrateState>,
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
@@ -83,8 +84,8 @@ pub struct PipelineBuilder {
 impl PipelineBuilder {
     pub fn with_observations(
         mut self,
-        observations: Arc<crate::metrics::observations::ObservationHub>,
-        host: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+        observations: Arc<ObservationHub>,
+        host: Arc<dyn ObservationRecorder>,
     ) -> Self {
         self.observations = observations;
         self.host_observations = host;
@@ -110,8 +111,8 @@ impl PipelineBuilder {
             contract_attachments: None,
             backpressure_registry: None,
             liveness_snapshots: None,
-            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
-            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
+            observations: Arc::new(ObservationHub::default()),
+            host_observations: Arc::new(NoObservations),
             feed_plan: FeedPlan::default(),
             run_substrate: None,
             flow_effective_config: None,

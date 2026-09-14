@@ -19,7 +19,7 @@ use obzenflow_adapters::middleware::rate_limit_with_burst;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
-use obzenflow_core::event::ChainPayload;
+use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
@@ -247,7 +247,7 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     let metrics = tail
         .iter()
         .find_map(|env| match &env.payload {
-            obzenflow_core::event::SystemPayload::PipelineLifecycle(ev) => match ev {
+            SystemPayload::PipelineLifecycle(ev) => match ev {
                 obzenflow_core::event::PipelineLifecycleEvent::Cancelled { metrics, .. } => {
                     metrics.clone()
                 }

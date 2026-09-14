@@ -17,8 +17,7 @@ use crate::supervised_base::{
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::WriterId;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 use super::config::JoinConfig;
 use super::fsm::{JoinContext, JoinState};
@@ -108,7 +107,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
         instrumentation.bind_observations(
             self.resources.flow_id,
-            obzenflow_core::WriterId::from(self.config.stage_id),
+            WriterId::from(self.config.stage_id),
             &self.resources.runtime_execution,
         );
 

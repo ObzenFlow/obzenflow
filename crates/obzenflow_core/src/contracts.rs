@@ -283,7 +283,7 @@ impl Contract for TransportContract {
         // We therefore only update writer-side counts when we observe a
         // FlowControl::Eof with an explicit writer_seq, and treat that
         // as the final writer count for the edge.
-        if let crate::event::ChainPayload::FlowControl(
+        if let ChainPayload::FlowControl(
             crate::event::payloads::flow_control_payload::FlowControlPayload::Eof {
                 writer_seq: Some(seq),
                 ..
@@ -402,7 +402,7 @@ impl Contract for SourceContract {
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
         use crate::event::payloads::flow_control_payload::FlowControlPayload;
 
-        if let crate::event::ChainPayload::FlowControl(payload) = &event.payload {
+        if let ChainPayload::FlowControl(payload) = &event.payload {
             match payload {
                 FlowControlPayload::SourceContract {
                     expected_count: Some(count),
@@ -937,8 +937,7 @@ mod tests {
     use crate::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use crate::event::types::SeqNo;
     use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
-    use crate::CycleDepth;
-    use crate::WriterId;
+    use crate::{CycleDepth, WriterId};
 
     fn dummy_ctx() -> (ContractWriteContext, ContractReadContext, StageId, StageId) {
         let upstream_stage = StageId::new();

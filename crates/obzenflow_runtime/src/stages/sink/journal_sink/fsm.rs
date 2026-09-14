@@ -27,8 +27,7 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::SinkOperationPhase;
-use obzenflow_core::event::{JournalRecord, SystemEvent};
+use obzenflow_core::event::{ChainPayload, JournalRecord, SinkOperationPhase, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -967,7 +966,7 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
 
 async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
-    parent_envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent_envelope: &JournalRecord<ChainPayload>,
     payload: DeliveryPayload,
 ) -> Result<(), obzenflow_fsm::FsmError> {
     let writer_id = ctx.writer_id.ok_or_else(|| {
@@ -1027,8 +1026,9 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_terminal_eof_audit_gate;
-    use super::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
+    use super::{
+        apply_terminal_eof_audit_gate, JournalSinkContext, JournalSinkEvent, JournalSinkState,
+    };
     use crate::stages::common::handlers::{CommitReceipt, SinkLifecycleReport};
     use crate::stages::sink::journal_sink::supervisor::JournalSinkSupervisor;
     use crate::stages::source::finite::fsm::tests::TestJournal;

@@ -2,6 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::event::provenance::{
+    AuthoredEnvelope, AuthoredProvenance, ChainEventProvenance, ProcessingProvenance,
+};
+use crate::event::status::processing_status::ProcessingStatus;
 mod control;
 mod data;
 mod lifecycle;
@@ -57,7 +61,7 @@ impl ChainEventFactory {
     }
 
     pub fn create_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
-        let provenance = crate::event::provenance::ChainEventProvenance {
+        let provenance = ChainEventProvenance {
             id: EventId::new(),
             writer_id,
             event_kind: content.kind(),
@@ -67,10 +71,10 @@ impl ChainEventFactory {
                 .to_string(),
             causality: CausalityContext::new(),
             flow_context: FlowContext::default(),
-            processing: crate::event::provenance::ProcessingProvenance {
+            processing: ProcessingProvenance {
                 processed_by: "unknown".into(),
                 event_time: current_timestamp(),
-                status: crate::event::status::processing_status::ProcessingStatus::Success,
+                status: ProcessingStatus::Success,
                 error_hops_remaining: None,
             },
             intent: None,
@@ -85,8 +89,8 @@ impl ChainEventFactory {
             composite_activations: Vec::new(),
         };
         ChainEvent {
-            envelope: crate::event::provenance::AuthoredEnvelope {
-                provenance: crate::event::provenance::AuthoredProvenance { event: provenance },
+            envelope: AuthoredEnvelope {
+                provenance: AuthoredProvenance { event: provenance },
                 observability: None,
             },
             payload: content,

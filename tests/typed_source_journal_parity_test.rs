@@ -323,10 +323,7 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_stage_appended(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name]["data_journal_file"]
         .as_str()
@@ -344,9 +341,7 @@ async fn read_stage_appended(
     events
 }
 
-fn data_signature(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<(String, serde_json::Value)> {
+fn data_signature(events: &[JournalRecord<ChainPayload>]) -> Vec<(String, serde_json::Value)> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -360,7 +355,7 @@ fn data_signature(
 
 fn assert_source_journal(
     stage_name: &str,
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    events: &[JournalRecord<ChainPayload>],
     expected_data_writer: Option<WriterId>,
     eof_must_match_data_writer: bool,
 ) -> WriterId {

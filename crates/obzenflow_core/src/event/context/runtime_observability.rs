@@ -4,6 +4,7 @@
 
 //! Optional runtime measurements. A missing value never represents measured zero.
 
+use crate::event::payloads::execution_payload::CircuitState;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -84,7 +85,7 @@ impl TimingMeasurements {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CircuitBreakerMeasurements {
-    pub observed_state: crate::event::payloads::execution_payload::CircuitState,
+    pub observed_state: CircuitState,
     pub requests_total: u64,
     pub successes_total: u64,
     pub failures_total: u64,

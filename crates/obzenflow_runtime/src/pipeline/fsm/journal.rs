@@ -17,6 +17,7 @@ use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::SourceContractStrictMode;
 use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::FlowStopMode;
+use obzenflow_core::event::journal_record::SystemJournalRecord;
 use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::{
     MetricsCoordinationEvent, PipelineLifecycleEvent, PipelineStopAdmission, StageLifecycleEvent,
@@ -30,7 +31,7 @@ fn observe<'a>(
     ctx: &mut C,
     fail: FailureDecision,
     contract_state: S,
-) -> Result<&'a obzenflow_core::event::journal_record::SystemJournalRecord, Change> {
+) -> Result<&'a SystemJournalRecord, Change> {
     let E::Journal(envelope) = event else {
         unreachable!("journal handler input");
     };
@@ -183,10 +184,7 @@ fn all_stages_completed(ctx: &C) -> bool {
     ctx.topology.num_stages() > 0 && ctx.completed_stages.len() == ctx.topology.num_stages()
 }
 
-fn own_pipeline<'a>(
-    row: &'a obzenflow_core::event::journal_record::SystemJournalRecord,
-    ctx: &C,
-) -> Option<&'a PipelineLifecycleEvent> {
+fn own_pipeline<'a>(row: &'a SystemJournalRecord, ctx: &C) -> Option<&'a PipelineLifecycleEvent> {
     match &row.payload {
         SystemPayload::PipelineLifecycle(event) if *row.writer_id() == ctx.system_id.into() => {
             Some(event)
@@ -199,7 +197,7 @@ fn own_pipeline<'a>(
 // EOF/quiescence/replay completion does not require all logical feed statuses.
 fn completion_boundary(
     state: S,
-    row: &obzenflow_core::event::journal_record::SystemJournalRecord,
+    row: &SystemJournalRecord,
     ctx: &mut C,
     mut actions: Vec<A>,
 ) -> Change {
@@ -218,11 +216,7 @@ fn completion_boundary(
     change(state, actions)
 }
 
-fn authorise_sources(
-    row: &obzenflow_core::event::journal_record::SystemJournalRecord,
-    ctx: &mut C,
-    actions: &mut Vec<A>,
-) {
+fn authorise_sources(row: &SystemJournalRecord, ctx: &mut C, actions: &mut Vec<A>) {
     if matches!(
         own_pipeline(row, ctx),
         Some(PipelineLifecycleEvent::Running { .. })

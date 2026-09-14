@@ -8,7 +8,7 @@ use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrument
 use crate::stages::common::handlers::SinkOperationError;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{
-    ChainEventFactory, SinkOperationFailed, SinkOperationPhase, SystemEvent,
+    ChainEventFactory, ChainPayload, SinkOperationFailed, SinkOperationPhase, SystemEvent,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, JournalRecord, StageId, TypedPayload, WriterId};
@@ -30,7 +30,7 @@ pub struct SinkLifecycleFailureCommit<'a> {
 
 #[doc(hidden)]
 pub struct SinkLifecycleFailureRecorded {
-    pub operation: JournalRecord<obzenflow_core::event::ChainPayload>,
+    pub operation: JournalRecord<ChainPayload>,
     pub lifecycle_event_id: EventId,
 }
 

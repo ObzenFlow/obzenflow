@@ -6,6 +6,8 @@
 
 use super::*;
 use obzenflow::ai::{ChatTransform, EmbeddingTransform};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::EffectAttemptStarted;
 use obzenflow_dsl::infinite_source;
@@ -485,10 +487,7 @@ async fn stage_processing_errors(
 }
 
 fn failed_effect_record(event: &ChainEvent, effect_type: &str) -> Option<EffectRecord> {
-    let ChainPayload::Execution(
-        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
-    ) = &event.payload
-    else {
+    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
     let record = record.clone();
@@ -1016,7 +1015,10 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
         loop {
             let input_events = stage_events(&active_archive, "input").await;
             let has_eof = input_events.iter().any(|event| {
-                matches!(&event.payload, ChainPayload::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
+                matches!(
+                    &event.payload,
+                    ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+                )
             });
             if has_eof {
                 return;
@@ -1078,7 +1080,10 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
         .iter()
         .rposition(|event| {
             event.writer_id == chat_writer
-                && matches!(&event.payload, ChainPayload::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
+                && matches!(
+                    &event.payload,
+                    ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+                )
         })
         .expect("chat authors EOF after its in-flight work");
     assert_eq!(output_positions.len(), 2);

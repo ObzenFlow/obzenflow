@@ -12,6 +12,7 @@ use crate::messaging::upstream_subscription::StageInputPosition;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,7 @@ impl JoinDeliverySnapshot {
         side: JoinSide,
         delivered_source_stage_id: StageId,
         delivered_stage_input_position: StageInputPosition,
-        input_envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
+        input_envelope: JournalRecord<ChainPayload>,
         reference_high_water: VectorClock,
     ) -> Self {
         Self {

@@ -12,7 +12,7 @@ use obzenflow_core::JournalRecord;
 use std::sync::Arc;
 
 pub async fn mirror_middleware_event_to_system_journal(
-    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+    envelope: &JournalRecord<ChainPayload>,
     system_journal: &Arc<dyn Journal<SystemEvent>>,
 ) {
     let middleware = match &envelope.payload {

@@ -6,6 +6,8 @@ use super::*;
 use crate::web::surface_metrics::HttpSurfaceMetricsEmitter;
 use obzenflow_core::id::SystemId;
 use obzenflow_core::web::{EndpointMetadata, RoutePolicy};
+use obzenflow_core::FlowId;
+use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -103,12 +105,8 @@ async fn get_and_post_failures_select_safe_500_before_optional_measurements() {
         ] {
             let calls = Arc::new(AtomicUsize::new(0));
             let metrics = Arc::new(HttpSurfaceMetricsCollector::new());
-            let execution = obzenflow_runtime::execution::RuntimeExecution::new(
-                obzenflow_runtime::execution::RuntimeMode::Live,
-                None,
-            );
-            let recorder = execution
-                .observation_recorder(obzenflow_core::FlowId::new(), SystemId::new().into());
+            let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+            let recorder = execution.observation_recorder(FlowId::new(), SystemId::new().into());
             let mut host = WarpWebHost::new();
             host.with_surface_metrics(metrics.clone());
             host.register_endpoint(Box::new(Endpoint {

@@ -14,6 +14,7 @@ use obzenflow_core::ai::{
     TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
     EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemPayload,
@@ -800,10 +801,7 @@ async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
 }
 
 fn successful_chat_record(event: &ChainEvent) -> Option<(EffectRecord, ChatCompletionReply)> {
-    let ChainPayload::Execution(
-        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
-    ) = &event.payload
-    else {
+    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
     let record = record.clone();

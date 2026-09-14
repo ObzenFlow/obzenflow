@@ -12,7 +12,9 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
 use crate::stages::common::supervision::suspension::suspend_until;
 use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::ChainPayload;
 
 use obzenflow_core::event::{ChainEventFactory, JournalRecord};
 use obzenflow_core::journal::Journal;
@@ -92,7 +94,7 @@ pub(crate) async fn drain_one_pending(
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-    pending_parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pending_parent: Option<&JournalRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -247,7 +249,7 @@ pub(crate) async fn drain_one_pending_resolve(
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-    pending_parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pending_parent: Option<&JournalRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -262,7 +264,7 @@ pub(crate) async fn drain_one_pending_resolve(
     let requires_terminal_frontier_seal = pending.event.writer_id == WriterId::from(stage_id)
         && matches!(
             &pending.event.payload,
-            obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
         );
 
     // FLOWIP-120b Step 1: the commit core (flow/runtime enrichment, per-type
@@ -447,16 +449,14 @@ async fn emit_stalled_fact(
 ) {
     let event = ChainEventFactory::execution_event(
         WriterId::from(stage_id),
-        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::Backpressure(
-            obzenflow_core::event::payloads::execution_payload::BackpressureFact::Stalled {
-                upstream: stage_id,
-                downstream: detail.downstream,
-                window: detail.window,
-                stall_timeout_ms: detail.stall_timeout.as_millis().min(u64::MAX as u128) as u64,
-                elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
-                in_flight: detail.in_flight,
-            },
-        ),
+        ExecutionPayload::Backpressure(BackpressureFact::Stalled {
+            upstream: stage_id,
+            downstream: detail.downstream,
+            window: detail.window,
+            stall_timeout_ms: detail.stall_timeout.as_millis().min(u64::MAX as u128) as u64,
+            elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
+            in_flight: detail.in_flight,
+        }),
     )
     .with_flow_context(flow_context.clone())
     .with_runtime_provenance(instrumentation.snapshot());
@@ -482,7 +482,7 @@ async fn emit_poison_eof(
         instrumentation.authored_data_frontier();
 
     let mut event = ChainEventFactory::eof_event_with_kind(writer_id, EofKind::Poison);
-    if let obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_id: ref mut eof_writer,
         writer_seq,
         writer_seq_by_event_type: eof_writer_seq_by_event_type,

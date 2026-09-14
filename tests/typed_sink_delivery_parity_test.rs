@@ -206,7 +206,7 @@ async fn read_stage_journal(
     run_dir: &Path,
     stage_name: &str,
     manifest_field: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
@@ -224,17 +224,11 @@ async fn read_stage_journal(
     events
 }
 
-async fn read_stage(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
 }
 
-async fn read_stage_errors(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
@@ -250,8 +244,8 @@ struct DeliveryEvidence {
 }
 
 fn delivery_evidence(
-    source: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    sink: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    source: &[JournalRecord<ChainPayload>],
+    sink: &[JournalRecord<ChainPayload>],
 ) -> Vec<DeliveryEvidence> {
     let inputs = source
         .iter()

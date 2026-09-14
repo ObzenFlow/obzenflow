@@ -5,26 +5,30 @@
 //! FSM instrumentation for HandlerSupervised stages
 
 use crate::control_plane::{
-    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider, NoControlPlane,
-    RateLimiterSnapshotter,
+    CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView, ControlPlaneProvider,
+    NoControlPlane, RateLimiterSnapshotter,
 };
+use crate::execution::RuntimeExecution;
 use hdrhistogram::Histogram;
-use obzenflow_core::event::context::{EventTypeCountContext, UpstreamEventTypeCountContext};
+use obzenflow_core::event::context::{
+    EffectCircuitBreakerContext, EffectRateLimiterContext, EventTypeCountContext,
+    UpstreamEventTypeCountContext,
+};
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::execution_payload::CircuitState;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::ChainEvent;
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::EventId;
-use obzenflow_core::EventType;
-use obzenflow_core::StageId;
-use obzenflow_core::WriterId;
+use obzenflow_core::event::{ChainEvent, JournalEvent};
+use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::{
+    EventId, EventType, FlowId, JournalPayload, MiddlewareExecutionScope, StageId, WriterId,
+};
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::constants::{
     HISTOGRAM_MAX_MS, HISTOGRAM_MIN_MS, HISTOGRAM_SIGFIGS, QUANTILE_P50, QUANTILE_P90,
@@ -68,10 +72,10 @@ struct AuthoredDataFrontier {
 
 /// Stage instrumentation that tracks metrics alongside FSM state
 pub struct StageInstrumentation {
-    observation_owner: std::sync::OnceLock<super::observations::ObservationOwner>,
+    observation_owner: OnceLock<super::observations::ObservationOwner>,
     measurement_started_at_ms: u64,
     processing_time_count: AtomicU64,
-    last_processing_time_available: std::sync::atomic::AtomicBool,
+    last_processing_time_available: AtomicBool,
     // Gauge metrics - current values
     pub in_flight_count: AtomicU32,
     /// Join-only gauge (Live join): number of reference events processed since the last stream event.
@@ -174,13 +178,13 @@ impl StageInstrumentation {
 
     pub fn new_with_config(config: InstrumentationConfig) -> Self {
         Self {
-            observation_owner: std::sync::OnceLock::new(),
-            measurement_started_at_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            observation_owner: OnceLock::new(),
+            measurement_started_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
             processing_time_count: AtomicU64::new(0),
-            last_processing_time_available: std::sync::atomic::AtomicBool::new(false),
+            last_processing_time_available: AtomicBool::new(false),
             // Gauges
             in_flight_count: AtomicU32::new(0),
             join_reference_since_last_stream: AtomicU64::new(0),
@@ -431,15 +435,9 @@ impl StageInstrumentation {
                 time_open_seconds: cb.time_open_seconds,
                 time_half_open_seconds: cb.time_half_open_seconds,
                 observed_state: match cb.state {
-                    crate::control_plane::CircuitBreakerState::Closed => {
-                        obzenflow_core::event::payloads::execution_payload::CircuitState::Closed
-                    }
-                    crate::control_plane::CircuitBreakerState::Open => {
-                        obzenflow_core::event::payloads::execution_payload::CircuitState::Open
-                    }
-                    crate::control_plane::CircuitBreakerState::HalfOpen => {
-                        obzenflow_core::event::payloads::execution_payload::CircuitState::HalfOpen
-                    }
+                    CircuitBreakerState::Closed => CircuitState::Closed,
+                    CircuitBreakerState::Open => CircuitState::Open,
+                    CircuitBreakerState::HalfOpen => CircuitState::HalfOpen,
                 },
             });
         }
@@ -462,21 +460,19 @@ impl StageInstrumentation {
             .iter()
             .filter_map(|(effect_type, snapshotter)| {
                 let cb = snapshotter()?;
-                Some(
-                    obzenflow_core::event::context::EffectCircuitBreakerContext {
-                        effect_type: effect_type.clone(),
-                        cb_requests_total: cb.requests_total,
-                        cb_successes_total: cb.successes_total,
-                        cb_failures_total: cb.failures_total,
-                        cb_slow_total: cb.slow_total,
-                        cb_rejections_total: cb.rejections_total,
-                        cb_opened_total: cb.opened_total,
-                        cb_time_closed_seconds: cb.time_closed_seconds,
-                        cb_time_open_seconds: cb.time_open_seconds,
-                        cb_time_half_open_seconds: cb.time_half_open_seconds,
-                        cb_state: cb.state.stable_gauge(),
-                    },
-                )
+                Some(EffectCircuitBreakerContext {
+                    effect_type: effect_type.clone(),
+                    cb_requests_total: cb.requests_total,
+                    cb_successes_total: cb.successes_total,
+                    cb_failures_total: cb.failures_total,
+                    cb_slow_total: cb.slow_total,
+                    cb_rejections_total: cb.rejections_total,
+                    cb_opened_total: cb.opened_total,
+                    cb_time_closed_seconds: cb.time_closed_seconds,
+                    cb_time_open_seconds: cb.time_open_seconds,
+                    cb_time_half_open_seconds: cb.time_half_open_seconds,
+                    cb_state: cb.state.stable_gauge(),
+                })
             })
             .collect();
         runtime.effect_rate_limiters = self
@@ -484,7 +480,7 @@ impl StageInstrumentation {
             .iter()
             .filter_map(|(effect_type, snapshotter)| {
                 let rl = snapshotter()?;
-                Some(obzenflow_core::event::context::EffectRateLimiterContext {
+                Some(EffectRateLimiterContext {
                     effect_type: effect_type.clone(),
                     rl_events_total: rl.events_total,
                     rl_delayed_total: rl.delayed_total,
@@ -503,9 +499,9 @@ impl StageInstrumentation {
 
     pub fn bind_observations(
         self: &Arc<Self>,
-        flow_id: obzenflow_core::FlowId,
+        flow_id: FlowId,
         writer: WriterId,
-        execution: &crate::execution::RuntimeExecution,
+        execution: &RuntimeExecution,
     ) {
         let scope = super::observations::scope(execution, flow_id);
         execution.observations().activate_scope(scope);
@@ -543,7 +539,7 @@ impl StageInstrumentation {
     /// for that capture, without enabling historical handler measurements.
     pub(crate) fn capture_for_record_in_scope(
         &self,
-        scope: obzenflow_core::MiddlewareExecutionScope,
+        scope: MiddlewareExecutionScope,
     ) -> Option<ObservabilityContext> {
         let owner = self.observation_owner.get()?;
         let packet =
@@ -572,7 +568,7 @@ impl StageInstrumentation {
     }
 
     /// Note a consumed envelope so downstream events capture reader position and origin.
-    pub fn record_consumed<P: obzenflow_core::JournalPayload>(
+    pub fn record_consumed<P: JournalPayload>(
         &self,
         envelope: &JournalRecord<P>,
         upstream_stage: StageId,
@@ -720,13 +716,11 @@ impl StageInstrumentation {
     /// The most-recent per-invocation processing duration. The output committer
     /// reads this to stamp `processing_info.processing_time` on stage outputs
     /// (FLOWIP-115f), replacing the deleted `TimingMiddleware` observer.
-    pub fn last_processing_time(&self) -> Option<obzenflow_core::time::MetricsDuration> {
+    pub fn last_processing_time(&self) -> Option<MetricsDuration> {
         self.last_processing_time_available
             .load(Ordering::Relaxed)
             .then(|| {
-                obzenflow_core::time::MetricsDuration::from_nanos(
-                    self.last_processing_time_nanos.load(Ordering::Relaxed),
-                )
+                MetricsDuration::from_nanos(self.last_processing_time_nanos.load(Ordering::Relaxed))
             })
     }
 
@@ -900,7 +894,7 @@ mod tests {
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::{ChainEventFactory, ChainPayload};
     use obzenflow_core::{EventId, EventType, JournalId, JournalRecord, StageId, WriterId};
 
     #[test]
@@ -984,10 +978,8 @@ mod tests {
             "checkout.command.v1",
             serde_json::json!({}),
         );
-        let envelope = JournalRecord::<obzenflow_core::event::ChainPayload>::new(
-            JournalWriterId::from(JournalId::new()),
-            event,
-        );
+        let envelope =
+            JournalRecord::<ChainPayload>::new(JournalWriterId::from(JournalId::new()), event);
 
         instrumentation.record_consumed(&envelope, physical_upstream);
 

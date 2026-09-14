@@ -6,10 +6,12 @@ use chrono::Utc;
 use crc32fast::Hasher;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::types::DurationMs;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, PipelineLifecycleEvent, SystemEvent, SystemPayload,
+    ChainEvent, ChainEventFactory, JournalRecord, PipelineLifecycleEvent, SystemEvent,
+    SystemPayload,
 };
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::run_manifest::{
@@ -17,11 +19,10 @@ use obzenflow_core::journal::run_manifest::{
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
-use obzenflow_core::WriterId;
+use obzenflow_core::{JournalWriterId, WriterId};
 use obzenflow_infra::journal::disk::log_record::{LogRecord, RECORD_FRAME_KIND};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
-use obzenflow_runtime::replay::ReplayArchive;
-use obzenflow_runtime::replay::ReplayError;
+use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tempfile::tempdir;
@@ -82,10 +83,10 @@ fn write_system_log_completed(dir: &Path) {
         }),
     );
 
-    let record = obzenflow_core::event::JournalRecord::commit_event(
+    let record = JournalRecord::commit_event(
         event,
-        obzenflow_core::event::provenance::JournalProvenance {
-            journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::from(JournalId::new()),
             vector_clock: VectorClock::new(),
             timestamp: Utc::now(),
             journal_group_id: None,
@@ -117,10 +118,10 @@ fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
 fn write_released_legacy_retry_row(dir: &Path) {
     let writer_id = WriterId::from(obzenflow_core::StageId::new());
     let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));
-    let record = obzenflow_core::event::JournalRecord::commit_event(
+    let record = JournalRecord::commit_event(
         event,
-        obzenflow_core::event::provenance::JournalProvenance {
-            journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::from(JournalId::new()),
             vector_clock: VectorClock::new(),
             timestamp: Utc::now(),
             journal_group_id: None,
@@ -249,10 +250,10 @@ async fn open_requires_completed_status_by_default() {
         }),
     );
 
-    let record = obzenflow_core::event::JournalRecord::commit_event(
+    let record = JournalRecord::commit_event(
         failed_event,
-        obzenflow_core::event::provenance::JournalProvenance {
-            journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::from(JournalId::new()),
             vector_clock: VectorClock::new(),
             timestamp: Utc::now(),
             journal_group_id: None,

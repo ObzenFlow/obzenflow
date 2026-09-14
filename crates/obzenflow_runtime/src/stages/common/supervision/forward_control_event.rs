@@ -5,20 +5,18 @@
 //! Common helper to forward control events downstream.
 
 use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use std::sync::Arc;
 
 pub(crate) async fn forward_control_event(
-    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+    envelope: &JournalRecord<ChainPayload>,
     stage_id: StageId,
     stage_name: &str,
     stage_type: StageType,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-) -> Result<
-    JournalRecord<obzenflow_core::event::ChainPayload>,
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<JournalRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     // Re-stamp flow and runtime context so metrics remain local to the
     // forwarding stage even when forwarding control events.
     let mut forward_event = envelope.authored();

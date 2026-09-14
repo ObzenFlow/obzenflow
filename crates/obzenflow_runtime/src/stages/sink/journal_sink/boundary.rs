@@ -7,10 +7,12 @@
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkConsumeReport;
 use async_trait::async_trait;
+use obzenflow_core::event::observation::ObservationRecorder;
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, MiddlewareFact, RateLimiterFact,
 };
 use std::fmt;
+use std::sync::Arc;
 
 pub const MAX_SINK_POLICY_EVIDENCE_ENTRIES: usize = 64;
 const MAX_POLICY_TEXT_BYTES: usize = 512;
@@ -232,11 +234,7 @@ pub trait SinkDeliveryPermit: Send {
 
 #[async_trait]
 pub trait SinkDeliveryBoundary: Send + Sync {
-    fn install_observation_recorder(
-        &self,
-        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
-    }
+    fn install_observation_recorder(&self, _recorder: Arc<dyn ObservationRecorder>) {}
     async fn admit_sink_delivery(&self) -> SinkDeliveryAdmission;
 }
 
@@ -246,7 +244,8 @@ mod tests {
     use obzenflow_core::event::payloads::effect_payload::EffectCursor;
     use obzenflow_core::event::payloads::execution_payload::{
         CircuitBreakerHealthClassification, CircuitBreakerOpenTrigger,
-        CircuitBreakerRejectionReason, CircuitBreakerRetryStopReason,
+        CircuitBreakerRejectionReason, CircuitBreakerRetryStopReason, CircuitState,
+        RateLimiterMode,
     };
 
     fn cursor() -> EffectCursor {
@@ -288,8 +287,8 @@ mod tests {
             test_request_count: 1,
         });
         assert_allowed_breaker(CircuitBreakerFact::StateChanged {
-            from_state: obzenflow_core::event::payloads::execution_payload::CircuitState::Closed,
-            to_state: obzenflow_core::event::payloads::execution_payload::CircuitState::Open,
+            from_state: CircuitState::Closed,
+            to_state: CircuitState::Open,
             timestamp: 1,
         });
         assert!(serde_json::from_value::<CircuitBreakerFact>(
@@ -310,10 +309,8 @@ mod tests {
                 limit_rate: 1.0,
             },
             RateLimiterFact::ModeChange {
-                mode_from:
-                    obzenflow_core::event::payloads::execution_payload::RateLimiterMode::Normal,
-                mode_to:
-                    obzenflow_core::event::payloads::execution_payload::RateLimiterMode::Limiting,
+                mode_from: RateLimiterMode::Normal,
+                mode_to: RateLimiterMode::Limiting,
                 limit_rate: 1.0,
             },
             RateLimiterFact::ConfigChanged {

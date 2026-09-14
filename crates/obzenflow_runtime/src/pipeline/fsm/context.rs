@@ -7,6 +7,7 @@
 use crate::feed_plan::FeedKey;
 use crate::id_conversions::StageIdExt;
 use crate::messaging::system_subscription::SystemSubscription;
+use crate::metrics::observations::ObservationHub;
 use crate::pipeline::config::SourceContractStrictMode;
 use crate::pipeline::resources::PipelineResources;
 use crate::pipeline::termination::{ExecutionOutcome, TerminationState};
@@ -159,7 +160,7 @@ pub(crate) struct PipelineContext {
     pub(crate) stage_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
-    pub(crate) observations: Arc<crate::metrics::observations::ObservationHub>,
+    pub(crate) observations: Arc<ObservationHub>,
     pub(crate) backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
 
     /// Per-source contract status (pass/fail) keyed by source StageId

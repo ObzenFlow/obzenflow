@@ -343,7 +343,7 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-fn resume_rows(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<ResumeRow> {
+fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {

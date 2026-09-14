@@ -90,7 +90,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
         instrumentation.bind_observations(
             self.resources.flow_id,
-            obzenflow_core::WriterId::from(self.config.stage_id),
+            WriterId::from(self.config.stage_id),
             &self.resources.runtime_execution,
         );
 

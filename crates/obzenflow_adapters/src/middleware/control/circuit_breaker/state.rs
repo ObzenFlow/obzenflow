@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::event::payloads::execution_payload::CircuitState as RecordedCircuitState;
 use obzenflow_runtime::control_plane::{
     CircuitBreakerState, CircuitBreakerStateSnapshot, CircuitBreakerStateView,
 };
@@ -51,7 +52,7 @@ impl CircuitBreakerStateView for CircuitBreakerStateViewImpl {
     }
 }
 
-impl From<CircuitState> for obzenflow_core::event::payloads::execution_payload::CircuitState {
+impl From<CircuitState> for RecordedCircuitState {
     fn from(state: CircuitState) -> Self {
         match state {
             CircuitState::Closed => Self::Closed,

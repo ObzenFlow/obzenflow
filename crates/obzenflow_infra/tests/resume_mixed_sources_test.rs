@@ -393,7 +393,7 @@ enum MixedRow {
     Eof,
 }
 
-fn mixed_rows(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<MixedRow> {
+fn mixed_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<MixedRow> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {

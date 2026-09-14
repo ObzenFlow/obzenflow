@@ -147,6 +147,7 @@ impl<T: TypedPayload + Send + Sync + 'static> OneFactStageOutput for T {}
 mod tests {
     use super::*;
     use crate::event::schema::{StageOutputFacts, TypedFact, TypedFactSetError};
+    use crate::event::ChainPayload;
     use serde::{Deserialize, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,7 +415,7 @@ mod tests {
     fn sum_of_products_fails_closed_on_bad_groups() {
         let foreign = vec![TypedFact {
             event_type: crate::event::types::EventType::from("stage_output.unknown.v1"),
-            payload: crate::event::ChainPayload::Fact(serde_json::json!({})),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         }];
         assert!(matches!(
             ClassificationOutcome::try_from_facts(&foreign),

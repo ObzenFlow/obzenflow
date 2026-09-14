@@ -13,7 +13,9 @@ use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
 use crate::typing::SourceTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::observability::HttpPullTelemetry;
+use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::ChainPayload;
 
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::ingress::{
@@ -74,34 +76,30 @@ where
 fn http_pull_evidence(
     writer_id: WriterId,
     snapshot: HttpPullTelemetry,
-    recorder: &dyn obzenflow_core::event::observation::ObservationRecorder,
+    recorder: &dyn ObservationRecorder,
 ) -> ChainEvent {
     use obzenflow_core::event::observation::ObservationRecord;
     use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, HttpPullStateFact};
-    recorder.observe(ObservationRecord::HttpPull(
-        obzenflow_core::event::observability::HttpPullMeasurements {
-            requests_total: snapshot.requests_total,
-            responses_2xx: snapshot.responses_2xx,
-            responses_4xx: snapshot.responses_4xx,
-            responses_5xx: snapshot.responses_5xx,
-            rate_limited_total: snapshot.rate_limited_total,
-            retries_total: snapshot.retries_total,
-            events_decoded_total: snapshot.events_decoded_total,
-            wait_seconds_rate_limit: snapshot.wait_seconds_rate_limit,
-            wait_seconds_poll_interval: snapshot.wait_seconds_poll_interval,
-            wait_seconds_backoff: snapshot.wait_seconds_backoff,
-        },
-    ));
+    recorder.observe(ObservationRecord::HttpPull(HttpPullMeasurements {
+        requests_total: snapshot.requests_total,
+        responses_2xx: snapshot.responses_2xx,
+        responses_4xx: snapshot.responses_4xx,
+        responses_5xx: snapshot.responses_5xx,
+        rate_limited_total: snapshot.rate_limited_total,
+        retries_total: snapshot.retries_total,
+        events_decoded_total: snapshot.events_decoded_total,
+        wait_seconds_rate_limit: snapshot.wait_seconds_rate_limit,
+        wait_seconds_poll_interval: snapshot.wait_seconds_poll_interval,
+        wait_seconds_backoff: snapshot.wait_seconds_backoff,
+    }));
     ChainEventFactory::create_event(
         writer_id,
-        obzenflow_core::event::ChainPayload::Execution(ExecutionPayload::HttpPullState(
-            HttpPullStateFact {
-                state: snapshot.state,
-                wait_reason: snapshot.wait_reason,
-                next_wake_unix_secs: snapshot.next_wake_unix_secs,
-                last_success_unix_secs: snapshot.last_success_unix_secs,
-            },
-        )),
+        ChainPayload::Execution(ExecutionPayload::HttpPullState(HttpPullStateFact {
+            state: snapshot.state,
+            wait_reason: snapshot.wait_reason,
+            next_wake_unix_secs: snapshot.next_wake_unix_secs,
+            last_success_unix_secs: snapshot.last_success_unix_secs,
+        })),
     )
 }
 
@@ -687,7 +685,7 @@ pub struct TypedAsyncFiniteSourceHandlerAdapter<H> {
     handler: H,
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
-    recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
 }
 
 impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
@@ -698,7 +696,7 @@ impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
             handler,
             writer_id: None,
             observation_sink,
-            recorder: Arc::new(obzenflow_core::event::observation::NoObservations),
+            recorder: Arc::new(NoObservations),
         }
     }
 }
@@ -714,10 +712,7 @@ where
         self.writer_id = Some(writer_id);
     }
 
-    fn install_observation_recorder(
-        &mut self,
-        recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         self.recorder = recorder;
     }
 
@@ -779,7 +774,7 @@ pub struct TypedAsyncInfiniteSourceHandlerAdapter<H> {
     handler: H,
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
-    recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
     registration: Option<SourceRuntimeRegistration>,
 }
 
@@ -792,7 +787,7 @@ impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<
             handler,
             writer_id: None,
             observation_sink,
-            recorder: Arc::new(obzenflow_core::event::observation::NoObservations),
+            recorder: Arc::new(NoObservations),
             registration,
         }
     }
@@ -812,10 +807,7 @@ where
         self.writer_id = Some(writer_id);
     }
 
-    fn install_observation_recorder(
-        &mut self,
-        recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         self.recorder = recorder;
     }
 
@@ -874,9 +866,11 @@ where
 mod tests {
     use super::super::erased::ErasedSourceOutcome;
     use super::*;
+    use crate::execution::{RuntimeExecution, RuntimeMode};
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::ingress::{IngressAttemptSeq, IngressKey};
-    use obzenflow_core::{OneFactStageOutput, StageId, StageOutputFacts, TypedPayload};
+    use obzenflow_core::{FlowId, OneFactStageOutput, StageId, StageOutputFacts, TypedPayload};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1053,11 +1047,10 @@ mod tests {
         let mut adapter =
             TypedAsyncFiniteSourceHandlerAdapter::new(SnapshotThenValidation { sink: None });
         UnifiedAsyncFiniteSourceHandler::install_writer_id(&mut adapter, writer_id);
-        let execution =
-            crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
         UnifiedAsyncFiniteSourceHandler::install_observation_recorder(
             &mut adapter,
-            execution.observation_recorder(obzenflow_core::FlowId::new(), writer_id),
+            execution.observation_recorder(FlowId::new(), writer_id),
         );
 
         let (outcome, observations) =
@@ -1073,11 +1066,7 @@ mod tests {
         assert_eq!(observations[0].writer_id, writer_id);
         assert!(matches!(
             &observations[0].payload,
-            ChainPayload::Execution(
-                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::HttpPullState(
-                    _
-                )
-            )
+            ChainPayload::Execution(ExecutionPayload::HttpPullState(_))
         ));
         use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
         assert!(execution.observations().snapshot().iter().flat_map(|packet| &packet.records)

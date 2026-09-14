@@ -13,6 +13,7 @@
 //! - FSM owns control flow decisions (sleep, retry, transition)
 //! - Contract tracking is separated from subscription mechanics
 
+use obzenflow_core::event::ChainPayload;
 mod construction;
 mod contract_checking;
 mod polling;
@@ -111,7 +112,7 @@ fn record_receipt(
     };
 
     let upstream_stage = reader_progress[index].stage_id;
-    let obzenflow_core::event::ChainPayload::Delivery(payload) = &receipt.payload else {
+    let ChainPayload::Delivery(payload) = &receipt.payload else {
         tracing::warn!(
             owner = %owner_label,
             receipt_id = %receipt.id,
@@ -692,7 +693,7 @@ where
         &self,
         parent_event_id: EventId,
         reader_progress: &[ReaderProgress],
-    ) -> Option<(StageId, JournalRecord<obzenflow_core::event::ChainPayload>)> {
+    ) -> Option<(StageId, JournalRecord<ChainPayload>)> {
         reader_progress.iter().find_map(|progress| {
             progress
                 .pending_delivery_inputs

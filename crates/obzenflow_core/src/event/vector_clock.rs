@@ -226,7 +226,8 @@ impl CausalOrderingService {
 mod tests {
     use super::*;
     use crate::event::chain_event::ChainEventFactory;
-    use crate::event::JournalRecord;
+    use crate::event::provenance::JournalProvenance;
+    use crate::event::{ChainPayload, JournalRecord, JournalWriterId};
     use crate::{StageId, WriterId};
     use chrono::Utc;
     use serde_json::json;
@@ -234,7 +235,7 @@ mod tests {
     fn envelope_with_event_id_and_clock(
         event_id: EventId,
         vector_clock: VectorClock,
-    ) -> JournalRecord<crate::event::ChainPayload> {
+    ) -> JournalRecord<ChainPayload> {
         let writer_id = WriterId::from(StageId::new());
         let mut event =
             ChainEventFactory::data_event(writer_id, "test.vector_clock", json!({ "ok": true }));
@@ -242,8 +243,8 @@ mod tests {
 
         JournalRecord::commit_event(
             event,
-            crate::event::provenance::JournalProvenance {
-                journal_writer_id: crate::event::JournalWriterId::new(),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::new(),
                 vector_clock,
                 timestamp: Utc::now(),
                 journal_group_id: None,

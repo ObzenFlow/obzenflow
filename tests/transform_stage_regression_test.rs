@@ -14,8 +14,7 @@ use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStat
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{JournalRecord, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -39,8 +38,7 @@ impl TypedPayload for TransformStageEvent {
     const EVENT_TYPE: &'static str = "transform.stage.event";
 }
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
@@ -283,7 +281,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
 
     async fn read_chain_journal(
         path: std::path::PathBuf,
-    ) -> Result<Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>>> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>> {
         let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
             obzenflow_infra::journal::DiskJournal::with_owner(
                 path,
@@ -432,9 +430,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
         }
     }
 
-    async fn read_journal(
-        path: std::path::PathBuf,
-    ) -> Result<Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>>> {
+    async fn read_journal(path: std::path::PathBuf) -> Result<Vec<JournalRecord<ChainPayload>>> {
         let journal = obzenflow_infra::journal::DiskJournal::<ChainEvent>::with_owner(
             path,
             JournalOwner::stage(StageId::new()),

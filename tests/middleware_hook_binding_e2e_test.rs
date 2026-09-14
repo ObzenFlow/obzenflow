@@ -9,6 +9,7 @@
 //! carrier, rejects one effect protected unit, and observes a live run plus
 //! strict replay of the same archive.
 
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 #[path = "test_support/exported_jsonl.rs"]
 mod exported_jsonl;
 
@@ -571,11 +572,7 @@ fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
     let mut failures: Vec<_> = exported_jsonl::chain_events(jsonl)
         .into_iter()
         .filter_map(|event| {
-            let ChainPayload::Execution(
-                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(
-                    record,
-                ),
-            ) = event.payload
+            let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = event.payload
             else {
                 return None;
             };

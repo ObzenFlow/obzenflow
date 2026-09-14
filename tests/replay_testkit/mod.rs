@@ -69,7 +69,7 @@ pub fn archive_manifest(run_dir: &Path) -> serde_json::Value {
 pub async fn read_stage_envelopes(
     run_dir: &Path,
     stage_key: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
@@ -97,7 +97,7 @@ pub async fn read_stage_envelopes(
 pub async fn read_stage_envelopes_appended(
     run_dir: &Path,
     stage_key: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
@@ -119,9 +119,7 @@ pub async fn read_stage_envelopes_appended(
 
 /// The per-run `StageId` an upstream's authored EOF names, resolved from the
 /// EOF payload's `writer_id` (falling back to the chain event's writer).
-fn authored_eof_stage_id(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Option<StageId> {
+fn authored_eof_stage_id(envelopes: &[JournalRecord<ChainPayload>]) -> Option<StageId> {
     envelopes.iter().find_map(|envelope| {
         let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
             &envelope.payload
@@ -205,7 +203,7 @@ pub async fn count_reader_telemetry_rows(run_dir: &Path, stage_key: &str) -> usi
         .filter(|envelope| {
             matches!(
                 &envelope.payload,
-                obzenflow_core::event::ChainPayload::FlowControl(payload)
+                ChainPayload::FlowControl(payload)
                     if payload.is_reader_telemetry()
             )
         })

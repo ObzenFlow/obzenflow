@@ -111,7 +111,7 @@ mod tests {
     };
     use crate::event::ChainEventFactory;
     use crate::id::StageId;
-    use crate::WriterId;
+    use crate::{FlowId, WriterId};
     use serde_json::json;
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
         use crate::event::observation::{CaptureReason, CaptureScope, CaptureSeq};
         CaptureStamp {
             capture_scope: CaptureScope {
-                flow_id: crate::FlowId::new(),
+                flow_id: FlowId::new(),
                 resume_generation: Default::default(),
             },
             observer,

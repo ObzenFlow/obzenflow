@@ -75,6 +75,7 @@ impl<T: TypedFactSet + StageFactSet> EffectOutcomeFacts for T {}
 mod tests {
     use crate::event::schema::{EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError};
     use crate::event::types::EventType;
+    use crate::event::ChainPayload;
     use crate::TypedPayload;
     use serde::{Deserialize, Serialize};
 
@@ -122,7 +123,7 @@ mod tests {
     fn unknown_fact() -> TypedFact {
         TypedFact {
             event_type: EventType::from("carrier.unknown.v1"),
-            payload: crate::event::ChainPayload::Fact(serde_json::json!({})),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         }
     }
 

@@ -29,7 +29,8 @@ use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{
-    ChainEventFactory, StageFatalCode, StageFatalReason, StageFatalRecorded, SystemEvent,
+    ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason, StageFatalRecorded,
+    SystemEvent,
 };
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -1250,7 +1251,7 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
     let stalled = events
         .iter()
         .find_map(|envelope| match &envelope.payload {
-            obzenflow_core::event::ChainPayload::Execution(ExecutionPayload::Backpressure(
+            ChainPayload::Execution(ExecutionPayload::Backpressure(
                 BackpressureFact::Stalled {
                     upstream,
                     downstream,
@@ -1283,7 +1284,7 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
     let poison_eof = events
         .iter()
         .find_map(|envelope| match &envelope.payload {
-            obzenflow_core::event::ChainPayload::FlowControl(
+            ChainPayload::FlowControl(
                 obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
                     kind,
                     writer_id,
@@ -1408,7 +1409,7 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         .any(|env| {
             matches!(
                 env.payload,
-                obzenflow_core::event::ChainPayload::FlowControl(
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Drain
                 )
             )
@@ -1438,7 +1439,7 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         .any(|env| {
             matches!(
                 env.payload,
-                obzenflow_core::event::ChainPayload::FlowControl(
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Drain
                 )
             )

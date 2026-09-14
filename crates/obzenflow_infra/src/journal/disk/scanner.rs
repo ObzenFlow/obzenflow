@@ -264,18 +264,20 @@ mod tests {
     use crate::journal::disk::log_record::{serialize_record, LogRecord};
     use chrono::Utc;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::{JournalId, StageId, WriterId};
+    use obzenflow_core::event::JournalRecord;
+    use obzenflow_core::{JournalId, JournalWriterId, StageId, WriterId};
     use serde_json::json;
     use std::io::Cursor;
 
     fn record() -> LogRecord<ChainEvent> {
         let writer_id = WriterId::from(StageId::new());
         let event = ChainEventFactory::data_event(writer_id, "test.event", json!({ "k": "v" }));
-        obzenflow_core::event::JournalRecord::commit_event(
+        JournalRecord::commit_event(
             event,
-            obzenflow_core::event::provenance::JournalProvenance {
-                journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(JournalId::new()),
                 vector_clock: VectorClock::new(),
                 timestamp: Utc::now(),
                 journal_group_id: None,

@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::ai::{AiProvider, LlmHashes, LlmObservability};
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::{
     CompositeActivationContext, FlowContext, RuntimeObservability, RuntimeProvenance,
@@ -17,7 +18,7 @@ use crate::event::status::processing_status::ProcessingStatus;
 use crate::event::system_event::StageLifecycleEvent;
 use crate::event::vector_clock::VectorClock;
 use crate::id::{CompositeId, FlowId, SystemId};
-use crate::{EventId, JournalWriterId, ReaderGeneration, StageId, WriterId};
+use crate::{ChainEvent, EventId, JournalWriterId, ReaderGeneration, StageId, WriterId};
 use chrono::{TimeZone, Utc};
 use serde_json::json;
 
@@ -114,7 +115,7 @@ fn required_record_roots_do_not_confuse_absence_with_business_null() {
         assert!(serde_json::from_value::<JournalRecord<ChainPayload>>(committed).is_err());
         let mut authored = serde_json::to_value(&authored).unwrap();
         authored.as_object_mut().unwrap().remove(root);
-        assert!(serde_json::from_value::<crate::ChainEvent>(authored).is_err());
+        assert!(serde_json::from_value::<ChainEvent>(authored).is_err());
     }
 }
 
@@ -304,10 +305,10 @@ fn invalid_or_oversized_observations_are_omitted_without_changing_the_committed_
             thread_count: None,
         },
         ObservationRecord::Llm {
-            metadata: crate::ai::LlmObservability::new(
-                crate::ai::AiProvider::new("test"),
+            metadata: LlmObservability::new(
+                AiProvider::new("test"),
                 "x".repeat(70_000),
-                crate::ai::LlmHashes::new("prompt".into(), "params".into()),
+                LlmHashes::new("prompt".into(), "params".into()),
             ),
         },
     ] {

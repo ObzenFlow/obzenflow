@@ -17,6 +17,7 @@
 //! barrier.
 
 use crate::testing::FlowTestHarness;
+use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::system_event::{MetricsCoordinationEvent, SystemPayload};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
@@ -220,10 +221,7 @@ async fn current_journal_offset(
 async fn read_journal_from(
     journal: &Arc<dyn Journal<SystemEvent>>,
     from: u64,
-) -> Result<
-    Vec<obzenflow_core::event::journal_record::JournalRecord<obzenflow_core::event::SystemPayload>>,
-    MetricsBarrierError,
-> {
+) -> Result<Vec<JournalRecord<SystemPayload>>, MetricsBarrierError> {
     let mut reader = journal
         .reader_from(from)
         .await
@@ -242,14 +240,18 @@ async fn read_journal_from(
 mod tests {
     use super::*;
     use crate::id_conversions::StageIdExt;
+    use crate::metrics::observations::ObservationHub;
     use crate::pipeline::fsm::PipelineFsmEvent;
     use crate::pipeline::handle::FlowHandleExtras;
     use crate::pipeline::{FlowHandle, PipelineState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::observation::NoObservations;
     use obzenflow_core::event::system_event::MetricsCoordinationEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload, WriterId};
+    use obzenflow_core::event::{
+        JournalEvent, JournalWriterId, SystemEvent, SystemPayload, WriterId,
+    };
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -323,8 +325,7 @@ mod tests {
             event: T,
             _parent: Option<&JournalRecord<T::Payload>>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
-            let envelope =
-                JournalRecord::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
@@ -382,8 +383,8 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
-            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
-            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
+            observations: Arc::new(ObservationHub::default()),
+            host_observations: Arc::new(NoObservations),
 
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),
@@ -422,8 +423,8 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
-            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
-            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
+            observations: Arc::new(ObservationHub::default()),
+            host_observations: Arc::new(NoObservations),
 
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),

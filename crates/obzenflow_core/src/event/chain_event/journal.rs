@@ -4,24 +4,19 @@
 
 use super::ChainEvent;
 use crate::event::journal_event::{JournalEvent, Sealed};
+use crate::event::provenance::{AuthoredEnvelope, ChainEventProvenance};
 use crate::event::types::{AdmissionSeq, EventId, WriterId};
+use crate::event::ChainPayload;
 
 impl Sealed for ChainEvent {}
 
 impl JournalEvent for ChainEvent {
-    type Payload = crate::event::ChainPayload;
-    fn into_parts(
-        self,
-    ) -> (
-        crate::event::provenance::AuthoredEnvelope<crate::event::provenance::ChainEventProvenance>,
-        Self::Payload,
-    ) {
+    type Payload = ChainPayload;
+    fn into_parts(self) -> (AuthoredEnvelope<ChainEventProvenance>, Self::Payload) {
         (self.envelope, self.payload)
     }
     fn from_parts(
-        envelope: crate::event::provenance::AuthoredEnvelope<
-            crate::event::provenance::ChainEventProvenance,
-        >,
+        envelope: AuthoredEnvelope<ChainEventProvenance>,
         payload: Self::Payload,
     ) -> Self {
         Self { envelope, payload }

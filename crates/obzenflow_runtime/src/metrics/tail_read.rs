@@ -12,7 +12,7 @@ use obzenflow_core::event::context::{RuntimeProvenance, StageType};
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::id::StageId;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetadata, StageMetricsSnapshot};
-use obzenflow_core::Journal;
+use obzenflow_core::{Journal, WriterId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -129,7 +129,7 @@ pub async fn read_stage_metrics_from_tail(
         {
             for row in rows.into_iter().rev() {
                 if let Some(observation) = row.envelope.observability {
-                    if observation.capture.observer == obzenflow_core::WriterId::from(stage_id) {
+                    if observation.capture.observer == WriterId::from(stage_id) {
                         observations.offer_recorded(observation);
                     }
                 }
@@ -208,15 +208,18 @@ pub async fn read_flow_metrics_from_tails(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use obzenflow_core::event::context::{
+        ExecutionAccounting, ExecutionProgress, RuntimeProvenance,
+    };
     use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
     use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::ChainPayload;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::ChainEvent;
-    use obzenflow_core::WriterId;
+    use obzenflow_core::{ChainEvent, WriterId};
     use std::sync::{Arc, Mutex};
 
     /// Minimal in-memory journal for ChainEvent used in tail-read tests.
@@ -226,7 +229,7 @@ mod tests {
     struct InMemoryChainJournal {
         id: JournalId,
         owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
     }
 
     impl InMemoryChainJournal {
@@ -246,7 +249,7 @@ mod tests {
     }
 
     struct InMemoryReader {
-        events: Vec<JournalRecord<obzenflow_core::event::ChainPayload>>,
+        events: Vec<JournalRecord<ChainPayload>>,
         pos: usize,
     }
 
@@ -263,8 +266,8 @@ mod tests {
         async fn append(
             &self,
             event: ChainEvent,
-            _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-        ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
+            _parent: Option<&JournalRecord<ChainPayload>>,
+        ) -> Result<JournalRecord<ChainPayload>, JournalError> {
             let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(envelope.clone());
@@ -273,7 +276,7 @@ mod tests {
 
         async fn read_all_unordered(
             &self,
-        ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
         }
@@ -281,8 +284,7 @@ mod tests {
         async fn read_event(
             &self,
             _event_id: &obzenflow_core::EventId,
-        ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-        {
+        ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             Ok(None)
         }
 
@@ -300,7 +302,7 @@ mod tests {
         async fn read_last_n(
             &self,
             count: usize,
-        ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -311,10 +313,7 @@ mod tests {
 
     #[async_trait]
     impl JournalReader<ChainEvent> for InMemoryReader {
-        async fn next(
-            &mut self,
-        ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-        {
+        async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -337,9 +336,9 @@ mod tests {
         events_processed_total: u64,
         errors_total: u64,
         by_kind: &[(ErrorKind, u64)],
-    ) -> obzenflow_core::event::context::RuntimeProvenance {
-        obzenflow_core::event::context::RuntimeProvenance {
-            progress: obzenflow_core::event::context::ExecutionProgress {
+    ) -> RuntimeProvenance {
+        RuntimeProvenance {
+            progress: ExecutionProgress {
                 reader_seq: 0,
                 receipted_seq: 0,
                 writer_seq: 0,
@@ -351,7 +350,7 @@ mod tests {
                 last_emitted_event_id: None,
                 last_emitted_writer: None,
             },
-            accounting: obzenflow_core::event::context::ExecutionAccounting {
+            accounting: ExecutionAccounting {
                 events_processed_total,
                 events_accumulated_total: 0,
                 events_emitted_total: 0,

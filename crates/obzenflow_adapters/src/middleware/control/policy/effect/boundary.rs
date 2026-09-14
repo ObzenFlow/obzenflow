@@ -7,6 +7,7 @@ use super::contract::{EffectAttemptOutcome, PolicyAdmission};
 use crate::middleware::control::EffectResilienceMiddleware;
 use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
 use async_trait::async_trait;
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{
@@ -15,7 +16,7 @@ use obzenflow_runtime::effects::{
     SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant as StdInstant;
 
 /// A per-effect chain, partitioned once at construction so the execution
@@ -50,24 +51,21 @@ impl CompiledEffectChain {
 /// Effect boundary backed by per-effect policy chains, keyed by the declared
 /// effect type. Effects with no declared policies execute unguarded.
 pub struct PerEffectPolicyBoundary {
-    recorder: std::sync::OnceLock<
-        std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    >,
+    recorder: OnceLock<Arc<dyn ObservationRecorder>>,
     chains: HashMap<&'static str, CompiledEffectChain>,
 }
 
 impl PerEffectPolicyBoundary {
-    fn observation_recorder(
-        &self,
-    ) -> std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder> {
-        self.recorder.get().cloned().unwrap_or_else(|| {
-            std::sync::Arc::new(obzenflow_core::event::observation::NoObservations)
-        })
+    fn observation_recorder(&self) -> Arc<dyn ObservationRecorder> {
+        self.recorder
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(NoObservations))
     }
 
     pub fn new(chains: HashMap<&'static str, Arc<Vec<EffectPolicyAttachment>>>) -> Self {
         Self {
-            recorder: std::sync::OnceLock::new(),
+            recorder: OnceLock::new(),
             chains: chains
                 .into_iter()
                 .map(|(effect_type, chain)| (effect_type, CompiledEffectChain::compile(chain)))
@@ -99,7 +97,7 @@ fn observe_reverse(
 }
 
 pub(in crate::middleware::control) async fn execute_chain_once(
-    recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
     effect_type: &str,
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
@@ -139,7 +137,7 @@ pub(in crate::middleware::control) async fn execute_chain_once(
 }
 
 async fn execute_single_use_chain_once(
-    recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
     effect_type: &str,
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
@@ -173,7 +171,7 @@ async fn execute_single_use_chain_once(
 }
 
 async fn execute_affine_chain_once(
-    recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
     effect_type: &str,
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
@@ -208,10 +206,7 @@ async fn execute_affine_chain_once(
 
 #[async_trait]
 impl EffectBoundary for PerEffectPolicyBoundary {
-    fn install_observation_recorder(
-        &self,
-        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
+    fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
         let _ = self.recorder.set(recorder);
     }
 

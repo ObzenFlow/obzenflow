@@ -4,9 +4,12 @@
 
 //! Typed fact-set authoring support.
 
+use crate::config::LineagePolicy;
 use crate::event::chain_event::{ChainEvent, ChainPayload};
 use crate::event::schema::typed_payload::TypedPayload;
 use crate::event::types::EventType;
+use crate::event::ChainEventFactory;
+use crate::WriterId;
 use std::any::{type_name, TypeId};
 
 /// Type metadata for one member of a typed fact set.
@@ -61,22 +64,17 @@ impl TypedFact {
 
     pub fn into_derived_event(
         self,
-        writer_id: crate::WriterId,
+        writer_id: WriterId,
         parent: &ChainEvent,
-        lineage: crate::config::LineagePolicy,
+        lineage: LineagePolicy,
     ) -> ChainEvent {
-        let mut event = crate::event::ChainEventFactory::derived_event(
-            writer_id,
-            parent,
-            self.payload,
-            lineage,
-        );
+        let mut event = ChainEventFactory::derived_event(writer_id, parent, self.payload, lineage);
         event.envelope.provenance.event.event_type = self.event_type.to_string();
         event
     }
 
-    pub fn into_event(self, writer_id: crate::WriterId) -> ChainEvent {
-        let mut event = crate::event::ChainEventFactory::create_event(writer_id, self.payload);
+    pub fn into_event(self, writer_id: WriterId) -> ChainEvent {
+        let mut event = ChainEventFactory::create_event(writer_id, self.payload);
         event.envelope.provenance.event.event_type = self.event_type.to_string();
         event
     }
@@ -242,6 +240,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::ChainPayload;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,7 +424,7 @@ mod tests {
 
         let unknown = vec![TypedFact {
             event_type: EventType::from("fact.unknown.v1"),
-            payload: crate::event::ChainPayload::Fact(serde_json::json!({})),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         }];
         assert!(matches!(
             HandWrittenSum::try_from_facts(&unknown),
@@ -505,7 +504,7 @@ mod tests {
         let mut with_unknown = carrier.into_facts().expect("product serializes");
         with_unknown.push(TypedFact {
             event_type: EventType::from("fact.unknown.v1"),
-            payload: crate::event::ChainPayload::Fact(serde_json::json!({})),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         });
         assert!(matches!(
             HandWrittenProduct::try_from_facts(&with_unknown),

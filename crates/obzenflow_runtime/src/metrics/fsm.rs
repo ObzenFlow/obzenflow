@@ -10,10 +10,18 @@
 
 use super::snapshot::{JournalBinding, SnapshotObservation};
 use obzenflow_core::event::chain_event::ChainPayload;
-use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::observability::HttpSurfaceRouteMetricsSnapshot;
+use obzenflow_core::event::context::{
+    MeasurementWindow, RuntimeObservability, RuntimeProvenance, StageType,
+};
+use obzenflow_core::event::observability::{
+    HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
+};
+use obzenflow_core::event::observation::CaptureReason;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitState, ExecutionPayload, HttpPullStateFact,
+};
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::{SinkOperationFailed, SinkOperationPhase, WriterId};
+use obzenflow_core::event::{SinkOperationFailed, SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::metrics::{
@@ -23,7 +31,7 @@ use obzenflow_core::metrics::{
 };
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
-use obzenflow_core::{ChainEvent, EventId, EventType, Journal, TypedPayload};
+use obzenflow_core::{ChainEvent, EventId, EventType, Journal, JournalRecord, TypedPayload};
 use obzenflow_fsm::{
     fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
 };
@@ -71,14 +79,14 @@ pub enum MetricsAggregatorEvent {
 
     /// Process a batch of events
     ProcessBatch {
-        events: Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>>,
+        events: Vec<JournalRecord<ChainPayload>>,
         journal_kind: MetricsJournalKind,
         journal_stage: StageId,
     },
 
     /// Process a system event (FLOWIP-059b)
     ProcessSystemEvent {
-        envelope: Box<obzenflow_core::JournalRecord<obzenflow_core::event::SystemPayload>>,
+        envelope: Box<JournalRecord<SystemPayload>>,
     },
 
     /// Time to export metrics
@@ -124,14 +132,14 @@ pub enum MetricsAggregatorAction {
 
     /// Update metrics from an event
     UpdateMetrics {
-        envelope: Box<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>>,
+        envelope: Box<JournalRecord<ChainPayload>>,
         journal_kind: MetricsJournalKind,
         journal_stage: StageId,
     },
 
     /// Process system events from the system journal (FLOWIP-059b)
     ProcessSystemEvent {
-        envelope: Box<obzenflow_core::JournalRecord<obzenflow_core::event::SystemPayload>>,
+        envelope: Box<JournalRecord<SystemPayload>>,
     },
 
     /// Export metrics snapshot
@@ -259,8 +267,7 @@ pub struct MetricsStore {
     pub ingestion_refusals_total: HashMap<(IngressKey, String), u64>,
 
     // HTTP pull telemetry (FLOWIP-084e)
-    pub http_pull_metrics:
-        HashMap<StageId, obzenflow_core::event::observability::HttpPullMetricsSnapshot>,
+    pub http_pull_metrics: HashMap<StageId, HttpPullMetricsSnapshot>,
 
     // AI chunking telemetry (FLOWIP-086z)
     pub ai_chunking_metrics: HashMap<StageId, obzenflow_core::metrics::AiChunkingMetricsSnapshot>,
@@ -299,17 +306,14 @@ pub struct StageMetrics {
     // Actual sum of processing times (nanoseconds) - never reconstructed from percentiles
     pub processing_time_sum_nanos: Option<u64>,
     pub processing_time_count: Option<u64>,
-    pub timing_window: Option<obzenflow_core::event::context::MeasurementWindow>,
+    pub timing_window: Option<MeasurementWindow>,
     // Stage-specific timing for accurate rate calculation
     pub first_event_time: Option<std::time::Instant>,
     pub last_event_time: Option<std::time::Instant>,
 }
 
 impl StageMetrics {
-    pub(super) fn merge_runtime_measurements(
-        &mut self,
-        runtime: &obzenflow_core::event::context::RuntimeObservability,
-    ) {
+    pub(super) fn merge_runtime_measurements(&mut self, runtime: &RuntimeObservability) {
         if let Some(value) = runtime.in_flight {
             self.last_in_flight = Some(value);
         }
@@ -338,10 +342,7 @@ impl StageMetrics {
 
     /// Merge one wide-event runtime snapshot. Counters are monotonic and use
     /// max so tail seeding, out-of-order observation, and replay are stable.
-    pub(super) fn merge_runtime_context(
-        &mut self,
-        runtime_ctx: &obzenflow_core::event::context::RuntimeProvenance,
-    ) {
+    pub(super) fn merge_runtime_context(&mut self, runtime_ctx: &RuntimeProvenance) {
         self.last_failures_total = Some(
             self.last_failures_total
                 .unwrap_or(0)
@@ -918,11 +919,7 @@ impl MetricsStore {
             .or_insert(0) += 1;
     }
 
-    fn fold_http_pull_state(
-        &mut self,
-        stage_id: StageId,
-        state: &obzenflow_core::event::payloads::execution_payload::HttpPullStateFact,
-    ) {
+    fn fold_http_pull_state(&mut self, stage_id: StageId, state: &HttpPullStateFact) {
         let entry = self.http_pull_metrics.entry(stage_id).or_default();
         entry.state = Some(state.state);
         entry.wait_reason = state.wait_reason;
@@ -1019,11 +1016,7 @@ impl MetricsStore {
             .insert(stage_id, next_state.to_string());
     }
 
-    fn update_control_measurements(
-        &mut self,
-        stage_id: StageId,
-        runtime: &obzenflow_core::event::context::RuntimeObservability,
-    ) {
+    fn update_control_measurements(&mut self, stage_id: StageId, runtime: &RuntimeObservability) {
         if let Some(cb) = &runtime.circuit_breaker {
             self.circuit_breaker_requests_total
                 .insert(stage_id, cb.requests_total);
@@ -1218,7 +1211,7 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 match &envelope.payload {
-                    obzenflow_core::event::SystemPayload::StageLifecycle { stage_id, event } => {
+                    SystemPayload::StageLifecycle { stage_id, event } => {
                         // Track ALL states each stage has been in (never overwrite)
                         match event {
                             obzenflow_core::event::StageLifecycleEvent::Running => {
@@ -1248,7 +1241,7 @@ impl FsmAction for MetricsAggregatorAction {
                             _ => {} // Skip draining, drained for now
                         }
                     }
-                    obzenflow_core::event::SystemPayload::PipelineLifecycle(event)
+                    SystemPayload::PipelineLifecycle(event)
                         if ctx.pipeline_writer.is_none_or(|writer| {
                             writer == envelope.envelope.provenance.event.writer_id
                         }) =>
@@ -1329,7 +1322,7 @@ impl FsmAction for MetricsAggregatorAction {
                             _ => {} // Skip other pipeline events
                         }
                     }
-                    obzenflow_core::event::SystemPayload::ContractResult {
+                    SystemPayload::ContractResult {
                         upstream,
                         reader,
                         selected_event_type,
@@ -1388,7 +1381,7 @@ impl FsmAction for MetricsAggregatorAction {
                             *gauge = (*gauge).max(seq.0);
                         }
                     }
-                    obzenflow_core::event::SystemPayload::IngressRefusal {
+                    SystemPayload::IngressRefusal {
                         ingress_key,
                         reason,
                         event_count,
@@ -1472,7 +1465,9 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                 }
 
-                if let obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::HttpPullState(state)) = &event.payload {
+                if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
+                    &event.payload
+                {
                     store.fold_http_pull_state(stage_id, state);
                 }
 
@@ -1504,9 +1499,6 @@ impl FsmAction for MetricsAggregatorAction {
                 }
 
                 use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
-                use obzenflow_core::event::payloads::execution_payload::{
-                    CircuitBreakerFact, ExecutionPayload,
-                };
                 if let Some(observation) = &envelope.envelope.observability {
                     store.observations.offer_recorded(observation.clone());
                 }
@@ -1551,9 +1543,9 @@ impl FsmAction for MetricsAggregatorAction {
                         CircuitBreakerFact::Closed { .. } => Some(("closed", 0.0)),
                         CircuitBreakerFact::HalfOpen { .. } => Some(("half_open", 0.5)),
                         CircuitBreakerFact::StateChanged { to_state, .. } => Some(match to_state {
-                            obzenflow_core::event::payloads::execution_payload::CircuitState::Closed => ("closed", 0.0),
-                            obzenflow_core::event::payloads::execution_payload::CircuitState::Open => ("open", 1.0),
-                            obzenflow_core::event::payloads::execution_payload::CircuitState::HalfOpen => ("half_open", 0.5),
+                            CircuitState::Closed => ("closed", 0.0),
+                            CircuitState::Open => ("open", 1.0),
+                            CircuitState::HalfOpen => ("half_open", 0.5),
                         }),
                         _ => None,
                     };
@@ -1608,9 +1600,9 @@ impl FsmAction for MetricsAggregatorAction {
 
             MetricsAggregatorAction::ExportMetrics => {
                 tracing::debug!("ExportMetrics action triggered");
-                ctx.metrics_store.observations.capture_registered(
-                    obzenflow_core::event::observation::CaptureReason::Periodic,
-                );
+                ctx.metrics_store
+                    .observations
+                    .capture_registered(CaptureReason::Periodic);
                 ctx.metrics_store.refresh_measurements();
                 // Keep wide metrics current even when the physical cursors lag.
                 // This refresh does not advance input coverage or its watermark:
@@ -1677,7 +1669,7 @@ impl FsmAction for MetricsAggregatorAction {
 
                 let export_event = obzenflow_core::event::SystemEvent::new(
                     WriterId::from(ctx.system_id),
-                    obzenflow_core::event::SystemPayload::MetricsCoordination(
+                    SystemPayload::MetricsCoordination(
                         obzenflow_core::event::MetricsCoordinationEvent::Exported {
                             watermark: obzenflow_core::event::vector_clock::VectorClock { clocks },
                         },
@@ -1715,7 +1707,7 @@ impl FsmAction for MetricsAggregatorAction {
                 // Metrics aggregator publishes SystemEvent to system journal
                 let drain_event = obzenflow_core::event::SystemEvent::new(
                     system_writer_id,
-                    obzenflow_core::event::SystemPayload::MetricsCoordination(
+                    SystemPayload::MetricsCoordination(
                         obzenflow_core::event::MetricsCoordinationEvent::Drained,
                     ),
                 );
@@ -1803,7 +1795,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                         match event {
                             MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
                                 let pipeline_event = match &envelope.payload {
-                                    obzenflow_core::event::SystemPayload::PipelineLifecycle(event)
+                                    SystemPayload::PipelineLifecycle(event)
                                         if ctx.pipeline_writer.is_none_or(|writer| writer == envelope.envelope.provenance.event.writer_id) => {
                                         Some(event)
                                     }
@@ -1949,7 +1941,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                         match event {
                             MetricsAggregatorEvent::ProcessSystemEvent { envelope } => {
                                 let pipeline_event = match &envelope.payload {
-                                    obzenflow_core::event::SystemPayload::PipelineLifecycle(event)
+                                    SystemPayload::PipelineLifecycle(event)
                                         if ctx.pipeline_writer.is_none_or(|writer| writer == envelope.envelope.provenance.event.writer_id) => {
                                         Some(event)
                                     }
@@ -2061,7 +2053,12 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::observability::HttpPullTelemetry;
+    use obzenflow_core::event::context::{CircuitBreakerMeasurements, RuntimeObservability};
+    use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
+    use obzenflow_core::event::observation::CaptureScope;
+    use obzenflow_core::event::payloads::execution_payload::{CircuitState, HttpPullStateFact};
+    use obzenflow_core::event::ChainPayload;
+    use obzenflow_core::FlowId;
 
     use async_trait::async_trait;
     use obzenflow_core::event::context::{CompositeActivationContext, StageType};
@@ -2069,9 +2066,7 @@ mod tests {
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::event::CorrelationId;
-    use obzenflow_core::event::JournalEvent;
+    use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
@@ -2209,15 +2204,15 @@ mod tests {
             wait_seconds_poll_interval: 7.0,
             wait_seconds_backoff: 2.0,
         };
-        let scope = obzenflow_core::event::observation::CaptureScope {
-            flow_id: obzenflow_core::FlowId::new(),
+        let scope = CaptureScope {
+            flow_id: FlowId::new(),
             resume_generation: Default::default(),
         };
         store.stage_metrics.entry(stage_id).or_default();
         let mut fold = |telemetry: &HttpPullTelemetry, seq| {
             store.fold_http_pull_state(
                 stage_id,
-                &obzenflow_core::event::payloads::execution_payload::HttpPullStateFact {
+                &HttpPullStateFact {
                     state: telemetry.state,
                     wait_reason: telemetry.wait_reason,
                     next_wake_unix_secs: telemetry.next_wake_unix_secs,
@@ -2232,9 +2227,11 @@ mod tests {
                 capture_reason: CaptureReason::Record,
                 observed_at_ms: seq,
             });
-            packet.records.push(ObservationRecord::HttpPull(
-                obzenflow_core::event::observability::HttpPullMeasurements::from(telemetry),
-            ));
+            packet
+                .records
+                .push(ObservationRecord::HttpPull(HttpPullMeasurements::from(
+                    telemetry,
+                )));
             store.observations.offer(packet);
             store.refresh_measurements();
         };
@@ -2330,10 +2327,9 @@ mod tests {
     fn circuit_breaker_snapshot_does_not_suppress_lifecycle_transition() {
         let stage_id = StageId::new();
         let mut store = MetricsStore::default();
-        let runtime = obzenflow_core::event::context::RuntimeObservability {
-            circuit_breaker: Some(obzenflow_core::event::context::CircuitBreakerMeasurements {
-                observed_state:
-                    obzenflow_core::event::payloads::execution_payload::CircuitState::Open,
+        let runtime = RuntimeObservability {
+            circuit_breaker: Some(CircuitBreakerMeasurements {
+                observed_state: CircuitState::Open,
                 requests_total: 1,
                 successes_total: 0,
                 failures_total: 0,
@@ -2370,16 +2366,13 @@ mod tests {
     #[tokio::test]
     async fn historical_prefix_fold_reconstructs_exact_duration_before_tail() {
         struct VecReader {
-            events: VecDeque<JournalRecord<obzenflow_core::event::ChainPayload>>,
+            events: VecDeque<JournalRecord<ChainPayload>>,
             position: u64,
         }
 
         #[async_trait]
         impl JournalReader<ChainEvent> for VecReader {
-            async fn next(
-                &mut self,
-            ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-            {
+            async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
                 let next = self.events.pop_front();
                 if next.is_some() {
                     self.position += 1;
@@ -2571,8 +2564,8 @@ mod tests {
             async fn append(
                 &self,
                 _event: T,
-                _parent: Option<&obzenflow_core::JournalRecord<T::Payload>>,
-            ) -> Result<obzenflow_core::JournalRecord<T::Payload>, JournalError> {
+                _parent: Option<&JournalRecord<T::Payload>>,
+            ) -> Result<JournalRecord<T::Payload>, JournalError> {
                 Err(JournalError::Implementation {
                     message: "noop journal".to_string(),
                     source: "noop".into(),
@@ -2581,15 +2574,14 @@ mod tests {
 
             async fn read_all_unordered(
                 &self,
-            ) -> Result<Vec<obzenflow_core::JournalRecord<T::Payload>>, JournalError> {
+            ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
                 Ok(Vec::new())
             }
 
             async fn read_event(
                 &self,
                 _event_id: &obzenflow_core::EventId,
-            ) -> Result<Option<obzenflow_core::JournalRecord<T::Payload>>, JournalError>
-            {
+            ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
                 Ok(None)
             }
 
@@ -2603,17 +2595,14 @@ mod tests {
             async fn read_last_n(
                 &self,
                 _count: usize,
-            ) -> Result<Vec<obzenflow_core::JournalRecord<T::Payload>>, JournalError> {
+            ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
                 Ok(Vec::new())
             }
         }
 
         #[async_trait]
         impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
-            async fn next(
-                &mut self,
-            ) -> Result<Option<obzenflow_core::JournalRecord<T::Payload>>, JournalError>
-            {
+            async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
                 Ok(None)
             }
 

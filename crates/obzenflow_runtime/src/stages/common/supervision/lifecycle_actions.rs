@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::event::types::EventId;
-    use obzenflow_core::event::JournalWriterId;
+    use obzenflow_core::event::{JournalWriterId, SystemPayload};
     use obzenflow_core::id::{JournalId, StageId};
     use obzenflow_core::journal::{JournalError, JournalReader};
     use obzenflow_core::{ChainEvent, Journal, JournalRecord};
@@ -276,8 +276,8 @@ mod tests {
         async fn append(
             &self,
             event: SystemEvent,
-            _parent: Option<&JournalRecord<obzenflow_core::event::SystemPayload>>,
-        ) -> Result<JournalRecord<obzenflow_core::event::SystemPayload>, JournalError> {
+            _parent: Option<&JournalRecord<SystemPayload>>,
+        ) -> Result<JournalRecord<SystemPayload>, JournalError> {
             self.events
                 .lock()
                 .expect("lock poisoned")
@@ -287,16 +287,14 @@ mod tests {
 
         async fn read_all_unordered(
             &self,
-        ) -> Result<Vec<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError>
-        {
+        ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
             Ok(Vec::new())
         }
 
         async fn read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError>
-        {
+        ) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
             Ok(None)
         }
 
@@ -313,8 +311,7 @@ mod tests {
         async fn read_last_n(
             &self,
             _count: usize,
-        ) -> Result<Vec<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError>
-        {
+        ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
             Ok(Vec::new())
         }
     }
@@ -351,7 +348,7 @@ mod tests {
     async fn send_failure_emits_cancelled_for_timeout() {
         let event = exercise_failure(STOP_REASON_TIMEOUT).await;
         match event.payload {
-            obzenflow_core::event::SystemPayload::StageLifecycle { event, .. } => match event {
+            SystemPayload::StageLifecycle { event, .. } => match event {
                 obzenflow_core::event::StageLifecycleEvent::Cancelled { reason, .. } => {
                     assert_eq!(reason, STOP_REASON_TIMEOUT);
                 }
@@ -365,7 +362,7 @@ mod tests {
     async fn send_failure_emits_cancelled_for_user_stop() {
         let event = exercise_failure(STOP_REASON_USER_STOP).await;
         match event.payload {
-            obzenflow_core::event::SystemPayload::StageLifecycle { event, .. } => match event {
+            SystemPayload::StageLifecycle { event, .. } => match event {
                 obzenflow_core::event::StageLifecycleEvent::Cancelled { reason, .. } => {
                     assert_eq!(reason, STOP_REASON_USER_STOP);
                 }
@@ -379,7 +376,7 @@ mod tests {
     async fn send_failure_emits_failed_for_other_errors() {
         let event = exercise_failure("boom").await;
         match event.payload {
-            obzenflow_core::event::SystemPayload::StageLifecycle { event, .. } => match event {
+            SystemPayload::StageLifecycle { event, .. } => match event {
                 obzenflow_core::event::StageLifecycleEvent::Failed { error, .. } => {
                     assert_eq!(error, "boom");
                 }

@@ -18,6 +18,7 @@ use obzenflow_core::ai::{
     EmbeddingTarget,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
 };
@@ -406,10 +407,7 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
 }
 
 fn successful_effect_record(event: &ChainEvent, effect_type: &str) -> Option<EffectRecord> {
-    let ChainPayload::Execution(
-        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
-    ) = &event.payload
-    else {
+    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
     let record = record.clone();

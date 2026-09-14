@@ -17,6 +17,7 @@
 //! join arm end to end: the error row traverses the join's passthrough path
 //! and every valid row still joins, asserted from the event-sourced journals.
 
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 mod replay_testkit;
 
 use async_trait::async_trait;
@@ -267,9 +268,7 @@ fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> F
     })
 }
 
-fn is_error_row(
-    envelope: &obzenflow_core::event::JournalRecord<obzenflow_core::event::ChainPayload>,
-) -> bool {
+fn is_error_row(envelope: &JournalRecord<ChainPayload>) -> bool {
     matches!(
         envelope.envelope.provenance.event.processing.status,
         ProcessingStatus::Error { .. }

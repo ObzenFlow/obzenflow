@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::event::context::ExecutionAccounting;
 use obzenflow_core::event::{
     journal_record::JournalRecord,
     payloads::execution_payload::{
@@ -13,6 +14,7 @@ use obzenflow_core::event::{
     types::{SeqNo, WriterId},
     StageLifecycleEvent, SystemEvent,
 };
+use obzenflow_core::FlowId;
 use obzenflow_core::{
     id::{JournalId, SystemId},
     JournalWriterId, StageId,
@@ -39,13 +41,11 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
             writer_key: "worker".into(),
             seq: SeqNo(7),
         },
-        middleware: obzenflow_core::event::payloads::execution_payload::MiddlewareFact::RateLimiter(
-            obzenflow_core::event::payloads::execution_payload::RateLimiterFact::ModeChange {
-                mode_from: RateLimiterMode::Normal,
-                mode_to: RateLimiterMode::Limiting,
-                limit_rate: 10.0,
-            },
-        ),
+        middleware: MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+            mode_from: RateLimiterMode::Normal,
+            mode_to: RateLimiterMode::Limiting,
+            limit_rate: 10.0,
+        }),
     });
     let mut rebuilt = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let mut live = rebuilt.clone();
@@ -89,7 +89,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
 #[test]
 fn stage_bootstrap_retains_terminal_accounting_after_an_empty_duplicate() {
     let stage = StageId::new();
-    let metrics = serde_json::to_value(obzenflow_core::event::context::ExecutionAccounting {
+    let metrics = serde_json::to_value(ExecutionAccounting {
         events_processed_total: 100,
         events_emitted_total: 99,
         errors_total: 1,
@@ -341,7 +341,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     use obzenflow_core::event::observation::*;
     let stage = StageId::new();
     let capture_scope = CaptureScope {
-        flow_id: obzenflow_core::FlowId::new(),
+        flow_id: FlowId::new(),
         resume_generation: Default::default(),
     };
     enum Input {

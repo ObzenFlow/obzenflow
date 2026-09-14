@@ -210,12 +210,12 @@ fn composite_status_payload(
 #[cfg(test)]
 mod composite_status_projection_tests {
     use super::*;
-    use obzenflow_core::event::{StageLifecycleEvent, SystemPayload, WriterId};
+    use obzenflow_core::event::{JournalRecord, StageLifecycleEvent, SystemPayload, WriterId};
     use obzenflow_core::id::{CompositeId, RoleId, StageId, SystemId};
 
     async fn envelope(stage: StageId, event: StageLifecycleEvent) -> SystemJournalRecord {
         let system_id = SystemId::new();
-        obzenflow_core::event::JournalRecord::new(
+        JournalRecord::new(
             obzenflow_core::event::JournalWriterId::from(obzenflow_core::id::JournalId::new()),
             SystemEvent::new(
                 WriterId::from(system_id),

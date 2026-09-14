@@ -15,7 +15,9 @@ use crate::journal::FlowJournalFactory;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::{ChainEventFactory, JournalEvent, SystemEvent, SystemEventFactory};
+use obzenflow_core::event::{
+    ChainEventFactory, ChainPayload, JournalEvent, SystemEvent, SystemEventFactory,
+};
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
@@ -202,7 +204,7 @@ fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent 
         ChainEventFactory::data_event(writer, "metrics.fact", serde_json::json!({"total": total}));
     event.flow_context.stage_id = stage;
     event.runtime = Some(RuntimeProvenance {
-        accounting: obzenflow_core::event::context::ExecutionAccounting {
+        accounting: ExecutionAccounting {
             failures_total: total,
             events_processed_total: total,
             ..Default::default()
@@ -298,12 +300,7 @@ async fn context(
     (ctx, io, system, exports)
 }
 
-async fn fold(
-    ctx: &mut Context,
-    stage: StageId,
-    rail: Rail,
-    row: JournalRecord<obzenflow_core::event::ChainPayload>,
-) {
+async fn fold(ctx: &mut Context, stage: StageId, rail: Rail, row: JournalRecord<ChainPayload>) {
     Action::UpdateMetrics {
         envelope: Box::new(row),
         journal_kind: rail,

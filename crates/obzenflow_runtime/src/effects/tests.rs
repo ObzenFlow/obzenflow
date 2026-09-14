@@ -11,7 +11,8 @@ use crate::stages::observer::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::event_envelope::JournalGroupMember;
-use obzenflow_core::event::{JournalEvent, JournalRecord};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::{ChainPayload, EventKind, JournalEvent, JournalRecord};
 use obzenflow_core::journal::{ArchiveStatus, JournalError, JournalReader, StatusDerivation};
 use obzenflow_core::{
     BoundedBindingEvidence, JournalId, JournalOwner, JournalWriterId, TypedPayload,
@@ -372,8 +373,8 @@ impl Journal<ChainEvent> for FailingStartJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         self.attempted_event_types
             .lock()
             .expect("attempted event types lock poisoned")
@@ -384,16 +385,14 @@ impl Journal<ChainEvent> for FailingStartJournal {
         })
     }
 
-    async fn read_all_unordered(
-        &self,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &EventId,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -410,7 +409,7 @@ impl Journal<ChainEvent> for FailingStartJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -428,8 +427,8 @@ impl Journal<ChainEvent> for InspectingFailJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         assert!(event.consumes_data_credit());
         assert_eq!(
             self.registry.edge_in_flight(self.upstream, self.downstream),
@@ -442,16 +441,14 @@ impl Journal<ChainEvent> for InspectingFailJournal {
         })
     }
 
-    async fn read_all_unordered(
-        &self,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &EventId,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -468,7 +465,7 @@ impl Journal<ChainEvent> for InspectingFailJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -1674,14 +1671,14 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for CommittedFailureTr
     }
 }
 
-fn parent_envelope(writer_id: WriterId) -> JournalRecord<obzenflow_core::event::ChainPayload> {
+fn parent_envelope(writer_id: WriterId) -> JournalRecord<ChainPayload> {
     let event = ChainEventFactory::data_event(writer_id, "test.input", json!({"id": 1}));
     JournalRecord::new(JournalWriterId::new(), event)
 }
 
 fn invocation_context(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
 ) -> EffectInvocationContext {
     let effect_runtime_mode = if effect_history.is_some() {
@@ -1700,7 +1697,7 @@ fn invocation_context(
 
 fn invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -1746,7 +1743,7 @@ fn invocation_context_with_mode(
 
 fn transactional_invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -1767,7 +1764,7 @@ fn transactional_invocation_context_with_mode(
 
 fn zero_slot_named_invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -1788,7 +1785,7 @@ fn zero_slot_named_invocation_context_with_mode(
 
 fn named_affine_invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -2047,7 +2044,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
 }
 
 async fn affine_scope_matrix_histories(
-    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: &JournalRecord<ChainPayload>,
 ) -> (Arc<EffectHistory>, Arc<EffectHistory>) {
     let stage_id = StageId::new();
     let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
@@ -2102,7 +2099,7 @@ fn direct_fact_scope(
 async fn assert_scope_matrix_hit(
     runtime_execution: crate::execution::RuntimeExecution,
     history: Arc<EffectHistory>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     expected_scope: obzenflow_core::MiddlewareExecutionScope,
 ) {
     let stage_id = StageId::new();
@@ -2148,7 +2145,7 @@ async fn assert_scope_matrix_hit(
 async fn assert_scope_matrix_executable(
     runtime_execution: crate::execution::RuntimeExecution,
     history: Option<Arc<EffectHistory>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     expected_prefix_rows: usize,
 ) {
     let stage_id = StageId::new();
@@ -3603,10 +3600,7 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
 
 async fn adapter_history_fixture(
     effect_count: usize,
-) -> (
-    JournalRecord<obzenflow_core::event::ChainPayload>,
-    Arc<EffectHistory>,
-) {
+) -> (JournalRecord<ChainPayload>, Arc<EffectHistory>) {
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
@@ -3644,7 +3638,7 @@ async fn adapter_history_fixture(
 }
 
 async fn run_consume_one_adapter(
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     history: Arc<EffectHistory>,
     settlement: AdapterSettlement,
     calls: Arc<AtomicUsize>,
@@ -4314,7 +4308,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
             descriptor_hash: "hash".into(),
             descriptor: descriptor.clone(),
             outcome: EffectOutcomePayload::SucceededFact {
-                event_kind: obzenflow_core::event::EventKind::Fact,
+                event_kind: EventKind::Fact,
 
                 event_type: FirstOutput::versioned_event_type().into(),
                 output: json!({ "value": 10 }),
@@ -4328,7 +4322,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
             descriptor_hash: "hash".into(),
             descriptor,
             outcome: EffectOutcomePayload::SucceededFact {
-                event_kind: obzenflow_core::event::EventKind::Fact,
+                event_kind: EventKind::Fact,
 
                 event_type: SecondOutput::versioned_event_type().into(),
                 output: json!({ "value": "twenty" }),
@@ -4357,7 +4351,7 @@ fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
-            event_kind: obzenflow_core::event::EventKind::Fact,
+            event_kind: EventKind::Fact,
 
             event_type: "fx.out".into(),
             output: json!({ "ordinal": ordinal }),
@@ -4389,7 +4383,7 @@ fn incomplete_outcome_group_on_completed_archive_fails_loud() {
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
-            event_kind: obzenflow_core::event::EventKind::Fact,
+            event_kind: EventKind::Fact,
 
             event_type: "fx.out".into(),
             output: json!({ "ordinal": ordinal }),
@@ -4420,7 +4414,7 @@ fn interleaved_incomplete_groups_all_drop_on_interrupted_archive() {
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
-            event_kind: obzenflow_core::event::EventKind::Fact,
+            event_kind: EventKind::Fact,
 
             event_type: "fx.out".into(),
             output: json!({ "ordinal": ordinal }),
@@ -4565,9 +4559,7 @@ async fn capture_is_exempt_from_declared_effect_list() {
     let events = journal.events();
     assert!(matches!(
         &events[0].payload,
-        obzenflow_core::event::ChainPayload::Execution(
-            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(_)
-        )
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
     ));
     assert_eq!(events[0].event_type(), CAPTURE_EVENT_TYPE);
     assert!(events[0]
@@ -5675,11 +5667,7 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
         .is_none());
     let event = ChainEventFactory::create_event(
         WriterId::from(stage_id),
-        obzenflow_core::event::ChainPayload::Execution(
-            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(
-                record,
-            ),
-        ),
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)),
     );
 
     let err = effect_record_from_event(&event)

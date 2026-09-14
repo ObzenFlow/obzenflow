@@ -37,14 +37,15 @@
 //! framework effect/capture record path supplies only the journal, preserving
 //! its compatibility append until typed outcome facts replace it.
 
+use obzenflow_core::event::context::RuntimeProvenance;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use std::sync::Arc;
 
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 
-use obzenflow_core::event::CorrelationId;
-use obzenflow_core::event::{ChainPayload, JournalRecord, SystemEvent};
+use obzenflow_core::event::{ChainPayload, CorrelationId, JournalRecord, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, WriterId};
 
@@ -106,10 +107,7 @@ pub(crate) fn commit_control_output(
     journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     mut event: ChainEvent,
-) -> futures::future::BoxFuture<
-    'static,
-    Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError>,
-> {
+) -> futures::future::BoxFuture<'static, Result<JournalRecord<ChainPayload>, CommitError>> {
     let journal = journal.clone();
     let instrumentation = instrumentation.clone();
     crate::supervised_base::publication::commit(async move {
@@ -151,11 +149,8 @@ pub(crate) fn commit_error_output(
     journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     mut event: ChainEvent,
-    parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-) -> futures::future::BoxFuture<
-    'static,
-    Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError>,
-> {
+    parent: Option<&JournalRecord<ChainPayload>>,
+) -> futures::future::BoxFuture<'static, Result<JournalRecord<ChainPayload>, CommitError>> {
     use futures::FutureExt;
     let journal = journal.clone();
     let instrumentation = instrumentation.clone();
@@ -411,9 +406,9 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_prebuilt(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+        parent: Option<&JournalRecord<ChainPayload>>,
         options: CommitOptions,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError> {
+    ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let intent = if event.consumes_data_credit() {
             StageAppendIntent::NormalStageData
         } else {
@@ -426,10 +421,10 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_prebuilt_with_intent(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+        parent: Option<&JournalRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError> {
+    ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
         crate::supervised_base::publication::commit(async move {
@@ -444,10 +439,10 @@ impl OutputCommitter<'_> {
     async fn commit_prebuilt_with_intent_inline(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+        parent: Option<&JournalRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError> {
+    ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let event = self
             .prepare_prebuilt_with_intent(event, parent, options, intent)
             .await?;
@@ -483,10 +478,10 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_reserved_prebuilt(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+        parent: Option<&JournalRecord<ChainPayload>>,
         options: CommitOptions,
         reservation: BackpressureReservation,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError> {
+    ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
         crate::supervised_base::publication::commit(async move {
@@ -526,8 +521,8 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_authored_terminal(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
         crate::supervised_base::publication::commit(async move {
@@ -542,8 +537,8 @@ impl OutputCommitter<'_> {
     async fn commit_authored_terminal_inline(
         &self,
         mut event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, CommitError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let flow_context = self
             .flow_context
             .ok_or("framework terminal commit requires a flow context")?;
@@ -622,8 +617,8 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, CommitError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
         let group_id = group_id.to_owned();
@@ -640,8 +635,8 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, CommitError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -742,7 +737,7 @@ impl OutputCommitter<'_> {
     async fn prepare_prebuilt_with_intent(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+        parent: Option<&JournalRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<ChainEvent, CommitError> {
@@ -817,7 +812,7 @@ impl OutputCommitter<'_> {
     /// counters still advance only after append acknowledgement.
     fn project_committed_output(
         &self,
-        snapshot: &mut obzenflow_core::event::context::RuntimeProvenance,
+        snapshot: &mut RuntimeProvenance,
         event: &ChainEvent,
         options: CommitOptions,
     ) {
@@ -858,7 +853,7 @@ impl OutputCommitter<'_> {
 
     async fn finish_committed(
         &self,
-        written: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        written: &JournalRecord<ChainPayload>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) {
@@ -866,11 +861,7 @@ impl OutputCommitter<'_> {
         self.mirror_committed(written, intent).await;
     }
 
-    fn account_committed(
-        &self,
-        written: &JournalRecord<obzenflow_core::event::ChainPayload>,
-        options: CommitOptions,
-    ) {
+    fn account_committed(&self, written: &JournalRecord<ChainPayload>, options: CommitOptions) {
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.consumes_data_credit() {
                 let authored_here = self.flow_context.is_none_or(|flow_context| {
@@ -895,7 +886,7 @@ impl OutputCommitter<'_> {
 
     async fn mirror_committed(
         &self,
-        written: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        written: &JournalRecord<ChainPayload>,
         intent: StageAppendIntent,
     ) {
         if matches!(
@@ -963,7 +954,7 @@ pub(crate) struct FrameworkObservabilityCommit<'a> {
     /// middleware may author durable framework Data facts through the same
     /// buffer, and those rows participate in B2 accounting.
     pub backpressure_writer: &'a BackpressureWriter,
-    pub parent: Option<&'a JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub parent: Option<&'a JournalRecord<ChainPayload>>,
     pub observer_scope: MiddlewareExecutionScope,
 }
 
@@ -1004,10 +995,7 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
     matches!(
         &event.payload,
         ChainPayload::Execution(
-            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(_)
-                | obzenflow_core::event::payloads::execution_payload::ExecutionPayload::RateLimiter(
-                    _
-                )
+            ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_)
         )
     )
 }

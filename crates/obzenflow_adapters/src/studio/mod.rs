@@ -28,11 +28,14 @@ use middleware::MiddlewareView;
 use obzenflow_core::composite::{
     CompositeDefinition, CompositeLifecycleProjection, CompositeProjectionError,
 };
+use obzenflow_core::event::observation::{ObservabilityContext, ObservationSource};
 use obzenflow_core::event::{
     journal_record::SystemJournalRecord, PipelineLifecycleEvent, SystemPayload,
 };
 use obzenflow_core::{web::SseFrame, EventId};
+use obzenflow_runtime::metrics::observations::ObservationHub;
 use stages::StageLifecycleView;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Default)]
 enum ObservedFlowState {
@@ -49,9 +52,8 @@ pub struct StudioProjection {
     middleware: MiddlewareView,
     aliases: ContractBoundaryAliases,
     flow_state: ObservedFlowState,
-    measurements: obzenflow_runtime::metrics::observations::ObservationHub,
-    live_measurements:
-        Option<std::sync::Arc<dyn obzenflow_core::event::observation::ObservationSource>>,
+    measurements: ObservationHub,
+    live_measurements: Option<Arc<dyn ObservationSource>>,
 }
 
 impl Clone for StudioProjection {
@@ -114,10 +116,7 @@ impl StudioProjection {
         frames
     }
 
-    pub fn with_observations(
-        mut self,
-        source: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationSource>,
-    ) -> Self {
+    pub fn with_observations(mut self, source: Arc<dyn ObservationSource>) -> Self {
         if let Some(scope) = source.active_scope() {
             self.measurements.activate_scope(scope);
         }
@@ -140,17 +139,11 @@ impl StudioProjection {
             .collect()
     }
 
-    pub fn project_measurements(
-        &mut self,
-        packet: obzenflow_core::event::observation::ObservabilityContext,
-    ) -> Vec<SseFrame> {
+    pub fn project_measurements(&mut self, packet: ObservabilityContext) -> Vec<SseFrame> {
         self.measurement_frames(self.measurements.select(packet).unwrap_or_default())
     }
 
-    fn project_retained_measurements(
-        &mut self,
-        packet: obzenflow_core::event::observation::ObservabilityContext,
-    ) -> Vec<SseFrame> {
+    fn project_retained_measurements(&mut self, packet: ObservabilityContext) -> Vec<SseFrame> {
         self.measurement_frames(
             self.measurements
                 .select_recorded(packet)
@@ -158,10 +151,7 @@ impl StudioProjection {
         )
     }
 
-    fn measurement_frames(
-        &mut self,
-        selected: Vec<obzenflow_core::event::observation::ObservabilityContext>,
-    ) -> Vec<SseFrame> {
+    fn measurement_frames(&mut self, selected: Vec<ObservabilityContext>) -> Vec<SseFrame> {
         use obzenflow_core::event::observation::ObservationRecord;
         let mut frames = Vec::new();
         for selected in selected {

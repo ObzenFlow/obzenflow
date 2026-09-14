@@ -11,6 +11,7 @@ use crate::stages::common::supervision::control_resolution::{
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -80,7 +81,7 @@ pub(super) async fn dispatch_hydrating<
             common::observe_reference_envelope(ctx, &envelope);
 
             let directive = match &envelope.payload {
-                obzenflow_core::event::ChainPayload::FlowControl(signal) => {
+                ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; the join authors its own at
                     // the flip.

@@ -6,9 +6,10 @@ use super::*;
 use crate::event::payloads::effect_payload::{
     EffectCursor, EffectDescriptor, EFFECT_RECORD_EVENT_TYPE,
 };
+use crate::event::payloads::execution_payload::ExecutionPayload;
 use crate::event::types::CorrelationId;
 use crate::id::StageId;
-use crate::ingress::IngressContext;
+use crate::ingress::{IngressAttemptSeq, IngressContext};
 use crate::WriterId;
 use serde_json::json;
 
@@ -32,7 +33,7 @@ fn test_derived_event() {
                 accepted_at_ns: 42,
                 ingress_key: "test".into(),
                 batch_index: Some(1),
-                attempt_seq: crate::ingress::IngressAttemptSeq(0),
+                attempt_seq: IngressAttemptSeq(0),
             });
 
     let child = ChainEventFactory::derived_data_event(
@@ -61,9 +62,7 @@ fn framework_effect_data_is_not_source_replayable() {
     };
     let event = ChainEventFactory::create_event(
         writer_id,
-        ChainPayload::Execution(
-            crate::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
-        ),
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)),
     );
     // Application descriptors cannot impersonate execution records.
     let fact = ChainEventFactory::data_event(writer_id, EFFECT_RECORD_EVENT_TYPE, json!({}));

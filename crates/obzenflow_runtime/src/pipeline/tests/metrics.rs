@@ -11,13 +11,13 @@ use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 #[cfg(test)]
 use crate::pipeline::metrics::composite_boundaries_from_topology;
 use crate::pipeline::tests::support::{
-    make_context, make_fsm_context, owned_test_stage, source_sink_topology_with_source,
-    test_context, DiscardSnapshots, StartGate, TerminalAppendGate,
+    make_context, make_fsm_context, new_stage_journal, new_system_journal, owned_test_stage,
+    source_sink_topology_with_source, test_context, ControlledJournal, DiscardSnapshots, StartGate,
+    TerminalAppendGate,
 };
-use crate::pipeline::tests::support::{new_stage_journal, new_system_journal, ControlledJournal};
 use crate::pipeline::PipelineState;
 use crate::supervised_base::{ChannelBuilder, SupervisorHandle};
-use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::context::{ExecutionAccounting, StageType};
 use obzenflow_core::event::{
     ChainEvent, MetricsCoordinationEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
@@ -366,7 +366,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
             );
             event.flow_context.stage_id = stage;
             event = event.with_runtime_provenance(RuntimeProvenance {
-                accounting: obzenflow_core::event::context::ExecutionAccounting {
+                accounting: ExecutionAccounting {
                     events_emitted_total: count,
                     errors_total: if failed { count } else { 0 },
                     errors_by_kind: if failed {

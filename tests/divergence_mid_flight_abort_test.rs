@@ -25,16 +25,15 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
-use obzenflow_core::event::SystemPayload;
+use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     CycleDepth, DivergenceContract, EventId, FlowId, JournalId, JournalRecord, StageOutputs,
-    TransportContract,
+    TransportContract, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::{memory_journals, MemoryJournalFactory};
@@ -308,8 +307,8 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         self.inner.append(self.corrupt(event), parent).await
     }
 
@@ -317,8 +316,8 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
         &self,
         group_id: &str,
         events: Vec<ChainEvent>,
-        parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner
             .append_group(
                 group_id,
@@ -331,16 +330,14 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
             .await
     }
 
-    async fn read_all_unordered(
-        &self,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
@@ -354,7 +351,7 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
     async fn read_last_n(
         &self,
         count: usize,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }

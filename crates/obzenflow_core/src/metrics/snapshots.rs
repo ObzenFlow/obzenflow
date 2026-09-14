@@ -7,8 +7,8 @@
 //! These DTOs define the observations published by execution and host samplers,
 //! implementing the dual collection pattern for application and infrastructure metrics.
 
-use crate::event::context::StageType;
-use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
+use crate::event::context::{MeasurementWindow, StageType};
+use crate::event::observability::{HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot};
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::system_event::{
     ContractName, ContractResultStatusLabel, EdgeLivenessState, StageActivity, SystemFeedRole,
@@ -199,7 +199,7 @@ pub struct AppMetricsSnapshot {
     /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
     ///
     /// Keyed by stage ID (labels attach via `stage_metadata`).
-    pub http_pull_metrics: HashMap<StageId, crate::event::observability::HttpPullMetricsSnapshot>,
+    pub http_pull_metrics: HashMap<StageId, HttpPullMetricsSnapshot>,
 
     /// AI chunking metrics derived from `ai_chunking.snapshot` wide events (FLOWIP-086z).
     ///
@@ -432,7 +432,7 @@ pub struct FlowMetricsSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageMetricsSnapshot {
     pub processing_time_count: Option<u64>,
-    pub timing_window: Option<crate::event::context::MeasurementWindow>,
+    pub timing_window: Option<MeasurementWindow>,
     /// Total events processed by this stage
     pub events_processed_total: u64,
 

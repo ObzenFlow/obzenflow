@@ -22,6 +22,7 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
@@ -792,7 +793,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     crate::stages::source::supervision::source_error_kind(&error);
                                 let mut events = vec![normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
-                                    obzenflow_core::event::payloads::execution_payload::SourcePollKind::Finite,
+                                    SourcePollKind::Finite,
                                     &error,
                                 )];
                                 events.extend(poll.operational_events);

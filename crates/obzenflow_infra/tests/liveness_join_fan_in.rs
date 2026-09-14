@@ -4,10 +4,9 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{SystemEvent, SystemPayload};
+use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
-use obzenflow_core::TypedPayload;
+use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
@@ -17,8 +16,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
-use obzenflow_runtime::stages::LivenessSnapshots;
-use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::stages::{LivenessSnapshots, SourceError};
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the join-fan-in test. The two legs (reference
@@ -276,9 +274,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     let idle_upstreams: HashSet<StageId> = liveness
         .states
         .iter()
-        .filter(|(_, reader, state)| {
-            *reader == joiner_id && *state == obzenflow_core::event::EdgeLivenessState::Idle
-        })
+        .filter(|(_, reader, state)| *reader == joiner_id && *state == EdgeLivenessState::Idle)
         .map(|(upstream, _, _)| *upstream)
         .collect();
     for envelope in envelopes {

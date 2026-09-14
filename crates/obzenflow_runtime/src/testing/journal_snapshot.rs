@@ -17,9 +17,10 @@
 use crate::testing::probe::JournalProbeError;
 use crate::testing::FlowTestHarness;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::journal_record::JournalPayload;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{JournalEvent, JournalRecord, WriterId};
+use obzenflow_core::event::{JournalEvent, JournalRecord, SystemPayload, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::EventId;
 use std::sync::Arc;
@@ -75,9 +76,7 @@ pub enum SequenceMatchMode {
 pub struct ParentEventId(EventId);
 
 impl ParentEventId {
-    pub fn of<P: obzenflow_core::event::journal_record::JournalPayload>(
-        env: &JournalRecord<P>,
-    ) -> Self {
+    pub fn of<P: JournalPayload>(env: &JournalRecord<P>) -> Self {
         Self(*env.id())
     }
 
@@ -212,7 +211,7 @@ impl EventShape<SystemEvent> {
     /// Match a system envelope by predicate over its `SystemPayload`.
     pub fn system_event_predicate(
         description: impl Into<String>,
-        predicate: impl Fn(&obzenflow_core::event::SystemPayload) -> bool + Send + Sync + 'static,
+        predicate: impl Fn(&SystemPayload) -> bool + Send + Sync + 'static,
     ) -> Self {
         let predicate = Arc::new(predicate);
         Self::predicate(description, move |env| predicate(&env.payload))
@@ -255,7 +254,7 @@ pub enum CausalAssertionError {
 }
 
 /// Assert strict happened-before (`a < b`) on envelope vector clocks.
-pub fn assert_happens_before<P: obzenflow_core::event::journal_record::JournalPayload>(
+pub fn assert_happens_before<P: JournalPayload>(
     a: &JournalRecord<P>,
     b: &JournalRecord<P>,
 ) -> Result<(), CausalAssertionError> {
@@ -273,7 +272,7 @@ pub fn assert_happens_before<P: obzenflow_core::event::journal_record::JournalPa
 }
 
 /// Assert concurrency on envelope vector clocks.
-pub fn assert_concurrent<P: obzenflow_core::event::journal_record::JournalPayload>(
+pub fn assert_concurrent<P: JournalPayload>(
     a: &JournalRecord<P>,
     b: &JournalRecord<P>,
 ) -> Result<(), CausalAssertionError> {
@@ -608,14 +607,17 @@ fn assert_unordered_multiset<T: JournalEvent + DirectParentId + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::chrono::Utc;
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::provenance::JournalProvenance;
+    use obzenflow_core::event::system_event::PipelineLifecycleEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
+    use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent, SystemPayload};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::StageId;
+    use obzenflow_core::{JournalWriterId, StageId, SystemId};
     use std::sync::{Arc, Mutex};
 
     // Test-local double for the `Journal<T>` port, not an infra adapter and
@@ -683,8 +685,7 @@ mod tests {
             event: T,
             _parent: Option<&JournalRecord<T::Payload>>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
-            let envelope =
-                JournalRecord::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
@@ -777,44 +778,40 @@ mod tests {
         let mut b_clock = VectorClock::new();
         b_clock.clocks.insert("writer_a".to_string(), 2);
 
-        let a = JournalRecord::<obzenflow_core::event::SystemPayload>::commit_event(
+        let a = JournalRecord::<SystemPayload>::commit_event(
             {
                 let mut event = SystemEvent::new(
-                    WriterId::from(obzenflow_core::SystemId::new()),
-                    obzenflow_core::event::SystemPayload::PipelineLifecycle(
-                        obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting,
-                    ),
+                    WriterId::from(SystemId::new()),
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
                 );
                 event.id = a_id;
                 event.timestamp = 0;
                 event
             },
-            obzenflow_core::event::provenance::JournalProvenance {
-                journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(JournalId::new()),
                 vector_clock: a_clock,
-                timestamp: obzenflow_core::chrono::Utc::now(),
+                timestamp: Utc::now(),
                 journal_group_id: None,
                 journal_group_member: None,
             },
         )
         .expect("valid committed fixture");
 
-        let b = JournalRecord::<obzenflow_core::event::SystemPayload>::commit_event(
+        let b = JournalRecord::<SystemPayload>::commit_event(
             {
                 let mut event = SystemEvent::new(
-                    WriterId::from(obzenflow_core::SystemId::new()),
-                    obzenflow_core::event::SystemPayload::PipelineLifecycle(
-                        obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting,
-                    ),
+                    WriterId::from(SystemId::new()),
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
                 );
                 event.id = b_id;
                 event.timestamp = 0;
                 event
             },
-            obzenflow_core::event::provenance::JournalProvenance {
-                journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(JournalId::new()),
                 vector_clock: b_clock,
-                timestamp: obzenflow_core::chrono::Utc::now(),
+                timestamp: Utc::now(),
                 journal_group_id: None,
                 journal_group_member: None,
             },
@@ -836,10 +833,10 @@ mod tests {
         let mk = |ty: &str| {
             JournalRecord::commit_event(
                 ChainEventFactory::data_event(writer, ty, serde_json::json!({})),
-                obzenflow_core::event::provenance::JournalProvenance {
-                    journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+                JournalProvenance {
+                    journal_writer_id: JournalWriterId::from(JournalId::new()),
                     vector_clock: VectorClock::new(),
-                    timestamp: obzenflow_core::chrono::Utc::now(),
+                    timestamp: Utc::now(),
                     journal_group_id: None,
                     journal_group_member: None,
                 },

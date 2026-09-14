@@ -21,6 +21,7 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
@@ -980,7 +981,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                     crate::stages::source::supervision::source_error_kind(&error);
                                 let mut events = vec![normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
-                                    obzenflow_core::event::payloads::execution_payload::SourcePollKind::AsyncInfinite,
+                                    SourcePollKind::AsyncInfinite,
                                     &error,
                                 )];
                                 events.extend(poll.operational_events);

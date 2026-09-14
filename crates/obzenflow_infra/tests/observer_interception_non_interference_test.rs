@@ -42,10 +42,7 @@ fn manifest(run_dir: &Path) -> RunManifest {
     serde_json::from_str(&body).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
 }
 
-async fn stage_events(
-    run_dir: &Path,
-    stage_key: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = manifest(run_dir);
     let stage = manifest
         .stages

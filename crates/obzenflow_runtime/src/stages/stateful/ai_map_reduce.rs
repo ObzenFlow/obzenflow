@@ -14,8 +14,7 @@
 //! delivery surface includes the internal manifest / wrapper payloads. This is
 //! intentional (FLOWIP-086z-part-2).
 
-use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handler_error::StageFatal;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::stateful::traits::StatefulHandler;
 use crate::stages::common::handlers::{StatefulTerminationKind, TerminalValidation};
 use async_trait::async_trait;
@@ -25,9 +24,8 @@ use obzenflow_core::ai::{
     ChunkPlanningSummary,
 };
 use obzenflow_core::event::context::CompositeActivationContext;
-use obzenflow_core::event::ChainPayload;
-use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, EventId, TypedPayload};
+use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
+use obzenflow_core::{ChainEvent, EventId, TypedFact, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -669,7 +667,7 @@ where
                 collected,
                 planning: manifest.planning.clone(),
             };
-            obzenflow_core::TypedFact::from_payload(payload)
+            TypedFact::from_payload(payload)
                 .map_err(|error| Self::protocol_fatal(error.to_string()))?
                 .into_derived_event(
                     stored_manifest.parent.writer_id,
@@ -682,7 +680,7 @@ where
                 chunk_count: manifest.chunk_count,
                 failed_indices,
             };
-            obzenflow_core::TypedFact::from_payload(payload)
+            TypedFact::from_payload(payload)
                 .map_err(|error| Self::protocol_fatal(error.to_string()))?
                 .into_derived_event(
                     stored_manifest.parent.writer_id,
@@ -758,6 +756,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::ai::OversizePolicy;
 
     use obzenflow_core::id::StageId;
     use obzenflow_core::WriterId;
@@ -795,7 +794,7 @@ mod tests {
 
     fn manifest_event(job_key: EventId, chunk_count: usize) -> ChainEvent {
         let manifest = AiMapReducePlanningManifest {
-            oversize_policy: obzenflow_core::ai::OversizePolicy::Error,
+            oversize_policy: OversizePolicy::Error,
             exclusions_by_reason: Default::default(),
             job_key,
             chunk_count,

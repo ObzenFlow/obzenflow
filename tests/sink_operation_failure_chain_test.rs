@@ -699,7 +699,7 @@ async fn read_stage_journal(
     run: &Path,
     stage: &str,
     field: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = manifest(run);
     let file = manifest["stages"][stage][field]
         .as_str()
@@ -713,9 +713,7 @@ async fn read_stage_journal(
         .expect("stage journal reads")
 }
 
-async fn read_system_journal(
-    run: &Path,
-) -> Vec<JournalRecord<obzenflow_core::event::SystemPayload>> {
+async fn read_system_journal(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
     let manifest = manifest(run);
     let file = manifest["system_journal_file"]
         .as_str()
@@ -743,8 +741,8 @@ struct FailureChain {
 }
 
 fn failure_chain(
-    data: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    errors: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    data: &[JournalRecord<ChainPayload>],
+    errors: &[JournalRecord<ChainPayload>],
 ) -> FailureChain {
     let (operation_envelope, operation) = errors
         .iter()

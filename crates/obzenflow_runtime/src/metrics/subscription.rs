@@ -5,6 +5,7 @@
 //! Physical observation cursors. Stage EOF and reader credits belong to
 //! dataflow consumers, never to this metrics observer.
 
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{ChainEvent, JournalId, JournalRecord, StageId};
 use std::sync::Arc;
@@ -25,7 +26,7 @@ struct Cursor {
 
 pub(crate) struct MetricsBatch {
     pub(crate) stage: StageId,
-    pub(crate) events: Vec<JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub(crate) events: Vec<JournalRecord<ChainPayload>>,
 }
 
 pub(crate) struct MetricsSubscription {

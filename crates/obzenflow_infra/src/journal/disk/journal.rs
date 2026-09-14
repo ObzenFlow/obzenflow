@@ -16,9 +16,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use crc32fast::Hasher;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{event_envelope::JournalGroupMember, journal_record::JournalRecord};
+use obzenflow_core::event::{
+    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
+};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -26,13 +28,10 @@ use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
-use std::io::BufReader;
-use std::io::SeekFrom;
+use std::io::{BufReader, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::RwLock;
@@ -477,7 +476,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             JournalRecord::commit(
                 authored,
                 payload,
-                obzenflow_core::event::provenance::JournalProvenance {
+                JournalProvenance {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
                     vector_clock: vector_clock.clone(),
                     timestamp: Utc::now(),
@@ -655,7 +654,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                 JournalRecord::commit(
                     authored,
                     payload,
-                    obzenflow_core::event::provenance::JournalProvenance {
+                    JournalProvenance {
                         journal_writer_id: JournalWriterId::from(self.journal_id),
                         vector_clock: vector_clock.clone(),
                         timestamp,
@@ -1055,7 +1054,10 @@ mod tail_tests;
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::event::provenance::JournalProvenance;
+    use obzenflow_core::event::JournalRecord;
     use obzenflow_core::id::StageId;
+    use obzenflow_core::JournalWriterId;
     use tokio::sync::Barrier;
 
     use uuid::Uuid;
@@ -1239,10 +1241,10 @@ mod tests {
                     "atomic.member",
                     serde_json::json!({ "index": index }),
                 );
-                obzenflow_core::event::JournalRecord::commit_event(
+                JournalRecord::commit_event(
                     event,
-                    obzenflow_core::event::provenance::JournalProvenance {
-                        journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                    JournalProvenance {
+                        journal_writer_id: JournalWriterId::from(journal_id),
                         vector_clock: VectorClock::new(),
                         timestamp: Utc::now(),
                         journal_group_id: Some("effect-outcome:test".into()),
@@ -1845,10 +1847,10 @@ mod tests {
                     "atomic.member",
                     serde_json::json!({ "index": index }),
                 );
-                obzenflow_core::event::JournalRecord::commit_event(
+                JournalRecord::commit_event(
                     event,
-                    obzenflow_core::event::provenance::JournalProvenance {
-                        journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                    JournalProvenance {
+                        journal_writer_id: JournalWriterId::from(journal_id),
                         vector_clock: VectorClock::new(),
                         timestamp: Utc::now(),
                         journal_group_id: None,

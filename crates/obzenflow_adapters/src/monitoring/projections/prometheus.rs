@@ -2771,7 +2771,8 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
 mod tests {
     use super::*;
     use obzenflow_core::event::observability::{
-        HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
+        HttpPullMetricsSnapshot, HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot,
+        WaitReason,
     };
     use obzenflow_core::event::system_event::{
         ContractName, ContractResultStatusLabel, SystemFeedRole,
@@ -3112,7 +3113,7 @@ mod tests {
         let mut http_pull_metrics = HashMap::new();
         http_pull_metrics.insert(
             stage_id,
-            obzenflow_core::event::observability::HttpPullMetricsSnapshot {
+            HttpPullMetricsSnapshot {
                 state: Some(telemetry.state),
                 wait_reason: telemetry.wait_reason,
                 next_wake_unix_secs: telemetry.next_wake_unix_secs,

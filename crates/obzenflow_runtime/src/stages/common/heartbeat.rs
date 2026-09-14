@@ -3,6 +3,8 @@
 // https://obzenflow.dev
 
 use crate::execution::{HeartbeatExecutionPolicy, RuntimeExecution};
+use crate::metrics::instrumentation::StageInstrumentation;
+use obzenflow_core::event::observation::ObservationRecord;
 use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity};
 use obzenflow_core::event::types::{DurationMs, SeqNo};
 use obzenflow_core::event::EventId;
@@ -405,7 +407,7 @@ impl Drop for HeartbeatHandle {
 pub fn spawn_heartbeat(
     stage_id: StageId,
     stage_name: String,
-    instrumentation: Arc<crate::metrics::instrumentation::StageInstrumentation>,
+    instrumentation: Arc<StageInstrumentation>,
     liveness_snapshots: LivenessSnapshots,
     state: Arc<HeartbeatState>,
     config: HeartbeatConfig,
@@ -503,12 +505,20 @@ pub fn spawn_heartbeat(
                         },
                     );
 
-                    use obzenflow_core::event::observation::ObservationRecord;
+                    // A busy or poisoned lock leaves this optional identity unavailable.
+                    let last_consumed_event_id = match state_for_task.last_consumed_event_id.try_lock() {
+                        Ok(event_id) => *event_id,
+                        Err(_) => None,
+                    };
+                    let last_output_event_id = match state_for_task.last_output_event_id.try_lock() {
+                        Ok(event_id) => *event_id,
+                        Err(_) => None,
+                    };
                     instrumentation.observe(ObservationRecord::StageHeartbeat {
                         activity,
                         handler_blocked_ms,
-                        last_consumed_event_id: state_for_task.last_consumed_event_id.try_lock().ok().and_then(|id| *id),
-                        last_output_event_id: state_for_task.last_output_event_id.try_lock().ok().and_then(|id| *id),
+                        last_consumed_event_id,
+                        last_output_event_id,
                     });
                     for (index, edge) in edges_snapshot.iter().enumerate() {
                         if previous_states[index] == edge.state {
@@ -555,6 +565,7 @@ pub fn spawn_heartbeat(
 mod tests {
     use super::*;
     use crate::execution::RuntimeMode;
+    use crate::metrics::instrumentation::StageInstrumentation;
     use crate::replay::{ReplayArchive, ReplayError};
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
@@ -804,7 +815,7 @@ mod tests {
         let handle = spawn_heartbeat(
             stage_id,
             "test_stage".to_string(),
-            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
+            Arc::new(StageInstrumentation::new()),
             liveness_snapshots.clone(),
             state.clone(),
             config,
@@ -869,7 +880,7 @@ mod tests {
         let handle = spawn_heartbeat(
             stage_id,
             "test_stage".to_string(),
-            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
+            Arc::new(StageInstrumentation::new()),
             liveness_snapshots.clone(),
             state.clone(),
             config,
@@ -931,7 +942,7 @@ mod tests {
         let handle = spawn_heartbeat(
             stage_id,
             "test_stage".to_string(),
-            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
+            Arc::new(StageInstrumentation::new()),
             liveness_snapshots.clone(),
             state.clone(),
             config,

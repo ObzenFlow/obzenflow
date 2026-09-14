@@ -5,8 +5,11 @@
 //! System orchestration events (written to control journal)
 
 use crate::event::context::ExecutionAccounting;
+use crate::event::journal_record::JournalPayload;
+use crate::event::payloads::chain_payload::EventKind;
 use crate::event::payloads::execution_payload::MiddlewareFact;
 use crate::event::payloads::flow_control_payload::EofKind;
+use crate::event::provenance::{AuthoredEnvelope, SystemEventProvenance};
 use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, StageKey, SystemId};
@@ -98,13 +101,12 @@ impl FromStr for SystemFeedRole {
 /// An authored system record, without journal commitment provenance.
 #[derive(Debug, Clone)]
 pub struct SystemEvent {
-    pub envelope:
-        crate::event::provenance::AuthoredEnvelope<crate::event::provenance::SystemEventProvenance>,
+    pub envelope: AuthoredEnvelope<SystemEventProvenance>,
     pub payload: SystemPayload,
 }
 
 impl std::ops::Deref for SystemEvent {
-    type Target = crate::event::provenance::SystemEventProvenance;
+    type Target = SystemEventProvenance;
     fn deref(&self) -> &Self::Target {
         &self.envelope.provenance.event
     }
@@ -118,11 +120,8 @@ impl std::ops::DerefMut for SystemEvent {
 impl Serialize for SystemEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::{Error, SerializeStruct};
-        crate::event::journal_record::JournalPayload::validate(
-            &self.payload,
-            &self.envelope.provenance.event,
-        )
-        .map_err(S::Error::custom)?;
+        JournalPayload::validate(&self.payload, &self.envelope.provenance.event)
+            .map_err(S::Error::custom)?;
         let mut record = serializer.serialize_struct("SystemEvent", 2)?;
         record.serialize_field("envelope", &self.envelope)?;
         record.serialize_field("payload", &self.payload)?;
@@ -134,16 +133,11 @@ impl<'de> Deserialize<'de> for SystemEvent {
         use serde::de::Error;
         let raw = crate::event::record_serde::deserialize::<
             _,
-            crate::event::provenance::AuthoredEnvelope<
-                crate::event::provenance::SystemEventProvenance,
-            >,
+            AuthoredEnvelope<SystemEventProvenance>,
             SystemPayload,
         >(deserializer)?;
-        crate::event::journal_record::JournalPayload::validate(
-            &raw.payload,
-            &raw.envelope.provenance.event,
-        )
-        .map_err(D::Error::custom)?;
+        JournalPayload::validate(&raw.payload, &raw.envelope.provenance.event)
+            .map_err(D::Error::custom)?;
         Ok(Self {
             envelope: raw.envelope,
             payload: raw.payload,
@@ -515,7 +509,7 @@ impl SystemEvent {
         let provenance = SystemEventProvenance {
             id: EventId::new(),
             writer_id,
-            event_kind: crate::event::payloads::chain_payload::EventKind::System,
+            event_kind: EventKind::System,
             event_type: event.event_type().to_string(),
             timestamp: current_timestamp(),
         };
@@ -940,18 +934,11 @@ impl Sealed for SystemEvent {}
 
 impl JournalEvent for SystemEvent {
     type Payload = SystemPayload;
-    fn into_parts(
-        self,
-    ) -> (
-        crate::event::provenance::AuthoredEnvelope<crate::event::provenance::SystemEventProvenance>,
-        Self::Payload,
-    ) {
+    fn into_parts(self) -> (AuthoredEnvelope<SystemEventProvenance>, Self::Payload) {
         (self.envelope, self.payload)
     }
     fn from_parts(
-        envelope: crate::event::provenance::AuthoredEnvelope<
-            crate::event::provenance::SystemEventProvenance,
-        >,
+        envelope: AuthoredEnvelope<SystemEventProvenance>,
         payload: Self::Payload,
     ) -> Self {
         Self { envelope, payload }

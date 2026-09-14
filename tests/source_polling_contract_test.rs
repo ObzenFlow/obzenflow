@@ -18,7 +18,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{TypedPayload, WriterId};
+use obzenflow_core::{JournalRecord, TypedPayload, WriterId};
 use obzenflow_dsl::{
     async_infinite_source, async_source, infinite_source, sink, source, test_flow,
 };
@@ -935,9 +935,7 @@ fn offsets(times: &[tokio::time::Instant]) -> Vec<Duration> {
     times.iter().map(|instant| *instant - start).collect()
 }
 
-fn policy_report_names(
-    events: &[obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<String> {
+fn policy_report_names(events: &[JournalRecord<ChainPayload>]) -> Vec<String> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -1143,7 +1141,7 @@ async fn wait_for_counter(counter: &AtomicUsize, expected: usize) {
 async fn wait_for_custom_rows(
     journal: &Arc<dyn Journal<ChainEvent>>,
     expected: usize,
-) -> Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     for _ in 0..1_000 {
         let rows = journal
             .read_causally_ordered()

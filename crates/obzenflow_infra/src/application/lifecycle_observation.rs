@@ -79,7 +79,7 @@ impl Projection {
         }
     }
 
-    pub(crate) fn fold(&mut self, envelope: &JournalRecord<obzenflow_core::event::SystemPayload>) {
+    pub(crate) fn fold(&mut self, envelope: &JournalRecord<SystemPayload>) {
         if envelope.envelope.provenance.event.writer_id != self.writer
             || matches!(self.health, Health::Failed(_))
         {
@@ -272,8 +272,9 @@ impl Feed {
 mod tests {
     use super::*;
     use obzenflow_core::event::types::DurationMs;
-    use obzenflow_core::event::{PipelineCancellationCause, SystemEventFactory};
+    use obzenflow_core::event::{PipelineCancellationCause, SystemEventFactory, SystemPayload};
     use obzenflow_core::id::SystemId;
+    use obzenflow_core::journal::JournalError;
 
     #[tokio::test]
     async fn admission_progress_and_terminal_integrity_are_independent() {
@@ -378,18 +379,13 @@ mod tests {
         task.await.unwrap();
     }
 
-    struct FailingReader(Option<JournalRecord<obzenflow_core::event::SystemPayload>>);
+    struct FailingReader(Option<JournalRecord<SystemPayload>>);
     #[async_trait::async_trait]
     impl JournalReader<SystemEvent> for FailingReader {
-        async fn next(
-            &mut self,
-        ) -> Result<
-            Option<JournalRecord<obzenflow_core::event::SystemPayload>>,
-            obzenflow_core::journal::JournalError,
-        > {
+        async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
             match self.0.take() {
                 Some(event) => Ok(Some(event)),
-                None => Err(obzenflow_core::journal::JournalError::Full),
+                None => Err(JournalError::Full),
             }
         }
         fn position(&self) -> u64 {

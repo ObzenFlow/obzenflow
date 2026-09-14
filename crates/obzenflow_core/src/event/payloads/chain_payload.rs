@@ -6,6 +6,7 @@ use super::composite_data_payload::CompositeDataPayload;
 use super::delivery_payload::DeliveryPayload;
 use super::execution_payload::ExecutionPayload;
 use super::flow_control_payload::FlowControlPayload;
+use crate::event::chain_event::ReplayDisposition;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
@@ -146,7 +147,7 @@ impl ChainPayload {
 }
 
 impl ChainPayload {
-    pub fn replay_disposition(&self) -> crate::event::chain_event::ReplayDisposition {
+    pub fn replay_disposition(&self) -> ReplayDisposition {
         use crate::event::chain_event::ReplayDisposition;
         match self {
             ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => ReplayDisposition::ReAdmit,

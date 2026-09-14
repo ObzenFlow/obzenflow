@@ -16,7 +16,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, JournalRecord};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
 use obzenflow_core::ChainEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -147,7 +147,7 @@ async fn handle_reference_envelope<
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
-    envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
+    envelope: JournalRecord<ChainPayload>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
@@ -170,7 +170,7 @@ async fn handle_reference_envelope<
         .store(ctx.reference_since_last_stream as u64, Ordering::Relaxed);
 
     let directive = match &envelope.payload {
-        obzenflow_core::event::ChainPayload::FlowControl(signal) => {
+        ChainPayload::FlowControl(signal) => {
             // FLOWIP-120n: consume the catch-up watermark before the generic
             // control resolution; the join authors its own at the flip.
             if let FlowControlPayload::CatchUpComplete {
@@ -520,7 +520,7 @@ async fn handle_stream_envelope<
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
-    envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
+    envelope: JournalRecord<ChainPayload>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
@@ -540,7 +540,7 @@ async fn handle_stream_envelope<
         .store(0, Ordering::Relaxed);
 
     let directive = match &envelope.payload {
-        obzenflow_core::event::ChainPayload::FlowControl(signal) => {
+        ChainPayload::FlowControl(signal) => {
             // FLOWIP-120n: consume the catch-up watermark before the generic
             // control resolution; the join authors its own at the flip.
             if let FlowControlPayload::CatchUpComplete {
@@ -1184,7 +1184,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     side: JoinSubscriptionSide,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
-    pending_parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pending_parent: Option<&JournalRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {

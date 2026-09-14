@@ -269,7 +269,7 @@ async fn read_stage_journal(
     run_dir: &Path,
     stage_name: &str,
     manifest_field: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
@@ -285,23 +285,15 @@ async fn read_stage_journal(
         .expect("stage journal reads")
 }
 
-async fn read_stage(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
 }
 
-async fn read_stage_errors(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
-fn triage_projection(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<serde_json::Value> {
+fn triage_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<serde_json::Value> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -315,18 +307,14 @@ fn triage_projection(
         .collect()
 }
 
-fn chunk_projection(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<ChunkEnvelope<String>> {
+fn chunk_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<ChunkEnvelope<String>> {
     events
         .iter()
         .filter_map(|envelope| ChunkEnvelope::<String>::from_event(&envelope.authored()))
         .collect()
 }
 
-fn chunk_journal_sequence(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<&'static str> {
+fn chunk_journal_sequence(events: &[JournalRecord<ChainPayload>]) -> Vec<&'static str> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -341,9 +329,7 @@ fn chunk_journal_sequence(
         .collect()
 }
 
-fn snapshot_projection(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<serde_json::Value> {
+fn snapshot_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<serde_json::Value> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -355,9 +341,7 @@ fn snapshot_projection(
         .collect()
 }
 
-fn try_map_success_projection(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<TryMapRecord> {
+fn try_map_success_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<TryMapRecord> {
     events
         .iter()
         .filter_map(|envelope| {
@@ -371,9 +355,7 @@ fn try_map_success_projection(
         .collect()
 }
 
-fn try_map_error_projection(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<(u64, ErrorKind)> {
+fn try_map_error_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<(u64, ErrorKind)> {
     events
         .iter()
         .filter_map(|envelope| {
@@ -389,16 +371,14 @@ fn try_map_error_projection(
         .collect()
 }
 
-fn filter_projection(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<FilterRecord> {
+fn filter_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<FilterRecord> {
     events
         .iter()
         .filter_map(|envelope| FilterRecord::from_event(&envelope.authored()))
         .collect()
 }
 
-fn delivery_count(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> usize {
+fn delivery_count(events: &[JournalRecord<ChainPayload>]) -> usize {
     events
         .iter()
         .filter(|envelope| matches!(envelope.payload, ChainPayload::Delivery(_)))
@@ -406,7 +386,7 @@ fn delivery_count(events: &[JournalRecord<obzenflow_core::event::ChainPayload>])
 }
 
 fn assert_canonical_event_type_and_eof<T: TypedPayload>(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    events: &[JournalRecord<ChainPayload>],
     expected_data_rows: usize,
 ) {
     let canonical = T::versioned_event_type();
@@ -454,8 +434,8 @@ fn assert_canonical_event_type_and_eof<T: TypedPayload>(
 fn assert_derived_stage_authorship<T: TypedPayload>(
     run_dir: &Path,
     stage_name: &str,
-    parent_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    output_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    parent_events: &[JournalRecord<ChainPayload>],
+    output_events: &[JournalRecord<ChainPayload>],
 ) {
     let writer = stage_writer(run_dir, stage_name);
     let writer_clock = writer.to_string();

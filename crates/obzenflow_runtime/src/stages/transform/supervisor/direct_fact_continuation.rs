@@ -32,7 +32,7 @@ use crate::stages::transform::fsm::{
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, JournalRecord, MiddlewareExecutionScope, StageId};
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -51,7 +51,7 @@ pub(super) async fn start_if_eligible<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut TransformContext<H>,
-    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+    envelope: &JournalRecord<ChainPayload>,
     upstream_stage: Option<StageId>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     scope: MiddlewareExecutionScope,

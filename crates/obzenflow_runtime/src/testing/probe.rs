@@ -17,17 +17,13 @@
 //! are therefore counted by default.
 
 use crate::testing::stage_journal::StageJournalLookupError;
-use crate::testing::test_clock::SettleSchedulerError;
-use crate::testing::test_clock::TestClockError;
-use crate::testing::FlowTestHarness;
-use crate::testing::TestClock;
+use crate::testing::test_clock::{SettleSchedulerError, TestClockError};
+use crate::testing::{FlowTestHarness, TestClock};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::EventId;
-use obzenflow_core::event::WriterId;
+use obzenflow_core::event::{ChainPayload, EventId, WriterId};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
-use obzenflow_core::{CycleDepth, SccId};
+use obzenflow_core::{CycleDepth, SccId, StageId};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -105,7 +101,7 @@ pub enum JournalProbeError {
 /// [`Self::stage_writer_seq`].
 pub struct JournalProbeEvent {
     stage_id: StageId,
-    envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
+    envelope: JournalRecord<ChainPayload>,
 }
 
 impl JournalProbeEvent {
@@ -134,7 +130,7 @@ impl JournalProbeEvent {
     }
 
     /// The observed envelope.
-    pub fn envelope(&self) -> &JournalRecord<obzenflow_core::event::ChainPayload> {
+    pub fn envelope(&self) -> &JournalRecord<ChainPayload> {
         &self.envelope
     }
 }
@@ -466,7 +462,7 @@ impl JournalProbe {
 
     async fn read_all_envelopes(
         &self,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalProbeError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalProbeError> {
         let mut reader = self
             .journal
             .reader()
@@ -487,15 +483,20 @@ impl JournalProbe {
 mod tests {
     use super::*;
     use crate::id_conversions::StageIdExt;
+    use crate::metrics::observations::ObservationHub;
     use crate::pipeline::fsm::PipelineFsmEvent;
     use crate::pipeline::handle::FlowHandleExtras;
     use crate::pipeline::{FlowHandle, PipelineState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
     use chrono::Utc;
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::observation::NoObservations;
+    use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{ChainEvent, ChainEventFactory, JournalEvent, WriterId};
+    use obzenflow_core::event::{
+        ChainEvent, ChainEventFactory, JournalEvent, JournalWriterId, WriterId,
+    };
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -579,8 +580,7 @@ mod tests {
             event: T,
             _parent: Option<&JournalRecord<T::Payload>>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
-            let envelope =
-                JournalRecord::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
@@ -640,8 +640,8 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
-            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
-            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
+            observations: Arc::new(ObservationHub::default()),
+            host_observations: Arc::new(NoObservations),
 
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),
@@ -731,10 +731,8 @@ mod tests {
         let event = ChainEventFactory::data_event(writer_id, "data", serde_json::json!({}));
         let envelope = JournalRecord::commit_event(
             event,
-            obzenflow_core::event::provenance::JournalProvenance {
-                journal_writer_id: obzenflow_core::event::JournalWriterId::from(
-                    stage_journal_impl.id,
-                ),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: VectorClock::new(),
                 timestamp: Utc::now(),
                 journal_group_id: None,
@@ -871,10 +869,8 @@ mod tests {
         clock_a.clocks.insert(upstream_a.to_string(), 1);
         let env_a = JournalRecord::commit_event(
             ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
-            obzenflow_core::event::provenance::JournalProvenance {
-                journal_writer_id: obzenflow_core::event::JournalWriterId::from(
-                    stage_journal_impl.id,
-                ),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: clock_a,
                 timestamp: Utc::now(),
                 journal_group_id: None,
@@ -888,10 +884,8 @@ mod tests {
         clock_b.clocks.insert(upstream_b.to_string(), 1);
         let env_b = JournalRecord::commit_event(
             ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
-            obzenflow_core::event::provenance::JournalProvenance {
-                journal_writer_id: obzenflow_core::event::JournalWriterId::from(
-                    stage_journal_impl.id,
-                ),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: clock_b,
                 timestamp: Utc::now(),
                 journal_group_id: None,

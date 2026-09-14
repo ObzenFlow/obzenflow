@@ -10,9 +10,11 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{event_envelope::JournalGroupMember, journal_record::JournalRecord};
+use obzenflow_core::event::{
+    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
+};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -128,7 +130,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             JournalRecord::commit(
                 authored,
                 payload,
-                obzenflow_core::event::provenance::JournalProvenance {
+                JournalProvenance {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
                     vector_clock,
                     timestamp: Utc::now(),
@@ -197,7 +199,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
                 JournalRecord::commit(
                     authored,
                     payload,
-                    obzenflow_core::event::provenance::JournalProvenance {
+                    JournalProvenance {
                         journal_writer_id: JournalWriterId::from(self.journal_id),
                         vector_clock,
                         timestamp: Utc::now(),

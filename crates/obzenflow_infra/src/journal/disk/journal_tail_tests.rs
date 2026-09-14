@@ -5,7 +5,7 @@
 //! FLOWIP-140h: tail reads must preserve committed records across I/O boundaries.
 
 use super::*;
-use obzenflow_core::event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::StageId;
 
 struct Fixture {
@@ -51,7 +51,7 @@ impl Fixture {
 
 async fn assert_tail(
     journal: &DiskJournal<ChainEvent>,
-    expected: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    expected: &[JournalRecord<ChainPayload>],
     count: usize,
 ) {
     let actual = journal.read_last_n(count).await.unwrap();

@@ -42,6 +42,7 @@
 //! whose cursor `recorded_flow_id` is the lineage namespace). Identity is
 //! compared only within a replay lineage; see `lineage`.
 
+use obzenflow_core::event::payloads::chain_payload::EventKind;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload};
@@ -75,7 +76,7 @@ pub struct PositionalRow {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RowKind {
     Payload {
-        event_kind: obzenflow_core::event::payloads::chain_payload::EventKind,
+        event_kind: EventKind,
         event_type: String,
     },
     Watermark,
@@ -198,12 +199,14 @@ fn effect_identity(event: &ChainEvent) -> Option<EffectIdentity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::ai::AiMapReduceTaggedPartial;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::context::replay_context::ReplayContext;
     use obzenflow_core::event::payloads::effect_payload::{
         EffectCursor, EffectDescriptor, EffectProvenance,
     };
-    use obzenflow_core::{StageId, WriterId};
+    use obzenflow_core::event::EventKind;
+    use obzenflow_core::{EventId, StageId, WriterId};
 
     fn writer() -> WriterId {
         WriterId::from(StageId::new())
@@ -218,7 +221,7 @@ mod tests {
         assert_eq!(
             row.kind,
             RowKind::Payload {
-                event_kind: obzenflow_core::event::EventKind::Fact,
+                event_kind: EventKind::Fact,
                 event_type: "order.placed".to_string()
             }
         );
@@ -230,8 +233,8 @@ mod tests {
     #[test]
     fn ai_map_reduce_job_keys_are_normalised_as_run_local_identity() {
         use obzenflow_core::TypedPayload;
-        let event = obzenflow_core::ai::AiMapReduceTaggedPartial {
-            job_key: obzenflow_core::EventId::new(),
+        let event = AiMapReduceTaggedPartial {
+            job_key: EventId::new(),
             chunk_index: 0,
             chunk_count: 2,
             partial: json!({"id": 7}),

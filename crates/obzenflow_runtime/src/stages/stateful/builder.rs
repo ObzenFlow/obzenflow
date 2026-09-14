@@ -4,6 +4,7 @@
 
 //! Builder for stateful stages
 
+use obzenflow_core::WriterId;
 use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -97,7 +98,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
         instrumentation.bind_observations(
             self.resources.flow_id,
-            obzenflow_core::WriterId::from(self.config.stage_id),
+            WriterId::from(self.config.stage_id),
             &self.resources.runtime_execution,
         );
 
@@ -132,7 +133,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_observation_recorder(instrumentation.observation_recorder());
-        handler.install_writer_id(obzenflow_core::WriterId::from(self.config.stage_id));
+        handler.install_writer_id(WriterId::from(self.config.stage_id));
         let emit_interval = self
             .config
             .emit_interval

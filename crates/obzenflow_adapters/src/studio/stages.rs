@@ -7,10 +7,12 @@
 
 use obzenflow_core::event::journal_record::SystemJournalRecord;
 use obzenflow_core::web::SseFrame;
+use obzenflow_core::StageId;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Default)]
 pub(super) struct StageLifecycleView {
-    latest_by_stage: std::collections::BTreeMap<obzenflow_core::StageId, SystemJournalRecord>,
+    latest_by_stage: BTreeMap<StageId, SystemJournalRecord>,
 }
 
 impl StageLifecycleView {

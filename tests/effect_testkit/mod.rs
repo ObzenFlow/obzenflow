@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use obzenflow_core::event::ChainPayload;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -32,7 +33,7 @@ pub struct EffectInvocationContextBuilder {
     input_seq: StageInputPosition,
     stage_logic_version: String,
     data_journal: Arc<dyn Journal<ChainEvent>>,
-    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
+    parent: JournalRecord<ChainPayload>,
     runtime_execution: RuntimeExecution,
     effect_ports: EffectPortRegistry,
     effect_declarations: Vec<EffectDeclaration>,

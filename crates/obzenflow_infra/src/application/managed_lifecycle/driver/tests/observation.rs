@@ -140,14 +140,12 @@ struct GatedReader {
     before_running: bool,
     gate: Option<oneshot::Receiver<Result<(), JournalError>>>,
     entered: Option<oneshot::Sender<()>>,
-    held: Option<JournalRecord<obzenflow_core::event::SystemPayload>>,
+    held: Option<JournalRecord<SystemPayload>>,
     saw_ready: bool,
 }
 #[async_trait::async_trait]
 impl JournalReader<SystemEvent> for GatedReader {
-    async fn next(
-        &mut self,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
         let event = match self.held.take() {
             Some(event) => Some(event),
             None => {

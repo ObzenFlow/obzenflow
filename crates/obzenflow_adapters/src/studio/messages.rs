@@ -5,6 +5,10 @@
 //! JSON payloads and event names for Studio's `/api/flow/events` stream.
 
 use super::contracts::ContractBoundaryAlias;
+use obzenflow_core::event::context::{
+    CircuitBreakerMeasurements, ExecutionAccounting, RateLimiterMeasurements,
+};
+use obzenflow_core::event::observation::CaptureStamp;
 use obzenflow_core::event::{
     payloads::{execution_payload::CircuitBreakerOpenTrigger, flow_control_payload::EofKind},
     system_event::{
@@ -78,7 +82,7 @@ pub(super) enum StudioMessage<'a> {
         #[serde(flatten)]
         update: MiddlewareUpdate<'a>,
         timestamp_ms: u64,
-        capture: obzenflow_core::event::observation::CaptureStamp,
+        capture: CaptureStamp,
     },
     ContractStatus {
         #[serde(flatten)]
@@ -183,7 +187,7 @@ pub(super) struct Observation<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_clock: Option<&'a VectorClock>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub capture: Option<obzenflow_core::event::observation::CaptureStamp>,
+    pub capture: Option<CaptureStamp>,
 }
 
 #[derive(Serialize)]
@@ -214,20 +218,20 @@ enum StageUpdate {
     #[serde(rename = "stage_draining")]
     Draining {
         #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
+        accounting: Option<ExecutionAccounting>,
     },
     #[serde(rename = "stage_drained")]
     Drained,
     #[serde(rename = "stage_completed")]
     Completed {
         #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
+        accounting: Option<ExecutionAccounting>,
     },
     #[serde(rename = "stage_cancelled")]
     Cancelled {
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
+        accounting: Option<ExecutionAccounting>,
     },
     #[serde(rename = "stage_failed")]
     Failed {
@@ -235,7 +239,7 @@ enum StageUpdate {
         #[serde(skip_serializing_if = "Option::is_none")]
         recoverable: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
+        accounting: Option<ExecutionAccounting>,
         #[serde(skip)]
         causal_event_id: Option<EventId>,
     },
@@ -373,7 +377,7 @@ pub(super) enum CircuitBreakerUpdate<'a> {
         summary: CircuitSummary,
     },
     Measurements {
-        measurements: obzenflow_core::event::context::CircuitBreakerMeasurements,
+        measurements: CircuitBreakerMeasurements,
     },
 }
 
@@ -455,7 +459,7 @@ pub(super) enum RateLimiterUpdate<'a> {
         window: RateLimiterWindow,
     },
     Measurements {
-        measurements: obzenflow_core::event::context::RateLimiterMeasurements,
+        measurements: RateLimiterMeasurements,
     },
 }
 

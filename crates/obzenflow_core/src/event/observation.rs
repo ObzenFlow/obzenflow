@@ -7,9 +7,10 @@
 use super::context::measurement_snapshots::{MetricsSnapshot, SliSnapshot};
 use super::context::RuntimeObservability;
 use super::payloads::execution_payload::CircuitState;
+use crate::ai::LlmObservability;
 use crate::id::FlowId;
 use crate::time::MetricsDuration;
-use crate::{ReaderGeneration, StageId, WriterId};
+use crate::{EventId, ReaderGeneration, StageId, WriterId};
 use serde::{Deserialize, Serialize};
 
 mod validation;
@@ -91,7 +92,7 @@ impl ObservabilityContext {
 )]
 pub enum ObservationRecord {
     Llm {
-        metadata: crate::ai::LlmObservability,
+        metadata: LlmObservability,
     },
     CircuitBreakerSummary {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,8 +149,8 @@ pub enum ObservationRecord {
     StageHeartbeat {
         activity: super::system_event::StageActivity,
         handler_blocked_ms: Option<super::types::DurationMs>,
-        last_consumed_event_id: Option<crate::EventId>,
-        last_output_event_id: Option<crate::EventId>,
+        last_consumed_event_id: Option<EventId>,
+        last_output_event_id: Option<EventId>,
     },
     EdgeLiveness {
         upstream: StageId,
@@ -157,7 +158,7 @@ pub enum ObservationRecord {
         state: super::system_event::EdgeLivenessState,
         idle_ms: super::types::DurationMs,
         last_reader_seq: Option<super::types::SeqNo>,
-        last_event_id: Option<crate::EventId>,
+        last_event_id: Option<EventId>,
     },
     HttpSurface {
         snapshot: super::observability::HttpSurfaceMetricsSnapshot,

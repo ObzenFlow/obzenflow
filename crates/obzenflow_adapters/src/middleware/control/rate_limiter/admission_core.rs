@@ -15,6 +15,7 @@
 //! (FLOWIP-115d AC20). It returns plain data; the adapters turn that data into
 //! lifecycle/control facts.
 
+use obzenflow_core::event::payloads::execution_payload::RateLimiterMode as RecordedRateLimiterMode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -354,8 +355,15 @@ impl RateLimiterCore {
     }
 
     pub(crate) fn snapshot(&self) -> Option<RateLimiterCoreSnapshot> {
-        let stats = self.stats.try_lock().ok()?;
-        let bucket = self.bucket.try_lock().ok()?;
+        // Skip this optional snapshot if a lock is busy or poisoned.
+        let stats = match self.stats.try_lock() {
+            Ok(stats) => stats,
+            Err(_) => return None,
+        };
+        let bucket = match self.bucket.try_lock() {
+            Ok(bucket) => bucket,
+            Err(_) => return None,
+        };
         Some(RateLimiterCoreSnapshot {
             events_total: stats.events_total,
             delayed_total: stats.delayed_total,
@@ -575,7 +583,7 @@ where
     }
 }
 
-impl From<RateLimiterMode> for obzenflow_core::event::payloads::execution_payload::RateLimiterMode {
+impl From<RateLimiterMode> for RecordedRateLimiterMode {
     fn from(mode: RateLimiterMode) -> Self {
         match mode {
             RateLimiterMode::Normal => Self::Normal,

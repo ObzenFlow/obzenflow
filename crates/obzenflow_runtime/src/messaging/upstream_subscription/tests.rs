@@ -9,13 +9,16 @@ use super::{
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
+use obzenflow_core::chrono::Utc;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectProvenance};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent, SystemPayload};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -41,10 +44,10 @@ use tokio::time::Instant;
 fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecord<ChainPayload> {
     JournalRecord::commit_event(
         event,
-        obzenflow_core::event::provenance::JournalProvenance {
+        JournalProvenance {
             journal_writer_id: JournalWriterId::new(),
             vector_clock,
-            timestamp: obzenflow_core::chrono::Utc::now(),
+            timestamp: Utc::now(),
             journal_group_id: None,
             journal_group_member: None,
         },
@@ -2394,9 +2397,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
             ChainEventFactory::derived_event(
                 writer_id,
                 &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-                obzenflow_core::event::ChainPayload::Execution(
-                    obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(effect_record.clone()),
-                ),
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect_record.clone())),
                 obzenflow_core::config::LineagePolicy::default(),
             )
             .with_effect_provenance(EffectProvenance::from_record(
@@ -2592,7 +2593,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
 struct SharedTestJournal {
     id: JournalId,
     owner: Option<JournalOwner>,
-    events: Arc<Mutex<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
 }
 
 impl SharedTestJournal {
@@ -2607,7 +2608,7 @@ impl SharedTestJournal {
     fn append_with_clock(&self, event: ChainEvent, vector_clock: VectorClock) {
         let envelope = JournalRecord::commit_event(
             event,
-            obzenflow_core::event::provenance::JournalProvenance {
+            JournalProvenance {
                 journal_writer_id: JournalWriterId::from(self.id),
                 vector_clock,
                 timestamp: chrono::Utc::now(),
@@ -2621,7 +2622,7 @@ impl SharedTestJournal {
 }
 
 struct SharedTestJournalReader {
-    events: Arc<Mutex<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
     pos: usize,
 }
 
@@ -2629,8 +2630,7 @@ struct SharedTestJournalReader {
 impl JournalReader<ChainEvent> for SharedTestJournalReader {
     async fn next(
         &mut self,
-    ) -> std::result::Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-    {
+    ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         if self.pos < guard.len() {
             let envelope = guard[self.pos].clone();
@@ -2663,8 +2663,8 @@ impl Journal<ChainEvent> for SharedTestJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> std::result::Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> std::result::Result<JournalRecord<ChainPayload>, JournalError> {
         let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         self.events.lock().unwrap().push(envelope.clone());
         Ok(envelope)
@@ -2672,16 +2672,14 @@ impl Journal<ChainEvent> for SharedTestJournal {
 
     async fn read_all_unordered(
         &self,
-    ) -> std::result::Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-    {
+    ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(self.events.lock().unwrap().clone())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-    {
+    ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -2698,8 +2696,7 @@ impl Journal<ChainEvent> for SharedTestJournal {
     async fn read_last_n(
         &self,
         count: usize,
-    ) -> std::result::Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError>
-    {
+    ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         let len = guard.len();
         let start = len.saturating_sub(count);
@@ -2830,7 +2827,7 @@ async fn canonical_single(
 
 async fn expect_delivery(
     subscription: &mut UpstreamSubscription<ChainEvent>,
-) -> JournalRecord<obzenflow_core::event::ChainPayload> {
+) -> JournalRecord<ChainPayload> {
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::Event(envelope) => envelope,
         other => panic!(

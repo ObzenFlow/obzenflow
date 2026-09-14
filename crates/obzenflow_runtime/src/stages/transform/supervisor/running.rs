@@ -29,6 +29,7 @@ use crate::stages::observer::dispatch::{
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -263,7 +264,7 @@ async fn dispatch_running_inner<
             }
 
             let directive = match &envelope.payload {
-                obzenflow_core::event::ChainPayload::FlowControl(signal) => {
+                ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; each stage authors its own.
                     if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {

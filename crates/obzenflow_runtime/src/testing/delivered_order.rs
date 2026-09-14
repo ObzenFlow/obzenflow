@@ -16,7 +16,7 @@
 //! Constraint: the projection only witnesses inputs that produced at least one
 //! output, so determinism fixtures should emit one output per consumed input.
 
-use obzenflow_core::event::JournalRecord;
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::EventId;
 use std::collections::{HashMap, HashSet};
 
@@ -54,11 +54,8 @@ impl DeliveredOrderProjection {
     /// `(stable stage key, envelopes)`. Outputs whose parent is not found in
     /// any upstream (for example framework rows) are skipped.
     pub fn from_envelopes(
-        stage_outputs: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-        upstreams: &[(
-            String,
-            Vec<JournalRecord<obzenflow_core::event::ChainPayload>>,
-        )],
+        stage_outputs: &[JournalRecord<ChainPayload>],
+        upstreams: &[(String, Vec<JournalRecord<ChainPayload>>)],
     ) -> Self {
         let mut parent_index: HashMap<EventId, &str> = HashMap::new();
         for (stage_key, envelopes) in upstreams {

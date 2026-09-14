@@ -12,9 +12,8 @@ use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::supervisor::PipelineSupervisor;
-use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::tests::support::{
-    empty_system_subscription, make_fsm_context, source_sink_topology,
+    empty_system_subscription, make_fsm_context, new_system_journal, source_sink_topology,
     source_sink_topology_with_source, spawn_supervisor_loop, test_context, test_supervisor,
     TestPipelineStageHandle,
 };
@@ -23,7 +22,7 @@ use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised}
 use async_trait::async_trait;
 use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{JournalRecord, StageId, SystemId};
@@ -32,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 struct PausedReader {
-    row: Option<JournalRecord<obzenflow_core::event::SystemPayload>>,
+    row: Option<JournalRecord<SystemPayload>>,
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
@@ -41,9 +40,7 @@ struct PausedReader {
 
 #[async_trait]
 impl JournalReader<SystemEvent> for PausedReader {
-    async fn next(
-        &mut self,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
         let _guard = match &self.lock {
             Some(lock) => Some(lock.read().await),
             None => None,
@@ -120,7 +117,7 @@ pub async fn graceful_deadline_bounds_a_stalled_source_control_send(
     let admissions: Vec<_> = facts
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            obzenflow_core::event::SystemPayload::PipelineLifecycle(
+            SystemPayload::PipelineLifecycle(
                 obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { admission },
             ) => Some(admission.clone()),
             _ => None,

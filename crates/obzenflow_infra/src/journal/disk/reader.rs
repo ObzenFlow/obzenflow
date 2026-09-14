@@ -10,8 +10,9 @@
 
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{event_envelope::JournalGroupMember, journal_record::JournalRecord};
+use obzenflow_core::event::{
+    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
+};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
@@ -543,8 +544,11 @@ mod tests {
     use chrono::Utc;
     use crc32fast::Hasher;
     use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::journal_record::JournalPayload;
+    use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::{ChainEvent, JournalId, StageId, WriterId};
+    use obzenflow_core::event::JournalRecord;
+    use obzenflow_core::{ChainEvent, JournalId, JournalWriterId, StageId, WriterId};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -668,10 +672,10 @@ mod tests {
             let make_record = || {
                 let event =
                     ChainEventFactory::data_event(stage.into(), "tail", serde_json::json!({}));
-                obzenflow_core::event::JournalRecord::commit_event(
+                JournalRecord::commit_event(
                     event,
-                    obzenflow_core::event::provenance::JournalProvenance {
-                        journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                    JournalProvenance {
+                        journal_writer_id: JournalWriterId::from(journal_id),
                         vector_clock: VectorClock::new(),
                         timestamp: Utc::now(),
                         journal_group_id: None,
@@ -746,10 +750,7 @@ mod tests {
         }
     }
 
-    fn write_framed_record<P: obzenflow_core::event::journal_record::JournalPayload>(
-        file: &mut NamedTempFile,
-        record: &obzenflow_core::event::JournalRecord<P>,
-    ) {
+    fn write_framed_record<P: JournalPayload>(file: &mut NamedTempFile, record: &JournalRecord<P>) {
         let json_body = serialize_record(record).unwrap();
         let mut hasher = Hasher::new();
         hasher.update(&json_body);
@@ -775,10 +776,10 @@ mod tests {
                 "test.event",
                 serde_json::json!({"index": i}),
             );
-            let record = obzenflow_core::event::JournalRecord::commit_event(
+            let record = JournalRecord::commit_event(
                 event,
-                obzenflow_core::event::provenance::JournalProvenance {
-                    journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                JournalProvenance {
+                    journal_writer_id: JournalWriterId::from(journal_id),
                     vector_clock: VectorClock::new(),
                     timestamp: Utc::now(),
                     journal_group_id: None,
@@ -823,10 +824,10 @@ mod tests {
                 "test.event",
                 serde_json::json!({"index": i}),
             );
-            let record = obzenflow_core::event::JournalRecord::commit_event(
+            let record = JournalRecord::commit_event(
                 event,
-                obzenflow_core::event::provenance::JournalProvenance {
-                    journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                JournalProvenance {
+                    journal_writer_id: JournalWriterId::from(journal_id),
                     vector_clock: VectorClock::new(),
                     timestamp: Utc::now(),
                     journal_group_id: None,

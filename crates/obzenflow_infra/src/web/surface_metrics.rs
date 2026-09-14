@@ -10,6 +10,7 @@
 use obzenflow_core::event::observability::{
     HttpSurfaceMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
 };
+use obzenflow_core::event::observation::{CaptureReason, ObservationRecord, ObservationRecorder};
 use obzenflow_core::web::HttpMethod;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -194,14 +195,14 @@ pub struct HttpSurfaceMetricsEmitter {
 
 struct HttpSurfaceMetricsEmitterState {
     collector: Arc<HttpSurfaceMetricsCollector>,
-    recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    recorder: Arc<dyn ObservationRecorder>,
     last_emitted_total_requests: AtomicU64,
 }
 
 impl HttpSurfaceMetricsEmitter {
     pub fn new(
         collector: Arc<HttpSurfaceMetricsCollector>,
-        recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+        recorder: Arc<dyn ObservationRecorder>,
     ) -> Self {
         Self {
             state: Arc::new(HttpSurfaceMetricsEmitterState {
@@ -251,13 +252,13 @@ impl HttpSurfaceMetricsEmitter {
             return;
         };
         self.state.recorder.observe_with_reason(
-            obzenflow_core::event::observation::ObservationRecord::HttpSurface {
+            ObservationRecord::HttpSurface {
                 snapshot: HttpSurfaceMetricsSnapshot { routes },
             },
             if force {
-                obzenflow_core::event::observation::CaptureReason::Final
+                CaptureReason::Final
             } else {
-                obzenflow_core::event::observation::CaptureReason::Periodic
+                CaptureReason::Periodic
             },
         );
     }
@@ -266,7 +267,7 @@ impl HttpSurfaceMetricsEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::SystemId;
+    use obzenflow_core::{FlowId, SystemId};
 
     #[test]
     fn http_status_class_buckets_expected_ranges() {
@@ -353,8 +354,7 @@ mod tests {
         use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
         let collector = Arc::new(HttpSurfaceMetricsCollector::new());
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
-        let recorder =
-            execution.observation_recorder(obzenflow_core::FlowId::new(), SystemId::new().into());
+        let recorder = execution.observation_recorder(FlowId::new(), SystemId::new().into());
         let emitter = HttpSurfaceMetricsEmitter::new(collector.clone(), recorder);
         let observe = || {
             collector.observe(HttpSurfaceObservation {

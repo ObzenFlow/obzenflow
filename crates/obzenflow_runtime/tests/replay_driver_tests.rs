@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::{FlowContext, IntentContext, StageType};
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{ChainEvent, JournalWriterId, StageId, WriterId};
@@ -13,7 +13,7 @@ use obzenflow_runtime::replay::{ReplayContextTemplate, ReplayDriver, ReplayError
 use std::path::PathBuf;
 
 struct TestReader {
-    envelopes: Vec<JournalRecord<obzenflow_core::event::ChainPayload>>,
+    envelopes: Vec<JournalRecord<ChainPayload>>,
     pos: usize,
     at_end_hint: bool,
     /// When set, `next` returns an error, simulating the reader's own
@@ -23,9 +23,7 @@ struct TestReader {
 
 #[async_trait]
 impl JournalReader<ChainEvent> for TestReader {
-    async fn next(
-        &mut self,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         if self.fail {
             return Err(JournalError::Implementation {
                 message: "simulated corrupt archive record".to_string(),

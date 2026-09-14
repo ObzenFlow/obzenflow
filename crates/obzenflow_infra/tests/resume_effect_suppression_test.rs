@@ -294,9 +294,7 @@ async fn run_until_delivered(
 
 /// The user-owned effect outcome facts of a stage journal, in physical append
 /// order: `(recorded_flow_id, input_seq)` per fact.
-fn outcome_fact_cursors(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<(String, u64)> {
+fn outcome_fact_cursors(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<(String, u64)> {
     let outcome_type = EffectValue::versioned_event_type();
     envelopes
         .iter()
@@ -328,10 +326,7 @@ fn outcome_fact_cursors(
 }
 
 /// Index of the stage's authored catch-up watermark in append order.
-fn watermark_index(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    stage_key: &str,
-) -> usize {
+fn watermark_index(envelopes: &[JournalRecord<ChainPayload>], stage_key: &str) -> usize {
     envelopes
         .iter()
         .position(|envelope| {

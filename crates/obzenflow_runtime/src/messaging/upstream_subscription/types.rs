@@ -4,13 +4,14 @@
 
 use crate::control_plane::ControlPlaneProvider;
 use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::system_event::{SystemEvent, SystemFeedRole};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::ChainEvent;
+use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, EventType, JournalRecord, StageId, WriterId};
@@ -218,7 +219,7 @@ pub struct SubscriptionState {
 
     /// Buffering for events that need to be returned later
     /// (Currently unused but available for future ordering requirements)
-    pub(super) pending_events: VecDeque<JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub(super) pending_events: VecDeque<JournalRecord<ChainPayload>>,
 }
 
 impl SubscriptionState {
@@ -527,7 +528,7 @@ pub(crate) struct PendingReceiptMeta {
 /// This registry is intentionally broader than `pending_receipts`: forwarded
 /// data still needs an exact durable parent even though it does not contribute
 /// to the immediate upstream writer's receipt watermark.
-pub(crate) type PendingDeliveryInput = obzenflow_core::event::journal_record::ChainJournalRecord;
+pub(crate) type PendingDeliveryInput = ChainJournalRecord;
 
 #[derive(Debug)]
 pub struct ReaderProgress {

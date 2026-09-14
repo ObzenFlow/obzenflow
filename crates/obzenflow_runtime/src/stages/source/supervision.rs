@@ -27,6 +27,8 @@ use crate::stages::source::boundary::{
 };
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::SystemPayload;
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -55,7 +57,7 @@ pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
 /// established error-journal representation.
 pub(crate) fn normalise_source_poll_error(
     writer_id: WriterId,
-    source_type: obzenflow_core::event::payloads::execution_payload::SourcePollKind,
+    source_type: SourcePollKind,
     error: &SourceError,
 ) -> ChainEvent {
     use obzenflow_core::event::payloads::execution_payload::{
@@ -117,7 +119,7 @@ pub(crate) async fn record_source_cleanup_failed(
 ) -> Result<(), BoxError> {
     let event = SystemEvent::new(
         WriterId::from(stage_id),
-        obzenflow_core::event::SystemPayload::SourceCleanupFailed {
+        SystemPayload::SourceCleanupFailed {
             stage_id,
             stage_name: stage_name.to_string(),
             error: error.to_string(),
@@ -472,14 +474,16 @@ where
 mod tests {
     use super::*;
     use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+    use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::id_conversions::StageIdExt;
     use crate::supervised_base::ChannelBuilder;
     use async_trait::async_trait;
+    use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, SourcePollKind};
     use obzenflow_core::event::types::EventId;
-    use obzenflow_core::event::{ChainEventFactory, JournalWriterId, WriterId};
+    use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalWriterId, WriterId};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::{JournalError, JournalReader};
-    use obzenflow_core::{ChainEvent, Journal, JournalRecord};
+    use obzenflow_core::{ChainEvent, FlowId, Journal, JournalRecord};
     use obzenflow_topology::TopologyBuilder;
     use std::marker::PhantomData;
     use std::num::NonZeroU64;
@@ -675,11 +679,7 @@ mod tests {
         ];
 
         for (error, expected_kind) in cases {
-            let event = normalise_source_poll_error(
-                writer_id,
-                obzenflow_core::event::payloads::execution_payload::SourcePollKind::AsyncFinite,
-                &error,
-            );
+            let event = normalise_source_poll_error(writer_id, SourcePollKind::AsyncFinite, &error);
             assert!(matches!(
                 event.processing.status,
                 ProcessingStatus::Error {
@@ -688,8 +688,8 @@ mod tests {
                 } if *kind == expected_kind
             ));
             match event.payload {
-                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SourcePollError(failure)) => {
-                    assert_eq!(failure.source_type, obzenflow_core::event::payloads::execution_payload::SourcePollKind::AsyncFinite);
+                ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
+                    assert_eq!(failure.source_type, SourcePollKind::AsyncFinite);
                     assert_eq!(failure.error_type.processing_error_kind(), expected_kind);
                     assert_eq!(failure.message, error.to_string());
                 }
@@ -865,9 +865,8 @@ mod tests {
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
         let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
-        let execution =
-            crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
-        instrumentation.bind_observations(obzenflow_core::FlowId::new(), s.into(), &execution);
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        instrumentation.bind_observations(FlowId::new(), s.into(), &execution);
         let stage_flow_context = FlowContext {
             flow_name: "flow".to_string(),
             flow_id: "flow_id".to_string(),

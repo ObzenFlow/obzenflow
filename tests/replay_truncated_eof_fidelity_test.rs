@@ -160,7 +160,7 @@ async fn eof_kinds(run_dir: &Path, stage_key: &str) -> Vec<EofKind> {
     kinds_of(&replay_testkit::read_stage_envelopes_appended(run_dir, stage_key).await)
 }
 
-fn kinds_of(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<EofKind> {
+fn kinds_of(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<EofKind> {
     envelopes
         .iter()
         .filter_map(|envelope| match &envelope.payload {

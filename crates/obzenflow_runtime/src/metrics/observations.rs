@@ -8,10 +8,11 @@
 use crate::execution::RuntimeExecution;
 use obzenflow_core::event::context::RuntimeObservability;
 use obzenflow_core::event::observation::*;
-use obzenflow_core::{FlowId, WriterId};
+use obzenflow_core::{FlowId, MiddlewareExecutionScope, StageId, WriterId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_PACKET_FAMILIES: usize = 128;
 const MAX_KEYS: usize = 4096;
@@ -42,7 +43,7 @@ enum Kind {
     AiChunking,
     HttpSurface,
     StageHeartbeat,
-    EdgeLiveness(obzenflow_core::StageId, obzenflow_core::StageId),
+    EdgeLiveness(StageId, StageId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -233,14 +234,16 @@ impl ObservationSink for ObservationHub {
 
 impl ObservationSource for ObservationHub {
     fn active_scope(&self) -> Option<CaptureScope> {
-        self.view.try_lock().ok().and_then(|view| view.active_scope)
+        match self.view.try_lock() {
+            Ok(view) => view.active_scope,
+            Err(_) => None,
+        }
     }
     fn snapshot(&self) -> Vec<ObservabilityContext> {
-        let mut packets: Vec<_> = self
-            .view
-            .try_lock()
-            .map(|view| view.latest.values().cloned().collect())
-            .unwrap_or_default();
+        let mut packets: Vec<_> = match self.view.try_lock() {
+            Ok(view) => view.latest.values().cloned().collect(),
+            Err(_) => return Vec::new(),
+        };
         // Families are independently retained; overlapping projected fields
         // apply in capture order, never HashMap iteration order.
         packets.sort_by_key(|packet| {
@@ -282,7 +285,7 @@ impl ObservationOwner {
     pub(crate) fn capture_in_scope(
         &self,
         reason: CaptureReason,
-        scope: obzenflow_core::MiddlewareExecutionScope,
+        scope: MiddlewareExecutionScope,
     ) -> Option<ObservabilityContext> {
         if scope.is_deterministic_replay() || !self.execution.host_observations_allowed() {
             return None;
@@ -304,8 +307,8 @@ impl ObservationOwner {
             observer: self.observer,
             capture_seq: CaptureSeq(sequence),
             capture_reason: reason,
-            observed_at_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            observed_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .ok()?
                 .as_millis() as u64,
         }))
@@ -437,7 +440,9 @@ mod tests {
     use crate::execution::RuntimeMode;
     use crate::metrics::instrumentation::StageInstrumentation;
     use obzenflow_core::event::context::{MeasurementWindow, TimingMeasurements};
+    use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ReaderGeneration, StageId};
+    use std::time::Duration;
 
     fn packet(
         scope: CaptureScope,
@@ -613,7 +618,7 @@ mod tests {
         let stage = StageId::new();
         let instrumentation = Arc::new(StageInstrumentation::new());
         instrumentation.bind_observations(scope.flow_id, stage.into(), &execution);
-        instrumentation.record_output_event(&obzenflow_core::event::ChainEventFactory::data_event(
+        instrumentation.record_output_event(&ChainEventFactory::data_event(
             stage.into(),
             "business.fact",
             serde_json::Value::Null,
@@ -634,7 +639,7 @@ mod tests {
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
         let instrumentation = Arc::new(StageInstrumentation::new());
         instrumentation.bind_observations(FlowId::new(), StageId::new().into(), &execution);
-        instrumentation.record_processing_time(std::time::Duration::ZERO);
+        instrumentation.record_processing_time(Duration::ZERO);
         let captured = instrumentation
             .capture_observability(CaptureReason::Record)
             .unwrap();
@@ -658,7 +663,7 @@ mod tests {
         let execution = RuntimeExecution::new(RuntimeMode::Replay, None);
         let instrumentation = Arc::new(StageInstrumentation::new());
         instrumentation.bind_observations(FlowId::new(), StageId::new().into(), &execution);
-        instrumentation.record_processing_time(std::time::Duration::from_millis(5));
+        instrumentation.record_processing_time(Duration::from_millis(5));
         assert!(instrumentation
             .capture_observability(CaptureReason::Final)
             .is_none());

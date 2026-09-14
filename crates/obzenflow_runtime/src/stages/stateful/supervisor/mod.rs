@@ -8,6 +8,8 @@
 //! - `running.rs`  contains the Accumulating and Emitting loops
 //! - `draining.rs` contains the Draining loop
 
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::ChainPayload;
 mod draining;
 mod running;
 
@@ -438,7 +440,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     async fn forward_control_event(
         &self,
         ctx: &StatefulContext<H>,
-        envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        envelope: &JournalRecord<ChainPayload>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = forward_control_event_helper(
             envelope,
@@ -496,7 +498,9 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             StageType::Stateful,
         );
 
-        let payload = obzenflow_core::event::payloads::execution_payload::ExecutionPayload::AccumulatorProgress { inputs_since_last_report: delta };
+        let payload = ExecutionPayload::AccumulatorProgress {
+            inputs_since_last_report: delta,
+        };
 
         let heartbeat = ChainEventFactory::execution_event(writer_id, payload)
             .with_flow_context(flow_context)

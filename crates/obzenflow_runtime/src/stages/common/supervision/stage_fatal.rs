@@ -5,7 +5,7 @@
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::StageFatal;
 use obzenflow_core::event::{
-    ChainEventFactory, JournalRecord, StageFatalRecorded, StageFatalSeverity,
+    ChainEventFactory, ChainPayload, JournalRecord, StageFatalRecorded, StageFatalSeverity,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
@@ -17,17 +17,14 @@ pub(crate) struct StageFatalCommit<'a> {
     pub stage_id: StageId,
     pub stage_key: &'a str,
     pub input_position: Option<StageInputPosition>,
-    pub parent: Option<&'a JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub parent: Option<&'a JournalRecord<ChainPayload>>,
     pub lineage: obzenflow_core::config::LineagePolicy,
 }
 
 pub(crate) async fn record_stage_fatal(
     fatal: &StageFatal,
     commit: StageFatalCommit<'_>,
-) -> Result<
-    JournalRecord<obzenflow_core::event::ChainPayload>,
-    Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> Result<JournalRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let payload = StageFatalRecorded {
         severity: if fatal.primary_cause_event_id.is_some() {
             StageFatalSeverity::Secondary

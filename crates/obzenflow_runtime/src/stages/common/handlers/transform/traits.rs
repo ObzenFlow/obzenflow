@@ -9,6 +9,7 @@
 use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
+use obzenflow_core::event::observation::ObservationRecorder;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventType, WriterId};
@@ -85,11 +86,7 @@ pub trait TransformHandler: Send + Sync {
     /// default ignores it.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 
-    fn install_observation_recorder(
-        &mut self,
-        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
-    }
+    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
 
     /// Install the runtime-owned writer identity for this transform stage.
     ///
@@ -131,11 +128,7 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 
-    fn install_observation_recorder(
-        &mut self,
-        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
-    }
+    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
 
     /// Runtime-owned transform-stage identity forwarded to internal adapters.
     #[doc(hidden)]
@@ -163,10 +156,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
         TransformHandler::install_lineage_policy(self, policy)
     }
 
-    fn install_observation_recorder(
-        &mut self,
-        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         TransformHandler::install_observation_recorder(self, recorder)
     }
 
@@ -330,10 +320,7 @@ impl<H> UnifiedTransformHandler for EffectfulTransformHandlerAdapter<H>
 where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    fn install_observation_recorder(
-        &mut self,
-        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
-    ) {
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
         self.effect_boundary.install_observation_recorder(recorder);
     }
 

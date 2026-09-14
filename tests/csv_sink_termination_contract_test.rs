@@ -220,7 +220,7 @@ fn stalling_flow(journal_base: PathBuf, csv_path: PathBuf) -> FlowDefinition {
     })
 }
 
-fn eof_kinds(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<EofKind> {
+fn eof_kinds(events: &[JournalRecord<ChainPayload>]) -> Vec<EofKind> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -238,8 +238,8 @@ struct ReceiptSummary {
 }
 
 fn receipt_summary(
-    source: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    sink: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    source: &[JournalRecord<ChainPayload>],
+    sink: &[JournalRecord<ChainPayload>],
 ) -> ReceiptSummary {
     let source_ids = source
         .iter()

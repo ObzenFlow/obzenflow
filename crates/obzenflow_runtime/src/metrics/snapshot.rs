@@ -7,6 +7,8 @@
 
 use super::fsm::MetricsJournalKind;
 use obzenflow_core::event::context::RuntimeProvenance;
+use obzenflow_core::event::observation::ObservabilityContext;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::JournalError;
 use obzenflow_core::{ChainEvent, EventId, Journal, JournalId, JournalRecord, StageId, WriterId};
 
@@ -29,7 +31,7 @@ struct RecordIdentity {
 }
 
 impl RecordIdentity {
-    fn of(row: &JournalRecord<obzenflow_core::event::ChainPayload>) -> Result<Self, JournalError> {
+    fn of(row: &JournalRecord<ChainPayload>) -> Result<Self, JournalError> {
         let writer = row.envelope.provenance.event.writer_id;
         let sequence = row
             .envelope
@@ -85,18 +87,12 @@ pub(crate) struct SnapshotObservation {
 }
 
 impl SnapshotObservation {
-    pub(crate) fn measurements(
-        &self,
-    ) -> Vec<obzenflow_core::event::observation::ObservabilityContext> {
+    pub(crate) fn measurements(&self) -> Vec<ObservabilityContext> {
         use obzenflow_core::event::observation::ObservationSource;
         self.measurements.snapshot()
     }
 
-    fn retain_measurements(
-        &self,
-        row: &JournalRecord<obzenflow_core::event::ChainPayload>,
-        stage: StageId,
-    ) {
+    fn retain_measurements(&self, row: &JournalRecord<ChainPayload>, stage: StageId) {
         if let Some(packet) = &row.envelope.observability {
             if packet.capture.observer == WriterId::from(stage) {
                 self.measurements.offer_recorded(packet.clone());
@@ -119,7 +115,7 @@ impl SnapshotObservation {
 
     pub(crate) fn fold(
         &mut self,
-        row: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        row: &JournalRecord<ChainPayload>,
         stage: StageId,
     ) -> Result<(), JournalError> {
         self.retain_measurements(row, stage);

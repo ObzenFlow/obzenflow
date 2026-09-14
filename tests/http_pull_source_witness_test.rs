@@ -101,9 +101,7 @@ async fn run(journal_base: &Path, calls: Arc<AtomicUsize>, replay_from: Option<&
         .expect("HTTP pull witness flow completes");
 }
 
-async fn read_error_journal(
-    run_dir: &Path,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_error_journal(run_dir: &Path) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"]["pull"]["error_journal_file"]
         .as_str()
@@ -136,9 +134,7 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_data_journal(
-    run_dir: &Path,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_data_journal(run_dir: &Path) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"]["pull"]["data_journal_file"]
         .as_str()
@@ -156,9 +152,7 @@ async fn read_data_journal(
     events
 }
 
-fn typed_snapshots(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<(WriterId, HttpPullStateFact)> {
+fn typed_snapshots(events: &[JournalRecord<ChainPayload>]) -> Vec<(WriterId, HttpPullStateFact)> {
     events
         .iter()
         .filter_map(|envelope| match &envelope.payload {
@@ -172,8 +166,8 @@ fn typed_snapshots(
 }
 
 fn assert_validation_journals(
-    data: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    errors: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    data: &[JournalRecord<ChainPayload>],
+    errors: &[JournalRecord<ChainPayload>],
     expect_live_snapshots: bool,
 ) {
     assert!(data.iter().all(|envelope| !envelope.consumes_data_credit()));

@@ -54,6 +54,8 @@
 //! consumed, so the abandoned poll charges no token; `delayed_total` and
 //! `events_total` are independent counters.
 
+use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::payloads::execution_payload::RateLimiterFact;
 mod admission_core;
 mod config;
 mod factory;
@@ -199,36 +201,35 @@ impl RateLimiterMiddleware {
 
     fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
         if let Some(pulse) = self.core.take_due_pulse(Instant::now()) {
-            ctx.observe(
-                obzenflow_core::event::observation::ObservationRecord::RateLimiterActivity {
-                    effect_type: None,
-                    window_ms: pulse.window_ms,
-                    delayed_events: pulse.delayed_events,
-                    delay_ms_total: pulse.delay_ms_total,
-                    delay_ms_max: pulse.delay_ms_max,
-                    limit_rate: self.limit_rate(),
-                },
-            );
+            ctx.observe(ObservationRecord::RateLimiterActivity {
+                effect_type: None,
+                window_ms: pulse.window_ms,
+                delayed_events: pulse.delayed_events,
+                delay_ms_total: pulse.delay_ms_total,
+                delay_ms_max: pulse.delay_ms_max,
+                limit_rate: self.limit_rate(),
+            });
         }
     }
 
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
         if let Some(summary) = self.core.take_due_summary(Instant::now()) {
             if let Some((from, to)) = summary.mode_change {
-                ctx.write_control_event(rate_limiter_event(self.writer_id,
-                    obzenflow_core::event::payloads::execution_payload::RateLimiterFact::ModeChange {
-                        mode_from: from.into(), mode_to: to.into(), limit_rate: self.limit_rate(),
-                    }
+                ctx.write_control_event(rate_limiter_event(
+                    self.writer_id,
+                    RateLimiterFact::ModeChange {
+                        mode_from: from.into(),
+                        mode_to: to.into(),
+                        limit_rate: self.limit_rate(),
+                    },
                 ));
             }
-            ctx.observe(
-                obzenflow_core::event::observation::ObservationRecord::RateLimiterUtilisation {
-                    effect_type: None,
-                    utilization_percent: summary.utilization_percent,
-                    events_in_window: summary.events_in_window,
-                    window_size_ms: summary.window_size_ms,
-                },
-            );
+            ctx.observe(ObservationRecord::RateLimiterUtilisation {
+                effect_type: None,
+                utilization_percent: summary.utilization_percent,
+                events_in_window: summary.events_in_window,
+                window_size_ms: summary.window_size_ms,
+            });
         }
     }
 
@@ -302,6 +303,10 @@ mod tests {
     use super::admission_core::RateLimiterMode;
     use super::config::validated_rate_limiter_config;
     use super::*;
+    use obzenflow_core::event::observation::ObservationRecord;
+    use obzenflow_core::{FlowId, MiddlewareExecutionScope};
+    use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
+    use obzenflow_runtime::metrics::observations::ObservationHub;
     use std::time::Duration;
 
     use obzenflow_core::event::chain_event::ChainPayload;
@@ -322,28 +327,17 @@ mod tests {
         assert!((middleware.limit_rate() - 5.0).abs() < 1e-6);
     }
 
-    fn observation_context() -> (
-        MiddlewareContext,
-        Arc<obzenflow_runtime::metrics::observations::ObservationHub>,
-    ) {
-        let execution = obzenflow_runtime::execution::RuntimeExecution::new(
-            obzenflow_runtime::execution::RuntimeMode::Live,
-            None,
-        );
-        let recorder =
-            execution.observation_recorder(obzenflow_core::FlowId::new(), StageId::new().into());
+    fn observation_context() -> (MiddlewareContext, Arc<ObservationHub>) {
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        let recorder = execution.observation_recorder(FlowId::new(), StageId::new().into());
         (
-            MiddlewareContext::with_scope(
-                obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-            )
-            .with_observation_recorder(recorder),
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+                .with_observation_recorder(recorder),
             execution.observations().clone(),
         )
     }
 
-    fn samples(
-        hub: &obzenflow_runtime::metrics::observations::ObservationHub,
-    ) -> Vec<obzenflow_core::event::observation::ObservationRecord> {
+    fn samples(hub: &ObservationHub) -> Vec<ObservationRecord> {
         use obzenflow_core::event::observation::ObservationSource;
         hub.snapshot()
             .into_iter()

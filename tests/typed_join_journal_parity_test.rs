@@ -333,10 +333,7 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_stage_appended(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name]["data_journal_file"]
         .as_str()
@@ -364,10 +361,7 @@ fn stage_writer(run_dir: &Path, stage_name: &str) -> WriterId {
     WriterId::from(stage_id)
 }
 
-fn transport_signature(
-    run_dir: &Path,
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<String> {
+fn transport_signature(run_dir: &Path, events: &[JournalRecord<ChainPayload>]) -> Vec<String> {
     let reference_writer = stage_writer(run_dir, "reference_validate");
     let stream_writer = stage_writer(run_dir, "stream_validate");
     let join_writer = stage_writer(run_dir, "joined");
@@ -403,17 +397,14 @@ fn transport_signature(
         .collect()
 }
 
-fn facts(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<JoinedFact> {
+fn facts(events: &[JournalRecord<ChainPayload>]) -> Vec<JoinedFact> {
     events
         .iter()
         .filter_map(|envelope| JoinedFact::from_event(&envelope.authored()))
         .collect()
 }
 
-fn assert_journal_contract(
-    run_dir: &Path,
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) {
+fn assert_journal_contract(run_dir: &Path, events: &[JournalRecord<ChainPayload>]) {
     let manifest = archive_manifest(run_dir);
     let join_writer = stage_writer(run_dir, "joined");
     let mut finals = 0;

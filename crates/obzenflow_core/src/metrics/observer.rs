@@ -9,6 +9,7 @@
 //! architectural boundaries.
 
 use crate::event::journal_record::JournalRecord;
+use crate::event::{ChainPayload, SystemPayload};
 
 /// Trait for observing events for metrics collection
 ///
@@ -18,10 +19,10 @@ use crate::event::journal_record::JournalRecord;
 /// from multiple threads concurrently.
 pub trait MetricsObserver: Send + Sync {
     /// Called when a chain event is written to any journal
-    fn on_chain_event(&self, envelope: &JournalRecord<crate::event::ChainPayload>);
+    fn on_chain_event(&self, envelope: &JournalRecord<ChainPayload>);
 
     /// Called when a system event is written to the control journal
-    fn on_system_event(&self, envelope: &JournalRecord<crate::event::SystemPayload>);
+    fn on_system_event(&self, envelope: &JournalRecord<SystemPayload>);
 
     /// Called periodically to allow time-based aggregations
     fn on_tick(&self);
@@ -42,11 +43,11 @@ impl NoOpMetricsObserver {
 }
 
 impl MetricsObserver for NoOpMetricsObserver {
-    fn on_chain_event(&self, _envelope: &JournalRecord<crate::event::ChainPayload>) {
+    fn on_chain_event(&self, _envelope: &JournalRecord<ChainPayload>) {
         // No-op: metrics disabled
     }
 
-    fn on_system_event(&self, _envelope: &JournalRecord<crate::event::SystemPayload>) {
+    fn on_system_event(&self, _envelope: &JournalRecord<SystemPayload>) {
         // No-op: metrics disabled
     }
 
@@ -58,9 +59,7 @@ impl MetricsObserver for NoOpMetricsObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::ChainEventFactory;
-    use crate::event::JournalWriterId;
-    use crate::event::WriterId;
+    use crate::event::{ChainEventFactory, JournalWriterId, WriterId};
     use crate::id::StageId;
     use std::sync::Arc;
 

@@ -15,7 +15,9 @@ use obzenflow_core::ai::{
     ChunkPlanningSummary, ChunkRenderContext, OversizePolicy, TokenCount, TokenEstimator,
 };
 use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
 use obzenflow_core::event::payloads::execution_payload::{AiChunkingPlannedFact, ExecutionPayload};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::id::CompositeId;
@@ -127,8 +129,8 @@ impl<In, Item> ChunkByBudgetBuilder<In, Item> {
             oversize_policy: self.oversize_policy,
             budget_overhead_tokens: self.budget_overhead_tokens,
             snapshot_excluded_items_limit: self.snapshot_excluded_items_limit,
-            rerender_attempts_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            maximum_depth: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            rerender_attempts_total: Arc::new(AtomicU64::new(0)),
+            maximum_depth: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -149,8 +151,8 @@ pub struct ChunkByBudgetTyped<In, Item> {
     oversize_policy: OversizePolicy,
     budget_overhead_tokens: TokenCount,
     snapshot_excluded_items_limit: usize,
-    rerender_attempts_total: Arc<std::sync::atomic::AtomicU64>,
-    maximum_depth: Arc<std::sync::atomic::AtomicU32>,
+    rerender_attempts_total: Arc<AtomicU64>,
+    maximum_depth: Arc<AtomicU32>,
 }
 
 impl<In, Item> fmt::Debug for ChunkByBudgetTyped<In, Item> {
@@ -203,10 +205,7 @@ impl<In, Item> ChunkByBudgetTyped<In, Item> {
         };
         let rerenders = self
             .rerender_attempts_total
-            .fetch_add(
-                plan.stats.rerender_attempts_total,
-                std::sync::atomic::Ordering::Relaxed,
-            )
+            .fetch_add(plan.stats.rerender_attempts_total, Ordering::Relaxed)
             .saturating_add(plan.stats.rerender_attempts_total);
         let work = ObservationRecord::AiChunkingWork {
             rerender_attempts_total: rerenders,
@@ -214,7 +213,7 @@ impl<In, Item> ChunkByBudgetTyped<In, Item> {
                 .maximum_depth
                 .fetch_max(
                     plan.stats.max_decomposition_depth_reached,
-                    std::sync::atomic::Ordering::Relaxed,
+                    Ordering::Relaxed,
                 )
                 .max(plan.stats.max_decomposition_depth_reached),
             budget_overhead_tokens: self.budget_overhead_tokens.get(),
@@ -397,7 +396,18 @@ where
                     .map_err(|error| {
                         protocol_fatal(format!("planning failure serialization failed: {error}"))
                     })?;
-                return Ok(vec![ChainEventFactory::derived_event(writer_id, &event, ChainPayload::CompositeData(obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload::decode(&AiMapReducePlanningFailed::versioned_event_type(), payload).map_err(|e| protocol_fatal(e.to_string()))?), self.lineage)]);
+                return Ok(vec![ChainEventFactory::derived_event(
+                    writer_id,
+                    &event,
+                    ChainPayload::CompositeData(
+                        CompositeDataPayload::decode(
+                            &AiMapReducePlanningFailed::versioned_event_type(),
+                            payload,
+                        )
+                        .map_err(|e| protocol_fatal(e.to_string()))?,
+                    ),
+                    self.lineage,
+                )]);
             }
             Err(error) => return Err(error),
         };
@@ -415,7 +425,18 @@ where
                 serde_json::to_value(AiMapReduceMapInput { job_key, chunk }).map_err(|error| {
                     protocol_fatal(format!("generated map input serialization failed: {error}"))
                 })?;
-            outputs.push(ChainEventFactory::derived_event(writer_id, &event, ChainPayload::CompositeData(obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload::decode(&AiMapReduceMapInput::<ChunkEnvelope<Item>>::versioned_event_type(), payload).map_err(|e| protocol_fatal(e.to_string()))?), self.lineage));
+            outputs.push(ChainEventFactory::derived_event(
+                writer_id,
+                &event,
+                ChainPayload::CompositeData(
+                    CompositeDataPayload::decode(
+                        &AiMapReduceMapInput::<ChunkEnvelope<Item>>::versioned_event_type(),
+                        payload,
+                    )
+                    .map_err(|e| protocol_fatal(e.to_string()))?,
+                ),
+                self.lineage,
+            ));
         }
 
         let manifest = AiMapReducePlanningManifest {
@@ -430,7 +451,18 @@ where
         let payload = serde_json::to_value(manifest).map_err(|error| {
             protocol_fatal(format!("planning manifest serialization failed: {error}"))
         })?;
-        outputs.push(ChainEventFactory::derived_event(writer_id, &event, ChainPayload::CompositeData(obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload::decode(&AiMapReducePlanningManifest::versioned_event_type(), payload).map_err(|e| protocol_fatal(e.to_string()))?), self.lineage));
+        outputs.push(ChainEventFactory::derived_event(
+            writer_id,
+            &event,
+            ChainPayload::CompositeData(
+                CompositeDataPayload::decode(
+                    &AiMapReducePlanningManifest::versioned_event_type(),
+                    payload,
+                )
+                .map_err(|e| protocol_fatal(e.to_string()))?,
+            ),
+            self.lineage,
+        ));
         Ok(outputs)
     }
 
@@ -457,6 +489,9 @@ mod tests {
     use crate::stages::common::handlers::TypedTransformHandlerAdapter;
     use obzenflow_core::ai::{ChatRequest, EstimateSource, OversizeExhaustion, TokenEstimate};
     use obzenflow_core::event::context::CompositeActivationContext;
+    use obzenflow_core::event::payloads::execution_payload::{
+        AiChunkingPlannedFact, ExecutionPayload,
+    };
     use obzenflow_core::{EventId, StageId, WriterId};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -517,14 +552,8 @@ mod tests {
         )
     }
 
-    fn plan_fact(
-        event: &ChainEvent,
-    ) -> &obzenflow_core::event::payloads::execution_payload::AiChunkingPlannedFact {
-        let ChainPayload::Execution(
-            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::AiChunkingPlanned(
-                plan,
-            ),
-        ) = &event.payload
+    fn plan_fact(event: &ChainEvent) -> &AiChunkingPlannedFact {
+        let ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(plan)) = &event.payload
         else {
             panic!("expected durable planning evidence");
         };

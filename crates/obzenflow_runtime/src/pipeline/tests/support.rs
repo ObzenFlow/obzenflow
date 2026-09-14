@@ -7,6 +7,7 @@
 use crate::id_conversions::StageIdExt;
 use crate::journal::FlowJournalFactory;
 use crate::messaging::SystemSubscription;
+use crate::metrics::observations::ObservationHub;
 use crate::pipeline::fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
@@ -208,7 +209,7 @@ pub(in crate::pipeline) fn test_context(
     completion_subscription: Option<SystemSubscription<SystemEvent>>,
 ) -> PipelineContext {
     PipelineContext {
-        observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+        observations: Arc::new(ObservationHub::default()),
         system_id,
         topology,
         flow_name: "test_flow".to_string(),
@@ -583,7 +584,7 @@ pub(in crate::pipeline) fn make_context(
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
 ) -> PipelineContext {
     PipelineContext {
-        observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+        observations: Arc::new(ObservationHub::default()),
         system_id,
         topology: make_topology(),
         flow_name: "test_flow".to_string(),

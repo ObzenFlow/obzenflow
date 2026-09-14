@@ -10,8 +10,10 @@ use super::{
     StageInputPosition, UpstreamSubscription,
 };
 use obzenflow_core::event::context::CompositeActivationContext;
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::chain_payload::EventKind;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::provenance::ChainEventProvenance;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
@@ -264,11 +266,7 @@ where
         }
         if matches!(
             chain_event.payload,
-            ChainPayload::Execution(
-                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(
-                    _
-                )
-            )
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
         ) {
             return true;
         }
@@ -551,12 +549,11 @@ where
         let mut envelope = envelope;
         if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
             if let Some(provenance) = (&mut envelope.envelope.provenance.event as &mut dyn Any)
-                .downcast_mut::<obzenflow_core::event::provenance::ChainEventProvenance>(
-            ) {
+                .downcast_mut::<ChainEventProvenance>()
+            {
                 if matches!(
                     provenance.event_kind,
-                    obzenflow_core::event::payloads::chain_payload::EventKind::Fact
-                        | obzenflow_core::event::payloads::chain_payload::EventKind::CompositeData
+                    EventKind::Fact | EventKind::CompositeData
                 ) {
                     for spec in specs
                         .iter()

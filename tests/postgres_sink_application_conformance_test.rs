@@ -916,7 +916,7 @@ async fn read_stage_journal(
     run: &Path,
     stage: &str,
     field: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = replay_testkit::archive_manifest(run);
     let file = manifest["stages"][stage][field]
         .as_str()
@@ -930,9 +930,7 @@ async fn read_stage_journal(
         .expect("PostgreSQL stage journal reads")
 }
 
-async fn read_system_journal(
-    run: &Path,
-) -> Vec<JournalRecord<obzenflow_core::event::SystemPayload>> {
+async fn read_system_journal(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
     let manifest = replay_testkit::archive_manifest(run);
     let file = manifest["system_journal_file"]
         .as_str()

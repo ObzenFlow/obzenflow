@@ -11,7 +11,7 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{ChainEvent, EventId};
+use obzenflow_core::event::{ChainEvent, ChainPayload, EventId};
 use obzenflow_core::{CycleDepth, SccId, StageId, WriterId};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -117,7 +117,7 @@ impl CycleGuard {
         }
 
         let payload = match &event.payload {
-            obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
+            ChainPayload::FlowControl(payload) => payload,
             _ => return true,
         };
 
@@ -308,8 +308,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
-    use obzenflow_core::StageId;
-    use obzenflow_core::WriterId;
+    use obzenflow_core::{StageId, WriterId};
     use serde_json::json;
     use std::time::{Duration, Instant};
     fn test_scc_id(n: u128) -> SccId {

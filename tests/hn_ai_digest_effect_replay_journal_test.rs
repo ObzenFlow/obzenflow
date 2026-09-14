@@ -9,6 +9,7 @@
 //! polled. The fixture compares the framework evidence and domain effect fact
 //! identities emitted by both runs.
 
+use obzenflow_core::event::observation::ObservationRecord;
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
 #[path = "../examples/hn_ai_digest_demo/decoder.rs"]
@@ -899,7 +900,7 @@ fn is_generated_chunk_output(event: &ChainEvent) -> bool {
 }
 
 fn final_eof_event_type_counts(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    events: &[JournalRecord<ChainPayload>],
 ) -> &std::collections::BTreeMap<obzenflow_core::EventType, obzenflow_core::event::types::SeqNo> {
     events
         .iter()
@@ -916,8 +917,8 @@ fn final_eof_event_type_counts(
 
 fn assert_generated_chunk_authorship(
     run_dir: &Path,
-    seed_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    chunk_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    seed_events: &[JournalRecord<ChainPayload>],
+    chunk_events: &[JournalRecord<ChainPayload>],
     expected_map_inputs: usize,
 ) {
     let seed = seed_events
@@ -1104,10 +1105,7 @@ async fn assert_zero_chunk_archive(
     effect_evidence_ids(&finalise)
 }
 
-async fn stage_envelopes(
-    run_dir: &Path,
-    stage_key: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let relative = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
@@ -1134,8 +1132,8 @@ struct StableDeliveryReceipt {
 }
 
 fn stable_delivery_receipts(
-    parent_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    sink_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    parent_events: &[JournalRecord<ChainPayload>],
+    sink_events: &[JournalRecord<ChainPayload>],
 ) -> Vec<StableDeliveryReceipt> {
     let parents = parent_events
         .iter()
@@ -1231,9 +1229,7 @@ async fn assert_archive_contract_rejected_before_port_resolution(
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-fn effect_evidence_ids(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<EventId> {
+fn effect_evidence_ids(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<EventId> {
     let mut ids = envelopes
         .iter()
         .filter(|envelope| {
@@ -1249,10 +1245,7 @@ fn effect_evidence_ids(
 const CHAT_COMPLETION_EFFECT_TYPE: &str = "obzenflow.ai.chat_completion";
 
 fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
-    let ChainPayload::Execution(
-        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
-    ) = &event.payload
-    else {
+    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
     let record = record.clone();
@@ -1265,10 +1258,7 @@ fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
     }
 }
 
-fn assert_atomic_completion_groups(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-    expected: usize,
-) {
+fn assert_atomic_completion_groups(envelopes: &[JournalRecord<ChainPayload>], expected: usize) {
     let completions = envelopes
         .iter()
         .filter(|envelope| chat_completion_reply(&envelope.authored()).is_some())
@@ -1297,7 +1287,7 @@ fn assert_atomic_completion_groups(
 }
 
 fn assert_completion_contract(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    envelopes: &[JournalRecord<ChainPayload>],
     expected: usize,
     expected_label: &str,
     expected_target: &ChatTarget,
@@ -1350,14 +1340,14 @@ fn assert_completion_contract(
             envelope
                 .envelope.observability
                 .as_ref()
-                .is_none_or(|observability| !observability.records.iter().any(|record| matches!(record, obzenflow_core::event::observation::ObservationRecord::Llm { .. })))
+                .is_none_or(|observability| !observability.records.iter().any(|record| matches!(record, ObservationRecord::Llm { .. })))
         }),
         "120j keeps LLM usage in framework reply evidence without copying it into optional LLM attachments"
     );
 }
 
 fn circuit_breaker_event_count(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    envelopes: &[JournalRecord<ChainPayload>],
     predicate: impl Fn(&CircuitBreakerFact) -> bool,
 ) -> usize {
     envelopes
@@ -1371,9 +1361,7 @@ fn circuit_breaker_event_count(
         .count()
 }
 
-fn chunk_failures(
-    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
-) -> Vec<AiMapReduceChunkFailed> {
+fn chunk_failures(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<AiMapReduceChunkFailed> {
     envelopes
         .iter()
         .filter_map(|envelope| AiMapReduceChunkFailed::from_event(&envelope.authored()))

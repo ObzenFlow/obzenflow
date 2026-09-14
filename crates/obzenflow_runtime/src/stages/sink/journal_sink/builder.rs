@@ -4,6 +4,7 @@
 
 //! Builder for journal sink stages
 
+use obzenflow_core::WriterId;
 use std::sync::Arc;
 
 use super::config::JournalSinkConfig;
@@ -78,7 +79,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
         instrumentation.bind_observations(
             self.resources.flow_id,
-            obzenflow_core::WriterId::from(self.config.stage_id),
+            WriterId::from(self.config.stage_id),
             &self.resources.runtime_execution,
         );
 

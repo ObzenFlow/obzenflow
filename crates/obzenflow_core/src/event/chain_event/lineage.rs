@@ -139,6 +139,7 @@ mod composite_activation_tests {
     use crate::event::chain_event::ChainEventFactory;
     use crate::event::context::CompositeActivationContext;
     use crate::event::types::WriterId;
+    use crate::event::ChainEvent;
     use crate::id::{CompositeId, StageId};
     use serde_json::json;
 
@@ -187,8 +188,7 @@ mod composite_activation_tests {
             .as_object_mut()
             .unwrap()
             .remove("observability");
-        let decoded: crate::event::ChainEvent =
-            serde_json::from_value(without_measurements.clone()).unwrap();
+        let decoded: ChainEvent = serde_json::from_value(without_measurements.clone()).unwrap();
         assert_eq!(
             decoded.composite_activations(),
             child.composite_activations()
@@ -198,7 +198,7 @@ mod composite_activation_tests {
             .unwrap()
             .remove("composite_activations");
         assert!(
-            serde_json::from_value::<crate::event::ChainEvent>(without_measurements).is_err(),
+            serde_json::from_value::<ChainEvent>(without_measurements).is_err(),
             "protected activation membership is required by this schema"
         );
     }

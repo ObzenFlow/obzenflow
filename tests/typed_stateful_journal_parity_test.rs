@@ -323,7 +323,7 @@ async fn read_stage_journal(
     run_dir: &Path,
     stage_name: &str,
     manifest_field: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
@@ -339,28 +339,22 @@ async fn read_stage_journal(
         .expect("stage journal reads")
 }
 
-async fn read_stage(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
 }
 
-async fn read_stage_errors(
-    run_dir: &Path,
-    stage_name: &str,
-) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
+async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
-fn facts<T: TypedPayload>(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<T> {
+fn facts<T: TypedPayload>(events: &[JournalRecord<ChainPayload>]) -> Vec<T> {
     events
         .iter()
         .filter_map(|envelope| T::from_event(&envelope.authored()))
         .collect()
 }
 
-fn delivery_count(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> usize {
+fn delivery_count(events: &[JournalRecord<ChainPayload>]) -> usize {
     events
         .iter()
         .filter(|envelope| matches!(envelope.payload, ChainPayload::Delivery(_)))
@@ -368,7 +362,7 @@ fn delivery_count(events: &[JournalRecord<obzenflow_core::event::ChainPayload>])
 }
 
 fn assert_canonical_fact_and_eof<T: TypedPayload>(
-    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    events: &[JournalRecord<ChainPayload>],
     expected_rows: usize,
 ) {
     let canonical = T::versioned_event_type();
@@ -417,16 +411,16 @@ fn parent_values(output: &ChainEvent, inputs_by_id: &HashMap<EventId, Input>) ->
 }
 
 struct ProjectionJournals<'a> {
-    validate: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    validate_errors: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    fold: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    grouped: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    current_ranking: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    aggregate_ranking: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    fold_sink: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    group_sink: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    current_ranking_sink: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
-    aggregate_ranking_sink: &'a [JournalRecord<obzenflow_core::event::ChainPayload>],
+    validate: &'a [JournalRecord<ChainPayload>],
+    validate_errors: &'a [JournalRecord<ChainPayload>],
+    fold: &'a [JournalRecord<ChainPayload>],
+    grouped: &'a [JournalRecord<ChainPayload>],
+    current_ranking: &'a [JournalRecord<ChainPayload>],
+    aggregate_ranking: &'a [JournalRecord<ChainPayload>],
+    fold_sink: &'a [JournalRecord<ChainPayload>],
+    group_sink: &'a [JournalRecord<ChainPayload>],
+    current_ranking_sink: &'a [JournalRecord<ChainPayload>],
+    aggregate_ranking_sink: &'a [JournalRecord<ChainPayload>],
 }
 
 fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) {

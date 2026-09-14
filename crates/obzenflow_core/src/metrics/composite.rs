@@ -695,7 +695,7 @@ mod tests {
     use super::*;
     use crate::event::context::CompositeActivationContext;
     use crate::event::system_event::SystemFeedRole;
-    use crate::event::{ChainEventFactory, WriterId};
+    use crate::event::{ChainEventFactory, ChainPayload, WriterId};
     use crate::metrics::snapshots::{ContractMetricEdgeKey, ContractMetricResultKey};
     use serde_json::json;
 
@@ -1015,7 +1015,7 @@ mod tests {
     fn duration_excludes_signals_unmatched_data_and_internal_member_output() {
         let (boundary, input, success, _, _, _) = boundary();
         let mut unmatched = exit_event(&boundary, success, "internal.fact.v1", 10, 20);
-        unmatched.payload = crate::event::ChainPayload::Delivery(
+        unmatched.payload = ChainPayload::Delivery(
             crate::event::payloads::delivery_payload::DeliveryPayload::success(
                 crate::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,

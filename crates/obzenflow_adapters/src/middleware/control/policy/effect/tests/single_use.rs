@@ -6,7 +6,7 @@
 
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
-use obzenflow_core::event::JournalRecord;
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{
     BoundedBindingEvidence, FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload,
@@ -48,9 +48,7 @@ struct EmptyJournalReader;
 
 #[async_trait]
 impl JournalReader<ChainEvent> for EmptyJournalReader {
-    async fn next(
-        &mut self,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -76,8 +74,8 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         if self.fail_append {
             return Err(JournalError::Implementation {
                 message: "injected transactional append failure".to_string(),
@@ -91,8 +89,8 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         if self.fail_append {
             return Err(JournalError::Implementation {
                 message: "injected transactional terminal-group failure".to_string(),
@@ -105,16 +103,14 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
             .collect())
     }
 
-    async fn read_all_unordered(
-        &self,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -128,7 +124,7 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }

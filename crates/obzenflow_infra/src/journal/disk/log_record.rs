@@ -6,6 +6,7 @@
 //!
 //! Shared between DiskJournal and DiskJournalReader for efficient file-based operations.
 
+use obzenflow_core::event::event_envelope::JournalGroupMember;
 use obzenflow_core::event::journal_record::{JournalPayload, JournalRecord};
 use obzenflow_core::event::JournalEvent;
 use serde::{Deserialize, Serialize};
@@ -162,7 +163,7 @@ pub(crate) fn deserialize_frame<T: JournalEvent>(
         let provenance = &record.envelope.provenance.journal;
         if provenance.journal_group_id.as_deref() != Some(group.group_id.as_str())
             || provenance.journal_group_member
-                != Some(obzenflow_core::event::event_envelope::JournalGroupMember {
+                != Some(JournalGroupMember {
                     index: index as u32,
                     size,
                 })

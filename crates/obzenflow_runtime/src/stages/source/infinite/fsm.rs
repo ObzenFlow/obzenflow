@@ -543,13 +543,13 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 };
 
                 let system_event = if let Some(reason) = cancel_reason {
-                    obzenflow_core::event::SystemEvent::stage_cancelled_with_accounting(
+                    SystemEvent::stage_cancelled_with_accounting(
                         ctx.stage_id,
                         reason.to_string(),
                         metrics,
                     )
                 } else {
-                    obzenflow_core::event::SystemEvent::stage_failed_with_accounting(
+                    SystemEvent::stage_failed_with_accounting(
                         ctx.stage_id,
                         message.clone(),
                         false, // not recoverable

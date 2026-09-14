@@ -13,10 +13,9 @@ use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEventFactory, JournalRecord, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
-use obzenflow_core::{ChainEvent, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -362,7 +361,7 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Final stream-side EOF delivery that actually closed the stream
     /// subscription. Earlier Poison EOFs and other non-final EOF deliveries
     /// are deliberately not terminal-hook witnesses.
-    pub(crate) final_stream_eof: Option<JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub(crate) final_stream_eof: Option<JournalRecord<ChainPayload>>,
 
     /// Worst-wins join over both sides' terminal EOF kinds (FLOWIP-095k).
     pub terminal_eof_kind: Option<EofKind>,
@@ -372,7 +371,7 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// This should be the *stream EOF envelope* so that drain-time outputs can be
     /// parented with a frontier that includes stream-side ancestry even when the
     /// join emitted zero outputs prior to draining (FLOWIP-071h).
-    pub(crate) drain_parent: Option<JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub(crate) drain_parent: Option<JournalRecord<ChainPayload>>,
 
     /// Conservative high-water clock for the reference side (FLOWIP-071h interim).
     ///
@@ -424,7 +423,7 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
-    pub(crate) pending_parent: Option<JournalRecord<obzenflow_core::event::ChainPayload>>,
+    pub(crate) pending_parent: Option<JournalRecord<ChainPayload>>,
 
     /// Pending state transition once blocked outputs are fully written.
     pub(crate) pending_transition: Option<PendingTransition>,
@@ -656,13 +655,11 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     ctx.instrumentation.authored_data_frontier();
 
                 if let Some(buffered_event) = buffered {
-                    if let obzenflow_core::event::ChainPayload::FlowControl(
-                        FlowControlPayload::Eof {
-                            writer_seq: _writer_seq,
-                            vector_clock,
-                            ..
-                        },
-                    ) = buffered_event.payload.clone()
+                    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
+                        writer_seq: _writer_seq,
+                        vector_clock,
+                        ..
+                    }) = buffered_event.payload.clone()
                     {
                         upstream_vector_clock = vector_clock;
                         // We intentionally ignore the upstream writer_seq and
@@ -672,7 +669,7 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
 
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
 
-                if let obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof {
+                if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                     writer_id: ref mut eof_writer,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,

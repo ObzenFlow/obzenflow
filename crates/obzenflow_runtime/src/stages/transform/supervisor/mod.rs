@@ -9,6 +9,7 @@
 //! - `draining.rs` — Draining state event loop
 //! - `tests.rs`    — All unit tests
 
+use obzenflow_core::event::ChainPayload;
 mod direct_fact_continuation;
 mod draining;
 mod running;
@@ -25,8 +26,7 @@ use crate::supervised_base::{
 };
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::JournalRecord;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
@@ -415,7 +415,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     pub(super) async fn check_cycle_guard_data_event(
         &mut self,
         ctx: &mut TransformContext<H>,
-        envelope: &mut JournalRecord<obzenflow_core::event::ChainPayload>,
+        envelope: &mut JournalRecord<ChainPayload>,
         upstream: Option<StageId>,
         write_error_context: &'static str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -470,7 +470,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
     pub(super) async fn forward_control_event_guarded(
         &mut self,
-        envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        envelope: &JournalRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let should_forward = self
@@ -563,7 +563,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     /// Helper to forward control events
     pub(super) async fn forward_control_event(
         &self,
-        envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        envelope: &JournalRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = forward_control_event_helper(

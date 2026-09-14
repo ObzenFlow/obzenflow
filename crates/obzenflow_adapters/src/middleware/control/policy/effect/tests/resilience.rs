@@ -8,7 +8,9 @@
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
-use obzenflow_core::event::payloads::execution_payload::CircuitBreakerRetryStopReason;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitBreakerRetryStopReason, ExecutionPayload,
+};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
@@ -671,10 +673,9 @@ fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Ve
         .control_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RetryScheduled {
-                    delay_ms,
-                    ..
-                })) => Some(*delay_ms),
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RetryScheduled { delay_ms, .. },
+            )) => Some(*delay_ms),
             _ => None,
         })
         .collect()
@@ -687,12 +688,14 @@ fn recovery_completions(
         .control_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RecoveryCompleted {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RecoveryCompleted {
                     total_attempts,
                     backoff_elapsed_ms,
                     recovery_elapsed_ms,
                     ..
-                })) => Some((*total_attempts, *backoff_elapsed_ms, *recovery_elapsed_ms)),
+                },
+            )) => Some((*total_attempts, *backoff_elapsed_ms, *recovery_elapsed_ms)),
             _ => None,
         })
         .collect()
@@ -705,10 +708,9 @@ fn recovery_completion_cursors(
         .control_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RecoveryCompleted {
-                    cursor,
-                    ..
-                })) => Some(cursor.clone()),
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RecoveryCompleted { cursor, .. },
+            )) => Some(cursor.clone()),
             _ => None,
         })
         .collect()
@@ -725,10 +727,9 @@ fn settled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport) -
         .control_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::AttemptSettled {
-                    attempt,
-                    ..
-                })) => Some(*attempt),
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::AttemptSettled { attempt, .. },
+            )) => Some(*attempt),
             _ => None,
         })
         .collect()
@@ -739,10 +740,9 @@ fn scheduled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport)
         .control_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RetryScheduled {
-                    next_attempt,
-                    ..
-                })) => Some(*next_attempt),
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RetryScheduled { next_attempt, .. },
+            )) => Some(*next_attempt),
             _ => None,
         })
         .collect()
@@ -755,11 +755,13 @@ fn retry_exhaustions(
         .control_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RetryExhausted {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RetryExhausted {
                     total_attempts,
                     reason,
                     ..
-                })) => Some((*total_attempts, *reason)),
+                },
+            )) => Some((*total_attempts, *reason)),
             _ => None,
         })
         .collect()
@@ -1595,12 +1597,14 @@ async fn limiter_wait_is_not_a_slow_dependency_sample() {
         .control_events
         .iter()
         .find_map(|event| match &event.payload {
-            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::AttemptSettled {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::AttemptSettled {
                     slow,
                     dependency_elapsed_ms,
                     admission_wait_ms,
                     ..
-                })) => Some((*slow, *dependency_elapsed_ms, *admission_wait_ms)),
+                },
+            )) => Some((*slow, *dependency_elapsed_ms, *admission_wait_ms)),
             _ => None,
         })
         .expect("second call should publish one physical-attempt row");

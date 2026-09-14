@@ -14,6 +14,9 @@
 //! `Resume` strategy (continue-live, position-based) plus a `ResumeControl`
 //! handle, without changing the read-only query trait below.
 
+use crate::metrics::observations::ObservationHub;
+use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::{FlowId, WriterId};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -481,7 +484,7 @@ pub struct RuntimeExecution {
     strategy: Arc<dyn ExecutionStrategy>,
     archive: Option<Arc<dyn ReplayArchive>>,
     effect_cursors: Arc<crate::effects::EffectCursorCoordinator>,
-    observations: Arc<crate::metrics::observations::ObservationHub>,
+    observations: Arc<ObservationHub>,
     /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
     resume: Option<ResumeControl>,
 }
@@ -499,7 +502,7 @@ impl std::fmt::Debug for RuntimeExecution {
 }
 
 impl RuntimeExecution {
-    pub fn observations(&self) -> &Arc<crate::metrics::observations::ObservationHub> {
+    pub fn observations(&self) -> &Arc<ObservationHub> {
         &self.observations
     }
 
@@ -532,7 +535,7 @@ impl RuntimeExecution {
             strategy,
             archive,
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
-            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+            observations: Arc::new(ObservationHub::default()),
             resume,
         }
     }
@@ -547,9 +550,9 @@ impl RuntimeExecution {
 
     pub fn observation_recorder(
         &self,
-        flow_id: obzenflow_core::FlowId,
-        observer: obzenflow_core::WriterId,
-    ) -> Arc<dyn obzenflow_core::event::observation::ObservationRecorder> {
+        flow_id: FlowId,
+        observer: WriterId,
+    ) -> Arc<dyn ObservationRecorder> {
         let scope = crate::metrics::observations::scope(self, flow_id);
         self.observations.activate_scope(scope);
         Arc::new(
@@ -580,7 +583,7 @@ impl RuntimeExecution {
             strategy,
             archive,
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
-            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+            observations: Arc::new(ObservationHub::default()),
             resume: None,
         }
     }

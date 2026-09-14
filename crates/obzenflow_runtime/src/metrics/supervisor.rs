@@ -12,8 +12,7 @@ use crate::messaging::system_subscription::SystemSubscription;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::event::WriterId;
+use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
 use std::sync::Arc;
@@ -78,7 +77,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = obzenflow_core::event::SystemEvent::new(
             self.writer_id(),
-            obzenflow_core::event::SystemPayload::MetricsCoordination(
+            SystemPayload::MetricsCoordination(
                 obzenflow_core::event::MetricsCoordinationEvent::Shutdown,
             ),
         );
@@ -112,7 +111,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 // Metrics aggregator creates SystemEvent directly
                 let event = obzenflow_core::event::SystemEvent::new(
                     WriterId::from(self.system_id),
-                    obzenflow_core::event::SystemPayload::MetricsCoordination(
+                    SystemPayload::MetricsCoordination(
                         obzenflow_core::event::MetricsCoordinationEvent::Ready,
                     ),
                 );
