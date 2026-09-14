@@ -8,14 +8,14 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, SinkDestinationErrorCode, SinkOperationFailed,
-    SinkOperationPhase, SinkWritePhase, StageLifecycleEvent, SystemEvent, SystemEventType,
+    ChainEvent, ChainPayload, SinkDestinationErrorCode, SinkOperationFailed, SinkOperationPhase,
+    SinkWritePhase, StageLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
 use obzenflow_core::{
-    AdmissionSeq, EventEnvelope, EventId, FlowId, JournalId, StageId, SystemId, TypedPayload,
+    AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, StageId, SystemId, TypedPayload,
 };
 use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
@@ -72,8 +72,8 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let fact = (self.fact)(&event);
         if let Some(fact) = fact {
             self.probe
@@ -93,7 +93,7 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
                 .push(AppendObservation {
                     fact,
                     boundary: AppendBoundary::Returned,
-                    admission_seq: (self.admission_seq)(&envelope.event),
+                    admission_seq: (self.admission_seq)(&envelope.authored()),
                 });
         }
         result
@@ -103,19 +103,19 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(group_id, events, parent).await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
@@ -123,22 +123,25 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
         self.inner.reader_from(position).await
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }
 
 fn chain_fact(event: &ChainEvent) -> Option<&'static str> {
     if matches!(
-        &event.content,
-        ChainEventContent::Delivery(payload)
+        &event.payload,
+        ChainPayload::Delivery(payload)
             if matches!(payload.result, DeliveryResult::Failed { .. })
     ) {
         Some("R")
     } else if SinkOperationFailed::from_event(event).is_some() {
         Some("O")
     } else if ProbeInput::from_event(event).is_some()
-        && matches!(event.processing_info.status, ProcessingStatus::Error { .. })
+        && matches!(event.processing.status, ProcessingStatus::Error { .. })
     {
         Some("X")
     } else {
@@ -152,8 +155,8 @@ fn chain_admission_seq(event: &ChainEvent) -> Option<AdmissionSeq> {
 
 fn system_fact(event: &SystemEvent) -> Option<&'static str> {
     matches!(
-        event.event,
-        SystemEventType::StageLifecycle {
+        event.payload,
+        SystemPayload::StageLifecycle {
             event: StageLifecycleEvent::Failed { .. },
             ..
         }
@@ -696,7 +699,7 @@ async fn read_stage_journal(
     run: &Path,
     stage: &str,
     field: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = manifest(run);
     let file = manifest["stages"][stage][field]
         .as_str()
@@ -710,7 +713,9 @@ async fn read_stage_journal(
         .expect("stage journal reads")
 }
 
-async fn read_system_journal(run: &Path) -> Vec<EventEnvelope<SystemEvent>> {
+async fn read_system_journal(
+    run: &Path,
+) -> Vec<JournalRecord<obzenflow_core::event::SystemPayload>> {
     let manifest = manifest(run);
     let file = manifest["system_journal_file"]
         .as_str()
@@ -730,27 +735,28 @@ fn direct_parent(event: &ChainEvent) -> Option<EventId> {
     event.causality.parent_ids.first().copied()
 }
 
-struct FailureChain<'a> {
-    receipt: &'a ChainEvent,
-    operation_event: &'a ChainEvent,
+struct FailureChain {
+    receipt: ChainEvent,
+    operation_event: ChainEvent,
     operation: SinkOperationFailed,
-    route: &'a ChainEvent,
+    route: ChainEvent,
 }
 
-fn failure_chain<'a>(
-    data: &'a [EventEnvelope<ChainEvent>],
-    errors: &'a [EventEnvelope<ChainEvent>],
-) -> FailureChain<'a> {
+fn failure_chain(
+    data: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    errors: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> FailureChain {
     let (operation_envelope, operation) = errors
         .iter()
         .find_map(|envelope| {
-            SinkOperationFailed::from_event(&envelope.event).map(|operation| (envelope, operation))
+            SinkOperationFailed::from_event(&envelope.authored())
+                .map(|operation| (envelope, operation))
         })
         .expect("one typed operation failure");
     assert_eq!(
         errors
             .iter()
-            .filter(|envelope| SinkOperationFailed::from_event(&envelope.event).is_some())
+            .filter(|envelope| SinkOperationFailed::from_event(&envelope.authored()).is_some())
             .count(),
         1,
         "one authored error creates exactly one operation fact"
@@ -760,46 +766,51 @@ fn failure_chain<'a>(
         .expect("write failure names its receipt");
     let receipt = data
         .iter()
-        .map(|envelope| &envelope.event)
+        .map(|envelope| envelope.authored())
         .find(|event| event.id == receipt_id)
         .expect("failed receipt exists");
     let routes = errors
         .iter()
-        .map(|envelope| &envelope.event)
-        .filter(|event| direct_parent(event) == Some(operation_envelope.event.id))
+        .map(|envelope| envelope.authored())
+        .filter(|event| {
+            direct_parent(event) == Some(operation_envelope.envelope.provenance.event.id)
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         routes.len(),
         1,
         "O has exactly one fresh error-route successor"
     );
-    let route = routes[0];
+    let route = routes[0].clone();
 
-    assert_eq!(direct_parent(&operation_envelope.event), Some(receipt.id));
+    assert_eq!(
+        direct_parent(&operation_envelope.authored()),
+        Some(receipt.id)
+    );
     assert_ne!(
         route.id,
         operation.causal_event_id.expect("current input id")
     );
     assert_eq!(route.event_type(), ProbeInput::versioned_event_type());
     assert!(matches!(
-        route.processing_info.status,
+        route.processing.status,
         ProcessingStatus::Error { .. }
     ));
     assert!(
-        operation_envelope.event.admission_seq < route.admission_seq,
+        operation_envelope.envelope.provenance.event.admission_seq < route.admission_seq,
         "journal-stamped O must precede X"
     );
 
     FailureChain {
         receipt,
-        operation_event: &operation_envelope.event,
+        operation_event: operation_envelope.authored(),
         operation,
         route,
     }
 }
 
 fn failed_receipt_type(event: &ChainEvent) -> Option<&str> {
-    let ChainEventContent::Delivery(payload) = &event.content else {
+    let ChainPayload::Delivery(payload) = &event.payload else {
         return None;
     };
     let DeliveryResult::Failed { error_type, .. } = &payload.result else {
@@ -865,7 +876,7 @@ async fn current_only_failure_is_accounted_linked_and_continuable() {
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let chain = failure_chain(&data, &errors);
     assert_eq!(
-        failed_receipt_type(chain.receipt),
+        failed_receipt_type(&chain.receipt),
         Some("sink_write_current_only_failed")
     );
     assert_eq!(
@@ -885,13 +896,16 @@ async fn current_only_failure_is_accounted_linked_and_continuable() {
         chain.operation.failed_delivery_event_id,
         Some(chain.receipt.id)
     );
-    assert_eq!(direct_parent(chain.operation_event), Some(chain.receipt.id));
-    assert_eq!(direct_parent(chain.route), Some(chain.operation_event.id));
+    assert_eq!(
+        direct_parent(&chain.operation_event),
+        Some(chain.receipt.id)
+    );
+    assert_eq!(direct_parent(&chain.route), Some(chain.operation_event.id));
 
     let outcomes = data
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Delivery(payload) => Some(&payload.result),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Delivery(payload) => Some(&payload.result),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -914,25 +928,26 @@ async fn confirmed_rollback_retains_every_earlier_capability_and_never_settles_f
     let input_ids = source
         .iter()
         .filter_map(|envelope| {
-            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+            ProbeInput::from_event(&envelope.authored())
+                .map(|input| (input.value, envelope.envelope.provenance.event.id))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let data = read_stage_journal(&run, "probe", "data_journal_file").await;
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let chain = failure_chain(&data, &errors);
     assert_eq!(
-        failed_receipt_type(chain.receipt),
+        failed_receipt_type(&chain.receipt),
         Some("sink_batch_confirmed_rollback")
     );
     assert_eq!(chain.operation.causal_event_id, input_ids.get(&2).copied());
 
     let terminal_parents = data
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Delivery(payload)
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Delivery(payload)
                 if matches!(payload.result, DeliveryResult::Success { .. }) =>
             {
-                direct_parent(&envelope.event)
+                direct_parent(&envelope.authored())
             }
             _ => None,
         })
@@ -957,7 +972,8 @@ async fn deferred_origin_poison_names_the_buffered_subject_and_stops_reentry() {
     let input_ids = source
         .iter()
         .filter_map(|envelope| {
-            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+            ProbeInput::from_event(&envelope.authored())
+                .map(|input| (input.value, envelope.envelope.provenance.event.id))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let data = read_stage_journal(&run, "probe", "data_journal_file").await;
@@ -965,7 +981,7 @@ async fn deferred_origin_poison_names_the_buffered_subject_and_stops_reentry() {
     let chain = failure_chain(&data, &errors);
 
     assert_eq!(
-        failed_receipt_type(chain.receipt),
+        failed_receipt_type(&chain.receipt),
         Some("sink_materialisation_poisoned")
     );
     assert_eq!(chain.operation.causal_event_id, Some(input_ids[&2]));
@@ -973,7 +989,7 @@ async fn deferred_origin_poison_names_the_buffered_subject_and_stops_reentry() {
         chain.operation.operation_subject_event_id,
         Some(input_ids[&1])
     );
-    assert_eq!(direct_parent(chain.receipt), Some(input_ids[&2]));
+    assert_eq!(direct_parent(&chain.receipt), Some(input_ids[&2]));
     assert_ne!(
         chain.operation.operation_subject_event_id,
         chain.operation.causal_event_id
@@ -981,11 +997,11 @@ async fn deferred_origin_poison_names_the_buffered_subject_and_stops_reentry() {
 
     let terminal_parents = data
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Delivery(payload)
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Delivery(payload)
                 if matches!(payload.result, DeliveryResult::Success { .. }) =>
             {
-                direct_parent(&envelope.event)
+                direct_parent(&envelope.authored())
             }
             _ => None,
         })
@@ -1039,7 +1055,8 @@ async fn replay_reproduces_the_unresolved_deferred_origin_failure() {
     let input_ids = source
         .iter()
         .filter_map(|envelope| {
-            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+            ProbeInput::from_event(&envelope.authored())
+                .map(|input| (input.value, envelope.envelope.provenance.event.id))
         })
         .collect::<std::collections::HashMap<_, _>>();
     let data = read_stage_journal(&replay_run, "probe", "data_journal_file").await;
@@ -1069,27 +1086,32 @@ async fn fan_in_confirmed_rollback_retains_and_settles_exact_cross_upstream_pare
         .iter()
         .chain(&right)
         .filter_map(|envelope| {
-            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+            ProbeInput::from_event(&envelope.authored())
+                .map(|input| (input.value, envelope.envelope.provenance.event.id))
         })
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(input_ids.len(), 4);
-    assert!(left.iter().any(|event| event.event.id == input_ids[&1]));
-    assert!(right.iter().any(|event| event.event.id == input_ids[&2]));
+    assert!(left
+        .iter()
+        .any(|event| event.envelope.provenance.event.id == input_ids[&1]));
+    assert!(right
+        .iter()
+        .any(|event| event.envelope.provenance.event.id == input_ids[&2]));
 
     let data = read_stage_journal(&run, "probe", "data_journal_file").await;
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let chain = failure_chain(&data, &errors);
     assert_eq!(chain.operation.causal_event_id, Some(input_ids[&3]));
     assert_eq!(chain.operation.operation_subject_event_id, None);
-    assert_eq!(direct_parent(chain.receipt), Some(input_ids[&3]));
+    assert_eq!(direct_parent(&chain.receipt), Some(input_ids[&3]));
 
     let terminal_parents = data
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Delivery(payload)
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Delivery(payload)
                 if matches!(payload.result, DeliveryResult::Success { .. }) =>
             {
-                direct_parent(&envelope.event)
+                direct_parent(&envelope.authored())
             }
             _ => None,
         })
@@ -1115,7 +1137,7 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let chain = failure_chain(&data, &errors);
     assert_eq!(
-        failed_receipt_type(chain.receipt),
+        failed_receipt_type(&chain.receipt),
         Some("sink_materialisation_poisoned")
     );
     assert_eq!(
@@ -1127,8 +1149,8 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
     let system_events = read_system_journal(&run).await;
     let completed = system_events.iter().filter(|envelope| {
         matches!(
-            &envelope.event.event,
-            SystemEventType::StageLifecycle {
+            &envelope.payload,
+            SystemPayload::StageLifecycle {
                 stage_id: completed_stage,
                 event: StageLifecycleEvent::Completed { .. },
             } if *completed_stage == stage_id
@@ -1142,8 +1164,8 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
 
     let tied_failures = system_events
         .into_iter()
-        .filter_map(|envelope| match envelope.event.event {
-            SystemEventType::StageLifecycle {
+        .filter_map(|envelope| match envelope.payload {
+            SystemPayload::StageLifecycle {
                 stage_id: failed_stage,
                 event:
                     StageLifecycleEvent::Failed {
@@ -1233,7 +1255,8 @@ async fn fan_in_poison_stops_before_a_later_parent_can_accumulate_receipt_progre
         .iter()
         .chain(&right)
         .filter_map(|envelope| {
-            ProbeInput::from_event(&envelope.event).map(|input| (input.value, envelope.event.id))
+            ProbeInput::from_event(&envelope.authored())
+                .map(|input| (input.value, envelope.envelope.provenance.event.id))
         })
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
@@ -1254,10 +1277,10 @@ async fn fan_in_poison_stops_before_a_later_parent_can_accumulate_receipt_progre
         Some(input_ids[&2]),
         "the typed subject preserves the exact parent from the other fan-in feed"
     );
-    assert_eq!(direct_parent(chain.receipt), Some(input_ids[&3]));
+    assert_eq!(direct_parent(&chain.receipt), Some(input_ids[&3]));
     assert_eq!(
         data.iter()
-            .filter(|envelope| matches!(envelope.event.content, ChainEventContent::Delivery(_)))
+            .filter(|envelope| matches!(envelope.payload, ChainPayload::Delivery(_)))
             .count(),
         3,
         "no later delivery receipt accumulates after poison"
@@ -1266,8 +1289,8 @@ async fn fan_in_poison_stops_before_a_later_parent_can_accumulate_receipt_progre
         data.iter()
             .filter(|envelope| {
                 matches!(
-                    &envelope.event.content,
-                    ChainEventContent::Delivery(payload)
+                    &envelope.payload,
+                    ChainPayload::Delivery(payload)
                         if matches!(payload.result, DeliveryResult::Buffered { .. })
                 )
             })
@@ -1293,8 +1316,8 @@ async fn assert_lifecycle_failure(
     let operations = errors
         .iter()
         .filter_map(|envelope| {
-            SinkOperationFailed::from_event(&envelope.event)
-                .map(|operation| (&envelope.event, operation))
+            SinkOperationFailed::from_event(&envelope.authored())
+                .map(|operation| (envelope.authored(), operation))
         })
         .collect::<Vec<_>>();
     assert_eq!(operations.len(), 1);
@@ -1309,8 +1332,8 @@ async fn assert_lifecycle_failure(
     let system_events = read_system_journal(&run).await;
     let completed = system_events.iter().filter(|envelope| {
         matches!(
-            &envelope.event.event,
-            SystemEventType::StageLifecycle {
+            &envelope.payload,
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Completed { .. },
             } if *stage_id == operation.stage_id
@@ -1324,8 +1347,8 @@ async fn assert_lifecycle_failure(
 
     let tied_failures = system_events
         .into_iter()
-        .filter_map(|envelope| match envelope.event.event {
-            SystemEventType::StageLifecycle {
+        .filter_map(|envelope| match envelope.payload {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event:
                     StageLifecycleEvent::Failed {
@@ -1371,15 +1394,15 @@ async fn eof_flush_failure_names_the_deferred_subject_and_skips_drain() {
     let first_id = source
         .iter()
         .find_map(|envelope| {
-            ProbeInput::from_event(&envelope.event)
+            ProbeInput::from_event(&envelope.authored())
                 .filter(|input| input.value == 1)
-                .map(|_| envelope.event.id)
+                .map(|_| envelope.envelope.provenance.event.id)
         })
         .expect("first deferred input exists");
     let errors = read_stage_journal(&run, "probe", "error_journal_file").await;
     let operations = errors
         .iter()
-        .filter_map(|envelope| SinkOperationFailed::from_event(&envelope.event))
+        .filter_map(|envelope| SinkOperationFailed::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0].phase, SinkOperationPhase::Flush);

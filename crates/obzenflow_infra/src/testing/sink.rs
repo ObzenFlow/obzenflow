@@ -11,8 +11,8 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, Deliver
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, SinkOperationFailed, SinkOperationPhase, StageFatalRecorded,
-    StageLifecycleEvent, SystemEvent, SystemEventType,
+    ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, StageFatalRecorded,
+    StageLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION};
@@ -614,7 +614,7 @@ async fn read_chain_journal(path: &Path) -> Result<Vec<ChainEvent>, SinkConforma
         .await
         .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?
     {
-        events.push(envelope.event);
+        events.push(envelope.into_authored());
     }
     Ok(events)
 }
@@ -635,15 +635,15 @@ async fn read_system_journal(path: &Path) -> Result<Vec<SystemEvent>, SinkConfor
         .await
         .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?
     {
-        events.push(envelope.event);
+        events.push(envelope.into_authored());
     }
     Ok(events)
 }
 
 fn is_failed_receipt(event: &ChainEvent) -> bool {
     matches!(
-        &event.content,
-        ChainEventContent::Delivery(DeliveryPayload {
+        &event.payload,
+        ChainPayload::Delivery(DeliveryPayload {
             result: DeliveryResult::Failed { .. },
             ..
         })
@@ -670,20 +670,26 @@ struct ChainEventProjection {
 fn normalised_forwarded_control(
     event: &ChainEvent,
 ) -> Result<Option<serde_json::Value>, SinkConformanceFailure> {
-    if !matches!(event.content, ChainEventContent::FlowControl(_)) {
+    if !matches!(event.payload, ChainPayload::FlowControl(_)) {
         return Ok(None);
     }
 
     let mut value = serde_json::to_value(event)
         .map_err(|error| failure("journal-truth", "event-identity", error.to_string()))?;
-    let object = value.as_object_mut().ok_or_else(|| {
-        failure(
-            "journal-truth",
-            "event-identity",
-            "serialised ChainEvent is not an object",
-        )
-    })?;
-    object.remove("runtime_context");
+    value["envelope"]
+        .as_object_mut()
+        .expect("canonical envelope")
+        .remove("observability");
+    let object = value["envelope"]["provenance"]["event"]
+        .as_object_mut()
+        .ok_or_else(|| {
+            failure(
+                "journal-truth",
+                "event-identity",
+                "missing protected event provenance",
+            )
+        })?;
+    object.remove("runtime");
     let flow_context = object
         .get_mut("flow_context")
         .and_then(serde_json::Value::as_object_mut)
@@ -776,7 +782,7 @@ fn expected_error_route(kind: &ErrorKind) -> SinkJournalRoute {
 }
 
 fn event_error_kind(event: &ChainEvent) -> Option<&ErrorKind> {
-    match &event.processing_info.status {
+    match &event.processing.status {
         ProcessingStatus::Error {
             kind: Some(kind), ..
         } => Some(kind),
@@ -785,10 +791,10 @@ fn event_error_kind(event: &ChainEvent) -> Option<&ErrorKind> {
 }
 
 fn failed_receipt_disposition(event: &ChainEvent) -> Option<SinkWriteFailureDisposition> {
-    let ChainEventContent::Delivery(DeliveryPayload {
+    let ChainPayload::Delivery(DeliveryPayload {
         result: DeliveryResult::Failed { error_type, .. },
         ..
-    }) = &event.content
+    }) = &event.payload
     else {
         return None;
     };
@@ -801,19 +807,11 @@ fn failed_receipt_disposition(event: &ChainEvent) -> Option<SinkWriteFailureDisp
 }
 
 fn same_data_payload(left: &ChainEvent, right: &ChainEvent) -> bool {
-    matches!(
-        (&left.content, &right.content),
-        (
-            ChainEventContent::Data {
-                event_type: left_type,
-                payload: left_payload,
-            },
-            ChainEventContent::Data {
-                event_type: right_type,
-                payload: right_payload,
-            }
-        ) if left_type == right_type && left_payload == right_payload
-    )
+    left.consumes_data_credit()
+        && right.consumes_data_credit()
+        && left.event_kind == right.event_kind
+        && left.event_type() == right.event_type()
+        && left.payload.contract_body().ok() == right.payload.contract_body().ok()
 }
 
 fn inherited_route_context_matches(input: &ChainEvent, route: &ChainEvent) -> bool {
@@ -865,8 +863,8 @@ fn write_failure_receipt_matches(
         && direct_parent(operation_event) == Some(receipt.id)
         && receipt.flow_context.stage_id == operation.stage_id
         && matches!(
-            &receipt.content,
-            ChainEventContent::Delivery(payload)
+            &receipt.payload,
+            ChainPayload::Delivery(payload)
                 if payload.destination == operation.logical_destination
         )
 }
@@ -1005,8 +1003,8 @@ fn validate_sink_lifecycle_projection(
         let lifecycle = system_events
             .iter()
             .enumerate()
-            .filter_map(|(index, event)| match &event.event {
-                SystemEventType::StageLifecycle {
+            .filter_map(|(index, event)| match &event.payload {
+                SystemPayload::StageLifecycle {
                     stage_id,
                     event: lifecycle,
                 } if stage_id.to_string() == stage.stage_id => Some((index, lifecycle)),
@@ -1204,8 +1202,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
 
     let lifecycle_causes = system_events
         .iter()
-        .filter_map(|event| match &event.event {
-            SystemEventType::StageLifecycle {
+        .filter_map(|event| match &event.payload {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event:
                     StageLifecycleEvent::Failed {
@@ -1319,8 +1317,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                     candidate.flow_context.stage_id == operation.stage_id
                         && direct_parent(candidate) == Some(subject_id)
                         && matches!(
-                            &candidate.content,
-                            ChainEventContent::Delivery(payload)
+                            &candidate.payload,
+                            ChainPayload::Delivery(payload)
                                 if matches!(payload.result, DeliveryResult::Buffered { .. })
                         )
                 })
@@ -1331,8 +1329,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                     candidate.flow_context.stage_id == operation.stage_id
                         && direct_parent(candidate) == Some(subject_id)
                         && matches!(
-                            &candidate.content,
-                            ChainEventContent::Delivery(payload)
+                            &candidate.payload,
+                            ChainPayload::Delivery(payload)
                                 if matches!(
                                     payload.result,
                                     DeliveryResult::Success { .. }
@@ -1510,8 +1508,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
     let operation_failure_metrics = fold_operation_failure_metrics(&operation_failures);
     let eof_kinds = chain_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
+        .filter_map(|event| match &event.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
             _ => None,
         })
         .collect();
@@ -1800,7 +1798,7 @@ mod tests {
             r#"{}"#,
             r#"{"manifest_version":3.0}"#,
             r#"{"manifest_version":"2.0"}"#,
-            r#"{"manifest_version":"4.0"}"#,
+            r#"{"manifest_version":"5.0"}"#,
             r#"{"manifest_version":null}"#,
         ] {
             let error = parse_current_manifest(raw).expect_err("non-exact epoch must fail");
@@ -1928,7 +1926,8 @@ mod tests {
         ));
 
         let mut self_cycle = fixture.operation_event.clone();
-        self_cycle.causality.parent_ids.push(self_cycle.id);
+        let self_id = self_cycle.id;
+        self_cycle.causality.parent_ids.push(self_id);
         assert!(!operation_failure_identity_matches(
             &self_cycle,
             &fixture.operation,
@@ -1956,9 +1955,7 @@ mod tests {
         ));
 
         let mut wrong_type = fixture.route.clone();
-        if let ChainEventContent::Data { event_type, .. } = &mut wrong_type.content {
-            *event_type = "failure.projection.wrong.v1".to_string();
-        }
+        wrong_type.event_type = "failure.projection.wrong.v1".to_string();
         assert!(!write_failure_route_matches(
             &fixture.input,
             &fixture.receipt,
@@ -1999,7 +1996,8 @@ mod tests {
         ));
 
         let mut self_cycle = fixture.route.clone();
-        self_cycle.causality.parent_ids.push(self_cycle.id);
+        let self_id = self_cycle.id;
+        self_cycle.causality.parent_ids.push(self_id);
         assert!(!write_failure_route_matches(
             &fixture.input,
             &fixture.receipt,
@@ -2047,7 +2045,7 @@ mod tests {
             authored
                 .clone()
                 .with_flow_context(flow_context("output", sink_stage, StageType::Sink));
-        forwarded.runtime_context = None;
+        forwarded.runtime = None;
 
         let mut events = Vec::new();
         let mut projections = HashMap::new();

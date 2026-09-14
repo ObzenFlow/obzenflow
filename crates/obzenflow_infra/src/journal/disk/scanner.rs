@@ -265,19 +265,21 @@ mod tests {
     use obzenflow_core::{JournalId, StageId, WriterId};
     use serde_json::json;
     use std::io::Cursor;
-    use ulid::Ulid;
 
     fn record() -> LogRecord<ChainEvent> {
         let writer_id = WriterId::from(StageId::new());
         let event = ChainEventFactory::data_event(writer_id, "test.event", json!({ "k": "v" }));
-        LogRecord {
-            journal_id: JournalId::new(),
-            event_id: Ulid::new(),
-            writer_id,
-            vector_clock: VectorClock::new(),
-            timestamp: Utc::now(),
+        obzenflow_core::event::JournalRecord::commit_event(
             event,
-        }
+            obzenflow_core::event::provenance::JournalProvenance {
+                journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+                vector_clock: VectorClock::new(),
+                timestamp: Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid record")
     }
 
     /// Frame `body` with a correct `<len>:<crc>:` header (no trailing newline).

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
-use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
@@ -25,13 +25,13 @@ fn make_data_event(writer: WriterId, seq: u64) -> ChainEvent {
 /// Helper to create a simple EOF event for a given writer
 fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
     let mut eof = ChainEventFactory::eof_event(writer, true);
-    if let ChainEventContent::FlowControl(
+    if let ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
             writer_id,
             writer_seq,
             ..
         },
-    ) = &mut eof.content
+    ) = &mut eof.payload
     {
         *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));
@@ -171,8 +171,8 @@ async fn contract_state_tracks_seq_and_emits_final() {
     let final_events: Vec<_> = events
         .iter()
         .filter(|env| matches!(
-            env.event.content,
-            ChainEventContent::FlowControl(
+            env.payload,
+            ChainPayload::FlowControl(
                 obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionFinal { .. }
             )
         ))
@@ -184,12 +184,12 @@ async fn contract_state_tracks_seq_and_emits_final() {
     );
 
     // The consumed_count in the final event should match FSM-owned reader_seq.
-    if let ChainEventContent::FlowControl(
+    if let ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionFinal {
             consumed_count,
             ..
         },
-    ) = &final_events[0].event.content
+    ) = &final_events[0].payload
     {
         assert_eq!(
             *consumed_count,
@@ -282,8 +282,8 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
         .iter()
         .filter(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(
+                env.payload,
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionGap { .. }
                 )
             )
@@ -294,13 +294,13 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
         "expected a ConsumptionGap event for missing events"
     );
 
-    if let ChainEventContent::FlowControl(
+    if let ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionGap {
             from_seq,
             to_seq,
             upstream,
         },
-    ) = &gap_events[0].event.content
+    ) = &gap_events[0].payload
     {
         assert_eq!(*from_seq, SeqNo(3));
         assert_eq!(*to_seq, SeqNo(3));
@@ -313,8 +313,8 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
         .iter()
         .filter(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(
+                env.payload,
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionFinal { .. }
                 )
             )
@@ -325,7 +325,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
         "expected a ConsumptionFinal event for missing-events violation"
     );
 
-    if let ChainEventContent::FlowControl(
+    if let ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionFinal {
             pass,
             consumed_count,
@@ -335,7 +335,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
             failure_reason,
             ..
         },
-    ) = &final_events[0].event.content
+    ) = &final_events[0].payload
     {
         assert!(!*pass, "final event should mark pass=false");
         assert_eq!(
@@ -446,8 +446,8 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
         .iter()
         .filter(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(
+                env.payload,
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionGap { .. }
                 )
             )
@@ -462,8 +462,8 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
         .iter()
         .filter(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(
+                env.payload,
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionFinal { .. }
                 )
             )
@@ -474,7 +474,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
         "expected a ConsumptionFinal event for over-consumption divergence"
     );
 
-    if let ChainEventContent::FlowControl(
+    if let ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::ConsumptionFinal {
             pass,
             consumed_count,
@@ -483,7 +483,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
             failure_reason,
             ..
         },
-    ) = &final_events[0].event.content
+    ) = &final_events[0].payload
     {
         assert!(!*pass, "final event should mark pass=false");
         assert_eq!(*consumed_count, Count(2));

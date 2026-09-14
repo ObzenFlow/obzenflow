@@ -12,7 +12,7 @@ use crate::messaging::upstream_subscription::StageInputPosition;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, StageId};
+use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSide {
@@ -25,7 +25,7 @@ pub struct JoinDeliverySnapshot {
     side: JoinSide,
     delivered_source_stage_id: StageId,
     delivered_stage_input_position: StageInputPosition,
-    input_envelope: EventEnvelope<ChainEvent>,
+    input: ChainEvent,
     reference_high_water: VectorClock,
 }
 
@@ -34,14 +34,14 @@ impl JoinDeliverySnapshot {
         side: JoinSide,
         delivered_source_stage_id: StageId,
         delivered_stage_input_position: StageInputPosition,
-        input_envelope: EventEnvelope<ChainEvent>,
+        input_envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
         reference_high_water: VectorClock,
     ) -> Self {
         Self {
             side,
             delivered_source_stage_id,
             delivered_stage_input_position,
-            input_envelope,
+            input: input_envelope.into_authored(),
             reference_high_water,
         }
     }
@@ -59,7 +59,7 @@ impl JoinDeliverySnapshot {
     }
 
     pub fn input(&self) -> &ChainEvent {
-        &self.input_envelope.event
+        &self.input
     }
 
     pub fn reference_high_water(&self) -> &VectorClock {
@@ -576,7 +576,7 @@ mod tests {
             JoinSide::Stream,
             StageId::new(),
             position,
-            EventEnvelope::new(JournalWriterId::new(), event.clone()),
+            JournalRecord::new(JournalWriterId::new(), event.clone()),
             VectorClock::new(),
         );
         require_position(delivery.delivered_stage_input_position());

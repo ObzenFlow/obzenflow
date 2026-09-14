@@ -91,11 +91,14 @@ fn extensible_and_hidden_surface_lists_are_source_guarded() {
         "pub struct CompositeActivationContext",
         "#[non_exhaustive]",
     );
-    let observability = include_str!("../src/event/context/observability_context.rs");
+    // Activation membership is protected provenance; optional observations are closed.
+    let provenance = include_str!("../src/event/provenance.rs");
+    assert!(provenance.contains("pub composite_activations: Vec<CompositeActivationContext>"));
+    let observation = include_str!("../src/event/observation.rs");
     assert_attribute_before(
-        observability,
+        observation,
         "pub struct ObservabilityContext",
-        "#[non_exhaustive]",
+        "#[serde(deny_unknown_fields)]",
     );
 
     let snapshots = include_str!("../src/metrics/snapshots.rs");

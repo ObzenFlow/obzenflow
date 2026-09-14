@@ -6,9 +6,9 @@
 //! Neither is evidence that the sequential collector has covered a journal.
 
 use super::fsm::MetricsJournalKind;
-use obzenflow_core::event::context::RuntimeContext;
+use obzenflow_core::event::context::RuntimeProvenance;
 use obzenflow_core::journal::JournalError;
-use obzenflow_core::{ChainEvent, EventEnvelope, EventId, Journal, JournalId, StageId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, Journal, JournalId, JournalRecord, StageId, WriterId};
 
 pub(super) const SEARCH_WINDOWS: [usize; 8] = [1, 5, 20, 100, 500, 2_000, 10_000, 50_000];
 
@@ -29,9 +29,12 @@ struct RecordIdentity {
 }
 
 impl RecordIdentity {
-    fn of(row: &EventEnvelope<ChainEvent>) -> Result<Self, JournalError> {
-        let writer = row.event.writer_id;
+    fn of(row: &JournalRecord<obzenflow_core::event::ChainPayload>) -> Result<Self, JournalError> {
+        let writer = row.envelope.provenance.event.writer_id;
         let sequence = row
+            .envelope
+            .provenance
+            .journal
             .vector_clock
             .clocks
             .get(&writer.to_string())
@@ -41,7 +44,7 @@ impl RecordIdentity {
                 source: Box::new(std::io::Error::other("missing writer sequence")),
             })?;
         Ok(Self {
-            event: row.event.id,
+            event: row.envelope.provenance.event.id,
             writer,
             sequence,
         })
@@ -50,7 +53,7 @@ impl RecordIdentity {
 
 struct SnapshotFact {
     record: RecordIdentity,
-    context: RuntimeContext,
+    context: RuntimeProvenance,
 }
 
 #[derive(Default)]
@@ -78,10 +81,30 @@ struct TailSearch {
 pub(crate) struct SnapshotObservation {
     search: Option<TailSearch>,
     selection: SnapshotSelection,
+    measurements: super::observations::ObservationHub,
 }
 
 impl SnapshotObservation {
-    pub(crate) fn selected(&self) -> Option<&RuntimeContext> {
+    pub(crate) fn measurements(
+        &self,
+    ) -> Vec<obzenflow_core::event::observation::ObservabilityContext> {
+        use obzenflow_core::event::observation::ObservationSource;
+        self.measurements.snapshot()
+    }
+
+    fn retain_measurements(
+        &self,
+        row: &JournalRecord<obzenflow_core::event::ChainPayload>,
+        stage: StageId,
+    ) {
+        if let Some(packet) = &row.envelope.observability {
+            if packet.capture.observer == WriterId::from(stage) {
+                self.measurements.offer_recorded(packet.clone());
+            }
+        }
+    }
+
+    pub(crate) fn selected(&self) -> Option<&RuntimeProvenance> {
         match &self.selection {
             SnapshotSelection::Unseen => None,
             SnapshotSelection::Folded(fact) | SnapshotSelection::AheadOfFold(fact) => {
@@ -96,13 +119,14 @@ impl SnapshotObservation {
 
     pub(crate) fn fold(
         &mut self,
-        row: &EventEnvelope<ChainEvent>,
+        row: &JournalRecord<obzenflow_core::event::ChainPayload>,
         stage: StageId,
     ) -> Result<(), JournalError> {
-        if row.event.flow_context.stage_id != stage {
+        self.retain_measurements(row, stage);
+        if row.envelope.provenance.event.flow_context.stage_id != stage {
             return Ok(());
         }
-        let Some(context) = &row.event.runtime_context else {
+        let Some(context) = &row.envelope.provenance.event.runtime else {
             return Ok(());
         };
         let record = RecordIdentity::of(row)?;
@@ -147,6 +171,9 @@ impl SnapshotObservation {
             }
             let head = rows.first().map(RecordIdentity::of).transpose()?;
             for row in &rows {
+                self.retain_measurements(row, stage);
+            }
+            for row in &rows {
                 let record = RecordIdentity::of(row)?;
                 if self
                     .search
@@ -161,8 +188,8 @@ impl SnapshotObservation {
                     self.search = Some(TailSearch { head, outcome });
                     return Ok(());
                 }
-                if row.event.flow_context.stage_id == stage {
-                    if let Some(context) = &row.event.runtime_context {
+                if row.envelope.provenance.event.flow_context.stage_id == stage {
+                    if let Some(context) = &row.envelope.provenance.event.runtime {
                         // With serial folding and append-order journals, this fresh
                         // newest snapshot is either the latest fold or ahead of it.
                         let folded = matches!(&self.selection, SnapshotSelection::Folded(fact) if fact.record == record);

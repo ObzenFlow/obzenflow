@@ -7,8 +7,8 @@
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkConsumeReport;
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MiddlewareLifecycle, RateLimiterEvent,
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, MiddlewareFact, RateLimiterFact,
 };
 use std::fmt;
 
@@ -63,7 +63,7 @@ impl SinkDeliveryRejection {
 /// A closed, transient descriptor for middleware lifecycle evidence. It cannot
 /// carry delivery, data, progress, settlement, or terminal stage events.
 pub struct SinkPolicyEvidence {
-    lifecycle: MiddlewareLifecycle,
+    lifecycle: MiddlewareFact,
 }
 
 impl fmt::Debug for SinkPolicyEvidence {
@@ -76,7 +76,7 @@ impl fmt::Debug for SinkPolicyEvidence {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SinkPolicyEvidenceError {
-    DisallowedCircuitBreakerEvent,
+    DisallowedCircuitBreakerFact,
     InvalidDiagnostic,
     CapacityExceeded,
 }
@@ -84,7 +84,7 @@ pub enum SinkPolicyEvidenceError {
 impl fmt::Display for SinkPolicyEvidenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DisallowedCircuitBreakerEvent => {
+            Self::DisallowedCircuitBreakerFact => {
                 f.write_str("circuit-breaker event is not sink-policy evidence")
             }
             Self::InvalidDiagnostic => f.write_str("sink-policy evidence is not finite or bounded"),
@@ -104,9 +104,9 @@ fn valid_text(value: &str) -> bool {
 }
 
 impl SinkPolicyEvidence {
-    pub fn circuit_breaker(event: CircuitBreakerEvent) -> Result<Self, SinkPolicyEvidenceError> {
+    pub fn circuit_breaker(event: CircuitBreakerFact) -> Result<Self, SinkPolicyEvidenceError> {
         match &event {
-            CircuitBreakerEvent::Opened {
+            CircuitBreakerFact::Opened {
                 error_rate,
                 slow_call_rate,
                 last_error,
@@ -121,58 +121,37 @@ impl SinkPolicyEvidence {
                     return Err(SinkPolicyEvidenceError::InvalidDiagnostic);
                 }
             }
-            CircuitBreakerEvent::Closed { .. }
-            | CircuitBreakerEvent::Rejected { .. }
-            | CircuitBreakerEvent::HalfOpen { .. } => {}
-            CircuitBreakerEvent::Summary {
-                state,
-                rejection_rate,
-                time_in_closed_seconds,
-                time_in_open_seconds,
-                time_in_half_open_seconds,
-                ..
-            } => {
-                if !valid_text(state)
-                    || !valid_float(*rejection_rate)
-                    || !valid_float(*time_in_closed_seconds)
-                    || !valid_float(*time_in_open_seconds)
-                    || !valid_float(*time_in_half_open_seconds)
-                {
-                    return Err(SinkPolicyEvidenceError::InvalidDiagnostic);
-                }
-            }
-            CircuitBreakerEvent::AttemptSettled { .. }
-            | CircuitBreakerEvent::RetryScheduled { .. }
-            | CircuitBreakerEvent::RetrySucceeded { .. }
-            | CircuitBreakerEvent::RetryExhausted { .. }
-            | CircuitBreakerEvent::RetryStoppedNonRetryable { .. }
-            | CircuitBreakerEvent::RecoveryCompleted { .. } => {
-                return Err(SinkPolicyEvidenceError::DisallowedCircuitBreakerEvent);
+            CircuitBreakerFact::Closed { .. }
+            | CircuitBreakerFact::Rejected { .. }
+            | CircuitBreakerFact::HalfOpen { .. } => {}
+            CircuitBreakerFact::StateChanged { .. } => {}
+            CircuitBreakerFact::AttemptSettled { .. }
+            | CircuitBreakerFact::RetryScheduled { .. }
+            | CircuitBreakerFact::RetrySucceeded { .. }
+            | CircuitBreakerFact::RetryExhausted { .. }
+            | CircuitBreakerFact::RetryStoppedNonRetryable { .. }
+            | CircuitBreakerFact::RecoveryCompleted { .. } => {
+                return Err(SinkPolicyEvidenceError::DisallowedCircuitBreakerFact);
             }
         }
         Ok(Self {
-            lifecycle: MiddlewareLifecycle::CircuitBreaker(event),
+            lifecycle: MiddlewareFact::CircuitBreaker(event),
         })
     }
 
-    pub fn rate_limiter(event: RateLimiterEvent) -> Result<Self, SinkPolicyEvidenceError> {
+    pub fn rate_limiter(event: RateLimiterFact) -> Result<Self, SinkPolicyEvidenceError> {
         let valid = match &event {
-            RateLimiterEvent::Delayed {
+            RateLimiterFact::Delayed {
                 current_rate,
                 limit_rate,
                 ..
             } => valid_float(*current_rate) && valid_float(*limit_rate),
-            RateLimiterEvent::ActivityPulse { limit_rate, .. } => valid_float(*limit_rate),
-            RateLimiterEvent::ModeChange {
-                mode_from,
-                mode_to,
+            RateLimiterFact::ModeChange {
+                mode_from: _,
+                mode_to: _,
                 limit_rate,
-            } => valid_text(mode_from) && valid_text(mode_to) && valid_float(*limit_rate),
-            RateLimiterEvent::WindowUtilization {
-                utilization_percent,
-                ..
-            } => valid_float(*utilization_percent),
-            RateLimiterEvent::ConfigChanged { old_rate, new_rate } => {
+            } => valid_float(*limit_rate),
+            RateLimiterFact::ConfigChanged { old_rate, new_rate } => {
                 valid_float(*old_rate) && valid_float(*new_rate)
             }
         };
@@ -180,11 +159,11 @@ impl SinkPolicyEvidence {
             return Err(SinkPolicyEvidenceError::InvalidDiagnostic);
         }
         Ok(Self {
-            lifecycle: MiddlewareLifecycle::RateLimiter(event),
+            lifecycle: MiddlewareFact::RateLimiter(event),
         })
     }
 
-    pub(crate) fn into_lifecycle(self) -> MiddlewareLifecycle {
+    pub(crate) fn into_lifecycle(self) -> MiddlewareFact {
         self.lifecycle
     }
 }
@@ -253,6 +232,11 @@ pub trait SinkDeliveryPermit: Send {
 
 #[async_trait]
 pub trait SinkDeliveryBoundary: Send + Sync {
+    fn install_observation_recorder(
+        &self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     async fn admit_sink_delivery(&self) -> SinkDeliveryAdmission;
 }
 
@@ -260,7 +244,7 @@ pub trait SinkDeliveryBoundary: Send + Sync {
 mod tests {
     use super::*;
     use obzenflow_core::event::payloads::effect_payload::EffectCursor;
-    use obzenflow_core::event::payloads::observability_payload::{
+    use obzenflow_core::event::payloads::execution_payload::{
         CircuitBreakerHealthClassification, CircuitBreakerOpenTrigger,
         CircuitBreakerRejectionReason, CircuitBreakerRetryStopReason,
     };
@@ -269,20 +253,20 @@ mod tests {
         EffectCursor::new("flow", "stage", 1, 0)
     }
 
-    fn assert_allowed_breaker(event: CircuitBreakerEvent) {
+    fn assert_allowed_breaker(event: CircuitBreakerFact) {
         assert!(SinkPolicyEvidence::circuit_breaker(event).is_ok());
     }
 
-    fn assert_rejected_breaker(event: CircuitBreakerEvent) {
+    fn assert_rejected_breaker(event: CircuitBreakerFact) {
         assert!(matches!(
             SinkPolicyEvidence::circuit_breaker(event),
-            Err(SinkPolicyEvidenceError::DisallowedCircuitBreakerEvent)
+            Err(SinkPolicyEvidenceError::DisallowedCircuitBreakerFact)
         ));
     }
 
     #[test]
     fn every_sink_legal_breaker_and_limiter_variant_is_explicitly_allowed() {
-        assert_allowed_breaker(CircuitBreakerEvent::Opened {
+        assert_allowed_breaker(CircuitBreakerFact::Opened {
             error_rate: 0.5,
             failure_count: 2,
             trigger: CircuitBreakerOpenTrigger::FailureRate,
@@ -291,57 +275,48 @@ mod tests {
             slow_call_count: Some(1),
             last_error: Some("redacted".into()),
         });
-        assert_allowed_breaker(CircuitBreakerEvent::Closed {
+        assert_allowed_breaker(CircuitBreakerFact::Closed {
             success_count: 3,
             recovery_duration_ms: 20,
         });
-        assert_allowed_breaker(CircuitBreakerEvent::Rejected {
+        assert_allowed_breaker(CircuitBreakerFact::Rejected {
             reason: CircuitBreakerRejectionReason::CircuitOpen,
             cooldown_remaining_ms: Some(10),
             circuit_open_duration_ms: Some(30),
         });
-        assert_allowed_breaker(CircuitBreakerEvent::HalfOpen {
+        assert_allowed_breaker(CircuitBreakerFact::HalfOpen {
             test_request_count: 1,
         });
-        assert_allowed_breaker(CircuitBreakerEvent::Summary {
-            window_duration_s: 10,
-            requests_processed: 4,
-            requests_rejected: 1,
-            state: "closed".into(),
-            consecutive_failures: 0,
-            rejection_rate: 0.25,
-            successes_total: 3,
-            failures_total: 1,
-            opened_total: 1,
-            time_in_closed_seconds: 8.0,
-            time_in_open_seconds: 1.0,
-            time_in_half_open_seconds: 1.0,
+        assert_allowed_breaker(CircuitBreakerFact::StateChanged {
+            from_state: obzenflow_core::event::payloads::execution_payload::CircuitState::Closed,
+            to_state: obzenflow_core::event::payloads::execution_payload::CircuitState::Open,
+            timestamp: 1,
         });
+        assert!(serde_json::from_value::<CircuitBreakerFact>(
+            serde_json::json!({"action":"summary"})
+        )
+        .is_err());
+        for action in ["activity_pulse", "window_utilization"] {
+            assert!(serde_json::from_value::<RateLimiterFact>(
+                serde_json::json!({"action":action})
+            )
+            .is_err());
+        }
 
         for event in [
-            RateLimiterEvent::Delayed {
+            RateLimiterFact::Delayed {
                 delay_ms: 1,
                 current_rate: 2.0,
                 limit_rate: 1.0,
             },
-            RateLimiterEvent::ActivityPulse {
-                window_ms: 1000,
-                delayed_events: 1,
-                delay_ms_total: 2,
-                delay_ms_max: 2,
+            RateLimiterFact::ModeChange {
+                mode_from:
+                    obzenflow_core::event::payloads::execution_payload::RateLimiterMode::Normal,
+                mode_to:
+                    obzenflow_core::event::payloads::execution_payload::RateLimiterMode::Limiting,
                 limit_rate: 1.0,
             },
-            RateLimiterEvent::ModeChange {
-                mode_from: "steady".into(),
-                mode_to: "limited".into(),
-                limit_rate: 1.0,
-            },
-            RateLimiterEvent::WindowUtilization {
-                utilization_percent: 50.0,
-                events_in_window: 2,
-                window_size_ms: 1000,
-            },
-            RateLimiterEvent::ConfigChanged {
+            RateLimiterFact::ConfigChanged {
                 old_rate: 1.0,
                 new_rate: 2.0,
             },
@@ -352,7 +327,7 @@ mod tests {
 
     #[test]
     fn every_retry_or_settlement_shaped_breaker_variant_is_rejected() {
-        assert_rejected_breaker(CircuitBreakerEvent::AttemptSettled {
+        assert_rejected_breaker(CircuitBreakerFact::AttemptSettled {
             cursor: cursor(),
             attempt: 1,
             health_classification: CircuitBreakerHealthClassification::TransientFailure,
@@ -360,26 +335,26 @@ mod tests {
             dependency_elapsed_ms: 10,
             admission_wait_ms: 0,
         });
-        assert_rejected_breaker(CircuitBreakerEvent::RetryScheduled {
+        assert_rejected_breaker(CircuitBreakerFact::RetryScheduled {
             cursor: cursor(),
             next_attempt: 2,
             delay_ms: 10,
         });
-        assert_rejected_breaker(CircuitBreakerEvent::RetrySucceeded {
+        assert_rejected_breaker(CircuitBreakerFact::RetrySucceeded {
             cursor: cursor(),
             total_attempts: 2,
             terminal_classification: CircuitBreakerHealthClassification::Success,
         });
-        assert_rejected_breaker(CircuitBreakerEvent::RetryExhausted {
+        assert_rejected_breaker(CircuitBreakerFact::RetryExhausted {
             cursor: cursor(),
             total_attempts: 3,
             reason: CircuitBreakerRetryStopReason::AttemptLimit,
         });
-        assert_rejected_breaker(CircuitBreakerEvent::RetryStoppedNonRetryable {
+        assert_rejected_breaker(CircuitBreakerFact::RetryStoppedNonRetryable {
             cursor: cursor(),
             total_attempts: 1,
         });
-        assert_rejected_breaker(CircuitBreakerEvent::RecoveryCompleted {
+        assert_rejected_breaker(CircuitBreakerFact::RecoveryCompleted {
             cursor: cursor(),
             total_attempts: 3,
             backoff_elapsed_ms: 20,
@@ -390,7 +365,7 @@ mod tests {
     #[test]
     fn evidence_text_numbers_and_batch_capacity_fail_closed() {
         assert!(matches!(
-            SinkPolicyEvidence::circuit_breaker(CircuitBreakerEvent::Opened {
+            SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::Opened {
                 error_rate: f64::NAN,
                 failure_count: 1,
                 trigger: CircuitBreakerOpenTrigger::FailureRate,
@@ -401,20 +376,15 @@ mod tests {
             }),
             Err(SinkPolicyEvidenceError::InvalidDiagnostic)
         ));
-        assert!(matches!(
-            SinkPolicyEvidence::rate_limiter(RateLimiterEvent::ModeChange {
-                mode_from: "credential\nleak".into(),
-                mode_to: "limited".into(),
-                limit_rate: 1.0,
-            }),
-            Err(SinkPolicyEvidenceError::InvalidDiagnostic)
-        ));
+        assert!(serde_json::from_value::<RateLimiterFact>(serde_json::json!({
+            "action": "mode_change", "mode_from": "credential\nleak", "mode_to": "limiting", "limit_rate": 1.0,
+        })).is_err());
 
         let mut batch = SinkPolicyEvidenceBatch::new();
         for _ in 0..MAX_SINK_POLICY_EVIDENCE_ENTRIES {
             batch
                 .try_push(
-                    SinkPolicyEvidence::circuit_breaker(CircuitBreakerEvent::Closed {
+                    SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::Closed {
                         success_count: 1,
                         recovery_duration_ms: 1,
                     })
@@ -425,7 +395,7 @@ mod tests {
         assert_eq!(batch.len(), MAX_SINK_POLICY_EVIDENCE_ENTRIES);
         assert!(matches!(
             batch.try_push(
-                SinkPolicyEvidence::circuit_breaker(CircuitBreakerEvent::HalfOpen {
+                SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::HalfOpen {
                     test_request_count: 1,
                 })
                 .unwrap()

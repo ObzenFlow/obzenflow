@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{EdgeLivenessState, SystemEventType};
+use obzenflow_core::event::{EdgeLivenessState, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, effectful_transform, flow, sink, transform, FlowDefinition};
@@ -212,11 +212,14 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     > = Arc::new(Mutex::new(None));
     let registry_slot: Arc<Mutex<Option<LivenessSnapshots>>> = Arc::new(Mutex::new(None));
     let system_journal_slot_hook = system_journal_slot.clone();
+    let mut liveness = liveness_observations::LivenessTrace::default();
+    let liveness_source = liveness.source.clone();
     let registry_slot_hook = registry_slot.clone();
     let finish_gate = Arc::new(tokio::sync::Notify::new());
     let source_finish_gate = finish_gate.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
+        *liveness_source.lock().unwrap() = Some(handle.observations());
         let system_journal = handle.system_journal().expect("system journal available");
         *system_journal_slot_hook
             .lock()
@@ -269,6 +272,7 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
 
     let mut result = None;
     for _ in 0..240 {
+        liveness.capture();
         match run_task.poll() {
             Poll::Ready(res) => {
                 result = Some(res);
@@ -277,7 +281,7 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
             Poll::Pending => {
                 tokio::time::advance(Duration::from_secs(1)).await;
                 tokio::task::yield_now().await;
-                let journal = system_journal_slot.lock().unwrap().clone();
+                liveness.capture();
                 let readers = registry_slot.lock().unwrap().as_ref().map(|registry| {
                     registry.with_read(|entries| {
                         ["fast", "slow"].map(|name| {
@@ -287,13 +291,10 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
                         })
                     })
                 });
-                if let (Some(journal), Some([Some(fast), Some(slow)])) = (journal, readers) {
-                    let events = journal.read_causally_ordered().await.unwrap();
+                if let Some([Some(fast), Some(slow)]) = readers {
                     if [fast, slow].iter().all(|expected_reader| {
-                        events.iter().any(|envelope| {
-                            matches!(envelope.event.event, SystemEventType::EdgeLiveness {
-                            reader, state: EdgeLivenessState::Recovered, ..
-                        } if reader == *expected_reader)
+                        liveness.states.iter().any(|(_, reader, state)| {
+                            *reader == *expected_reader && *state == EdgeLivenessState::Recovered
                         })
                     }) {
                         finish_gate.notify_one();
@@ -303,6 +304,7 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
         }
     }
 
+    liveness.capture();
     result
         .expect("flow did not complete after advancing tokio time")
         .expect("flow should complete successfully");
@@ -330,15 +332,16 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     let mut edge_states_by_reader: HashMap<obzenflow_core::StageId, Vec<EdgeLivenessState>> =
         HashMap::new();
 
+    for (_, reader, state) in &liveness.states {
+        edge_states_by_reader
+            .entry(*reader)
+            .or_default()
+            .push(*state);
+    }
+
     for envelope in envelopes {
-        match &envelope.event.event {
-            SystemEventType::EdgeLiveness { reader, state, .. } => {
-                edge_states_by_reader
-                    .entry(*reader)
-                    .or_default()
-                    .push(*state);
-            }
-            SystemEventType::ContractStatus { pass, .. } => {
+        match &envelope.payload {
+            SystemPayload::ContractStatus { pass, .. } => {
                 assert!(
                     *pass,
                     "unexpected ContractStatus(pass=false) while exercising fan-out liveness"
@@ -381,3 +384,6 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
         "fast consumer should not emit Suspect/Stalled"
     );
 }
+
+#[path = "support/liveness_observations.rs"]
+mod liveness_observations;

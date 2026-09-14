@@ -178,7 +178,7 @@ pub struct AppMetricsSnapshot {
 
     /// Edge liveness state per edge (upstream, downstream) (FLOWIP-063e).
     ///
-    /// The latest semantic state from `SystemEventType::EdgeLiveness`.
+    /// The latest semantic state from `SystemPayload::EdgeLiveness`.
     /// Reporting encodings belong to the consuming projection.
     pub edge_liveness_state: HashMap<(StageId, StageId), EdgeLivenessState>,
 
@@ -199,7 +199,7 @@ pub struct AppMetricsSnapshot {
     /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
     ///
     /// Keyed by stage ID (labels attach via `stage_metadata`).
-    pub http_pull_metrics: HashMap<StageId, crate::event::observability::HttpPullTelemetry>,
+    pub http_pull_metrics: HashMap<StageId, crate::event::observability::HttpPullMetricsSnapshot>,
 
     /// AI chunking metrics derived from `ai_chunking.snapshot` wide events (FLOWIP-086z).
     ///
@@ -375,9 +375,9 @@ pub struct AiChunkingMetricsSnapshot {
     pub planned_items_total: u64,
     pub excluded_items_total: u64,
     pub chunks_emitted_total: u64,
-    pub rerender_attempts_total: u64,
-    pub max_depth_reached: u32,
-    pub budget_overhead_tokens: u64,
+    pub rerender_attempts_total: Option<u64>,
+    pub max_depth_reached: Option<u32>,
+    pub budget_overhead_tokens: Option<u64>,
 }
 
 /// Histogram data for a single metric
@@ -418,10 +418,10 @@ pub struct FlowMetricsSnapshot {
     pub errors_total: u64,
 
     /// Total event loops across all stages
-    pub event_loops_total: u64,
+    pub event_loops_total: Option<u64>,
 
     /// Event loops with work across all stages
-    pub event_loops_with_work_total: u64,
+    pub event_loops_with_work_total: Option<u64>,
 }
 
 /// Stage-level metrics snapshot for lifecycle events (UI-focused)
@@ -432,6 +432,8 @@ pub struct FlowMetricsSnapshot {
 /// not the full Prometheus schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageMetricsSnapshot {
+    pub processing_time_count: Option<u64>,
+    pub timing_window: Option<crate::event::context::MeasurementWindow>,
     /// Total events processed by this stage
     pub events_processed_total: u64,
 
@@ -451,23 +453,23 @@ pub struct StageMetricsSnapshot {
         std::collections::HashMap<crate::event::status::processing_status::ErrorKind, u64>,
 
     /// Number of in-flight events at snapshot time
-    pub in_flight: u32,
+    pub in_flight: Option<u32>,
 
     /// Recent latency percentiles in milliseconds
-    pub recent_p50_ms: u64,
-    pub recent_p90_ms: u64,
-    pub recent_p95_ms: u64,
-    pub recent_p99_ms: u64,
-    pub recent_p999_ms: u64,
+    pub recent_p50_ms: Option<u64>,
+    pub recent_p90_ms: Option<u64>,
+    pub recent_p95_ms: Option<u64>,
+    pub recent_p99_ms: Option<u64>,
+    pub recent_p999_ms: Option<u64>,
 
     /// Actual sum of processing times (nanoseconds) - never reconstructed from percentiles
     /// FLOWIP-059a-3: This field tracks the real sum for accurate histogram _sum export.
     #[serde(default)]
-    pub processing_time_sum_nanos: u64,
+    pub processing_time_sum_nanos: Option<u64>,
 
     /// Event loop utilization counters for this stage
-    pub event_loops_total: u64,
-    pub event_loops_with_work_total: u64,
+    pub event_loops_total: Option<u64>,
+    pub event_loops_with_work_total: Option<u64>,
 }
 
 /// Flow-level lifecycle metrics snapshot for UI events

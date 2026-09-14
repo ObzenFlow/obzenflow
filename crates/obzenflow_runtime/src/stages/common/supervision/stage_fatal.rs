@@ -5,7 +5,7 @@
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::StageFatal;
 use obzenflow_core::event::{
-    ChainEventFactory, EventEnvelope, StageFatalRecorded, StageFatalSeverity,
+    ChainEventFactory, JournalRecord, StageFatalRecorded, StageFatalSeverity,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
@@ -17,14 +17,17 @@ pub(crate) struct StageFatalCommit<'a> {
     pub stage_id: StageId,
     pub stage_key: &'a str,
     pub input_position: Option<StageInputPosition>,
-    pub parent: Option<&'a EventEnvelope<ChainEvent>>,
+    pub parent: Option<&'a JournalRecord<obzenflow_core::event::ChainPayload>>,
     pub lineage: obzenflow_core::config::LineagePolicy,
 }
 
 pub(crate) async fn record_stage_fatal(
     fatal: &StageFatal,
     commit: StageFatalCommit<'_>,
-) -> Result<EventEnvelope<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    JournalRecord<obzenflow_core::event::ChainPayload>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let payload = StageFatalRecorded {
         severity: if fatal.primary_cause_event_id.is_some() {
             StageFatalSeverity::Secondary
@@ -33,7 +36,9 @@ pub(crate) async fn record_stage_fatal(
         },
         stage_id: commit.stage_id,
         stage_key: commit.stage_key.to_string(),
-        causal_event_id: commit.parent.map(|parent| parent.event.id),
+        causal_event_id: commit
+            .parent
+            .map(|parent| parent.envelope.provenance.event.id),
         input_position: commit.input_position.map(|position| position.0),
         primary_cause_event_id: fatal.primary_cause_event_id,
         code: fatal.code,
@@ -44,7 +49,7 @@ pub(crate) async fn record_stage_fatal(
     let event = match commit.parent {
         Some(parent) => ChainEventFactory::derived_data_event(
             commit.writer_id,
-            &parent.event,
+            &parent.authored(),
             StageFatalRecorded::versioned_event_type(),
             payload,
             commit.lineage,

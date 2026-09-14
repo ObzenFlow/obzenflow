@@ -17,7 +17,7 @@
 //! barrier.
 
 use crate::testing::FlowTestHarness;
-use obzenflow_core::event::system_event::{MetricsCoordinationEvent, SystemEventType};
+use obzenflow_core::event::system_event::{MetricsCoordinationEvent, SystemPayload};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -131,9 +131,9 @@ impl MetricsBarrier {
             let envelopes = read_journal_from(&self.system_journal, scan_from).await?;
             let next_scan_from = scan_from + envelopes.len() as u64;
             for env in envelopes {
-                if let SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                if let SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported {
                     watermark,
-                }) = &env.event.event
+                }) = &env.payload
                 {
                     if let Some(seq) = watermark.clocks.get(writer_key) {
                         if *seq >= target_seq {
@@ -161,9 +161,9 @@ impl MetricsBarrier {
             let envelopes = read_journal_from(&self.system_journal, scan_from).await?;
             let next_scan_from = scan_from + envelopes.len() as u64;
             for env in envelopes {
-                if let SystemEventType::MetricsCoordination(
+                if let SystemPayload::MetricsCoordination(
                     MetricsCoordinationEvent::Drained | MetricsCoordinationEvent::Shutdown,
-                ) = &env.event.event
+                ) = &env.payload
                 {
                     return Ok(());
                 }
@@ -221,7 +221,7 @@ async fn read_journal_from(
     journal: &Arc<dyn Journal<SystemEvent>>,
     from: u64,
 ) -> Result<
-    Vec<obzenflow_core::event::event_envelope::EventEnvelope<SystemEvent>>,
+    Vec<obzenflow_core::event::journal_record::JournalRecord<obzenflow_core::event::SystemPayload>>,
     MetricsBarrierError,
 > {
     let mut reader = journal
@@ -246,10 +246,10 @@ mod tests {
     use crate::pipeline::handle::FlowHandleExtras;
     use crate::pipeline::{FlowHandle, PipelineState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
-    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::system_event::MetricsCoordinationEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventType, WriterId};
+    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload, WriterId};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -263,7 +263,7 @@ mod tests {
     struct MemoryJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> Default for MemoryJournal<T> {
@@ -277,7 +277,7 @@ mod tests {
     }
 
     struct MemoryJournalReader<T: JournalEvent> {
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
         pos: usize,
     }
 
@@ -286,7 +286,7 @@ mod tests {
     where
         T: JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self
                 .events
                 .lock()
@@ -321,16 +321,16 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let envelope =
-                EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+                JournalRecord::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             Ok(guard.clone())
         }
@@ -338,9 +338,9 @@ mod tests {
         async fn read_event(
             &self,
             event_id: &obzenflow_core::event::types::EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-            Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
+            Ok(guard.iter().find(|e| e.id() == event_id).cloned())
         }
 
         async fn reader_from(
@@ -353,7 +353,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -379,6 +382,9 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
+
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),
             metrics: Default::default(),
@@ -416,6 +422,9 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
+
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),
             metrics: Default::default(),
@@ -519,7 +528,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     WriterId::from(StageId::new()),
-                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Drained),
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained),
                 ),
                 None,
             )
@@ -545,7 +554,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     WriterId::from(StageId::new()),
-                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Shutdown),
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Shutdown),
                 ),
                 None,
             )
@@ -582,7 +591,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     WriterId::from(stage_id),
-                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported {
                         watermark,
                     }),
                 ),
@@ -625,7 +634,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     WriterId::from(other_id),
-                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported {
                         watermark,
                     }),
                 ),
@@ -646,7 +655,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     WriterId::from(stage_id),
-                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported {
                         watermark,
                     }),
                 ),
@@ -690,7 +699,7 @@ mod tests {
                 .append(
                     SystemEvent::new(
                         WriterId::from(stage_id),
-                        SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                        SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported {
                             watermark,
                         }),
                     ),

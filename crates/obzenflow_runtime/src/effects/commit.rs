@@ -9,7 +9,7 @@ fn composite_monotonic_event_time(parent: &ChainEvent, deterministic: u64) -> u6
         return deterministic;
     }
     parent.composite_activations().iter().fold(
-        parent.processing_info.event_time.max(deterministic),
+        parent.processing.event_time.max(deterministic),
         |time, activation| time.max(activation.entered_at_ms),
     )
 }
@@ -36,7 +36,7 @@ struct EffectCommitHandleInner<T, S> {
     heartbeat_state: Option<Arc<HeartbeatState>>,
     output_contract: StageOutputContract,
     backpressure_writer: BackpressureWriter,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<obzenflow_core::event::ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -56,7 +56,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) heartbeat_state: Option<Arc<HeartbeatState>>,
     pub(super) output_contract: StageOutputContract,
     pub(super) backpressure_writer: BackpressureWriter,
-    pub(super) parent: EventEnvelope<ChainEvent>,
+    pub(super) parent: JournalRecord<obzenflow_core::event::ChainPayload>,
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
@@ -412,27 +412,22 @@ fn commit_handle_reuse_error() -> EffectError {
 
 pub(super) fn build_effect_attempt_started_event(
     writer_id: WriterId,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     started: EffectAttemptStarted,
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
-    let payload = serde_json::to_value(&started)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let mut event = ChainEventFactory::derived_data_event(
-        writer_id,
-        &parent.event,
-        EffectAttemptStarted::versioned_event_type(),
-        payload,
-        lineage,
+    let mut event = ChainEventFactory::derived_event(
+        writer_id, &parent.authored(),
+        ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectAttemptStarted(started.clone())), lineage,
     );
     event.id = deterministic_effect_evidence_event_id(
         &started.cursor,
         &EffectAttemptStarted::versioned_event_type(),
         Some(started.attempt),
     );
-    event.processing_info.event_time = composite_monotonic_event_time(
-        &parent.event,
+    event.processing.event_time = composite_monotonic_event_time(
+        &parent.authored(),
         deterministic_effect_record_event_time(&started.cursor)
             .saturating_add(u64::from(started.attempt.get())),
     );
@@ -452,27 +447,22 @@ pub(super) fn build_effect_attempt_started_event(
 
 pub(super) fn build_effect_recovery_abandoned_event(
     writer_id: WriterId,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     abandoned: EffectRecoveryAbandoned,
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
-    let payload = serde_json::to_value(&abandoned)
-        .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let mut event = ChainEventFactory::derived_data_event(
-        writer_id,
-        &parent.event,
-        EffectRecoveryAbandoned::versioned_event_type(),
-        payload,
-        lineage,
+    let mut event = ChainEventFactory::derived_event(
+        writer_id, &parent.authored(),
+        ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecoveryAbandoned(abandoned.clone())), lineage,
     );
     event.id = deterministic_effect_evidence_event_id(
         &abandoned.cursor,
         &EffectRecoveryAbandoned::versioned_event_type(),
         None,
     );
-    event.processing_info.event_time = composite_monotonic_event_time(
-        &parent.event,
+    event.processing.event_time = composite_monotonic_event_time(
+        &parent.authored(),
         deterministic_effect_record_event_time(&abandoned.cursor).saturating_add(999),
     );
     event = event.with_effect_provenance(EffectProvenance {
@@ -492,7 +482,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_domain_effect_success_facts(
     writer_id: WriterId,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -527,28 +517,26 @@ pub(super) fn build_domain_effect_success_facts(
             descriptor: descriptor.clone(),
             outcome: EffectOutcomePayload::SucceededFact {
                 event_type: fact.event_type.clone(),
-                output: fact.payload.clone(),
+                event_kind: fact.payload.kind(),
+                output: fact
+                    .payload
+                    .contract_body()
+                    .map_err(|error| EffectError::Serialization(error.to_string()))?,
                 outcome_fact_ordinal: ordinal,
                 outcome_fact_count,
             },
             origin: origin.clone(),
         };
 
-        let mut event = ChainEventFactory::derived_data_event(
-            writer_id,
-            &parent.event,
-            fact.event_type.as_str(),
-            fact.payload,
-            lineage,
-        );
+        let mut event = fact.into_derived_event(writer_id, &parent.authored(), lineage);
         event.id = deterministic_event_id(
             record.cursor.recorded_flow_id.as_str(),
             record.cursor.stage_key.as_str(),
             StageInputPosition(record.cursor.input_seq.get()),
             output_ordinal,
         );
-        event.processing_info.event_time = composite_monotonic_event_time(
-            &parent.event,
+        event.processing.event_time = composite_monotonic_event_time(
+            &parent.authored(),
             deterministic_event_time(
                 StageInputPosition(record.cursor.input_seq.get()),
                 output_ordinal,
@@ -576,7 +564,7 @@ pub(super) async fn append_domain_effect_success_facts(
     output_contract: Option<&StageOutputContract>,
     backpressure_writer: &BackpressureWriter,
     writer_id: WriterId,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -640,7 +628,7 @@ pub(super) async fn append_domain_effect_success_facts(
 pub(super) async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     writer_id: WriterId,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
     backpressure_writer: &BackpressureWriter,
@@ -669,29 +657,30 @@ pub(super) async fn append_effect_record(
 
 pub(super) fn build_effect_record_event(
     writer_id: WriterId,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {
     let event_type = framework_effect_event_type(&record.descriptor.effect_type);
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
-    let payload =
-        serde_json::to_value(&record).map_err(|e| EffectError::Serialization(e.to_string()))?;
-    let mut event = ChainEventFactory::derived_data_event(
+    let mut event = ChainEventFactory::derived_event(
         writer_id,
-        &parent.event,
-        event_type,
-        payload,
+        &parent.authored(),
+        ChainPayload::Execution(
+            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(
+                record.clone(),
+            ),
+        ),
         lineage,
     )
     .with_effect_provenance(provenance);
     event.id = deterministic_effect_record_event_id(&record.cursor, event_type);
-    event.processing_info.event_time = composite_monotonic_event_time(
-        &parent.event,
+    event.processing.event_time = composite_monotonic_event_time(
+        &parent.authored(),
         deterministic_effect_record_event_time(&record.cursor),
     );
     if let EffectOutcomePayload::Failed { error_message, .. } = &record.outcome {
-        event.processing_info.status =
+        event.processing.status =
             obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
                 error_message.clone(),
                 Some(obzenflow_core::event::status::processing_status::ErrorKind::Remote),

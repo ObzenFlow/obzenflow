@@ -26,13 +26,13 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::{EventEnvelope, StageId, SystemId};
+use obzenflow_core::{JournalRecord, StageId, SystemId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 struct PausedReader {
-    row: Option<EventEnvelope<SystemEvent>>,
+    row: Option<JournalRecord<obzenflow_core::event::SystemPayload>>,
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
@@ -40,7 +40,9 @@ struct PausedReader {
 
 #[async_trait]
 impl JournalReader<SystemEvent> for PausedReader {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<SystemEvent>>, JournalError> {
+    async fn next(
+        &mut self,
+    ) -> Result<Option<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         // Moving the cursor before suspension intentionally makes cancellation
         // unsafe. A recreated read would skip this committed envelope.
@@ -112,8 +114,8 @@ pub async fn graceful_deadline_bounds_a_stalled_source_control_send(
     let facts = journal.read_all_unordered().await.unwrap();
     let admissions: Vec<_> = facts
         .iter()
-        .filter_map(|envelope| match &envelope.event.event {
-            obzenflow_core::event::SystemEventType::PipelineLifecycle(
+        .filter_map(|envelope| match &envelope.payload {
+            obzenflow_core::event::SystemPayload::PipelineLifecycle(
                 obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { admission },
             ) => Some(admission.clone()),
             _ => None,
@@ -397,7 +399,10 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
             .await
             .unwrap()
         {
-            assert_eq!(envelope.event.id, row.event.id);
+            assert_eq!(
+                envelope.envelope.provenance.event.id,
+                row.envelope.provenance.event.id
+            );
             delivered = true;
             break;
         }

@@ -33,7 +33,7 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, EventEnvelope, MiddlewareExecutionScope, StageId};
+use obzenflow_core::{ChainEvent, JournalRecord, MiddlewareExecutionScope, StageId};
 use std::collections::VecDeque;
 use std::task::Poll;
 
@@ -51,19 +51,19 @@ pub(super) async fn start_if_eligible<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut TransformContext<H>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     upstream_stage: Option<StageId>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     scope: MiddlewareExecutionScope,
     flow_context: &FlowContext,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     if matches!(
-        envelope.event.processing_info.status,
+        envelope.envelope.provenance.event.processing.status,
         ProcessingStatus::Error { .. }
     ) {
         return Ok(false);
     }
-    let Some(bound) = ctx.direct_fact_plan.bound_for(&envelope.event.event_type()) else {
+    let Some(bound) = ctx.direct_fact_plan.bound_for(&envelope.event_type()) else {
         return Ok(false);
     };
     if ctx.direct_fact_continuation.is_some() {
@@ -81,11 +81,11 @@ pub(super) async fn start_if_eligible<
         ctx.flow_id,
         flow_context,
         scope,
-        &envelope.event,
+        &envelope.authored(),
         input_position,
     );
 
-    let admission = DirectFactAdmission::new(envelope.event.event_type().into(), bound);
+    let admission = DirectFactAdmission::new(envelope.event_type().into(), bound);
     let effect_writer = ctx
         .backpressure_writer
         .clone()
@@ -98,7 +98,7 @@ pub(super) async fn start_if_eligible<
     let instrumentation = ctx.instrumentation.clone();
     let future_envelope = envelope.clone();
     let error_envelope = envelope.clone();
-    let event = envelope.event.clone();
+    let event = envelope.authored();
     let event_id = event.id;
     let effect_context = EffectInvocationContext {
         flow_id: ctx.flow_id,
@@ -143,8 +143,7 @@ pub(super) async fn start_if_eligible<
                 Err(error) => {
                     let reason = format!("Transform handler error: {error:?}");
                     let error_event = error_envelope
-                        .event
-                        .clone()
+                        .authored()
                         .mark_as_error(reason, error.kind());
                     if let Some(state) = &handler_heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -235,7 +234,7 @@ async fn fail<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat
             .state
-            .record_last_consumed(continuation.envelope.event.id);
+            .record_last_consumed(continuation.envelope.envelope.provenance.event.id);
     }
     Ok(EventLoopDirective::Transition(TransformEvent::Error(
         fatal.detail,
@@ -259,14 +258,14 @@ async fn finish_success<
         ctx.flow_id,
         flow_context,
         continuation.scope,
-        &continuation.envelope.event,
+        &continuation.envelope.authored(),
         input_position,
         transformed_events.as_slice(),
     );
 
     let mut pending = VecDeque::<PendingOutput>::new();
     for event in transformed_events {
-        if event.is_data() {
+        if event.consumes_data_credit() {
             return fail(
                 sup,
                 ctx,
@@ -312,7 +311,7 @@ async fn finish_success<
             }
             continue;
         }
-        if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
+        if let ProcessingStatus::Error { kind, .. } = &event.processing.status {
             ctx.instrumentation
                 .record_error(kind.clone().unwrap_or(ErrorKind::Unknown));
         }
@@ -392,7 +391,7 @@ async fn finish_success<
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat
             .state
-            .record_last_consumed(continuation.envelope.event.id);
+            .record_last_consumed(continuation.envelope.envelope.provenance.event.id);
     }
     Ok(EventLoopDirective::Continue)
 }
@@ -410,8 +409,8 @@ pub(super) async fn service<
         .direct_fact_continuation
         .take()
         .expect("service is called only for an occupied generated continuation");
-    if continuation.admission.event_type().as_str() != continuation.envelope.event.event_type() {
-        let observed = continuation.envelope.event.event_type();
+    if continuation.admission.event_type().as_str() != continuation.envelope.event_type() {
+        let observed = continuation.envelope.event_type();
         let expected = continuation.admission.event_type().as_str().to_string();
         return fail(
             sup,

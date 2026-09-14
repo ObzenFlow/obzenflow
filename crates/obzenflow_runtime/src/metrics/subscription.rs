@@ -6,7 +6,7 @@
 //! dataflow consumers, never to this metrics observer.
 
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
-use obzenflow_core::{ChainEvent, EventEnvelope, JournalId, StageId};
+use obzenflow_core::{ChainEvent, JournalId, JournalRecord, StageId};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -25,7 +25,7 @@ struct Cursor {
 
 pub(crate) struct MetricsBatch {
     pub(crate) stage: StageId,
-    pub(crate) events: Vec<EventEnvelope<ChainEvent>>,
+    pub(crate) events: Vec<JournalRecord<obzenflow_core::event::ChainPayload>>,
 }
 
 pub(crate) struct MetricsSubscription {

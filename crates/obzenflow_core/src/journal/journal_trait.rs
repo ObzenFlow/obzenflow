@@ -5,7 +5,7 @@
 use super::journal_error::JournalError;
 use super::journal_owner::JournalOwner;
 use super::journal_reader::JournalReader;
-use crate::event::event_envelope::EventEnvelope;
+use crate::event::journal_record::JournalRecord;
 use crate::event::types::EventId;
 use crate::event::vector_clock::CausalOrderingService;
 use crate::event::JournalEvent;
@@ -42,8 +42,8 @@ where
     async fn append(
         &self,
         event: T,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError>;
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError>;
 
     /// Atomically append a logical group of events.
     ///
@@ -61,8 +61,8 @@ where
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         match events.len() {
             0 => Ok(Vec::new()),
             1 => Ok(vec![
@@ -81,14 +81,14 @@ where
     /// The single raw-enumeration primitive the causal reads derive from. Disk
     /// reads through its full-scan framed reader; memory clones its in-memory
     /// vector.
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError>;
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError>;
 
     /// Read all events and return them in causal order.
     ///
     /// If A happened-before B then A appears before B; concurrent events are
     /// broken by `EventId` ordering, not wall-clock time. Derived from
     /// `read_all_unordered`.
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_causally_ordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         CausalOrderingService::order_envelopes_by_event_id(self.read_all_unordered().await?)
     }
 
@@ -97,14 +97,12 @@ where
     async fn read_causally_after(
         &self,
         after_event_id: &EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let all = self.read_causally_ordered().await?;
-        Ok(
-            match all.iter().position(|e| e.event.id() == after_event_id) {
-                Some(pos) => all.into_iter().skip(pos + 1).collect(),
-                None => Vec::new(),
-            },
-        )
+        Ok(match all.iter().position(|e| e.id() == after_event_id) {
+            Some(pos) => all.into_iter().skip(pos + 1).collect(),
+            None => Vec::new(),
+        })
     }
 
     /// Read a specific event by ID
@@ -113,7 +111,7 @@ where
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError>;
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError>;
 
     /// Create a reader that starts from the beginning. Multiple readers can be
     /// created for the same journal. Derived from `reader_from(0)`.
@@ -137,5 +135,8 @@ where
     /// Returns an empty vec if the journal is empty.
     /// This method should be O(n) where n is the requested count,
     /// not O(total_events) in the journal.
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError>;
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError>;
 }

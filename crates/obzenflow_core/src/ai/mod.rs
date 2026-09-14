@@ -48,7 +48,7 @@ pub use map_reduce::{
 pub use model_profile::{ChatModelProfile, ContextWindowSource};
 pub use observability::{
     attach_llm_observability, read_llm_observability, LlmCacheInfo, LlmCacheMode, LlmHashes,
-    LlmObservability, LlmObservabilityError, LLM_METADATA_KEY,
+    LlmObservability,
 };
 pub use ports::{ChatClient, EmbeddingClient};
 pub use structured_output::{StructuredOutputSchema, StructuredOutputSpec, ValidationHook};

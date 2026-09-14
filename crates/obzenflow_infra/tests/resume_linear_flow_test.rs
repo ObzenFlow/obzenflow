@@ -22,9 +22,8 @@ use obzenflow_adapters::middleware::handler_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{
-    ChainEventContent, EventEnvelope, ReplayLifecycleEvent, SystemEvent, SystemEventType,
+    ChainPayload, JournalRecord, ReplayLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::run_manifest::RunManifest;
@@ -425,19 +424,19 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-fn resume_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<ResumeRow> {
+fn resume_rows(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => {
-                Some(ResumeRow::Data(envelope.event.payload().clone()))
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some(ResumeRow::Data(envelope.payload().clone()))
             }
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
             }) => {
                 assert_eq!(
-                    envelope.event.event_type(),
+                    envelope.event_type(),
                     "control.catch_up_complete",
                     "the watermark row must carry the catch-up event type"
                 );
@@ -451,11 +450,13 @@ fn resume_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<ResumeRow> {
         .collect()
 }
 
-fn data_payloads(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<serde_json::Value> {
+fn data_payloads(
+    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<serde_json::Value> {
     envelopes
         .iter()
-        .filter(|envelope| envelope.event.is_data())
-        .map(|envelope| envelope.event.payload().clone())
+        .filter(|envelope| envelope.consumes_data_credit())
+        .map(|envelope| envelope.payload().clone())
         .collect()
 }
 
@@ -619,20 +620,17 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
         .iter()
         .find(|envelope| {
             matches!(
-                &envelope.event.event,
-                SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive { .. })
+                &envelope.payload,
+                SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive { .. })
             )
         })
         .expect("the resumed run's system journal must record system.replay.resumed_live");
-    assert_eq!(
-        resumed_live.event.event_type_name(),
-        "system.replay.resumed_live"
-    );
-    if let SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
+    assert_eq!(resumed_live.event_type_name(), "system.replay.resumed_live");
+    if let SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
         replayed_count,
         generation,
         ..
-    }) = &resumed_live.event.event
+    }) = &resumed_live.payload
     {
         assert_eq!(replayed_count.0, RECORDED);
         assert_eq!(*generation, 1);

@@ -76,6 +76,11 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
         let instrumentation = self
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        instrumentation.bind_observations(
+            self.resources.flow_id,
+            obzenflow_core::WriterId::from(self.config.stage_id),
+            &self.resources.runtime_execution,
+        );
 
         // Create context
         let control_strategy: Arc<dyn SignalGate> = self
@@ -84,6 +89,9 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             .unwrap_or_else(|| Arc::new(JonestownSignalStrategy));
 
         let sink_delivery_boundary = self.config.sink_delivery_boundary;
+        if let Some(boundary) = &sink_delivery_boundary {
+            boundary.install_observation_recorder(instrumentation.observation_recorder());
+        }
         let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self
@@ -100,7 +108,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                 spawn_heartbeat(
                     self.config.stage_id,
                     self.config.stage_name.clone(),
-                    self.resources.system_journal.clone(),
+                    instrumentation.clone(),
                     self.resources.liveness_snapshots.clone(),
                     heartbeat_state,
                     heartbeat_config,

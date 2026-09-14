@@ -9,12 +9,10 @@
 mod support_domain;
 
 use obzenflow_core::ai::{ChunkEnvelope, TokenCount};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -271,7 +269,7 @@ async fn read_stage_journal(
     run_dir: &Path,
     stage_name: &str,
     manifest_field: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
@@ -287,43 +285,54 @@ async fn read_stage_journal(
         .expect("stage journal reads")
 }
 
-async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage(
+    run_dir: &Path,
+    stage_name: &str,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
 }
 
-async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage_errors(
+    run_dir: &Path,
+    stage_name: &str,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
-fn triage_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<serde_json::Value> {
+fn triage_projection(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<serde_json::Value> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } if TriagedTicket::event_type_matches(event_type) => Some(payload.clone()),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Fact(payload)
+                if TriagedTicket::event_type_matches(&envelope.event_type()) =>
+            {
+                Some(payload.clone())
+            }
             _ => None,
         })
         .collect()
 }
 
-fn chunk_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<ChunkEnvelope<String>> {
+fn chunk_projection(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<ChunkEnvelope<String>> {
     events
         .iter()
-        .filter_map(|envelope| ChunkEnvelope::<String>::from_event(&envelope.event))
+        .filter_map(|envelope| ChunkEnvelope::<String>::from_event(&envelope.authored()))
         .collect()
 }
 
-fn chunk_journal_sequence(events: &[EventEnvelope<ChainEvent>]) -> Vec<&'static str> {
+fn chunk_journal_sequence(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<&'static str> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                MetricsLifecycle::Custom { name, .. },
-            )) if name == "ai_chunking.snapshot" => Some("snapshot"),
-            ChainEventContent::Data { event_type, .. }
-                if ChunkEnvelope::<String>::event_type_matches(event_type) =>
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(_)) => Some("snapshot"),
+            ChainPayload::Fact(_)
+                if ChunkEnvelope::<String>::event_type_matches(&envelope.event_type()) =>
             {
                 Some("chunk")
             }
@@ -332,40 +341,46 @@ fn chunk_journal_sequence(events: &[EventEnvelope<ChainEvent>]) -> Vec<&'static 
         .collect()
 }
 
-fn snapshot_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<serde_json::Value> {
+fn snapshot_projection(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<serde_json::Value> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                MetricsLifecycle::Custom { name, value, .. },
-            )) if name == "ai_chunking.snapshot" => Some(value.clone()),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(plan)) => {
+                Some(serde_json::to_value(plan).unwrap())
+            }
             _ => None,
         })
         .collect()
 }
 
-fn try_map_success_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<TryMapRecord> {
+fn try_map_success_projection(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<TryMapRecord> {
     events
         .iter()
         .filter_map(|envelope| {
             matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Success
             )
-            .then(|| TryMapRecord::from_event(&envelope.event))
+            .then(|| TryMapRecord::from_event(&envelope.authored()))
             .flatten()
         })
         .collect()
 }
 
-fn try_map_error_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<(u64, ErrorKind)> {
+fn try_map_error_projection(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<(u64, ErrorKind)> {
     events
         .iter()
         .filter_map(|envelope| {
-            let record = TryMapRecord::from_event(&envelope.event)?;
+            let record = TryMapRecord::from_event(&envelope.authored())?;
             let ProcessingStatus::Error {
                 kind: Some(kind), ..
-            } = &envelope.event.processing_info.status
+            } = &envelope.envelope.provenance.event.processing.status
             else {
                 return None;
             };
@@ -374,39 +389,41 @@ fn try_map_error_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<(u64, E
         .collect()
 }
 
-fn filter_projection(events: &[EventEnvelope<ChainEvent>]) -> Vec<FilterRecord> {
+fn filter_projection(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<FilterRecord> {
     events
         .iter()
-        .filter_map(|envelope| FilterRecord::from_event(&envelope.event))
+        .filter_map(|envelope| FilterRecord::from_event(&envelope.authored()))
         .collect()
 }
 
-fn delivery_count(events: &[EventEnvelope<ChainEvent>]) -> usize {
+fn delivery_count(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> usize {
     events
         .iter()
-        .filter(|envelope| matches!(envelope.event.content, ChainEventContent::Delivery(_)))
+        .filter(|envelope| matches!(envelope.payload, ChainPayload::Delivery(_)))
         .count()
 }
 
 fn assert_canonical_event_type_and_eof<T: TypedPayload>(
-    events: &[EventEnvelope<ChainEvent>],
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
     expected_data_rows: usize,
 ) {
     let canonical = T::versioned_event_type();
     let rows = events
         .iter()
-        .filter(|envelope| T::event_type_matches(&envelope.event.event_type()))
+        .filter(|envelope| T::event_type_matches(&envelope.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), expected_data_rows);
     assert!(rows
         .iter()
-        .all(|envelope| envelope.event.event_type() == canonical));
+        .all(|envelope| envelope.event_type() == canonical));
 
     let eof_keys = events
         .iter()
         .rev()
-        .find_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq_by_event_type,
                 ..
             }) => Some(writer_seq_by_event_type),
@@ -437,22 +454,29 @@ fn assert_canonical_event_type_and_eof<T: TypedPayload>(
 fn assert_derived_stage_authorship<T: TypedPayload>(
     run_dir: &Path,
     stage_name: &str,
-    parent_events: &[EventEnvelope<ChainEvent>],
-    output_events: &[EventEnvelope<ChainEvent>],
+    parent_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    output_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
 ) {
     let writer = stage_writer(run_dir, stage_name);
     let writer_clock = writer.to_string();
     let parents = parent_events
         .iter()
-        .filter(|envelope| envelope.event.is_data())
-        .map(|envelope| (envelope.event.id, envelope.event.writer_id))
+        .filter(|envelope| envelope.consumes_data_credit())
+        .map(|envelope| {
+            (
+                envelope.envelope.provenance.event.id,
+                envelope.envelope.provenance.event.writer_id,
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     for output in output_events
         .iter()
-        .filter(|envelope| T::event_type_matches(&envelope.event.event_type()))
+        .filter(|envelope| T::event_type_matches(&envelope.event_type()))
     {
-        assert_eq!(output.event.writer_id, writer);
+        assert_eq!(output.envelope.provenance.event.writer_id, writer);
         let parent_id = output
+            .envelope
+            .provenance
             .event
             .causality
             .parent_ids
@@ -461,8 +485,24 @@ fn assert_derived_stage_authorship<T: TypedPayload>(
         let parent_writer = parents
             .get(parent_id)
             .unwrap_or_else(|| panic!("parent {parent_id} exists in the upstream journal"));
-        assert!(output.vector_clock.get(&writer_clock) > 0);
-        assert!(output.vector_clock.get(&parent_writer.to_string()) > 0);
+        assert!(
+            output
+                .envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&writer_clock)
+                > 0
+        );
+        assert!(
+            output
+                .envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&parent_writer.to_string())
+                > 0
+        );
     }
 }
 
@@ -539,9 +579,8 @@ async fn scalar_and_dynamic_typed_outputs_have_live_replay_journal_parity() {
     assert_eq!(live_snapshots[2]["chunk_count"], 3);
     assert!(live_chunks.iter().all(|envelope| {
         !matches!(
-            &envelope.event.content,
-            ChainEventContent::Data { event_type, .. }
-                if event_type.as_str().contains("StageOutputs")
+            &envelope.payload,
+            ChainPayload::Fact(_) if envelope.event_type().contains("StageOutputs")
         )
     }));
     assert_eq!(
@@ -611,18 +650,29 @@ async fn scalar_and_dynamic_typed_outputs_have_live_replay_journal_parity() {
     let rejected_input = live_try_map_inputs
         .iter()
         .find(|envelope| {
-            TryMapRecord::from_event(&envelope.event).is_some_and(|record| record.index == 0)
+            TryMapRecord::from_event(&envelope.authored()).is_some_and(|record| record.index == 0)
         })
         .expect("source journal contains rejected try-map input");
     let error_parent = live_try_map_errors
         .iter()
-        .find(|envelope| TryMapRecord::event_type_matches(&envelope.event.event_type()))
+        .find(|envelope| TryMapRecord::event_type_matches(&envelope.event_type()))
         .expect("try-map error journal contains rejected parent");
-    assert_eq!(error_parent.event.id, rejected_input.event.id);
-    assert_eq!(error_parent.event.writer_id, rejected_input.event.writer_id);
     assert_eq!(
-        error_parent.event.causality.parent_ids,
-        rejected_input.event.causality.parent_ids
+        error_parent.envelope.provenance.event.id,
+        rejected_input.envelope.provenance.event.id
+    );
+    assert_eq!(
+        error_parent.envelope.provenance.event.writer_id,
+        rejected_input.envelope.provenance.event.writer_id
+    );
+    assert_eq!(
+        error_parent.envelope.provenance.event.causality.parent_ids,
+        rejected_input
+            .envelope
+            .provenance
+            .event
+            .causality
+            .parent_ids
     );
 
     run(&journal_base, Some(&live)).await;

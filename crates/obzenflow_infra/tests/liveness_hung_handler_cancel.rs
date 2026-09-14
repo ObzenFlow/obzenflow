@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{handler_observer, stage_lifecycle_observer};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{SystemEvent, SystemEventType};
+use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -305,8 +305,8 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     let mut saw_cancelled = false;
     let mut saw_stop_failed = false;
     for envelope in envelopes {
-        match &envelope.event.event {
-            SystemEventType::PipelineLifecycle(event) => {
+        match &envelope.payload {
+            SystemPayload::PipelineLifecycle(event) => {
                 pipeline_events.push(format!("{event:?}"));
                 match event {
                     obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { .. } => {
@@ -323,11 +323,11 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
                     _ => {}
                 }
             }
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 event: obzenflow_core::event::StageLifecycleEvent::Cancelled { .. },
                 ..
             } => saw_cancelled = true,
-            SystemEventType::ContractStatus { pass, .. } => {
+            SystemPayload::ContractStatus { pass, .. } => {
                 assert!(
                     *pass,
                     "unexpected ContractStatus(pass=false) while exercising hung handler cancellation"

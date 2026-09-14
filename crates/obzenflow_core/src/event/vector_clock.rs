@@ -200,18 +200,23 @@ impl CausalOrderingService {
     /// This is intended for *iteration* APIs like `Journal::read_causally_ordered()` that must be
     /// deterministic and must not use wall-clock timestamps. It guarantees that if `a`
     /// happened-before `b`, then `a` appears before `b` in the output.
-    pub fn order_envelopes_by_event_id<T>(
-        mut events: Vec<super::EventEnvelope<T>>,
-    ) -> Result<Vec<super::EventEnvelope<T>>, JournalError>
+    pub fn order_envelopes_by_event_id<P>(
+        mut events: Vec<super::JournalRecord<P>>,
+    ) -> Result<Vec<super::JournalRecord<P>>, JournalError>
     where
-        T: super::JournalEvent,
+        P: super::journal_record::JournalPayload,
     {
         // Fast path.
         if events.len() <= 1 {
             return Ok(events);
         }
 
-        events.sort_by_cached_key(|e| (Self::causal_rank(&e.vector_clock), *e.event.id()));
+        events.sort_by_cached_key(|e| {
+            (
+                Self::causal_rank(&e.envelope.provenance.journal.vector_clock),
+                *e.id(),
+            )
+        });
 
         Ok(events)
     }
@@ -221,7 +226,7 @@ impl CausalOrderingService {
 mod tests {
     use super::*;
     use crate::event::chain_event::ChainEventFactory;
-    use crate::event::{ChainEvent, EventEnvelope};
+    use crate::event::JournalRecord;
     use crate::{StageId, WriterId};
     use chrono::Utc;
     use serde_json::json;
@@ -229,20 +234,23 @@ mod tests {
     fn envelope_with_event_id_and_clock(
         event_id: EventId,
         vector_clock: VectorClock,
-    ) -> EventEnvelope<ChainEvent> {
+    ) -> JournalRecord<crate::event::ChainPayload> {
         let writer_id = WriterId::from(StageId::new());
         let mut event =
             ChainEventFactory::data_event(writer_id, "test.vector_clock", json!({ "ok": true }));
         event.id = event_id;
 
-        EventEnvelope {
-            journal_writer_id: crate::event::JournalWriterId::new(),
-            vector_clock,
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
+        JournalRecord::commit_event(
             event,
-        }
+            crate::event::provenance::JournalProvenance {
+                journal_writer_id: crate::event::JournalWriterId::new(),
+                vector_clock,
+                timestamp: Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .unwrap()
     }
 
     #[test]
@@ -278,8 +286,14 @@ mod tests {
         let output1 = CausalOrderingService::order_envelopes_by_event_id(input.clone()).unwrap();
         let output2 = CausalOrderingService::order_envelopes_by_event_id(input).unwrap();
 
-        let ids1: Vec<_> = output1.iter().map(|e| e.event.id).collect();
-        let ids2: Vec<_> = output2.iter().map(|e| e.event.id).collect();
+        let ids1: Vec<_> = output1
+            .iter()
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
+        let ids2: Vec<_> = output2
+            .iter()
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
 
         assert_eq!(ids1, vec![a_id, b_id, c_id]);
         assert_eq!(ids1, ids2);
@@ -326,7 +340,10 @@ mod tests {
 
         for permutation in permutations {
             let ordered = CausalOrderingService::order_envelopes_by_event_id(permutation).unwrap();
-            let ordered_ids: Vec<_> = ordered.iter().map(|e| e.event.id).collect();
+            let ordered_ids: Vec<_> = ordered
+                .iter()
+                .map(|e| e.envelope.provenance.event.id)
+                .collect();
             assert_eq!(ordered_ids, expected);
         }
     }

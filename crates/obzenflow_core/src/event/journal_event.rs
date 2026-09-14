@@ -21,8 +21,25 @@ mod private {
 /// This is a sealed trait - only ChainEvent and SystemEvent can implement it.
 /// The trait is sealed using the private::Sealed supertrait pattern.
 pub trait JournalEvent:
-    private::Sealed + Debug + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>
+    private::Sealed + 'static + Debug + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>
 {
+    type Payload: super::journal_record::JournalPayload<Event = Self>;
+
+    fn into_parts(
+        self,
+    ) -> (
+        super::provenance::AuthoredEnvelope<
+            <Self::Payload as super::journal_record::JournalPayload>::Provenance,
+        >,
+        Self::Payload,
+    );
+    fn from_parts(
+        envelope: super::provenance::AuthoredEnvelope<
+            <Self::Payload as super::journal_record::JournalPayload>::Provenance,
+        >,
+        payload: Self::Payload,
+    ) -> Self;
+
     /// Get the event's unique ID
     fn id(&self) -> &EventId;
 

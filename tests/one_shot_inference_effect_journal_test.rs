@@ -15,8 +15,8 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
-    EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemEventType,
+    ChainEvent, ChainPayload, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
+    EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload};
@@ -31,7 +31,6 @@ use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolverWithMetadata, EffectRegistrationBuilder, Effects,
     LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, StageCompletion,
-    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -743,7 +742,7 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .await
         .expect("stage journal is readable")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -796,22 +795,18 @@ async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
         .await
         .expect("system journal is readable")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
 fn successful_chat_record(event: &ChainEvent) -> Option<(EffectRecord, ChatCompletionReply)> {
-    let ChainEventContent::Data {
-        event_type,
-        payload,
-    } = &event.content
+    let ChainPayload::Execution(
+        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
+    ) = &event.payload
     else {
         return None;
     };
-    if event_type != EFFECT_RECORD_EVENT_TYPE {
-        return None;
-    }
-    let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
+    let record = record.clone();
     if record.descriptor.effect_type.as_str() != CHAT_EFFECT_TYPE {
         return None;
     }
@@ -1007,7 +1002,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
     let live_events = stage_events(&live_archive, "brief").await;
     let live_data = live_events
         .iter()
-        .filter(|event| matches!(event.content, ChainEventContent::Data { .. }))
+        .filter(|event| event.consumes_data_credit())
         .collect::<Vec<_>>();
     assert_eq!(
         live_data.len(),
@@ -1437,7 +1432,7 @@ async fn inference_track_and_off_modes_remain_nonblocking_and_locally_bounded() 
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event.content, ChainEventContent::Data { .. }))
+                .filter(|event| event.consumes_data_credit())
                 .count(),
             3,
             "{mode} retains the descriptor-proved local three-row bound"
@@ -1693,13 +1688,10 @@ async fn changed_inference_request_is_replay_divergence_before_port_resolution()
     let detail = system_events(&failed_archive)
         .await
         .into_iter()
-        .find_map(|event| match event.event {
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+        .find_map(|event| match event.payload {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed { reason, .. })
+            | SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
                 reason, ..
-            })
-            | SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
-                reason,
-                ..
             }) => Some(reason),
             _ => None,
         })
@@ -1763,13 +1755,10 @@ async fn changed_inference_logic_version_is_replay_divergence_with_identical_req
     let detail = system_events(&failed_archive)
         .await
         .into_iter()
-        .find_map(|event| match event.event {
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+        .find_map(|event| match event.payload {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed { reason, .. })
+            | SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
                 reason, ..
-            })
-            | SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
-                reason,
-                ..
             }) => Some(reason),
             _ => None,
         })

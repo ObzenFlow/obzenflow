@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemEventType};
+use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -124,8 +124,11 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
         Arc::new(Mutex::new(None));
     let system_journal_slot_hook = system_journal_slot.clone();
+    let mut liveness = liveness_observations::LivenessTrace::default();
+    let liveness_source = liveness.source.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
+        *liveness_source.lock().unwrap() = Some(handle.observations());
         let system_journal = handle.system_journal().expect("system journal available");
         *system_journal_slot_hook
             .lock()
@@ -168,6 +171,7 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
 
     let mut result = None;
     for _ in 0..300 {
+        liveness.capture();
         match run_task.poll() {
             Poll::Ready(res) => {
                 result = Some(res);
@@ -180,6 +184,7 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         }
     }
 
+    liveness.capture();
     result
         .expect("flow did not complete after advancing tokio time")
         .expect("flow should complete successfully");
@@ -195,16 +200,17 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         .await
         .expect("read system journal");
 
-    let mut saw_stalled = false;
-    let mut saw_recovered = false;
+    let saw_stalled = liveness
+        .states
+        .iter()
+        .any(|(_, _, state)| *state == EdgeLivenessState::Stalled);
+    let saw_recovered = liveness
+        .states
+        .iter()
+        .any(|(_, _, state)| *state == EdgeLivenessState::Recovered);
     for envelope in envelopes {
-        match &envelope.event.event {
-            SystemEventType::EdgeLiveness { state, .. } => match state {
-                EdgeLivenessState::Stalled => saw_stalled = true,
-                EdgeLivenessState::Recovered => saw_recovered = true,
-                _ => {}
-            },
-            SystemEventType::ContractStatus { pass, .. } => {
+        match &envelope.payload {
+            SystemPayload::ContractStatus { pass, .. } => {
                 assert!(
                     *pass,
                     "unexpected ContractStatus(pass=false) while exercising stalled transition"
@@ -223,3 +229,6 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         "expected EdgeLiveness Recovered after handler returned and progress resumed"
     );
 }
+
+#[path = "support/liveness_observations.rs"]
+mod liveness_observations;

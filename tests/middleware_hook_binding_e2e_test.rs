@@ -25,10 +25,9 @@ use obzenflow_adapters::middleware::{
     SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
     SourcePollUnitId,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
-use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
 use obzenflow_core::event::{
-    EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectOutcomePayload, EffectRecord,
+    EffectFailureCause, EffectFailureCode, EffectFailureSource, EffectOutcomePayload,
     RetryDisposition,
 };
 use obzenflow_core::{StageId, TypedPayload};
@@ -572,18 +571,14 @@ fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
     let mut failures: Vec<_> = exported_jsonl::chain_events(jsonl)
         .into_iter()
         .filter_map(|event| {
-            let ChainEventContent::Data {
-                event_type,
-                payload,
-            } = event.content
+            let ChainPayload::Execution(
+                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(
+                    record,
+                ),
+            ) = event.payload
             else {
                 return None;
             };
-            if event_type != EFFECT_RECORD_EVENT_TYPE {
-                return None;
-            }
-            let record: EffectRecord =
-                serde_json::from_value(payload).expect("effect record should decode");
             if record.descriptor.effect_type.as_str() != HookEffect::EFFECT_TYPE {
                 return None;
             }
@@ -595,6 +590,9 @@ fn recorded_breaker_failures(jsonl: &str) -> Vec<RecordedBreakerFailure> {
             };
             assert_eq!(
                 event
+                    .envelope
+                    .provenance
+                    .event
                     .effect_provenance
                     .as_ref()
                     .map(|provenance| &provenance.cursor),

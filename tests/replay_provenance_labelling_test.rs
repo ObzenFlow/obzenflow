@@ -20,7 +20,6 @@
 use async_trait::async_trait;
 use obzenflow_core::{
     event::chain_event::ChainEvent,
-    event::ChainEventContent,
     id::StageId,
     journal::{journal_owner::JournalOwner, Journal},
     TypedPayload,
@@ -422,7 +421,7 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .await
         .expect("stage journal should read")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -432,7 +431,7 @@ async fn data_rows_missing_replay_context(run_dir: &Path, stage_key: &str) -> Ve
     read_stage_events(run_dir, stage_key)
         .await
         .into_iter()
-        .filter(|event| matches!(event.content, ChainEventContent::Data { .. }))
+        .filter(|event| event.consumes_data_credit())
         .filter(|event| event.replay_context.is_none())
         .map(|event| event.event_type().to_string())
         .collect()

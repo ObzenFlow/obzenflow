@@ -452,7 +452,7 @@ async fn live_join_canonical_merge_reproduces_under_replay() {
     let live_joined = replay_testkit::read_stage_envelopes(&live_run, "joined")
         .await
         .iter()
-        .filter(|envelope| JoinedItem::from_event(&envelope.event).is_some())
+        .filter(|envelope| JoinedItem::from_event(&envelope.authored()).is_some())
         .count();
     assert_eq!(
         live_calls.load(Ordering::SeqCst),

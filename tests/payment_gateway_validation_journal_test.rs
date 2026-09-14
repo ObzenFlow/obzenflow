@@ -54,13 +54,18 @@ fn export_run(run: &Path, output: &Path) -> Vec<serde_json::Value> {
 }
 
 fn data_event_type(row: &serde_json::Value) -> Option<&str> {
-    (row.pointer("/event/content/content_type")?.as_str()? == "data")
-        .then(|| row.pointer("/event/content/event_type")?.as_str())
+    (row.pointer("/envelope/provenance/event/event_kind")?
+        .as_str()?
+        == "fact")
+        .then(|| {
+            row.pointer("/envelope/provenance/event/event_type")?
+                .as_str()
+        })
         .flatten()
 }
 
 fn order_id(row: &serde_json::Value) -> Option<&str> {
-    row.pointer("/event/content/payload/order_id")?.as_str()
+    row.pointer("/payload/order_id")?.as_str()
 }
 
 #[test]
@@ -123,12 +128,12 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         )
     }) {
         assert!(
-            row.pointer("/event/effect_provenance")
+            row.pointer("/envelope/provenance/event/effect_provenance")
                 .is_none_or(serde_json::Value::is_null),
             "pure validation facts must use ordinary derived-event identity"
         );
         assert!(
-            row.pointer("/event/causality/parent_ids")
+            row.pointer("/envelope/provenance/event/causality/parent_ids")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|parents| !parents.is_empty()),
             "pure validation facts retain their input parent"
@@ -141,13 +146,13 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         .expect("the valid order should be authorized");
     assert_eq!(
         authorized
-            .pointer("/event/effect_provenance/descriptor/effect_type")
+            .pointer("/envelope/provenance/event/effect_provenance/descriptor/effect_type")
             .and_then(serde_json::Value::as_str),
         Some("payment.authorize")
     );
     assert_eq!(
         authorized
-            .pointer("/event/effect_provenance/outcome_fact_ordinal")
+            .pointer("/envelope/provenance/event/effect_provenance/outcome_fact_ordinal")
             .and_then(serde_json::Value::as_u64),
         Some(0)
     );

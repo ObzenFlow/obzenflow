@@ -8,10 +8,8 @@
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter};
 use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource};
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerRetryStopReason, MiddlewareLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::execution_payload::CircuitBreakerRetryStopReason;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,
     RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY, RESILIENCE_BREAKER_COUNT_WINDOW_KEY,
@@ -672,13 +670,11 @@ fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Ve
     report
         .control_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryScheduled {
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RetryScheduled {
                     delay_ms,
                     ..
-                }),
-            )) => Some(*delay_ms),
+                })) => Some(*delay_ms),
             _ => None,
         })
         .collect()
@@ -690,15 +686,13 @@ fn recovery_completions(
     report
         .control_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RecoveryCompleted {
                     total_attempts,
                     backoff_elapsed_ms,
                     recovery_elapsed_ms,
                     ..
-                }),
-            )) => Some((*total_attempts, *backoff_elapsed_ms, *recovery_elapsed_ms)),
+                })) => Some((*total_attempts, *backoff_elapsed_ms, *recovery_elapsed_ms)),
             _ => None,
         })
         .collect()
@@ -710,13 +704,11 @@ fn recovery_completion_cursors(
     report
         .control_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RecoveryCompleted {
                     cursor,
                     ..
-                }),
-            )) => Some(cursor.clone()),
+                })) => Some(cursor.clone()),
             _ => None,
         })
         .collect()
@@ -732,13 +724,11 @@ fn settled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport) -
     report
         .control_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::AttemptSettled {
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::AttemptSettled {
                     attempt,
                     ..
-                }),
-            )) => Some(*attempt),
+                })) => Some(*attempt),
             _ => None,
         })
         .collect()
@@ -748,13 +738,11 @@ fn scheduled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport)
     report
         .control_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryScheduled {
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RetryScheduled {
                     next_attempt,
                     ..
-                }),
-            )) => Some(*next_attempt),
+                })) => Some(*next_attempt),
             _ => None,
         })
         .collect()
@@ -766,14 +754,12 @@ fn retry_exhaustions(
     report
         .control_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryExhausted {
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::RetryExhausted {
                     total_attempts,
                     reason,
                     ..
-                }),
-            )) => Some((*total_attempts, *reason)),
+                })) => Some((*total_attempts, *reason)),
             _ => None,
         })
         .collect()
@@ -1435,7 +1421,7 @@ async fn open_half_open_recovery_and_chronic_failure_share_one_authority() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let metrics = breaker[0].1();
+    let metrics = breaker[0].1().expect("measurement captured");
     assert_eq!(metrics.requests_total, 3);
     assert_eq!(metrics.successes_total, 1);
     assert_eq!(metrics.failures_total, 2);
@@ -1556,7 +1542,7 @@ async fn probe_busy_rejection_has_no_attempt_or_committed_permit() {
     ));
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let metrics = breaker[0].1();
+    let metrics = breaker[0].1().expect("measurement captured");
     assert_eq!(metrics.requests_total, 2);
     assert_eq!(metrics.failures_total, 1);
     assert_eq!(metrics.successes_total, 1);
@@ -1608,15 +1594,13 @@ async fn limiter_wait_is_not_a_slow_dependency_sample() {
     let settled = second
         .control_events
         .iter()
-        .find_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::AttemptSettled {
+        .find_map(|event| match &event.payload {
+            ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::AttemptSettled {
                     slow,
                     dependency_elapsed_ms,
                     admission_wait_ms,
                     ..
-                }),
-            )) => Some((*slow, *dependency_elapsed_ms, *admission_wait_ms)),
+                })) => Some((*slow, *dependency_elapsed_ms, *admission_wait_ms)),
             _ => None,
         })
         .expect("second call should publish one physical-attempt row");
@@ -1632,7 +1616,7 @@ async fn limiter_wait_is_not_a_slow_dependency_sample() {
     ));
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let metrics = breaker[0].1();
+    let metrics = breaker[0].1().expect("measurement captured");
     assert_eq!(metrics.requests_total, 2);
     assert_eq!(metrics.successes_total, 2);
     assert_eq!(metrics.failures_total, 0);
@@ -1722,7 +1706,7 @@ async fn circuit_opening_cancels_a_queued_limiter_reservation() {
     );
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let metrics = breaker[0].1();
+    let metrics = breaker[0].1().expect("measurement captured");
     assert_eq!(metrics.requests_total, 1);
     assert_eq!(metrics.failures_total, 1);
     assert_eq!(metrics.rejections_total, 1);
@@ -1781,7 +1765,7 @@ async fn cancellation_during_limiter_wait_commits_no_permit_or_attempt() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let metrics = breaker[0].1();
+    let metrics = breaker[0].1().expect("measurement captured");
     assert_eq!(metrics.requests_total, 1);
     assert_eq!(metrics.successes_total, 1);
     assert_eq!(metrics.failures_total, 0);
@@ -1825,7 +1809,7 @@ async fn cancellation_in_flight_records_an_attempt_without_a_health_sample() {
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
     assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let metrics = breaker[0].1();
+    let metrics = breaker[0].1().expect("measurement captured");
     assert_eq!(metrics.requests_total, 1);
     assert_eq!(metrics.successes_total, 0);
     assert_eq!(metrics.failures_total, 0);

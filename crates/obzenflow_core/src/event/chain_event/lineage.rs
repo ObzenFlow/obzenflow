@@ -6,7 +6,6 @@ use super::{ChainEvent, CorrelationContext};
 use crate::event::context::composite_activation_context::{
     union_composite_activations, CompositeActivationConflict,
 };
-use crate::event::context::observability_context::ObservabilityContext;
 use crate::event::context::CompositeActivationContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::types::CorrelationId;
@@ -51,10 +50,7 @@ impl ChainEvent {
 
     /// Composite activations that causally contribute to this event.
     pub fn composite_activations(&self) -> &[CompositeActivationContext] {
-        self.observability
-            .as_ref()
-            .map(|observability| observability.composite_activations.as_slice())
-            .unwrap_or_default()
+        &self.envelope.provenance.event.composite_activations
     }
 
     /// Insert one reconstructable input-boundary activation idempotently.
@@ -87,20 +83,8 @@ impl ChainEvent {
         Ok(inserted)
     }
 
-    pub(crate) fn inherited_composite_observability(&self) -> Option<ObservabilityContext> {
-        (!self.composite_activations().is_empty()).then(|| ObservabilityContext {
-            composite_activations: self.composite_activations().to_vec(),
-            ..ObservabilityContext::default()
-        })
-    }
-
     fn replace_composite_activations(&mut self, activations: Vec<CompositeActivationContext>) {
-        if activations.is_empty() && self.observability.is_none() {
-            return;
-        }
-        self.observability
-            .get_or_insert_with(ObservabilityContext::default)
-            .composite_activations = activations;
+        self.envelope.provenance.event.composite_activations = activations;
     }
 
     /// Check if this event has correlation info
@@ -162,9 +146,9 @@ mod composite_activation_tests {
     fn derived_events_preserve_exact_activation_identity() {
         let writer = WriterId::from(StageId::new());
         let mut entry = ChainEventFactory::data_event(writer, "test.input.v1", json!({}));
-        entry.processing_info.event_time = 100;
+        entry.processing.event_time = 100;
         let entry_id = entry.id;
-        let entered_at_ms = entry.processing_info.event_time;
+        let entered_at_ms = entry.processing.event_time;
         entry = entry
             .try_with_composite_activations(vec![CompositeActivationContext::new(
                 CompositeId::new("test:composite"),
@@ -185,11 +169,11 @@ mod composite_activation_tests {
         assert_eq!(child.composite_activations(), entry.composite_activations());
         let json = serde_json::to_value(&child).expect("event serializes");
         assert_eq!(
-            json["observability"]["composite_activations"][0]["entry_port"],
+            json["envelope"]["provenance"]["event"]["composite_activations"][0]["entry_port"],
             "in"
         );
         assert_eq!(
-            json["observability"]["composite_activations"][0],
+            json["envelope"]["provenance"]["event"]["composite_activations"][0],
             serde_json::json!({
                 "composite_id": "test:composite",
                 "activation": entry.id,
@@ -198,14 +182,25 @@ mod composite_activation_tests {
             })
         );
 
-        let mut legacy = json;
-        legacy["observability"]
+        let mut without_measurements = json;
+        without_measurements["envelope"]
             .as_object_mut()
-            .expect("observability object")
+            .unwrap()
+            .remove("observability");
+        let decoded: crate::event::ChainEvent =
+            serde_json::from_value(without_measurements.clone()).unwrap();
+        assert_eq!(
+            decoded.composite_activations(),
+            child.composite_activations()
+        );
+        without_measurements["envelope"]["provenance"]["event"]
+            .as_object_mut()
+            .unwrap()
             .remove("composite_activations");
-        let legacy: crate::event::ChainEvent =
-            serde_json::from_value(legacy).expect("pre-activation ChainEvent remains decodable");
-        assert!(legacy.composite_activations().is_empty());
+        assert!(
+            serde_json::from_value::<crate::event::ChainEvent>(without_measurements).is_err(),
+            "protected activation membership is required by this schema"
+        );
     }
 
     #[test]

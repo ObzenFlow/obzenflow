@@ -8,7 +8,7 @@
 //! and keeps file handles open for optimal performance.
 
 use super::journal_error::JournalError;
-use crate::event::event_envelope::EventEnvelope;
+use crate::event::journal_record::JournalRecord;
 use crate::event::JournalEvent;
 use async_trait::async_trait;
 
@@ -29,7 +29,7 @@ where
     ///
     /// Returns None if no more events are available (EOF).
     /// This method should be efficient - O(1) regardless of journal size.
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError>;
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError>;
 
     /// Get the current position in the journal
     ///

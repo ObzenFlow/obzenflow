@@ -44,12 +44,13 @@ pub(super) fn with_committed_receipt_snapshot(
     event: ChainEvent,
     instrumentation: &crate::metrics::instrumentation::StageInstrumentation,
 ) -> ChainEvent {
-    let mut snapshot = instrumentation.snapshot_with_control();
-    snapshot.events_emitted_total = snapshot.events_emitted_total.saturating_add(1);
-    snapshot.writer_seq = snapshot.writer_seq.saturating_add(1);
-    snapshot.last_emitted_event_id = Some(event.id);
-    snapshot.last_emitted_writer = Some(event.writer_id);
-    event.with_runtime_context(snapshot)
+    let mut snapshot = instrumentation.snapshot();
+    snapshot.accounting.events_emitted_total =
+        snapshot.accounting.events_emitted_total.saturating_add(1);
+    snapshot.progress.writer_seq = snapshot.progress.writer_seq.saturating_add(1);
+    snapshot.progress.last_emitted_event_id = Some(event.id);
+    snapshot.progress.last_emitted_writer = Some(event.writer_id);
+    event.with_runtime_provenance(snapshot)
 }
 
 // Re-export public API
@@ -69,7 +70,7 @@ pub use fsm::{JournalSinkEvent, JournalSinkState};
 mod tests {
     use super::journalled_delivery_event;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::event::ChainEventContent;
+    use obzenflow_core::event::ChainPayload;
     use obzenflow_core::{StageId, WriterId};
 
     #[test]
@@ -82,7 +83,7 @@ mod tests {
             "descriptor.snapshot",
             payload,
         );
-        let ChainEventContent::Delivery(payload) = event.content else {
+        let ChainPayload::Delivery(payload) = event.payload else {
             panic!("delivery factory must create a delivery event");
         };
         assert_eq!(payload.destination, "descriptor.snapshot");

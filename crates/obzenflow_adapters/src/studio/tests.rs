@@ -4,8 +4,11 @@
 
 use super::*;
 use obzenflow_core::event::{
-    event_envelope::EventEnvelope,
-    payloads::observability_payload::{MiddlewareLifecycle, RateLimiterEvent},
+    journal_record::JournalRecord,
+    payloads::execution_payload::{
+        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact,
+        RateLimiterFact, RateLimiterMode,
+    },
     system_event::MiddlewareEventOrigin,
     types::{SeqNo, WriterId},
     StageLifecycleEvent, SystemEvent,
@@ -16,8 +19,8 @@ use obzenflow_core::{
 };
 use serde_json::{json, Value};
 
-fn fact(event: SystemEventType) -> SystemEventEnvelope {
-    EventEnvelope::new(
+fn fact(event: SystemPayload) -> SystemJournalRecord {
+    JournalRecord::new(
         JournalWriterId::from(JournalId::new()),
         SystemEvent::new(WriterId::from(SystemId::new()), event),
     )
@@ -26,7 +29,7 @@ fn fact(event: SystemEventType) -> SystemEventEnvelope {
 #[test]
 fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisions() {
     let stage = StageId::new();
-    let envelope = fact(SystemEventType::MiddlewareLifecycle {
+    let envelope = fact(SystemPayload::MiddlewareLifecycle {
         stage_id: stage,
         stage_name: Some("worker".into()),
         flow_id: Some("flow".into()),
@@ -36,11 +39,13 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
             writer_key: "worker".into(),
             seq: SeqNo(7),
         },
-        middleware: MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
-            mode_from: "normal".into(),
-            mode_to: "throttled".into(),
-            limit_rate: 10.0,
-        }),
+        middleware: obzenflow_core::event::payloads::execution_payload::MiddlewareFact::RateLimiter(
+            obzenflow_core::event::payloads::execution_payload::RateLimiterFact::ModeChange {
+                mode_from: RateLimiterMode::Normal,
+                mode_to: RateLimiterMode::Limiting,
+                limit_rate: 10.0,
+            },
+        ),
     });
     let mut rebuilt = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let mut live = rebuilt.clone();
@@ -50,7 +55,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
     assert_eq!(frames[0].event.as_deref(), Some("middleware_lifecycle"));
     assert_eq!(
         frames[0].id.as_deref(),
-        Some(envelope.event.id.to_string().as_str())
+        Some(envelope.envelope.provenance.event.id.to_string().as_str())
     );
     let snapshot = rebuilt.middleware_snapshot(456).unwrap();
     assert_eq!(snapshot, live.middleware_snapshot(456).unwrap());
@@ -58,11 +63,11 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
     assert_eq!(
         serde_json::from_str::<Value>(&snapshot.data).unwrap(),
         json!({
-            "timestamp_ms": 456, "flow_id": "flow", "flow_name": "demo", "vector_clock": envelope.vector_clock,
-            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "rate_limiter": {"mode": "throttled", "revision": 7}}]
+            "timestamp_ms": 456, "flow_id": "flow", "flow_name": "demo", "vector_clock": envelope.envelope.provenance.journal.vector_clock,
+            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.timestamp}}]
         })
     );
-    let running = fact(SystemEventType::PipelineLifecycle(
+    let running = fact(SystemPayload::PipelineLifecycle(
         PipelineLifecycleEvent::Running {
             stage_count: Some(1),
         },
@@ -82,23 +87,24 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
 }
 
 #[test]
-fn stage_bootstrap_retains_enriched_terminal_metrics_after_an_empty_duplicate() {
+fn stage_bootstrap_retains_terminal_accounting_after_an_empty_duplicate() {
     let stage = StageId::new();
-    let metrics = json!({
-        "events_processed_total": 100, "events_accumulated_total": 0, "events_emitted_total": 99,
-        "errors_total": 1, "errors_by_kind": {}, "in_flight": 0,
-        "recent_p50_ms": 0, "recent_p90_ms": 0, "recent_p95_ms": 0, "recent_p99_ms": 0, "recent_p999_ms": 0,
-        "processing_time_sum_nanos": 123, "event_loops_total": 100, "event_loops_with_work_total": 100
-    });
-    let enriched = fact(SystemEventType::StageLifecycle {
+    let metrics = serde_json::to_value(obzenflow_core::event::context::ExecutionAccounting {
+        events_processed_total: 100,
+        events_emitted_total: 99,
+        errors_total: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let enriched = fact(SystemPayload::StageLifecycle {
         stage_id: stage,
         event: StageLifecycleEvent::Completed {
-            metrics: Some(serde_json::from_value(metrics.clone()).unwrap()),
+            accounting: Some(serde_json::from_value(metrics.clone()).unwrap()),
         },
     });
-    let duplicate = fact(SystemEventType::StageLifecycle {
+    let duplicate = fact(SystemPayload::StageLifecycle {
         stage_id: stage,
-        event: StageLifecycleEvent::Completed { metrics: None },
+        event: StageLifecycleEvent::Completed { accounting: None },
     });
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     projection.rebuild(&enriched);
@@ -107,8 +113,11 @@ fn stage_bootstrap_retains_enriched_terminal_metrics_after_an_empty_duplicate() 
     assert_eq!(snapshots.len(), 1);
     assert!(snapshots[0].id.is_none());
     let payload: Value = serde_json::from_str(&snapshots[0].data).unwrap();
-    assert_eq!(payload["timestamp_ms"], enriched.event.timestamp);
-    assert_eq!(payload["metrics"], metrics);
+    assert_eq!(
+        payload["timestamp_ms"],
+        enriched.envelope.provenance.event.timestamp
+    );
+    assert_eq!(payload["accounting"], metrics);
 }
 
 fn payload(frame: &SseFrame) -> Value {
@@ -124,7 +133,7 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
             json!({"event_type": "stage_running"}),
         ),
         (
-            StageLifecycleEvent::Draining { metrics: None },
+            StageLifecycleEvent::Draining { accounting: None },
             json!({"event_type": "stage_draining"}),
         ),
         (
@@ -132,13 +141,13 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
             json!({"event_type": "stage_drained"}),
         ),
         (
-            StageLifecycleEvent::Completed { metrics: None },
+            StageLifecycleEvent::Completed { accounting: None },
             json!({"event_type": "stage_completed"}),
         ),
         (
             StageLifecycleEvent::Cancelled {
                 reason: "requested".into(),
-                metrics: None,
+                accounting: None,
             },
             json!({"event_type": "stage_cancelled", "reason": "requested"}),
         ),
@@ -146,14 +155,14 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
             StageLifecycleEvent::Failed {
                 error: "failed".into(),
                 recoverable: Some(false),
-                metrics: None,
+                accounting: None,
                 causal_event_id: Some(EventId::new()),
             },
             json!({"event_type": "stage_failed", "error": "failed", "recoverable": false}),
         ),
     ];
     for (event, mut expected) in cases {
-        let envelope = fact(SystemEventType::StageLifecycle {
+        let envelope = fact(SystemPayload::StageLifecycle {
             stage_id: stage,
             event,
         });
@@ -162,11 +171,14 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
         let live = projection.project(&envelope, 123).remove(0);
         expected["system_event_type"] = json!("stage_lifecycle");
         expected["stage_id"] = json!(stage.to_string());
-        expected["timestamp_ms"] = json!(envelope.event.timestamp);
-        expected["vector_clock"] = json!(envelope.vector_clock);
+        expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
+        expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
         assert_eq!(payload(&live), expected);
         assert_eq!(live.event.as_deref(), Some("stage_lifecycle"));
-        assert_eq!(live.id, Some(envelope.event.id.to_string()));
+        assert_eq!(
+            live.id,
+            Some(envelope.envelope.provenance.event.id.to_string())
+        );
 
         let mut rebuilt =
             StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
@@ -229,7 +241,7 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
     ];
     for (journal, expected) in flow_cases {
         assert_fact_payload(
-            fact(SystemEventType::PipelineLifecycle(
+            fact(SystemPayload::PipelineLifecycle(
                 serde_json::from_value(journal).unwrap(),
             )),
             "flow_lifecycle",
@@ -253,7 +265,7 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
         ),
     ];
     for (journal, expected) in replay_cases {
-        let envelope = fact(SystemEventType::ReplayLifecycle(
+        let envelope = fact(SystemPayload::ReplayLifecycle(
             serde_json::from_value(journal).unwrap(),
         ));
         assert_fact_payload(
@@ -264,7 +276,7 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
         );
         let stage = StageId::new();
         let mut stage_envelope = envelope;
-        stage_envelope.event.writer_id = WriterId::from(stage);
+        stage_envelope.envelope.provenance.event.writer_id = WriterId::from(stage);
         let mut expected = expected;
         expected["stage_id"] = json!(stage.to_string());
         assert_fact_payload(
@@ -286,24 +298,24 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
         (MetricsCoordinationEvent::Shutdown, "metrics_shutdown"),
     ] {
         assert_fact_payload(
-            fact(SystemEventType::MetricsCoordination(event)),
+            fact(SystemPayload::MetricsCoordination(event)),
             "metrics_coordination",
             Some("metrics_coordination"),
             json!({"event_type": name}),
         );
     }
     let watermark = obzenflow_core::event::vector_clock::VectorClock::new();
-    let envelope = fact(SystemEventType::MetricsCoordination(
+    let envelope = fact(SystemPayload::MetricsCoordination(
         MetricsCoordinationEvent::Exported {
             watermark: watermark.clone(),
         },
     ));
-    let expected = json!({"export_id": envelope.event.id.to_string(), "watermark": watermark});
+    let expected = json!({"export_id": envelope.envelope.provenance.event.id.to_string(), "watermark": watermark});
     assert_fact_payload(envelope, "metrics_watermark", None, expected);
 }
 
 fn assert_fact_payload(
-    envelope: SystemEventEnvelope,
+    envelope: SystemJournalRecord,
     name: &str,
     family: Option<&str>,
     mut expected: Value,
@@ -311,143 +323,230 @@ fn assert_fact_payload(
     if let Some(family) = family {
         expected["system_event_type"] = json!(family);
     }
-    expected["timestamp_ms"] = json!(envelope.event.timestamp);
-    expected["vector_clock"] = json!(envelope.vector_clock);
+    expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
+    expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let frames = projection.project(&envelope, 123);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].event.as_deref(), Some(name));
-    assert_eq!(frames[0].id, Some(envelope.event.id.to_string()));
+    assert_eq!(
+        frames[0].id,
+        Some(envelope.envelope.provenance.event.id.to_string())
+    );
     assert_eq!(payload(&frames[0]), expected);
 }
 
 #[test]
 fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() {
-    use obzenflow_core::event::payloads::observability_payload::{
-        CircuitBreakerEvent, CircuitBreakerOpenTrigger,
-    };
-
+    use obzenflow_core::event::observation::*;
     let stage = StageId::new();
-    let updates = [
-        MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Summary {
-            window_duration_s: 5,
-            requests_processed: 20,
-            requests_rejected: 2,
-            state: "CLOSED".into(),
-            consecutive_failures: 0,
-            rejection_rate: 0.1,
-            successes_total: 18,
-            failures_total: 2,
-            opened_total: 0,
-            time_in_closed_seconds: 5.0,
-            time_in_open_seconds: 0.0,
-            time_in_half_open_seconds: 0.0,
-        }),
-        MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Opened {
-            error_rate: 0.5,
-            failure_count: 2,
-            trigger: CircuitBreakerOpenTrigger::FailureRate,
-            observed_calls: 4,
-            slow_call_rate: Some(0.25),
-            slow_call_count: Some(1),
-            last_error: Some("timeout".into()),
-        }),
-        MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::HalfOpen {
-            test_request_count: 1,
-        }),
-        MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Closed {
-            success_count: 1,
-            recovery_duration_ms: 250,
-        }),
-        MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization {
-            utilization_percent: 25.0,
-            events_in_window: 5,
-            window_size_ms: 1000,
-        }),
-        MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
-            mode_from: "normal".into(),
-            mode_to: "throttled".into(),
-            limit_rate: 10.0,
-        }),
-        MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ActivityPulse {
-            window_ms: 1000,
-            delayed_events: 3,
-            delay_ms_total: 60,
-            delay_ms_max: 30,
-            limit_rate: 10.0,
-        }),
-        MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ConfigChanged {
-            old_rate: 10.0,
-            new_rate: 20.0,
-        }),
+    let capture_scope = CaptureScope {
+        flow_id: obzenflow_core::FlowId::new(),
+        resume_generation: Default::default(),
+    };
+    enum Input {
+        Fact(Box<SystemJournalRecord>),
+        Measurement(Box<ObservabilityContext>),
+    }
+    let measured = |seq, record| {
+        let mut packet = ObservabilityContext::new(CaptureStamp {
+            capture_scope,
+            observer: stage.into(),
+            capture_seq: CaptureSeq(seq),
+            capture_reason: CaptureReason::Periodic,
+            observed_at_ms: seq,
+        });
+        packet.records.push(record);
+        Input::Measurement(Box::new(packet))
+    };
+    let factual = |revision, middleware| {
+        Input::Fact(Box::new(fact(SystemPayload::MiddlewareLifecycle {
+            stage_id: stage,
+            stage_name: Some("worker".into()),
+            flow_id: Some("flow".into()),
+            flow_name: Some("demo".into()),
+            origin: MiddlewareEventOrigin {
+                event_id: EventId::new(),
+                writer_key: "worker".into(),
+                seq: SeqNo(revision),
+            },
+            middleware,
+        })))
+    };
+    let summary = |successes| ObservationRecord::CircuitBreakerSummary {
+        effect_type: None,
+        window_duration_s: 5,
+        requests_processed: 20,
+        requests_rejected: 2,
+        observed_state: CircuitState::Closed,
+        consecutive_failures: 0,
+        rejection_rate: 0.1,
+        successes_total: successes,
+        failures_total: 2,
+        opened_total: 0,
+        time_in_closed_seconds: 5.0,
+        time_in_open_seconds: 0.0,
+        time_in_half_open_seconds: 0.0,
+    };
+    let tape = vec![
+        measured(1, summary(18)),
+        factual(
+            7,
+            MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
+                error_rate: 0.5,
+                failure_count: 2,
+                trigger: CircuitBreakerOpenTrigger::FailureRate,
+                observed_calls: 4,
+                slow_call_rate: Some(0.25),
+                slow_call_count: Some(1),
+                last_error: Some("timeout".into()),
+            }),
+        ),
+        measured(2, summary(19)),
+        factual(
+            8,
+            MiddlewareFact::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+                test_request_count: 1,
+            }),
+        ),
+        factual(
+            9,
+            MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Closed {
+                success_count: 1,
+                recovery_duration_ms: 250,
+            }),
+        ),
+        measured(
+            1000,
+            ObservationRecord::RateLimiterUtilisation {
+                effect_type: None,
+                utilization_percent: 25.0,
+                events_in_window: 5,
+                window_size_ms: 1000,
+            },
+        ),
+        factual(
+            7,
+            MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+                mode_from: RateLimiterMode::Normal,
+                mode_to: RateLimiterMode::Limiting,
+                limit_rate: 10.0,
+            }),
+        ),
+        measured(
+            1001,
+            ObservationRecord::RateLimiterActivity {
+                effect_type: None,
+                window_ms: 1000,
+                delayed_events: 3,
+                delay_ms_total: 60,
+                delay_ms_max: 30,
+                limit_rate: 10.0,
+            },
+        ),
+        factual(
+            8,
+            MiddlewareFact::RateLimiter(RateLimiterFact::ConfigChanged {
+                old_rate: 10.0,
+                new_rate: 20.0,
+            }),
+        ),
     ];
-    let tape: Vec<_> = updates
-        .into_iter()
-        .enumerate()
-        .map(|(index, middleware)| {
-            fact(SystemEventType::MiddlewareLifecycle {
-                stage_id: stage,
-                stage_name: Some("worker".into()),
-                flow_id: Some("flow".into()),
-                flow_name: Some("demo".into()),
-                origin: MiddlewareEventOrigin {
-                    event_id: EventId::new(),
-                    writer_key: "worker".into(),
-                    seq: SeqNo(index as u64 + 1),
-                },
-                middleware,
-            })
-        })
-        .collect();
     let empty = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+    let apply = |view: &mut StudioProjection, input: &Input| match input {
+        Input::Fact(record) => view.project(record, 123),
+        Input::Measurement(packet) => view.project_measurements((**packet).clone()),
+    };
     let mut live = empty.clone();
     let mut frames = Vec::new();
     let mut snapshots = Vec::new();
-    for envelope in &tape {
-        frames.push(live.project(envelope, 123));
+    for input in &tape {
+        let projected = apply(&mut live, input);
+        if matches!(input, Input::Measurement(_)) {
+            for frame in &projected {
+                assert!(frame.id.is_none());
+                let body = payload(frame);
+                assert!(body.get("capture").is_some());
+                assert!(body.get("revision").is_none() && body.get("origin").is_none());
+            }
+        }
+        frames.push(projected);
         snapshots.push(live.middleware_snapshot(456));
     }
-    let opened = payload(&frames[1][0]);
-    assert_eq!(opened["state_from"], "closed");
-    assert_eq!(opened["state_to"], "open");
-    assert_eq!(
-        opened["context"],
-        json!({"error_rate": 0.5, "failure_count": 2, "trigger": "failure_rate", "observed_calls": 4, "slow_call_rate": 0.25, "slow_call_count": 1, "last_error": "timeout"})
+    assert!(
+        payload(snapshots[0].as_ref().unwrap())["middleware"][0]["circuit_breaker"]
+            .get("state")
+            .is_none()
     );
-    assert_eq!(payload(&frames[2][0])["state_from"], "open");
-    assert_eq!(payload(&frames[3][0])["state_from"], "half_open");
-    assert_eq!(payload(&frames[4][0])["mode"], "normal");
+    assert!(payload(&frames[1][0]).get("state_from").is_none());
+    assert_eq!(payload(&frames[1][0])["state_to"], "open");
     assert_eq!(
-        frames[7],
-        vec![SseFrame::comment("unsupported_middleware_event_skipped")]
+        payload(snapshots[2].as_ref().unwrap())["middleware"][0]["circuit_breaker"]["state"],
+        "open"
     );
-    let snapshot = payload(snapshots.last().unwrap().as_ref().unwrap());
-    assert_eq!(
-        snapshot["middleware"],
-        json!([{
-            "stage_id": stage.to_string(), "stage_name": "worker",
-            "circuit_breaker": {"state": "closed", "revision": 4, "requests_processed": 20, "requests_rejected": 2, "consecutive_failures": 0, "rejection_rate": 0.1, "successes_total": 18, "failures_total": 2, "opened_total": 0, "time_in_closed_s": 5.0, "time_in_open_s": 0.0, "time_in_half_open_s": 0.0},
-            "rate_limiter": {"mode": "throttled", "revision": 6, "utilization_pct": 25.0, "events_in_window": 5, "window_size_ms": 1000}
-        }])
-    );
-
+    assert_eq!(payload(&frames[3][0])["state_from"], "open");
+    assert_eq!(payload(&frames[4][0])["state_from"], "half_open");
+    let final_snapshot = payload(snapshots.last().unwrap().as_ref().unwrap());
+    let cb = &final_snapshot["middleware"][0]["circuit_breaker"];
+    assert_eq!(cb["state"], "closed");
+    assert_eq!(cb["revision"], 9);
+    assert_eq!(cb["successes_total"], 19);
+    let rl = &final_snapshot["middleware"][0]["rate_limiter"];
+    assert_eq!(rl["mode"], "limiting");
+    assert_eq!(rl["revision"], 7);
+    assert_eq!(rl["utilization_pct"], 25.0);
     for boundary in 0..=tape.len() {
         let mut resumed = empty.clone();
-        for (index, envelope) in tape.iter().enumerate() {
+        for (index, input) in tape.iter().enumerate() {
             if index < boundary {
-                resumed.rebuild(envelope);
+                match input {
+                    Input::Fact(record) => resumed.rebuild(record),
+                    Input::Measurement(packet) => {
+                        resumed.project_measurements((**packet).clone());
+                    }
+                }
             } else {
                 assert_eq!(
-                    resumed.project(envelope, 123),
+                    apply(&mut resumed, input),
                     frames[index],
-                    "resume at {boundary}, fact {index}"
+                    "boundary {boundary}, update {index}"
                 );
             }
             assert_eq!(
                 resumed.middleware_snapshot(456),
                 snapshots[index],
-                "resume at {boundary}, fact {index}"
+                "boundary {boundary}, update {index}"
             );
         }
     }
+    assert!(apply(&mut live, &measured(1, summary(999))).is_empty());
+    assert_eq!(
+        payload(live.middleware_snapshot(456).as_ref().unwrap()),
+        final_snapshot
+    );
+    let Input::Fact(mut carrier) = factual(
+        10,
+        MiddlewareFact::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+            test_request_count: 1,
+        }),
+    ) else {
+        unreachable!()
+    };
+    let Input::Measurement(stale) = measured(1, summary(999)) else {
+        unreachable!()
+    };
+    carrier.envelope.observability = Some(*stale);
+    let frames = live.project(&carrier, 789);
+    assert_eq!(
+        frames.len(),
+        1,
+        "stale attachment does not suppress its carrier fact"
+    );
+    assert_eq!(payload(&frames[0])["revision"], 10);
+    assert_eq!(frames[0].id, Some(carrier.id().to_string()));
+    let snapshot = payload(live.middleware_snapshot(789).as_ref().unwrap());
+    let cb = &snapshot["middleware"][0]["circuit_breaker"];
+    assert_eq!(cb["state"], "half_open");
+    assert_eq!(cb["revision"], 10);
+    assert_eq!(cb["successes_total"], 19);
 }

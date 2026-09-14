@@ -4,7 +4,7 @@
 
 //! TypedPayload trait for type-safe event handling
 
-use crate::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use crate::event::chain_event::{ChainEvent, ChainEventFactory, ChainPayload};
 use crate::event::types::WriterId;
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -54,68 +54,58 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
     /// Extract typed payload from ChainEvent if the event type matches
     ///
     /// Returns `Some(Self)` if:
-    /// - The event content is `Data`
+    /// - The payload belongs to this type's declared family
     /// - The event_type matches `Self::EVENT_TYPE`
     /// - The payload can be deserialized to `Self`
     ///
     /// Returns `None` otherwise.
     fn from_event(event: &ChainEvent) -> Option<Self> {
-        match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } if Self::event_type_matches(event_type) => {
-                serde_json::from_value(payload.clone()).ok()
-            }
-            _ => None,
-        }
+        Self::try_from_event(event).ok()
     }
 
-    /// Convert typed payload to ChainEvent
-    ///
-    /// # Panics
-    ///
-    /// Panics if serialization fails (should never happen for valid Serialize implementations)
+    /// User payloads are application facts. Built-in protocol implementations
+    /// override this with their closed typed carrier or execution constructor.
+    fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
+        serde_json::to_value(self).map(ChainPayload::Fact)
+    }
+
+    fn accepts_payload(payload: &ChainPayload) -> bool {
+        matches!(payload, ChainPayload::Fact(_))
+    }
+
     fn to_event(self, writer_id: WriterId) -> ChainEvent {
-        let event_type = Self::versioned_event_type();
-        ChainEventFactory::data_event(
+        let mut event = ChainEventFactory::create_event(
             writer_id,
-            &event_type,
-            serde_json::to_value(self).expect("Serialization should not fail"),
-        )
+            self.into_chain_payload()
+                .expect("typed payload serialization"),
+        );
+        event.envelope.provenance.event.event_type = Self::versioned_event_type();
+        event
     }
 
-    /// Try to extract typed payload from ChainEvent, returning Result
-    ///
-    /// This is similar to `from_event` but provides more detailed error information.
     fn try_from_event(event: &ChainEvent) -> Result<Self, TypedPayloadError> {
-        match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => {
-                if !Self::event_type_matches(event_type) {
-                    return Err(TypedPayloadError::TypeMismatch {
-                        expected: Self::EVENT_TYPE,
-                        actual: event_type.clone(),
-                    });
-                }
-
-                serde_json::from_value(payload.clone()).map_err(|e| {
-                    TypedPayloadError::DeserializationFailed {
-                        event_type: Self::EVENT_TYPE,
-                        error: e.to_string(),
-                    }
-                })
-            }
-            ChainEventContent::FlowControl(_) => {
-                Err(TypedPayloadError::WrongContentType("flow_signal"))
-            }
-            ChainEventContent::Delivery(_) => Err(TypedPayloadError::WrongContentType("delivery")),
-            ChainEventContent::Observability(_) => {
-                Err(TypedPayloadError::WrongContentType("lifecycle"))
-            }
+        if !Self::accepts_payload(&event.payload) {
+            return Err(TypedPayloadError::WrongContentType(
+                event.payload.kind().as_str(),
+            ));
         }
+        if !Self::event_type_matches(&event.envelope.provenance.event.event_type) {
+            return Err(TypedPayloadError::TypeMismatch {
+                expected: Self::EVENT_TYPE,
+                actual: event.event_type(),
+            });
+        }
+        // Execution history has a typed inner body as well as the outer tag.
+        let value = event.payload.contract_body().map_err(|error| {
+            TypedPayloadError::DeserializationFailed {
+                event_type: Self::EVENT_TYPE,
+                error: error.to_string(),
+            }
+        })?;
+        serde_json::from_value(value).map_err(|error| TypedPayloadError::DeserializationFailed {
+            event_type: Self::EVENT_TYPE,
+            error: error.to_string(),
+        })
     }
 
     /// Fully qualified event type including schema version (e.g., "event.v1")
@@ -146,8 +136,8 @@ pub enum TypedPayloadError {
         error: String,
     },
 
-    /// Event has wrong content type (not Data)
-    #[error("Event has wrong content type: {0} (expected 'data')")]
+    /// Event belongs to a different payload family
+    #[error("Event has wrong payload family: {0}")]
     WrongContentType(&'static str),
 }
 
@@ -176,16 +166,13 @@ mod tests {
         let writer_id = WriterId::from(StageId::new());
         let event = payload.clone().to_event(writer_id);
 
-        match event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload: json_payload,
-            } => {
-                assert_eq!(event_type, "test.event.v1");
+        assert_eq!(event.event_type(), "test.event.v1");
+        match event.payload {
+            ChainPayload::Fact(json_payload) => {
                 let extracted: TestEvent = serde_json::from_value(json_payload).unwrap();
                 assert_eq!(extracted, payload);
             }
-            _ => panic!("Expected Data content"),
+            _ => panic!("Expected application fact"),
         }
     }
 

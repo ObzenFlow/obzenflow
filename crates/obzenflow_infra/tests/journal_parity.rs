@@ -7,7 +7,7 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::system_event::SystemEventFactory;
 use obzenflow_core::event::types::EventId;
-use obzenflow_core::event::{JournalEvent, SystemEvent};
+use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, SystemId, WriterId};
@@ -71,30 +71,31 @@ async fn test_journal_parity() {
     for (i, (disk_event, memory_event)) in disk_events.iter().zip(memory_events.iter()).enumerate()
     {
         assert_eq!(
-            disk_event.event.id, memory_event.event.id,
+            disk_event.envelope.provenance.event.id, memory_event.envelope.provenance.event.id,
             "EventId mismatch at index {i}"
         );
         assert_eq!(
-            disk_event.event.event_type(),
-            memory_event.event.event_type(),
+            disk_event.event_type(),
+            memory_event.event_type(),
             "Event type mismatch at index {i}"
         );
 
         assert_eq!(
-            disk_event.event.payload(),
-            memory_event.event.payload(),
+            disk_event.payload(),
+            memory_event.payload(),
             "Payload mismatch at index {i}"
         );
 
         assert_eq!(
-            disk_event.event.writer_id, memory_event.event.writer_id,
+            disk_event.envelope.provenance.event.writer_id,
+            memory_event.envelope.provenance.event.writer_id,
             "Writer ID mismatch at index {i}"
         );
     }
 
     // Test read_event
-    let first_disk_id = &disk_events[0].event.id;
-    let first_memory_id = &memory_events[0].event.id;
+    let first_disk_id = &disk_events[0].envelope.provenance.event.id;
+    let first_memory_id = &memory_events[0].envelope.provenance.event.id;
 
     let disk_lookup = disk_journal.read_event(first_disk_id).await.unwrap();
     let memory_lookup = memory_journal.read_event(first_memory_id).await.unwrap();
@@ -158,7 +159,10 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
         journal.append(low.clone(), None).await.unwrap();
 
         let ordered = journal.read_causally_ordered().await.unwrap();
-        let ordered_ids: Vec<_> = ordered.iter().map(|e| e.event.id).collect();
+        let ordered_ids: Vec<_> = ordered
+            .iter()
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
         assert_eq!(
             ordered_ids,
             vec![low.id, high.id],
@@ -172,14 +176,14 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
         .await
         .unwrap()
         .into_iter()
-        .map(|e| e.event.id)
+        .map(|e| e.envelope.provenance.event.id)
         .collect();
     let memory_ids: Vec<_> = memory_journal
         .read_causally_ordered()
         .await
         .unwrap()
         .into_iter()
-        .map(|e| e.event.id)
+        .map(|e| e.envelope.provenance.event.id)
         .collect();
     assert_eq!(disk_ids, memory_ids);
 }
@@ -210,11 +214,18 @@ async fn test_read_causally_after_matches_slice_with_concurrent_events() {
         let ordered = journal.read_causally_ordered().await.unwrap();
         assert_eq!(ordered.len(), 3);
 
-        let reference_id = ordered[0].event.id;
-        let expected_ids: Vec<_> = ordered.iter().skip(1).map(|e| e.event.id).collect();
+        let reference_id = ordered[0].envelope.provenance.event.id;
+        let expected_ids: Vec<_> = ordered
+            .iter()
+            .skip(1)
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
 
         let after = journal.read_causally_after(&reference_id).await.unwrap();
-        let after_ids: Vec<_> = after.into_iter().map(|e| e.event.id).collect();
+        let after_ids: Vec<_> = after
+            .into_iter()
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
 
         assert_eq!(after_ids, expected_ids);
     }
@@ -273,44 +284,47 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
 
         assert!(
             obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
-                &env_root.vector_clock,
-                &env_left.vector_clock
+                &env_root.envelope.provenance.journal.vector_clock,
+                &env_left.envelope.provenance.journal.vector_clock
             )
         );
         assert!(
             obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
-                &env_root.vector_clock,
-                &env_right.vector_clock
+                &env_root.envelope.provenance.journal.vector_clock,
+                &env_right.envelope.provenance.journal.vector_clock
             )
         );
         assert!(
             obzenflow_core::event::vector_clock::CausalOrderingService::are_concurrent(
-                &env_left.vector_clock,
-                &env_right.vector_clock
+                &env_left.envelope.provenance.journal.vector_clock,
+                &env_right.envelope.provenance.journal.vector_clock
             )
         );
 
         assert!(
             obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
-                &env_left.vector_clock,
-                &env_join.vector_clock
+                &env_left.envelope.provenance.journal.vector_clock,
+                &env_join.envelope.provenance.journal.vector_clock
             )
         );
         assert!(
             obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
-                &env_right.vector_clock,
-                &env_join.vector_clock
+                &env_right.envelope.provenance.journal.vector_clock,
+                &env_join.envelope.provenance.journal.vector_clock
             )
         );
         assert!(
             obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
-                &env_merge_left.vector_clock,
-                &env_join.vector_clock
+                &env_merge_left.envelope.provenance.journal.vector_clock,
+                &env_join.envelope.provenance.journal.vector_clock
             )
         );
 
         let ordered = journal.read_causally_ordered().await.unwrap();
-        let ordered_ids: Vec<_> = ordered.iter().map(|e| e.event.id).collect();
+        let ordered_ids: Vec<_> = ordered
+            .iter()
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
         assert_eq!(
             ordered_ids,
             vec![root.id, left.id, right.id, merge_left.id, join.id],
@@ -370,7 +384,10 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
         journal.append(join.clone(), Some(&env_left)).await.unwrap();
 
         let ordered = journal.read_causally_ordered().await.unwrap();
-        let ordered_ids: Vec<_> = ordered.iter().map(|e| e.event.id).collect();
+        let ordered_ids: Vec<_> = ordered
+            .iter()
+            .map(|e| e.envelope.provenance.event.id)
+            .collect();
         assert_eq!(
             ordered_ids[0..3],
             [root.id, left.id, right.id],
@@ -417,7 +434,10 @@ async fn test_reader_surface_parity() {
         let mut reader = journal.reader().await.unwrap();
         for (i, id) in ids.iter().enumerate() {
             let env = reader.next().await.unwrap().expect("event");
-            assert_eq!(env.event.id, *id, "reader order mismatch at {i}");
+            assert_eq!(
+                env.envelope.provenance.event.id, *id,
+                "reader order mismatch at {i}"
+            );
             assert_eq!(reader.position(), i as u64 + 1);
         }
         assert!(reader.next().await.unwrap().is_none());
@@ -432,7 +452,10 @@ async fn test_reader_surface_parity() {
             assert_eq!(reader.position(), k as u64, "reader_from({k}) position");
             if k < N {
                 let env = reader.next().await.unwrap().expect("event");
-                assert_eq!(env.event.id, ids[k], "reader_from({k}) first event");
+                assert_eq!(
+                    env.envelope.provenance.event.id, ids[k],
+                    "reader_from({k}) first event"
+                );
             } else {
                 assert!(reader.next().await.unwrap().is_none());
             }
@@ -453,14 +476,14 @@ async fn test_reader_surface_parity() {
         .await
         .unwrap()
         .iter()
-        .map(|e| e.event.id)
+        .map(|e| e.envelope.provenance.event.id)
         .collect();
     let memory_last: Vec<_> = memory
         .read_last_n(3)
         .await
         .unwrap()
         .iter()
-        .map(|e| e.event.id)
+        .map(|e| e.envelope.provenance.event.id)
         .collect();
     assert_eq!(
         disk_last,
@@ -506,14 +529,14 @@ async fn test_system_event_parity() {
         .await
         .unwrap()
         .iter()
-        .map(|e| *e.event.id())
+        .map(|e| *e.id())
         .collect();
     let memory_ordered: Vec<_> = memory
         .read_causally_ordered()
         .await
         .unwrap()
         .iter()
-        .map(|e| *e.event.id())
+        .map(|e| *e.id())
         .collect();
     assert_eq!(disk_ordered.len(), 3);
     assert_eq!(
@@ -537,14 +560,14 @@ async fn test_system_event_parity() {
         .await
         .unwrap()
         .iter()
-        .map(|e| *e.event.id())
+        .map(|e| *e.id())
         .collect();
     let memory_last: Vec<_> = memory
         .read_last_n(2)
         .await
         .unwrap()
         .iter()
-        .map(|e| *e.event.id())
+        .map(|e| *e.id())
         .collect();
     assert_eq!(disk_last.len(), 2);
     assert_eq!(disk_last, memory_last, "SystemEvent read_last_n parity");

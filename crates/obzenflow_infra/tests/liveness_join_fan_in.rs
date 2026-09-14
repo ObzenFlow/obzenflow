@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{SystemEvent, SystemEventType};
+use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_core::TypedPayload;
@@ -190,9 +190,12 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         Arc::new(Mutex::new(None));
     let registry_slot: Arc<Mutex<Option<LivenessSnapshots>>> = Arc::new(Mutex::new(None));
     let system_journal_slot_hook = system_journal_slot.clone();
+    let mut liveness = liveness_observations::LivenessTrace::default();
+    let liveness_source = liveness.source.clone();
     let registry_slot_hook = registry_slot.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
+        *liveness_source.lock().unwrap() = Some(handle.observations());
         let system_journal = handle.system_journal().expect("system journal available");
         *system_journal_slot_hook
             .lock()
@@ -228,7 +231,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         })
     });
 
-    let run_handle = tokio::spawn(async move {
+    let mut run_handle = tokio::spawn(async move {
         FlowApplication::builder()
             .with_cli_args(["obzenflow"])
             .with_flow_handle_hook(hook)
@@ -236,14 +239,20 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
             .await
     });
 
-    tokio::time::timeout(Duration::from_secs(30), run_handle)
-        .await
-        .expect("flow did not complete within timeout")
-        .expect("flow task join")
-        .expect("flow should complete successfully");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                result = &mut run_handle => break result,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => liveness.capture(),
+            }
+        }
+    })
+    .await
+    .expect("flow did not complete within timeout")
+    .expect("flow task join")
+    .expect("flow should complete successfully");
 
-    // Give liveness tasks a moment to flush their final transitions.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    liveness.capture();
 
     let system_journal = system_journal_slot
         .lock()
@@ -264,21 +273,17 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         .await
         .expect("read system journal");
 
-    let mut idle_upstreams: HashSet<StageId> = HashSet::new();
+    let idle_upstreams: HashSet<StageId> = liveness
+        .states
+        .iter()
+        .filter(|(_, reader, state)| {
+            *reader == joiner_id && *state == obzenflow_core::event::EdgeLivenessState::Idle
+        })
+        .map(|(upstream, _, _)| *upstream)
+        .collect();
     for envelope in envelopes {
-        match &envelope.event.event {
-            SystemEventType::EdgeLiveness {
-                upstream,
-                reader,
-                state,
-                ..
-            } => {
-                if *reader == joiner_id && *state == obzenflow_core::event::EdgeLivenessState::Idle
-                {
-                    idle_upstreams.insert(*upstream);
-                }
-            }
-            SystemEventType::ContractStatus { pass, .. } => {
+        match &envelope.payload {
+            SystemPayload::ContractStatus { pass, .. } => {
                 assert!(
                     *pass,
                     "unexpected ContractStatus(pass=false) while exercising join liveness"
@@ -298,3 +303,6 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
         "expected exactly one join upstream edge to become Idle while the other is active"
     );
 }
+
+#[path = "support/liveness_observations.rs"]
+mod liveness_observations;

@@ -55,7 +55,7 @@ pub trait HandlerSupervised: Supervisor + Sync {
     where
         F: FnOnce(ChainEvent) -> Vec<ChainEvent>,
     {
-        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+        if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
             vec![event] // pass straight through
         } else {
             next(event)

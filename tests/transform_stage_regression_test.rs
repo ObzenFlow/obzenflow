@@ -11,7 +11,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
@@ -183,7 +183,10 @@ struct CountHandlerOutputObserver {
 impl HandlerObserver for CountHandlerOutputObserver {
     fn after_handle(&self, _ctx: &HandlerObserverContext<'_>, outputs: &[ChainEvent]) {
         self.calls.fetch_add(
-            outputs.iter().filter(|event| event.is_data()).count() as u64,
+            outputs
+                .iter()
+                .filter(|event| event.consumes_data_credit())
+                .count() as u64,
             Ordering::Relaxed,
         );
     }
@@ -280,7 +283,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
 
     async fn read_chain_journal(
         path: std::path::PathBuf,
-    ) -> Result<Vec<obzenflow_core::EventEnvelope<ChainEvent>>> {
+    ) -> Result<Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>>> {
         let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
             obzenflow_infra::journal::DiskJournal::with_owner(
                 path,
@@ -295,8 +298,8 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
     let error_events: Vec<ChainEvent> = read_chain_journal(error_journals[0].clone())
         .await?
         .into_iter()
-        .map(|env| env.event)
-        .filter(|e| e.is_data())
+        .map(|env| env.authored())
+        .filter(|e| e.consumes_data_credit())
         .collect();
 
     assert_eq!(
@@ -312,7 +315,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         Some(0)
     );
     assert!(matches!(
-        error_events[0].processing_info.status,
+        error_events[0].processing.status,
         ProcessingStatus::Error {
             kind: Some(ErrorKind::Timeout),
             ..
@@ -322,8 +325,8 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
     let data_events: Vec<ChainEvent> = read_chain_journal(data_journals[0].clone())
         .await?
         .into_iter()
-        .map(|env| env.event)
-        .filter(|e| matches!(e.content, ChainEventContent::Data { .. }))
+        .map(|env| env.authored())
+        .filter(|e| e.consumes_data_credit())
         .collect();
 
     // Transform data journal should contain the Domain error event (index=1) and no Timeout event (index=0).
@@ -331,7 +334,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
     for event in data_events {
         if event.payload().get("index").and_then(|v| v.as_u64()) == Some(1) {
             assert!(matches!(
-                event.processing_info.status,
+                event.processing.status,
                 ProcessingStatus::Error {
                     kind: Some(ErrorKind::Domain),
                     ..
@@ -355,8 +358,8 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         .into_iter()
         .any(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+                env.payload,
+                ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
             )
         });
     assert!(has_eof, "expected EOF in transform data journal");
@@ -431,7 +434,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
 
     async fn read_journal(
         path: std::path::PathBuf,
-    ) -> Result<Vec<obzenflow_core::EventEnvelope<ChainEvent>>> {
+    ) -> Result<Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>>> {
         let journal = obzenflow_infra::journal::DiskJournal::<ChainEvent>::with_owner(
             path,
             JournalOwner::stage(StageId::new()),
@@ -445,13 +448,13 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
     let error_events = read_journal(error_journal.expect("try-map error journal exists"))
         .await?
         .into_iter()
-        .map(|envelope| envelope.event)
-        .filter(|event| event.is_data())
+        .map(|envelope| envelope.authored())
+        .filter(|event| event.consumes_data_credit())
         .collect::<Vec<_>>();
     assert_eq!(error_events.len(), 1);
     assert_eq!(error_events[0].payload()["index"], serde_json::json!(0));
     assert!(matches!(
-        &error_events[0].processing_info.status,
+        &error_events[0].processing.status,
         ProcessingStatus::Error {
             kind: Some(ErrorKind::Unknown),
             message,
@@ -462,7 +465,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
     let successful_events = read_journal(data_journal.expect("try-map data journal exists"))
         .await?
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .filter(|event| TransformStageEvent::event_type_matches(&event.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(successful_events.len(), 1);
@@ -471,7 +474,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
         serde_json::json!(1)
     );
     assert!(matches!(
-        successful_events[0].processing_info.status,
+        successful_events[0].processing.status,
         ProcessingStatus::Success
     ));
 
@@ -523,7 +526,7 @@ async fn transform_applies_stage_middleware() -> Result<()> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|event| event.is_data())
+        .filter(|event| event.consumes_data_credit())
         .cloned()
         .collect();
 

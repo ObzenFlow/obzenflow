@@ -8,12 +8,9 @@ use async_trait::async_trait;
 use obzenflow_adapters::sources::{
     CursorlessPullDecoder, DecodeError, HttpPullConfig, HttpPullSource, HttpResponse,
 };
-use obzenflow_core::event::observability::HttpPullTelemetry;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, HttpPullStateFact};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
@@ -104,7 +101,9 @@ async fn run(journal_base: &Path, calls: Arc<AtomicUsize>, replay_from: Option<&
         .expect("HTTP pull witness flow completes");
 }
 
-async fn read_error_journal(run_dir: &Path) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_error_journal(
+    run_dir: &Path,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"]["pull"]["error_journal_file"]
         .as_str()
@@ -137,7 +136,9 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_data_journal(run_dir: &Path) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_data_journal(
+    run_dir: &Path,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"]["pull"]["data_journal_file"]
         .as_str()
@@ -155,34 +156,37 @@ async fn read_data_journal(run_dir: &Path) -> Vec<EventEnvelope<ChainEvent>> {
     events
 }
 
-fn typed_snapshots(events: &[EventEnvelope<ChainEvent>]) -> Vec<(WriterId, HttpPullTelemetry)> {
+fn typed_snapshots(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<(WriterId, HttpPullStateFact)> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                MetricsLifecycle::HttpPullSnapshot { snapshot },
-            )) => Some((envelope.event.writer_id, snapshot.clone())),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::HttpPullState(snapshot)) => Some((
+                envelope.envelope.provenance.event.writer_id,
+                snapshot.clone(),
+            )),
             _ => None,
         })
         .collect()
 }
 
 fn assert_validation_journals(
-    data: &[EventEnvelope<ChainEvent>],
-    errors: &[EventEnvelope<ChainEvent>],
+    data: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    errors: &[JournalRecord<obzenflow_core::event::ChainPayload>],
     expect_live_snapshots: bool,
 ) {
-    assert!(data.iter().all(|envelope| !envelope.event.is_data()));
+    assert!(data.iter().all(|envelope| !envelope.consumes_data_credit()));
     assert!(data
         .iter()
         .chain(errors)
-        .all(|envelope| !envelope.event.event_type().ends_with(".error")));
+        .all(|envelope| !envelope.event_type().ends_with(".error")));
 
     let eof_position = data
         .iter()
-        .position(|envelope| envelope.event.is_eof())
+        .position(|envelope| envelope.is_eof())
         .expect("finite validation is followed by EOF");
-    let eof_writer = data[eof_position].event.writer_id;
+    let eof_writer = data[eof_position].envelope.provenance.event.writer_id;
     let snapshots = typed_snapshots(data);
     if expect_live_snapshots {
         assert!(
@@ -192,10 +196,8 @@ fn assert_validation_journals(
         assert!(snapshots.iter().all(|(writer, _)| *writer == eof_writer));
         assert!(
             data[..eof_position].iter().any(|envelope| matches!(
-                envelope.event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                    MetricsLifecycle::HttpPullSnapshot { .. }
-                ))
+                envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::HttpPullState(_))
             )),
             "the live validation-poll snapshot is committed before EOF"
         );
@@ -210,7 +212,7 @@ fn assert_validation_journals(
         .iter()
         .filter(|envelope| {
             matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error {
                     kind: Some(ErrorKind::Validation),
                     ..
@@ -220,7 +222,9 @@ fn assert_validation_journals(
         .collect::<Vec<_>>();
     if expect_live_snapshots {
         assert_eq!(validation_rows.len(), 1);
-        assert!(validation_rows.iter().all(|row| !row.event.is_data()));
+        assert!(validation_rows
+            .iter()
+            .all(|row| !row.consumes_data_credit()));
     } else {
         assert!(
             validation_rows.is_empty(),

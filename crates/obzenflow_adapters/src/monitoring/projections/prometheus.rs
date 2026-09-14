@@ -1582,55 +1582,44 @@ impl PrometheusProjection {
             )?;
             writeln!(output)?;
 
-            // Work tracking
-            writeln!(
-                output,
-                "# HELP obzenflow_flow_event_loops_total Total event loops across all stages"
-            )?;
-            writeln!(output, "# TYPE obzenflow_flow_event_loops_total counter")?;
-            writeln!(
-                output,
-                "obzenflow_flow_event_loops_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name,
-                escape_label(&flow_id_label),
-                flow_metrics.event_loops_total
-            )?;
-            writeln!(output)?;
-
-            writeln!(output, "# HELP obzenflow_flow_event_loops_with_work_total Event loops with work across all stages")?;
-            writeln!(
-                output,
-                "# TYPE obzenflow_flow_event_loops_with_work_total counter"
-            )?;
-            writeln!(
-                output,
-                "obzenflow_flow_event_loops_with_work_total{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name,
-                escape_label(&flow_id_label),
-                flow_metrics.event_loops_with_work_total
-            )?;
-            writeln!(output)?;
-
-            // Gauges
-            let utilization = if flow_metrics.event_loops_total > 0 {
-                flow_metrics.event_loops_with_work_total as f64
-                    / flow_metrics.event_loops_total as f64
-            } else {
-                0.0
-            };
-            writeln!(
-                output,
-                "# HELP obzenflow_flow_utilization Flow utilization (0.0-1.0)"
-            )?;
-            writeln!(output, "# TYPE obzenflow_flow_utilization gauge")?;
-            writeln!(
-                output,
-                "obzenflow_flow_utilization{{flow=\"{}\",flow_id=\"{}\"}} {}",
-                flow_name,
-                escape_label(&flow_id_label),
-                utilization
-            )?;
-            writeln!(output)?;
+            for (name, value) in [
+                (
+                    "obzenflow_flow_event_loops_total",
+                    flow_metrics.event_loops_total,
+                ),
+                (
+                    "obzenflow_flow_event_loops_with_work_total",
+                    flow_metrics.event_loops_with_work_total,
+                ),
+            ] {
+                if let Some(value) = value {
+                    writeln!(output, "# TYPE {name} counter")?;
+                    writeln!(
+                        output,
+                        "{name}{{flow=\"{}\",flow_id=\"{}\"}} {value}",
+                        flow_name,
+                        escape_label(&flow_id_label)
+                    )?;
+                }
+            }
+            if let Some((total, work)) = flow_metrics
+                .event_loops_total
+                .zip(flow_metrics.event_loops_with_work_total)
+                .filter(|(total, _)| *total > 0)
+            {
+                let utilization = work as f64 / total as f64;
+                writeln!(
+                    output,
+                    "# HELP obzenflow_flow_utilization Flow utilization (0.0-1.0)"
+                )?;
+                writeln!(output, "# TYPE obzenflow_flow_utilization gauge")?;
+                writeln!(
+                    output,
+                    "obzenflow_flow_utilization{{flow=\"{}\",flow_id=\"{}\"}} {utilization}",
+                    flow_name,
+                    escape_label(&flow_id_label)
+                )?;
+            }
         }
 
         // Edge liveness (FLOWIP-063e)
@@ -2083,7 +2072,10 @@ impl PrometheusProjection {
             for (stage_id, metrics) in &snapshot.http_pull_metrics {
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     let stage_labels = format_stage_labels(stage_id, metadata);
-                    let waiting_reason = if matches!(metrics.state, HttpPullState::Waiting) {
+                    if metrics.state.is_none() {
+                        continue;
+                    }
+                    let waiting_reason = if matches!(metrics.state, Some(HttpPullState::Waiting)) {
                         metrics.wait_reason.as_ref()
                     } else {
                         None
@@ -2166,6 +2158,9 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE http_pull_requests_total counter")?;
             for (stage_id, metrics) in &snapshot.http_pull_metrics {
+                let Some(metrics) = metrics.measurements.as_ref() else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
@@ -2183,6 +2178,9 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE http_pull_responses_total counter")?;
             for (stage_id, metrics) in &snapshot.http_pull_metrics {
+                let Some(metrics) = metrics.measurements.as_ref() else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     let stage_labels = format_stage_labels(stage_id, metadata);
                     writeln!(
@@ -2210,6 +2208,9 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE http_pull_events_decoded_total counter")?;
             for (stage_id, metrics) in &snapshot.http_pull_metrics {
+                let Some(metrics) = metrics.measurements.as_ref() else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
@@ -2330,12 +2331,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_rerender_attempts_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.rerender_attempts_total else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_rerender_attempts_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.rerender_attempts_total
+                        value
                     )?;
                 }
             }
@@ -2350,12 +2354,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_max_depth_reached gauge"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.max_depth_reached else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_max_depth_reached{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.max_depth_reached
+                        value
                     )?;
                 }
             }
@@ -2370,12 +2377,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_budget_overhead_tokens gauge"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.budget_overhead_tokens else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_budget_overhead_tokens{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.budget_overhead_tokens
+                        value
                     )?;
                 }
             }
@@ -3100,7 +3110,16 @@ mod tests {
         };
 
         let mut http_pull_metrics = HashMap::new();
-        http_pull_metrics.insert(stage_id, telemetry);
+        http_pull_metrics.insert(
+            stage_id,
+            obzenflow_core::event::observability::HttpPullMetricsSnapshot {
+                state: Some(telemetry.state),
+                wait_reason: telemetry.wait_reason,
+                next_wake_unix_secs: telemetry.next_wake_unix_secs,
+                last_success_unix_secs: telemetry.last_success_unix_secs,
+                measurements: Some((&telemetry).into()),
+            },
+        );
 
         let mut snapshot = AppMetricsSnapshot::default();
         snapshot.stage_metadata = stage_metadata;
@@ -3160,9 +3179,9 @@ mod tests {
                 planned_items_total: 9,
                 excluded_items_total: 1,
                 chunks_emitted_total: 3,
-                rerender_attempts_total: 4,
-                max_depth_reached: 2,
-                budget_overhead_tokens: 123,
+                rerender_attempts_total: Some(4),
+                max_depth_reached: Some(2),
+                budget_overhead_tokens: Some(123),
             },
         );
 

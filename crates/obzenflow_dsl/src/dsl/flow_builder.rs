@@ -1683,6 +1683,7 @@ where
             .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
             .with_feed_plan(stage_resources_set.feed_plan.clone())
             .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone())
+            .with_observations(stage_resources_set.observations.clone(), stage_resources_set.host_observations.clone())
             .with_run_substrate(__substrate.clone())
             .with_flow_effective_config(__flow_effective.clone());
 

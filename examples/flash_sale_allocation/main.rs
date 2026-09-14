@@ -46,7 +46,7 @@ mod tests {
     use super::warehouse::{WarehouseConfig, WarehouseTestFault};
     use super::{flow, warehouse};
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
-    use obzenflow_core::event::{ChainEvent, ChainEventContent, StageFatalRecorded};
+    use obzenflow_core::event::{ChainEvent, ChainPayload, StageFatalRecorded};
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::{StageId, TypedPayload};
@@ -172,7 +172,7 @@ mod tests {
             .into_iter()
             .chain(allocation_error_events(run_dir).await)
         {
-            if let ProcessingStatus::Error { message, .. } = &event.processing_info.status {
+            if let ProcessingStatus::Error { message, .. } = &event.processing.status {
                 messages.push(message.clone());
             }
             if let Some(fatal) = StageFatalRecorded::from_event(&event) {
@@ -226,7 +226,7 @@ mod tests {
         let policy_rejections = events
             .iter()
             .filter_map(|event| match &event.content {
-                ChainEventContent::Data {
+                ChainPayload::Data {
                     event_type,
                     payload,
                 } if event_type == EFFECT_RECORD_EVENT_TYPE => {

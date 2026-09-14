@@ -95,6 +95,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         let instrumentation = self
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        instrumentation.bind_observations(
+            self.resources.flow_id,
+            obzenflow_core::WriterId::from(self.config.stage_id),
+            &self.resources.runtime_execution,
+        );
 
         let publications = crate::supervised_base::publication::PublicationScope::new();
         let heartbeat_config = self.heartbeat_config.clone();
@@ -112,7 +117,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                 spawn_heartbeat(
                     self.config.stage_id,
                     self.config.stage_name.clone(),
-                    self.resources.system_journal.clone(),
+                    instrumentation.clone(),
                     self.resources.liveness_snapshots.clone(),
                     heartbeat_state,
                     heartbeat_config,
@@ -126,6 +131,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         // build-resolved lineage policy before the handler is shared.
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
+        handler.install_observation_recorder(instrumentation.observation_recorder());
         handler.install_writer_id(obzenflow_core::WriterId::from(self.config.stage_id));
         let emit_interval = self
             .config

@@ -6,66 +6,53 @@ use super::*;
 pub(super) fn effect_record_from_event(
     event: &ChainEvent,
 ) -> Result<Option<EffectRecord>, EffectError> {
-    match &event.content {
-        ChainEventContent::Data { event_type, .. }
-            if EffectAttemptStarted::event_type_matches(event_type)
-                || EffectRecoveryAbandoned::event_type_matches(event_type) =>
-        {
-            // These framework rows participate in attempt-history folding,
-            // not in the legacy EffectRecord outcome group.
-            Ok(None)
-        }
-        ChainEventContent::Data {
-            event_type,
-            payload,
-        } if is_framework_effect_event_type(event_type) => {
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    match &event.payload {
+        ChainPayload::Execution(
+            ExecutionPayload::EffectAttemptStarted(_)
+            | ExecutionPayload::EffectRecoveryAbandoned(_),
+        ) => Ok(None),
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
             let provenance = event.effect_provenance.as_ref().ok_or_else(|| {
-                EffectError::EffectProvenanceMismatch(format!(
-                    "reserved framework effect event `{event_type}` is missing effect_provenance"
-                ))
+                EffectError::EffectProvenanceMismatch(
+                    "framework effect record is missing effect provenance".to_string(),
+                )
             })?;
             if !provenance.fact_owner.is_framework() {
-                return Err(EffectError::EffectProvenanceMismatch(format!(
-                    "reserved framework effect event `{event_type}` is not marked as framework-owned"
-                )));
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "framework effect record is not framework-owned".to_string(),
+                ));
             }
-
-            let record: EffectRecord = serde_json::from_value(payload.clone())
-                .map_err(|e| EffectError::Serialization(e.to_string()))?;
-            validate_effect_record_provenance(event_type, &record, provenance)?;
-            Ok(Some(record))
+            validate_effect_record_provenance(&event.event_type(), record, provenance)?;
+            Ok(Some(record.clone()))
         }
-        ChainEventContent::Data {
-            event_type,
-            payload,
-        } => {
+        ChainPayload::Fact(_) | ChainPayload::CompositeData(_) => {
             let Some(provenance) = event.effect_provenance.as_ref() else {
                 return Ok(None);
             };
             if provenance.fact_owner.is_framework() {
                 return Err(EffectError::EffectProvenanceMismatch(
-                    "framework-owned effect provenance must use a reserved framework effect event type"
-                        .to_string(),
+                    "framework evidence must use the typed execution contract".to_string(),
                 ));
             }
             let outcome_fact_ordinal = provenance.outcome_fact_ordinal.ok_or_else(|| {
                 EffectError::EffectProvenanceMismatch(
-                    "domain effect outcome facts must set outcome_fact_ordinal".to_string(),
+                    "domain effect outcome must set outcome_fact_ordinal".to_string(),
                 )
             })?;
             let outcome_fact_count = provenance.outcome_fact_count.ok_or_else(|| {
                 EffectError::EffectProvenanceMismatch(
-                    "domain effect outcome facts must set outcome_fact_count".to_string(),
+                    "domain effect outcome must set outcome_fact_count".to_string(),
                 )
             })?;
-
             let record = EffectRecord {
                 cursor: provenance.cursor.clone(),
                 descriptor_hash: provenance.descriptor_hash.clone(),
                 descriptor: provenance.descriptor.clone(),
                 outcome: EffectOutcomePayload::SucceededFact {
-                    event_type: event_type.clone().into(),
-                    output: payload.clone(),
+                    event_kind: event.payload.kind(),
+                    event_type: event.event_type().into(),
+                    output: event.payload(),
                     outcome_fact_ordinal,
                     outcome_fact_count,
                 },
@@ -74,7 +61,9 @@ pub(super) fn effect_record_from_event(
             validate_domain_effect_record_provenance(&record, provenance)?;
             Ok(Some(record))
         }
-        _ => Ok(None),
+        ChainPayload::Execution(_) | ChainPayload::Delivery(_) | ChainPayload::FlowControl(_) => {
+            Ok(None)
+        }
     }
 }
 
@@ -297,10 +286,14 @@ where
             .iter()
             .map(|record| match &record.outcome {
                 EffectOutcomePayload::SucceededFact {
-                    event_type, output, ..
+                    event_kind,
+                    event_type,
+                    output,
+                    ..
                 } => Ok(TypedFact {
                     event_type: event_type.clone(),
-                    payload: output.clone(),
+                    payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
+                        .map_err(|error| EffectError::Serialization(error.to_string()))?,
                 }),
                 _ => Err(EffectError::EffectProvenanceMismatch(
                     "multi-fact effect outcome group contains a non-domain-success record"
@@ -313,10 +306,14 @@ where
 
     match &single.outcome {
         EffectOutcomePayload::SucceededFact {
-            event_type, output, ..
+            event_kind,
+            event_type,
+            output,
+            ..
         } => T::try_from_facts(&[TypedFact {
             event_type: event_type.clone(),
-            payload: output.clone(),
+            payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
+                .map_err(|error| EffectError::Serialization(error.to_string()))?,
         }])
         .map_err(effect_fact_set_error),
         EffectOutcomePayload::Succeeded { output } => {
@@ -329,7 +326,7 @@ where
             };
             T::try_from_facts(&[TypedFact {
                 event_type: fact_type.event_type.clone(),
-                payload: output.clone(),
+                payload: ChainPayload::Fact(output.clone()),
             }])
             .map_err(effect_fact_set_error)
         }
@@ -378,7 +375,10 @@ pub(super) fn effect_record_group_materialization(
         let mut facts = Vec::new();
         for record in ordered {
             let EffectOutcomePayload::SucceededFact {
-                event_type, output, ..
+                event_kind,
+                event_type,
+                output,
+                ..
             } = &record.outcome
             else {
                 return Err(EffectError::EffectProvenanceMismatch(
@@ -388,7 +388,8 @@ pub(super) fn effect_record_group_materialization(
             };
             facts.push(TypedFact {
                 event_type: event_type.clone(),
-                payload: output.clone(),
+                payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
+                    .map_err(|error| EffectError::Serialization(error.to_string()))?,
             });
         }
         return Ok(EffectRecordMaterialization::DomainFacts { facts, origin });
@@ -396,11 +397,15 @@ pub(super) fn effect_record_group_materialization(
 
     match &single.outcome {
         EffectOutcomePayload::SucceededFact {
-            event_type, output, ..
+            event_kind,
+            event_type,
+            output,
+            ..
         } => Ok(EffectRecordMaterialization::DomainFacts {
             facts: vec![TypedFact {
                 event_type: event_type.clone(),
-                payload: output.clone(),
+                payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
+                    .map_err(|error| EffectError::Serialization(error.to_string()))?,
             }],
             origin: single.origin.clone(),
         }),

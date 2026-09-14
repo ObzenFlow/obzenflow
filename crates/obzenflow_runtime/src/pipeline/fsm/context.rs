@@ -12,11 +12,11 @@ use crate::pipeline::resources::PipelineResources;
 use crate::pipeline::termination::{ExecutionOutcome, TerminationState};
 use crate::pipeline::FlowStopMode;
 use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
+use obzenflow_core::event::context::ExecutionAccounting;
 use obzenflow_core::event::types::{SeqNo, ViolationCause};
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::metrics::StageMetricsSnapshot;
 use obzenflow_core::StageId;
 use obzenflow_fsm::FsmContext;
 use std::collections::{HashMap, HashSet};
@@ -159,6 +159,7 @@ pub(crate) struct PipelineContext {
     pub(crate) stage_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
+    pub(crate) observations: Arc<crate::metrics::observations::ObservationHub>,
     pub(crate) backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
 
     /// Per-source contract status (pass/fail) keyed by source StageId
@@ -177,7 +178,7 @@ pub(crate) struct PipelineContext {
     pub(crate) resources: PipelineResources,
     pub(crate) progress: PipelineProgress,
     /// Last known per-stage lifecycle metrics (for flow rollup)
-    pub(crate) stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
+    pub(crate) stage_lifecycle_metrics: HashMap<StageId, ExecutionAccounting>,
 
     /// Flow start time for duration calculation
     pub(crate) flow_start_time: Option<std::time::Instant>,

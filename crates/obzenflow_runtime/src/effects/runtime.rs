@@ -24,15 +24,7 @@ fn success_observation_events(
     match success {
         PreparedEffectSuccess::DomainFacts(facts) => facts
             .iter()
-            .map(|fact| {
-                ChainEventFactory::derived_data_event(
-                    writer_id,
-                    parent,
-                    fact.event_type.as_str(),
-                    fact.payload.clone(),
-                    lineage,
-                )
-            })
+            .map(|fact| fact.clone().into_derived_event(writer_id, parent, lineage))
             .collect(),
         PreparedEffectSuccess::RecordedReply(_) => Vec::new(),
     }
@@ -75,9 +67,9 @@ fn restore_archived_effect_identity(
     rebuilt: &mut ChainEvent,
     archived: &ChainEvent,
 ) -> Result<(), EffectError> {
-    let rebuilt_content = serde_json::to_value(&rebuilt.content)
+    let rebuilt_content = serde_json::to_value(&rebuilt.payload)
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let archived_content = serde_json::to_value(&archived.content)
+    let archived_content = serde_json::to_value(&archived.payload)
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
     if rebuilt.id != archived.id
         || rebuilt_content != archived_content
@@ -88,7 +80,7 @@ fn restore_archived_effect_identity(
             archived.id
         )));
     }
-    rebuilt.processing_info.event_time = archived.processing_info.event_time;
+    rebuilt.processing.event_time = archived.processing.event_time;
     rebuilt.effect_provenance = archived.effect_provenance.clone();
     Ok(())
 }
@@ -455,7 +447,7 @@ impl EffectsCore {
         let output_ordinal = self.reserve_output_ordinal()?;
         let event = deterministic_typed_output_event(
             self.ctx.writer_id,
-            &self.ctx.parent.event,
+            &self.ctx.parent.authored(),
             fact,
             &recorded_flow_id,
             &self.ctx.stage_key,
@@ -796,7 +788,7 @@ impl EffectsCore {
         let operation = {
             let slot = outcome_slot.clone();
             let writer_id = self.ctx.writer_id;
-            let parent_event = self.ctx.parent.event.clone();
+            let parent_event = self.ctx.parent.authored();
             let lineage = self.ctx.lineage;
             let base_context = binding_context;
             RepeatableEffectOperation::new_with_lifecycle(move |lifecycle| {
@@ -827,7 +819,7 @@ impl EffectsCore {
         };
 
         let report = boundary
-            .around_repeatable_effect(&identity, &self.ctx.parent.event, operation)
+            .around_repeatable_effect(&identity, &self.ctx.parent.authored(), operation)
             .await;
         let control_events = report.control_events;
 
@@ -946,7 +938,7 @@ impl EffectsCore {
             effect_type: EffectType::new(E::EFFECT_TYPE),
             attempt,
             outcome_group_id: outcome_group_id.clone(),
-            causal_input_id: self.ctx.parent.event.id,
+            causal_input_id: self.ctx.parent.envelope.provenance.event.id,
         };
         let start_event = build_effect_attempt_started_event(
             self.ctx.writer_id,
@@ -969,7 +961,7 @@ impl EffectsCore {
             let backpressure_writer = self.ctx.backpressure_writer.clone();
             let parent = self.ctx.parent.clone();
             let writer_id = self.ctx.writer_id;
-            let parent_event = self.ctx.parent.event.clone();
+            let parent_event = self.ctx.parent.authored();
             let lineage = self.ctx.lineage;
             let base_context = binding_context;
             AffineEffectOperation::new_with_lifecycle(
@@ -1022,7 +1014,7 @@ impl EffectsCore {
         let report = match self.ctx.effect_boundary.clone() {
             Some(boundary) => {
                 boundary
-                    .around_affine_effect(&identity, &self.ctx.parent.event, operation)
+                    .around_affine_effect(&identity, &self.ctx.parent.authored(), operation)
                     .await
             }
             None => operation.execute().await.into_report(Vec::new()),
@@ -1709,7 +1701,7 @@ impl EffectsCore {
         let expected_provenance = operation.provenance();
 
         let report = boundary
-            .around_single_use_effect(&identity, &self.ctx.parent.event, operation)
+            .around_single_use_effect(&identity, &self.ctx.parent.authored(), operation)
             .await;
         let (outcome, control_events) = match report.into_parts(&expected_provenance) {
             Ok(parts) => parts,
@@ -2314,7 +2306,7 @@ impl EffectsCore {
         if control_events.is_empty() {
             return Ok(());
         }
-        if control_events.iter().any(ChainEvent::is_data) {
+        if control_events.iter().any(ChainEvent::consumes_data_credit) {
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "escape-control batch for cursor {cursor:?} attempt {attempt} contains Data"
             )));
@@ -2412,7 +2404,7 @@ impl EffectsCore {
             if effect_record_from_event(event)?.is_some() {
                 continue;
             }
-            if event.is_data() {
+            if event.consumes_data_credit() {
                 return Err(EffectError::EffectProvenanceMismatch(format!(
                     "terminal control evidence for cursor {cursor:?} contains unrecognised Data"
                 )));

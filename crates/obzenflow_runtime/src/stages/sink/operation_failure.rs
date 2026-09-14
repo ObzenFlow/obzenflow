@@ -4,14 +4,14 @@
 
 //! Correctness-bearing lifecycle operation failure sequence.
 
-use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
+use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::handlers::SinkOperationError;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::{
     ChainEventFactory, SinkOperationFailed, SinkOperationPhase, SystemEvent,
 };
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, EventEnvelope, EventId, StageId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, EventId, JournalRecord, StageId, TypedPayload, WriterId};
 use std::sync::Arc;
 
 #[doc(hidden)]
@@ -30,7 +30,7 @@ pub struct SinkLifecycleFailureCommit<'a> {
 
 #[doc(hidden)]
 pub struct SinkLifecycleFailureRecorded {
-    pub operation: EventEnvelope<ChainEvent>,
+    pub operation: JournalRecord<obzenflow_core::event::ChainPayload>,
     pub lifecycle_event_id: EventId,
 }
 
@@ -65,7 +65,7 @@ pub async fn record_sink_lifecycle_operation_failure(
         stage_type: StageType::Sink,
     })
     .mark_as_error(commit.error.detail(), commit.error.kind())
-    .with_runtime_context(commit.instrumentation.snapshot_with_control());
+    .with_runtime_provenance(commit.instrumentation.snapshot());
     let error_journal = commit.error_journal.clone();
     let system_journal = commit.system_journal.clone();
     let instrumentation = commit.instrumentation.clone();
@@ -79,17 +79,17 @@ pub async fn record_sink_lifecycle_operation_failure(
             None,
         )
         .await?;
-        let lifecycle = SystemEvent::stage_failed_with_metrics_causal(
+        let lifecycle = SystemEvent::stage_failed_with_accounting_causal(
             stage_id,
             detail,
             false,
-            snapshot_stage_metrics(&instrumentation),
-            operation.event.id,
+            snapshot_stage_accounting(&instrumentation),
+            operation.envelope.provenance.event.id,
         );
         let lifecycle = system_journal.append(lifecycle, None).await?;
         Ok(SinkLifecycleFailureRecorded {
             operation,
-            lifecycle_event_id: lifecycle.event.id,
+            lifecycle_event_id: lifecycle.envelope.provenance.event.id,
         })
     })
     .await

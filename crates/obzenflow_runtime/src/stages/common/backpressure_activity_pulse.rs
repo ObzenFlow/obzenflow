@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::payloads::observability_payload::BackpressureEvent;
+use obzenflow_core::event::observation::ObservationRecord;
 use obzenflow_core::StageId;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -53,7 +53,7 @@ impl BackpressureActivityPulse {
         self.last_limiting_downstream_stage_id = limiting_downstream_stage_id;
     }
 
-    pub(crate) fn maybe_emit(&mut self) -> Option<BackpressureEvent> {
+    pub(crate) fn maybe_emit(&mut self) -> Option<ObservationRecord> {
         let now = Instant::now();
         let elapsed = now.duration_since(self.window_start);
         if elapsed < BACKPRESSURE_ACTIVITY_PULSE_WINDOW {
@@ -75,7 +75,7 @@ impl BackpressureActivityPulse {
             return None;
         }
 
-        Some(BackpressureEvent::ActivityPulse {
+        Some(ObservationRecord::BackpressureActivity {
             window_ms: BACKPRESSURE_ACTIVITY_PULSE_WINDOW_MS,
             delayed_events,
             delay_ms_total,

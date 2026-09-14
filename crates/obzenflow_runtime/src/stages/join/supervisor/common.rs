@@ -23,13 +23,10 @@ use crate::stages::observer::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
+
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
+use obzenflow_core::event::{ChainEventFactory, JournalRecord};
 use obzenflow_core::{ChainEvent, StageId};
-use serde_json::json;
 
 use super::JoinSupervisor;
 
@@ -132,7 +129,7 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
 
 pub(super) async fn forward_control_event_and_mirror<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let written = forward_control_event(
         envelope,
@@ -153,7 +150,7 @@ pub(super) async fn forward_control_event_and_mirror<H: UnifiedJoinHandler>(
 pub(super) async fn record_join_stage_fatal<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
     fatal: &StageFatal,
-    parent: Option<&EventEnvelope<ChainEvent>>,
+    parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
@@ -242,7 +239,7 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     _input: &ChainEvent,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
-    _parent: Option<&EventEnvelope<ChainEvent>>,
+    _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
@@ -272,7 +269,7 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
     outputs: &[ChainEvent],
-    _parent: Option<&EventEnvelope<ChainEvent>>,
+    _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
@@ -299,7 +296,7 @@ pub(super) fn delivery_snapshot(
     side: JoinSide,
     source_stage_id: StageId,
     stage_input_position: Option<StageInputPosition>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     reference_high_water: &obzenflow_core::event::vector_clock::VectorClock,
 ) -> Result<JoinDeliverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let position =
@@ -317,14 +314,14 @@ pub(super) fn signal_snapshot(
     side: Option<JoinSide>,
     input: &ChainEvent,
 ) -> Option<JoinSignalSnapshot> {
-    let signal = match &input.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
-            ..
-        }) => JoinSignalKind::Eof,
-        obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Drain) => {
+    let signal = match &input.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {
+            JoinSignalKind::Eof
+        }
+        obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Drain) => {
             JoinSignalKind::Drain
         }
-        obzenflow_core::event::ChainEventContent::FlowControl(_) => JoinSignalKind::OtherControl,
+        obzenflow_core::event::ChainPayload::FlowControl(_) => JoinSignalKind::OtherControl,
         _ => return None,
     };
     Some(JoinSignalSnapshot::new(side, signal))
@@ -332,13 +329,13 @@ pub(super) fn signal_snapshot(
 
 pub(super) fn observe_reference_envelope<H: UnifiedJoinHandler>(
     ctx: &mut JoinContext<H>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
 ) {
     // Conservative interim for FLOWIP-071h: merge all reference-side ancestry into one
     // high-water clock (component-wise max).
     CausalOrderingService::update_with_parent(
         &mut ctx.reference_high_water_clock,
-        &envelope.vector_clock,
+        &envelope.envelope.provenance.journal.vector_clock,
     );
 }
 
@@ -398,7 +395,7 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         return Ok(());
     }
 
-    let runtime_context = ctx.instrumentation.snapshot_with_control();
+    let runtime_context = ctx.instrumentation.snapshot();
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -408,18 +405,11 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         StageType::Join,
     );
 
-    let payload = ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-        name: "join_reference_heartbeat".to_string(),
-        value: json!({
-            "events_since_last_heartbeat": events_since_last,
-            "events_processed_total": runtime_context.events_processed_total,
-        }),
-        tags: None,
-    });
+    let payload = obzenflow_core::event::payloads::execution_payload::ExecutionPayload::JoinReferenceProgress { reference_inputs_since_last_report: events_since_last };
 
-    let heartbeat = ChainEventFactory::observability_event(writer_id, payload)
+    let heartbeat = ChainEventFactory::execution_event(writer_id, payload)
         .with_flow_context(flow_context)
-        .with_runtime_context(runtime_context);
+        .with_runtime_provenance(runtime_context);
 
     crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
     ctx.events_since_last_heartbeat = 0;

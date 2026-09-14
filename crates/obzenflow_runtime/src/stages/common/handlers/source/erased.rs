@@ -80,6 +80,11 @@ mod sealed {
 #[doc(hidden)]
 pub trait UnifiedFiniteSourceHandler: sealed::Finite + Send + Sync {
     fn install_writer_id(&mut self, writer_id: WriterId);
+    fn install_observation_recorder(
+        &mut self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     fn next_invocation(&mut self) -> ErasedSourceInvocation;
 }
 
@@ -88,6 +93,11 @@ pub trait UnifiedFiniteSourceHandler: sealed::Finite + Send + Sync {
 #[async_trait]
 pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
     fn install_writer_id(&mut self, writer_id: WriterId);
+    fn install_observation_recorder(
+        &mut self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     fn poll_timeout(&self) -> Option<Duration>;
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;
     async fn drain(&mut self) -> Result<(), SourceError>;
@@ -97,6 +107,11 @@ pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
 #[doc(hidden)]
 pub trait UnifiedInfiniteSourceHandler: sealed::Infinite + Send + Sync {
     fn install_writer_id(&mut self, writer_id: WriterId);
+    fn install_observation_recorder(
+        &mut self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     fn next_invocation(&mut self) -> ErasedSourceInvocation;
 }
 
@@ -105,6 +120,11 @@ pub trait UnifiedInfiniteSourceHandler: sealed::Infinite + Send + Sync {
 #[async_trait]
 pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync {
     fn install_writer_id(&mut self, writer_id: WriterId);
+    fn install_observation_recorder(
+        &mut self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     fn poll_timeout(&self) -> Option<Duration>;
     fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot>;
     async fn next_invocation(&mut self) -> ErasedSourceInvocation;

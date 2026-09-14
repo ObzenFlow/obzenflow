@@ -844,6 +844,9 @@ impl StageResourcesBuilder {
             stage_journals: all_stage_journals,
             error_journals: all_error_journals,
             stage_resources,
+            observations: flow_runtime_execution.observations().clone(),
+            host_observations: flow_runtime_execution
+                .observation_recorder(self.flow_id, self.pipeline_system_id.into()),
             message_bus,
             feed_plan: self.feed_plan,
         })
@@ -852,6 +855,8 @@ impl StageResourcesBuilder {
 
 /// Complete set of resources for all stages in a flow
 pub struct StageResourcesSet {
+    pub observations: Arc<crate::metrics::observations::ObservationHub>,
+    pub host_observations: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
     /// Flow execution ID
     pub flow_id: FlowId,
 

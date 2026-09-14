@@ -19,7 +19,7 @@ use obzenflow_core::ai::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
+    ChainEvent, ChainPayload, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
 };
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
@@ -401,22 +401,18 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .await
         .unwrap()
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
 fn successful_effect_record(event: &ChainEvent, effect_type: &str) -> Option<EffectRecord> {
-    let ChainEventContent::Data {
-        event_type,
-        payload,
-    } = &event.content
+    let ChainPayload::Execution(
+        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
+    ) = &event.payload
     else {
         return None;
     };
-    if event_type != EFFECT_RECORD_EVENT_TYPE {
-        return None;
-    }
-    let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
+    let record = record.clone();
     (record.descriptor.effect_type.as_str() == effect_type
         && matches!(record.outcome, EffectOutcomePayload::Succeeded { .. }))
     .then_some(record)

@@ -2,19 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Generic hosted-surface HTTP metrics collection and journaling (FLOWIP-093a).
+//! Optional hosted-surface HTTP measurements.
 //!
 //! The hosting layer maintains in-memory counters for low-overhead request accounting,
-//! then periodically emits a journaled `SystemEventType::HttpSurfaceSnapshot` so
-//! `/metrics` remains derivable from durable facts via `MetricsAggregator`.
+//! The runtime capture owner offers bounded samples to its retained view for `/metrics`.
 
 use obzenflow_core::event::observability::{
     HttpSurfaceMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
 };
-use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::{SystemEvent, SystemEventType, WriterId};
-use obzenflow_core::id::SystemId;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::web::HttpMethod;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -125,10 +120,12 @@ impl HttpSurfaceMetricsCollector {
         };
 
         let counters = {
-            let mut map = self
-                .routes
-                .lock()
-                .expect("poisoned HttpSurfaceMetricsCollector mutex");
+            let Ok(mut map) = self.routes.try_lock() else {
+                return;
+            };
+            if map.len() >= 1024 && !map.contains_key(&key) {
+                return;
+            }
             map.entry(key)
                 .or_insert_with(|| Arc::new(RouteCounters::default()))
                 .clone()
@@ -152,11 +149,8 @@ impl HttpSurfaceMetricsCollector {
         self.total_requests.load(Ordering::Relaxed)
     }
 
-    pub fn snapshot_routes(&self) -> Vec<HttpSurfaceRouteMetricsSnapshot> {
-        let map = self
-            .routes
-            .lock()
-            .expect("poisoned HttpSurfaceMetricsCollector mutex");
+    pub fn try_snapshot_routes(&self) -> Option<Vec<HttpSurfaceRouteMetricsSnapshot>> {
+        let map = self.routes.try_lock().ok()?;
 
         let mut out = Vec::with_capacity(map.len());
         for (key, counters) in map.iter() {
@@ -189,7 +183,7 @@ impl HttpSurfaceMetricsCollector {
                 ))
         });
 
-        out
+        Some(out)
     }
 }
 
@@ -200,23 +194,19 @@ pub struct HttpSurfaceMetricsEmitter {
 
 struct HttpSurfaceMetricsEmitterState {
     collector: Arc<HttpSurfaceMetricsCollector>,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
-    writer_id: WriterId,
-    snapshot_seq: AtomicU64,
+    recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
     last_emitted_total_requests: AtomicU64,
 }
 
 impl HttpSurfaceMetricsEmitter {
     pub fn new(
         collector: Arc<HttpSurfaceMetricsCollector>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
+        recorder: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
     ) -> Self {
         Self {
             state: Arc::new(HttpSurfaceMetricsEmitterState {
                 collector,
-                system_journal,
-                writer_id: WriterId::from(SystemId::new()),
-                snapshot_seq: AtomicU64::new(0),
+                recorder,
                 last_emitted_total_requests: AtomicU64::new(0),
             }),
         }
@@ -232,17 +222,17 @@ impl HttpSurfaceMetricsEmitter {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                this.emit_snapshot(false).await;
+                this.emit_snapshot(false);
             }
         })
     }
 
     /// Best-effort flush on shutdown to reduce the "last interval" gap.
-    pub async fn flush(&self) {
-        self.emit_snapshot(true).await;
+    pub fn capture_final(&self) {
+        self.emit_snapshot(true);
     }
 
-    async fn emit_snapshot(&self, force: bool) {
+    fn emit_snapshot(&self, force: bool) {
         let current_total = self.state.collector.total_requests();
         let last_emitted = self
             .state
@@ -257,31 +247,26 @@ impl HttpSurfaceMetricsEmitter {
             .last_emitted_total_requests
             .store(current_total, Ordering::Relaxed);
 
-        let seq = self.state.snapshot_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        let snapshot = HttpSurfaceMetricsSnapshot {
-            seq: SeqNo(seq),
-            routes: self.state.collector.snapshot_routes(),
+        let Some(routes) = self.state.collector.try_snapshot_routes() else {
+            return;
         };
-
-        let event = SystemEvent::new(
-            self.state.writer_id,
-            SystemEventType::HttpSurfaceSnapshot { snapshot },
+        self.state.recorder.observe_with_reason(
+            obzenflow_core::event::observation::ObservationRecord::HttpSurface {
+                snapshot: HttpSurfaceMetricsSnapshot { routes },
+            },
+            if force {
+                obzenflow_core::event::observation::CaptureReason::Final
+            } else {
+                obzenflow_core::event::observation::CaptureReason::Periodic
+            },
         );
-
-        if let Err(e) = self.state.system_journal.append(event, None).await {
-            tracing::warn!(
-                error = %e,
-                "Failed to append http_surface_snapshot system event; continuing"
-            );
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::MemoryJournal;
-    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::SystemId;
 
     #[test]
     fn http_status_class_buckets_expected_ranges() {
@@ -335,7 +320,7 @@ mod tests {
 
         assert_eq!(collector.total_requests(), 4);
 
-        let routes = collector.snapshot_routes();
+        let routes = collector.try_snapshot_routes().expect("uncontended routes");
         assert_eq!(routes.len(), 3, "expected 3 distinct route keys");
 
         assert_eq!(routes[0].surface_name, "a");
@@ -360,47 +345,59 @@ mod tests {
         assert_eq!(routes[2].requests_total, 1);
     }
 
-    #[tokio::test]
-    async fn emitter_skips_when_unchanged() {
+    #[test]
+    fn emitter_skips_unchanged_samples_and_final_contention_is_optional() {
+        use obzenflow_core::event::observation::{
+            CaptureReason, ObservationRecord, ObservationSource,
+        };
+        use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
         let collector = Arc::new(HttpSurfaceMetricsCollector::new());
-        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
-            SystemId::new(),
-        )));
-
-        let emitter = HttpSurfaceMetricsEmitter::new(collector.clone(), journal.clone());
-
-        collector.observe(HttpSurfaceObservation {
-            surface_name: Arc::from("surf"),
-            method: HttpMethod::Get,
-            path: Arc::from("/x"),
-            status: 200,
-            duration_ms: 1,
-            request_bytes: 0,
-            response_bytes: 0,
-        });
-
-        emitter.emit_snapshot(false).await;
-        emitter.emit_snapshot(false).await;
-
-        let events = journal.read_causally_ordered().await.unwrap();
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        let recorder =
+            execution.observation_recorder(obzenflow_core::FlowId::new(), SystemId::new().into());
+        let emitter = HttpSurfaceMetricsEmitter::new(collector.clone(), recorder);
+        let observe = || {
+            collector.observe(HttpSurfaceObservation {
+                surface_name: Arc::from("surf"),
+                method: HttpMethod::Get,
+                path: Arc::from("/x"),
+                status: 200,
+                duration_ms: 1,
+                request_bytes: 0,
+                response_bytes: 0,
+            })
+        };
+        observe();
+        emitter.emit_snapshot(false);
+        let first = execution.observations().snapshot();
+        assert_eq!(first.len(), 1);
+        emitter.emit_snapshot(false);
         assert_eq!(
-            events.len(),
-            1,
-            "expected idle suppression to skip second emit"
+            execution.observations().snapshot()[0].capture,
+            first[0].capture,
+            "idle suppression does not allocate another capture"
         );
-
-        collector.observe(HttpSurfaceObservation {
-            surface_name: Arc::from("surf"),
-            method: HttpMethod::Get,
-            path: Arc::from("/x"),
-            status: 200,
-            duration_ms: 1,
-            request_bytes: 0,
-            response_bytes: 0,
-        });
-        emitter.emit_snapshot(false).await;
-
-        let events = journal.read_causally_ordered().await.unwrap();
-        assert_eq!(events.len(), 2, "expected emit after traffic");
+        observe();
+        emitter.emit_snapshot(false);
+        let second = execution.observations().snapshot();
+        assert!(second[0].capture.capture_seq > first[0].capture.capture_seq);
+        let ObservationRecord::HttpSurface { snapshot } = &second[0].records[0] else {
+            panic!("surface measurement")
+        };
+        assert_eq!(snapshot.routes[0].requests_total, 2);
+        let held = collector.routes.lock().unwrap();
+        emitter.capture_final();
+        assert_eq!(
+            execution.observations().snapshot()[0].capture,
+            second[0].capture
+        );
+        drop(held);
+        emitter.capture_final();
+        assert_eq!(
+            execution.observations().snapshot()[0]
+                .capture
+                .capture_reason,
+            CaptureReason::Final
+        );
     }
 }

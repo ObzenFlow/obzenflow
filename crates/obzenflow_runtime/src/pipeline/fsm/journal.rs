@@ -20,7 +20,7 @@ use crate::pipeline::FlowStopMode;
 use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::{
     MetricsCoordinationEvent, PipelineLifecycleEvent, PipelineStopAdmission, StageLifecycleEvent,
-    SystemEvent, SystemEventType,
+    SystemPayload,
 };
 
 // Failure destinations are supplied explicitly by each phase. This fold does
@@ -30,17 +30,17 @@ fn observe<'a>(
     ctx: &mut C,
     fail: FailureDecision,
     contract_state: S,
-) -> Result<&'a SystemEvent, Change> {
+) -> Result<&'a obzenflow_core::event::journal_record::SystemJournalRecord, Change> {
     let E::Journal(envelope) = event else {
         unreachable!("journal handler input");
     };
-    let row = &envelope.event;
-    ctx.last_system_event_id_seen = Some(row.id);
-    if matches!(ctx.resources.producer_tail, ProducerTail::Through(id) if id == row.id) {
+    let row = envelope;
+    ctx.last_system_event_id_seen = Some(*row.id());
+    if matches!(ctx.resources.producer_tail, ProducerTail::Through(id) if id == *row.id()) {
         ctx.resources.producer_tail = ProducerTail::Reached;
     }
-    match &row.event {
-        SystemEventType::StageLifecycle { stage_id, event } => {
+    match &row.payload {
+        SystemPayload::StageLifecycle { stage_id, event } => {
             // Unrelated journal writers cannot satisfy this topology's barriers.
             if ctx
                 .topology
@@ -51,10 +51,10 @@ fn observe<'a>(
                     StageLifecycleEvent::Running => {
                         ctx.running_stages.insert(*stage_id);
                     }
-                    StageLifecycleEvent::Completed { metrics } => {
-                        if let Some(metrics) = metrics {
+                    StageLifecycleEvent::Completed { accounting } => {
+                        if let Some(accounting) = accounting {
                             ctx.stage_lifecycle_metrics
-                                .insert(*stage_id, metrics.clone());
+                                .insert(*stage_id, accounting.clone());
                         }
                         record_stage_completion(
                             &mut ctx.completed_stages,
@@ -62,23 +62,25 @@ fn observe<'a>(
                             ctx.topology.num_stages(),
                         );
                     }
-                    StageLifecycleEvent::Draining { metrics } => {
-                        if let Some(metrics) = metrics {
+                    StageLifecycleEvent::Draining { accounting } => {
+                        if let Some(accounting) = accounting {
                             ctx.stage_lifecycle_metrics
-                                .insert(*stage_id, metrics.clone());
+                                .insert(*stage_id, accounting.clone());
                         }
                     }
-                    StageLifecycleEvent::Failed { error, metrics, .. } => {
-                        if let Some(metrics) = metrics {
+                    StageLifecycleEvent::Failed {
+                        error, accounting, ..
+                    } => {
+                        if let Some(accounting) = accounting {
                             ctx.stage_lifecycle_metrics
-                                .insert(*stage_id, metrics.clone());
+                                .insert(*stage_id, accounting.clone());
                         }
                         return Err(fail(ctx, format!("Stage '{stage_id}' failed: {error}")));
                     }
-                    StageLifecycleEvent::Cancelled { reason, metrics } => {
-                        if let Some(metrics) = metrics {
+                    StageLifecycleEvent::Cancelled { reason, accounting } => {
+                        if let Some(accounting) = accounting {
                             ctx.stage_lifecycle_metrics
-                                .insert(*stage_id, metrics.clone());
+                                .insert(*stage_id, accounting.clone());
                         }
                         if !ctx.progress.stages_cancelled && !ctx.stop_intent.requested {
                             return Err(fail(
@@ -91,7 +93,7 @@ fn observe<'a>(
                 }
             }
         }
-        SystemEventType::ContractStatus {
+        SystemPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -147,8 +149,8 @@ fn observe<'a>(
                 ctx.contract_status.insert(*upstream, true);
             }
         }
-        SystemEventType::MetricsCoordination(event) => {
-            let own_metrics = ctx.resources.metrics.writer_id() == Some(row.writer_id);
+        SystemPayload::MetricsCoordination(event) => {
+            let own_metrics = ctx.resources.metrics.writer_id() == Some(*row.writer_id());
             if own_metrics {
                 match event {
                     MetricsCoordinationEvent::Ready => ctx.progress.metrics_ready = true,
@@ -181,9 +183,12 @@ fn all_stages_completed(ctx: &C) -> bool {
     ctx.topology.num_stages() > 0 && ctx.completed_stages.len() == ctx.topology.num_stages()
 }
 
-fn own_pipeline<'a>(row: &'a SystemEvent, ctx: &C) -> Option<&'a PipelineLifecycleEvent> {
-    match &row.event {
-        SystemEventType::PipelineLifecycle(event) if row.writer_id == ctx.system_id.into() => {
+fn own_pipeline<'a>(
+    row: &'a obzenflow_core::event::journal_record::SystemJournalRecord,
+    ctx: &C,
+) -> Option<&'a PipelineLifecycleEvent> {
+    match &row.payload {
+        SystemPayload::PipelineLifecycle(event) if *row.writer_id() == ctx.system_id.into() => {
             Some(event)
         }
         _ => None,
@@ -192,7 +197,12 @@ fn own_pipeline<'a>(row: &'a SystemEvent, ctx: &C) -> Option<&'a PipelineLifecyc
 
 // Used only by phases after bootstrap and before settlement. Stage-owned
 // EOF/quiescence/replay completion does not require all logical feed statuses.
-fn completion_boundary(state: S, row: &SystemEvent, ctx: &mut C, mut actions: Vec<A>) -> Change {
+fn completion_boundary(
+    state: S,
+    row: &obzenflow_core::event::journal_record::SystemJournalRecord,
+    ctx: &mut C,
+    mut actions: Vec<A>,
+) -> Change {
     if matches!(
         own_pipeline(row, ctx),
         Some(PipelineLifecycleEvent::AllStagesCompleted { .. })
@@ -208,7 +218,11 @@ fn completion_boundary(state: S, row: &SystemEvent, ctx: &mut C, mut actions: Ve
     change(state, actions)
 }
 
-fn authorise_sources(row: &SystemEvent, ctx: &mut C, actions: &mut Vec<A>) {
+fn authorise_sources(
+    row: &obzenflow_core::event::journal_record::SystemJournalRecord,
+    ctx: &mut C,
+    actions: &mut Vec<A>,
+) {
     if matches!(
         own_pipeline(row, ctx),
         Some(PipelineLifecycleEvent::Running { .. })
@@ -300,7 +314,7 @@ pub(super) fn running<'a>(_: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a
             Err(failure) => return Ok(failure),
         };
         let mut actions = vec![];
-        let next = if matches!(row.event, SystemEventType::ContractStatus { .. })
+        let next = if matches!(row.payload, SystemPayload::ContractStatus { .. })
             && !ctx.expected_sources.is_empty()
             && ctx
                 .expected_sources
@@ -388,7 +402,7 @@ pub(super) fn publishing_terminal<'a>(_: &'a S, event: &'a E, ctx: &'a mut C) ->
             .progress
             .selected_terminal
             .as_ref()
-            .is_some_and(|(event, _)| event.id == row.id);
+            .is_some_and(|(event, _)| event.id == *row.id());
         Ok(
             if selected
                 && matches!(
@@ -426,7 +440,7 @@ pub(super) fn publishing_final_marker<'a>(_: &'a S, event: &'a E, ctx: &'a mut C
             Ok(row) => row,
             Err(failure) => return Ok(failure),
         };
-        if ctx.progress.final_marker == Some(row.id)
+        if ctx.progress.final_marker == Some(*row.id())
             && matches!(
                 own_pipeline(row, ctx),
                 Some(PipelineLifecycleEvent::Drained)

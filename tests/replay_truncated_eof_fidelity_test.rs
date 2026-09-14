@@ -12,9 +12,8 @@
 //! matches under whole-run verification. A `Completed` archive still replays
 //! as `Natural` and finalizes.
 
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::{ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{StageOutputs, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -161,11 +160,11 @@ async fn eof_kinds(run_dir: &Path, stage_key: &str) -> Vec<EofKind> {
     kinds_of(&replay_testkit::read_stage_envelopes_appended(run_dir, stage_key).await)
 }
 
-fn kinds_of(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<EofKind> {
+fn kinds_of(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<EofKind> {
     envelopes
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
             _ => None,
         })
         .collect()
@@ -176,14 +175,14 @@ async fn data_rows(run_dir: &Path, stage_key: &str, event_type: &str) -> usize {
     replay_testkit::read_stage_envelopes_appended(run_dir, stage_key)
         .await
         .iter()
-        .filter(|envelope| envelope.event.is_data() && envelope.event.event_type() == event_type)
+        .filter(|envelope| envelope.consumes_data_credit() && envelope.event_type() == event_type)
         .count()
 }
 
 /// The replay run's `system.replay.completed` facts' synthesized kinds, read
 /// through the typed system journal via the run manifest.
 async fn synthesized_kinds(run_dir: &Path) -> Vec<Option<EofKind>> {
-    use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType};
+    use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::SystemId;
@@ -204,8 +203,8 @@ async fn synthesized_kinds(run_dir: &Path) -> Vec<Option<EofKind>> {
         .await
         .expect("system journal should read")
         .iter()
-        .filter_map(|envelope| match &envelope.event.event {
-            SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::Completed {
+        .filter_map(|envelope| match &envelope.payload {
+            SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::Completed {
                 synthesized_eof_kind,
                 ..
             }) => Some(*synthesized_eof_kind),
@@ -574,8 +573,8 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let fast_id = replay_testkit::read_stage_envelopes(&candidate, "fast")
         .await
         .iter()
-        .find_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
                 writer_id.as_ref().and_then(|w| w.as_stage().copied())
             }
             _ => None,
@@ -584,8 +583,8 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let slow_id = replay_testkit::read_stage_envelopes(&candidate, "slow")
         .await
         .iter()
-        .find_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
                 writer_id.as_ref().and_then(|w| w.as_stage().copied())
             }
             _ => None,
@@ -594,12 +593,12 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
 
     let authored_kinds: Vec<EofKind> = summer_rows
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof {
                 kind, writer_id, ..
             }) => {
                 let author = writer_id.as_ref().and_then(|w| w.as_stage().copied()).or(
-                    match envelope.event.writer_id {
+                    match envelope.envelope.provenance.event.writer_id {
                         WriterId::Stage(id) => Some(id),
                         _ => None,
                     },
@@ -728,8 +727,8 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
             .map(|rows| {
                 rows.iter()
                     .filter(|envelope| {
-                        envelope.event.is_data()
-                            && envelope.event.payload()["kind"].as_str() == Some("done")
+                        envelope.consumes_data_credit()
+                            && envelope.payload()["kind"].as_str() == Some("done")
                     })
                     .count()
             })

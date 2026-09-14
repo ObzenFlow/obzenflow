@@ -7,7 +7,7 @@
 //! `FlowApplication` resolves the runtime config snapshot once, owns it, and
 //! hands it to the flow build through this context; the build never reads
 //! 010-owned values ambiently. This type is the named future home for the
-//! 010h bootstrap-field migration (recorded follow-up). Not `RuntimeContext`:
+//! 010h bootstrap-field migration (recorded follow-up). Not `RuntimeProvenance`:
 //! that name belongs to the core metrics snapshot.
 
 use crate::runtime_config::ResolvedRuntimeConfig;

@@ -8,7 +8,7 @@ use crate::backpressure::BackpressureWriter;
 use crate::effects::EffectInvocationContext;
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::PollResult;
-use crate::metrics::instrumentation::{process_with_instrumentation, snapshot_stage_metrics};
+use crate::metrics::instrumentation::{process_with_instrumentation, snapshot_stage_accounting};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::{
     SinkConsumeReport, SinkOperationError, SinkWriteFailure, SinkWriteFailureDisposition,
@@ -35,11 +35,11 @@ use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryPayload, DeliveryResult,
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::ObservabilityPayload;
+
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
-    ChainEventContent, ChainEventFactory, EventEnvelope, JournalEvent, SinkOperationFailed,
-    SinkOperationPhase, StageFatalCode, StageFatalReason, SystemEvent,
+    ChainEventFactory, JournalRecord, SinkOperationFailed, SinkOperationPhase, StageFatalCode,
+    StageFatalReason, SystemEvent,
 };
 use obzenflow_core::WriterId;
 use obzenflow_core::{ChainEvent, TypedPayload};
@@ -112,8 +112,8 @@ pub(super) async fn dispatch_running<
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
-                event_type = %envelope.event.event_type_name(),
-                event_id = ?envelope.event.id,
+                event_type = %envelope.event_type_name(),
+                event_id = ?envelope.envelope.provenance.event.id,
                 "sink: poll_next returned Event"
             );
             let delivered_upstream_stage = subscription
@@ -125,7 +125,7 @@ pub(super) async fn dispatch_running<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
-            let is_data = envelope.event.is_data();
+            let is_data = envelope.consumes_data_credit();
             let stage_input_position = subscription.last_delivered_stage_input_position();
             let directive =
                 dispatch_event(ctx, subscription, &envelope, stage_input_position).await?;
@@ -262,31 +262,31 @@ pub(super) async fn dispatch_running<
 async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     tracing::trace!(stage_name = %ctx.stage_name, "Sink processing event");
 
     let upstream_stage = subscription.last_delivered_upstream_stage();
     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
-        if envelope.event.is_data() {
+        if envelope.consumes_data_credit() {
             heartbeat
                 .state
-                .record_data_read(upstream, envelope.event.id);
+                .record_data_read(upstream, envelope.envelope.provenance.event.id);
         }
     }
 
-    match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+    match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(signal) => {
             dispatch_control_event(ctx, subscription, envelope, signal).await
         }
-        obzenflow_core::event::ChainEventContent::Data { .. } => {
+        payload if payload.consumes_data_credit() => {
             dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
         }
         _ => {
             // Typed sink writers are a Data-only authoring surface. Delivery
             // and observability rows remain runtime transport/lifecycle input.
-            let event_id = envelope.event.id;
+            let event_id = envelope.envelope.provenance.event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
@@ -299,7 +299,7 @@ async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 
 async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     signal: &FlowControlPayload,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     // FLOWIP-120n: consume the catch-up watermark before the generic control
@@ -340,7 +340,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
     // FLOWIP-120n F17: an authored EOF can be the delivery that completes the
     // caught-up frontier; no watermark follows, so re-run the flip before
     // normal EOF handling.
-    if envelope.event.is_eof() {
+    if envelope.is_eof() {
         if let Some(message) = flip_on_authored_eof(
             subscription,
             CatchUpStage {
@@ -370,7 +370,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
     let contract_reader_count = ctx.contract_state.len();
 
     // FLOWIP-095k: fold the joined terminal kind before resolution.
-    if envelope.event.is_eof() {
+    if envelope.is_eof() {
         if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
             ctx.terminal_eof_kind = Some(
                 ctx.terminal_eof_kind
@@ -396,7 +396,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
 
     match resolution {
         ControlAction::Forward => {
-            if envelope.event.is_eof() {
+            if envelope.is_eof() {
                 drop(
                     subscription
                         .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
@@ -416,7 +416,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                             eof_count = outcome.eof_count,
                             total_readers = outcome.total_readers,
                             is_final = outcome.is_final,
-                            event_type = envelope.event.event_type(),
+                            event_type = envelope.event_type(),
                             "Sink received EOF; evaluated drain decision"
                         );
 
@@ -429,8 +429,8 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                         tracing::debug!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,
-                            event_type = envelope.event.event_type(),
-                            writer_id = ?envelope.event.writer_id,
+                            event_type = envelope.event_type(),
+                            writer_id = ?envelope.envelope.provenance.event.writer_id,
                             upstream_readers = upstream_readers,
                             "Sink received EOF authored by a non-upstream writer; ignoring for EOF authority and continuing to consume"
                         );
@@ -471,7 +471,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
                     eof_count = outcome.eof_count,
                     total_readers = outcome.total_readers,
                     is_final = outcome.is_final,
-                    event_type = envelope.event.event_type(),
+                    event_type = envelope.event_type(),
                     "Sink received EOF; evaluated drain decision"
                 );
             }
@@ -489,7 +489,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
         ControlAction::BufferAtEntryPoint { .. } | ControlAction::Suppress => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
-                event_type = envelope.event.event_type(),
+                event_type = envelope.event_type(),
                 "Unexpected control resolution for sink; ignoring"
             );
             Ok(EventLoopDirective::Continue)
@@ -497,7 +497,7 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
         ControlAction::Skip => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
-                event_type = envelope.event.event_type(),
+                event_type = envelope.event_type(),
                 "Sink skipping control event (dangerous!)"
             );
             Ok(EventLoopDirective::Continue)
@@ -564,11 +564,20 @@ fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
 fn prepare_receipt_plan(
     subscription: &crate::messaging::UpstreamSubscription<ChainEvent>,
     contract_state: &[crate::messaging::upstream_subscription::ReaderProgress],
-    current_envelope: &EventEnvelope<ChainEvent>,
+    current_envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     report: &mut SinkConsumeReport,
-) -> Result<Vec<(EventEnvelope<ChainEvent>, DeliveryPayload)>, StageFatal> {
+) -> Result<
+    Vec<(
+        JournalRecord<obzenflow_core::event::ChainPayload>,
+        DeliveryPayload,
+    )>,
+    StageFatal,
+> {
     if subscription
-        .pending_receipt_envelope(current_envelope.event.id, contract_state)
+        .pending_receipt_envelope(
+            current_envelope.envelope.provenance.event.id,
+            contract_state,
+        )
         .is_none()
     {
         return Err(protocol_fatal(
@@ -586,7 +595,9 @@ fn prepare_receipt_plan(
                 "sink report contains a duplicate commit receipt",
             ));
         }
-        if commit.parent_event_id == current_envelope.event.id && !primary_is_buffered {
+        if commit.parent_event_id == current_envelope.envelope.provenance.event.id
+            && !primary_is_buffered
+        {
             return Err(protocol_fatal(
                 "terminal sink primary also returned a current-input commit receipt",
             ));
@@ -616,7 +627,7 @@ async fn record_protocol_fatal_and_transition<
     ctx: &mut JournalSinkContext<H>,
     fatal: StageFatal,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
-    parent: Option<&EventEnvelope<ChainEvent>>,
+    parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
         .writer_id
@@ -634,7 +645,7 @@ async fn record_protocol_fatal_and_transition<
         },
     )
     .await?;
-    ctx.failure_causal_event_id = Some(recorded.event.id);
+    ctx.failure_causal_event_id = Some(recorded.envelope.provenance.event.id);
     Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
         fatal.detail,
     )))
@@ -645,11 +656,14 @@ async fn journal_sink_operation_failure<
 >(
     ctx: &mut JournalSinkContext<H>,
     input: &ChainEvent,
-    failed_receipt: &EventEnvelope<ChainEvent>,
+    failed_receipt: &JournalRecord<obzenflow_core::event::ChainPayload>,
     phase: SinkOperationPhase,
     error: &SinkOperationError,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
-) -> Result<EventEnvelope<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    JournalRecord<obzenflow_core::event::ChainPayload>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
@@ -659,7 +673,7 @@ async fn journal_sink_operation_failure<
         logical_destination: ctx.receipt_destination.clone(),
         causal_event_id: Some(input.id),
         input_position: input_position.map(|position| position.0),
-        failed_delivery_event_id: Some(failed_receipt.event.id),
+        failed_delivery_event_id: Some(failed_receipt.envelope.provenance.event.id),
         operation_subject_event_id: error.operation_subject_event_id(),
         phase,
         kind: error.kind(),
@@ -678,12 +692,14 @@ async fn journal_sink_operation_failure<
         ctx.stage_id,
         StageType::Sink,
     ))
-    .with_causality(CausalityContext::with_parent(failed_receipt.event.id))
+    .with_causality(CausalityContext::with_parent(
+        failed_receipt.envelope.provenance.event.id,
+    ))
     .with_correlation_from(input)
     .with_cycle_state_from(input)
     .mark_as_error(error.detail(), error.kind());
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
-    event = event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+    event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
     crate::stages::common::supervision::output_committer::commit_error_output(
         &ctx.error_journal,
         &ctx.instrumentation,
@@ -698,22 +714,22 @@ async fn journal_fresh_error_route<
 >(
     ctx: &mut JournalSinkContext<H>,
     input: &ChainEvent,
-    causal_parent: &EventEnvelope<ChainEvent>,
+    causal_parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     detail: String,
     kind: ErrorKind,
     observer_scope: MiddlewareExecutionScope,
-) -> Result<EventEnvelope<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
-    let ChainEventContent::Data {
-        event_type,
-        payload,
-    } = &input.content
-    else {
-        return Err("sink error route requires a data input".into());
-    };
+) -> Result<
+    JournalRecord<obzenflow_core::event::ChainPayload>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    if !input.is_typed_input() {
+        return Err("sink error route requires a typed input".into());
+    }
+
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
-    let mut event = ChainEventFactory::data_event(writer_id, event_type.clone(), payload.clone())
+    let mut event = ChainEventFactory::create_event(writer_id, input.payload.clone())
         .with_flow_context(make_flow_context(
             &ctx.flow_name,
             &ctx.flow_id.to_string(),
@@ -721,14 +737,17 @@ async fn journal_fresh_error_route<
             ctx.stage_id,
             StageType::Sink,
         ))
-        .with_causality(CausalityContext::with_parent(causal_parent.event.id))
+        .with_causality(CausalityContext::with_parent(
+            causal_parent.envelope.provenance.event.id,
+        ))
         .with_correlation_from(input)
         .with_cycle_state_from(input)
         .mark_as_error(detail, kind);
+    event.envelope.provenance.event.event_type = input.event_type();
     event.replay_context = input.replay_context.clone();
     event.ingress_context = input.ingress_context.clone();
     event = event.try_with_composite_activations(input.composite_activations().to_vec())?;
-    event = event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+    event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
 
     if route_to_error_journal(&event) {
         crate::stages::common::supervision::output_committer::commit_error_output(
@@ -768,16 +787,30 @@ async fn journal_policy_evidence<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut JournalSinkContext<H>,
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<obzenflow_core::event::ChainPayload>,
     batch: SinkPolicyEvidenceBatch,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
     for evidence in batch.into_entries() {
-        let mut event = ChainEventFactory::observability_event(
+        let execution = match evidence.into_lifecycle() {
+            obzenflow_core::event::payloads::execution_payload::MiddlewareFact::CircuitBreaker(
+                fact,
+            ) => {
+                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(
+                    fact,
+                )
+            }
+            obzenflow_core::event::payloads::execution_payload::MiddlewareFact::RateLimiter(
+                fact,
+            ) => obzenflow_core::event::payloads::execution_payload::ExecutionPayload::RateLimiter(
+                fact,
+            ),
+        };
+        let mut event = ChainEventFactory::create_event(
             writer_id,
-            ObservabilityPayload::Middleware(evidence.into_lifecycle()),
+            obzenflow_core::event::ChainPayload::Execution(execution),
         )
         .with_flow_context(make_flow_context(
             &ctx.flow_name,
@@ -786,12 +819,13 @@ async fn journal_policy_evidence<
             ctx.stage_id,
             StageType::Sink,
         ))
-        .with_causality(CausalityContext::with_parent(parent.event.id))
-        .with_correlation_from(&parent.event)
-        .with_cycle_state_from(&parent.event);
-        event =
-            event.try_with_composite_activations(parent.event.composite_activations().to_vec())?;
-        event = event.with_runtime_context(ctx.instrumentation.snapshot_with_control());
+        .with_causality(CausalityContext::with_parent(
+            parent.envelope.provenance.event.id,
+        ))
+        .with_correlation_from(&parent.authored())
+        .with_cycle_state_from(&parent.authored());
+        event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
+        event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
         let written =
             crate::supervised_base::publication::append(&ctx.data_journal, event, Some(parent))
                 .await?;
@@ -811,29 +845,29 @@ async fn journal_poisoned_lifecycle<
     causal_event_id: obzenflow_core::EventId,
     detail: String,
 ) -> Result<obzenflow_core::EventId, Box<dyn std::error::Error + Send + Sync>> {
-    let event = SystemEvent::stage_failed_with_metrics_causal(
+    let event = SystemEvent::stage_failed_with_accounting_causal(
         ctx.stage_id,
         detail,
         false,
-        snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+        snapshot_stage_accounting(ctx.instrumentation.as_ref()),
         causal_event_id,
     );
     let written =
         crate::supervised_base::publication::append(&ctx.system_journal, event, None).await?;
     ctx.failure_lifecycle_recorded = true;
     ctx.failure_causal_event_id = Some(causal_event_id);
-    Ok(written.event.id)
+    Ok(written.envelope.provenance.event.id)
 }
 
 async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let observer_input_position =
         stage_input_position.ok_or("sink delivered data input without StageInputPosition")?;
-    let event_id = envelope.event.id;
+    let event_id = envelope.envelope.provenance.event.id;
     let upstream_stage = subscription.last_delivered_upstream_stage();
     let heartbeat_state = ctx
         .heartbeat
@@ -871,7 +905,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         subscription.last_delivered_generation(),
     );
     let boundary = ctx.sink_delivery_boundary.clone();
-    let input = envelope.event.clone();
+    let input = envelope.authored();
 
     let execution = process_with_instrumentation(&ctx.instrumentation, || async {
         let _processing = heartbeat_state
@@ -1078,7 +1112,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             ctx.instrumentation.record_error(error.kind());
             last_chain = journal_fresh_error_route(
                 ctx,
-                &envelope.event,
+                &envelope.authored(),
                 &current_receipt,
                 error.to_string(),
                 error.kind(),
@@ -1089,7 +1123,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         RetainedAttemptDisposition::OperationFailure(failure) => {
             let operation = journal_sink_operation_failure(
                 ctx,
-                &envelope.event,
+                &envelope.authored(),
                 &current_receipt,
                 SinkOperationPhase::Write(failure.phase()),
                 failure.error(),
@@ -1099,7 +1133,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             ctx.instrumentation.record_error(failure.error().kind());
             last_chain = journal_fresh_error_route(
                 ctx,
-                &envelope.event,
+                &envelope.authored(),
                 &operation,
                 failure.error().detail(),
                 failure.error().kind(),
@@ -1108,8 +1142,12 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             .await?;
             if failure.disposition() == SinkWriteFailureDisposition::Poisoned {
                 poisoned_lifecycle_event_id = Some(
-                    journal_poisoned_lifecycle(ctx, last_chain.event.id, failure.error().detail())
-                        .await?,
+                    journal_poisoned_lifecycle(
+                        ctx,
+                        last_chain.envelope.provenance.event.id,
+                        failure.error().detail(),
+                    )
+                    .await?,
                 );
             }
         }
@@ -1168,7 +1206,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             ctx.flow_id,
             &flow_context,
             scope,
-            &envelope.event,
+            &envelope.authored(),
             observer_input_position,
             observer_outcome,
         );
@@ -1230,9 +1268,12 @@ async fn journal_delivery_receipt<
 >(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    parent_envelope: &EventEnvelope<ChainEvent>,
+    parent_envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     payload: DeliveryPayload,
-) -> Result<EventEnvelope<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    JournalRecord<obzenflow_core::event::ChainPayload>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -1245,11 +1286,13 @@ async fn journal_delivery_receipt<
     let writer_id = WriterId::from(ctx.stage_id);
     let delivery_event = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
         .with_flow_context(flow_context)
-        .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
-        .with_correlation_from(&parent_envelope.event)
-        .with_cycle_state_from(&parent_envelope.event);
+        .with_causality(CausalityContext::with_parent(
+            parent_envelope.envelope.provenance.event.id,
+        ))
+        .with_correlation_from(&parent_envelope.authored())
+        .with_cycle_state_from(&parent_envelope.authored());
     let delivery_event = delivery_event
-        .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())?;
+        .try_with_composite_activations(parent_envelope.composite_activations().to_vec())?;
 
     let data_journal = ctx.data_journal.clone();
     let system_journal = ctx.system_journal.clone();
@@ -1259,8 +1302,8 @@ async fn journal_delivery_receipt<
     let (written, settlement) = crate::supervised_base::publication::commit(async move {
         let event = super::super::with_committed_receipt_snapshot(delivery_event, &instrumentation);
         let written = data_journal.append(event, Some(&parent)).await?;
-        instrumentation.record_output_event(&written.event);
-        if let Some((seq, event_id, vector_clock)) = settlement.record(&written.event) {
+        instrumentation.record_output_event(&written.authored());
+        if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {
             instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
         }
         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(

@@ -6,7 +6,7 @@
 
 use super::contracts::ContractBoundaryAlias;
 use obzenflow_core::event::{
-    payloads::{flow_control_payload::EofKind, observability_payload::CircuitBreakerOpenTrigger},
+    payloads::{execution_payload::CircuitBreakerOpenTrigger, flow_control_payload::EofKind},
     system_event::{
         ContractName, ContractResultStatusLabel, EdgeLivenessState, MiddlewareEventOrigin,
         PipelineStopAdmission, SystemFeedRole,
@@ -16,7 +16,7 @@ use obzenflow_core::event::{
     PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
 };
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
-use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
+use obzenflow_core::metrics::FlowLifecycleMetricsSnapshot;
 use obzenflow_core::{web::SseFrame, EventId, StageId};
 use serde::{Serialize, Serializer};
 use std::path::PathBuf;
@@ -70,6 +70,15 @@ pub(super) enum StudioMessage<'a> {
         update: MiddlewareUpdate<'a>,
         #[serde(flatten)]
         at: Observation<'a>,
+    },
+    #[serde(rename = "middleware_lifecycle")]
+    MiddlewareMeasurements {
+        #[serde(serialize_with = "display")]
+        stage_id: StageId,
+        #[serde(flatten)]
+        update: MiddlewareUpdate<'a>,
+        timestamp_ms: u64,
+        capture: obzenflow_core::event::observation::CaptureStamp,
     },
     ContractStatus {
         #[serde(flatten)]
@@ -145,7 +154,9 @@ impl StudioMessage<'_> {
             Self::FlowLifecycle { .. } => "flow_lifecycle",
             Self::ReplayLifecycle { .. } => "replay_lifecycle",
             Self::SourceCleanupFailed { .. } => "source_cleanup_failed",
-            Self::MiddlewareLifecycle { .. } => "middleware_lifecycle",
+            Self::MiddlewareLifecycle { .. } | Self::MiddlewareMeasurements { .. } => {
+                "middleware_lifecycle"
+            }
             Self::ContractStatus { pass: true, .. } => "contract_status",
             Self::ContractStatus { pass: false, .. } => "contract_violation",
             Self::ContractResult { .. } => "contract_result",
@@ -169,7 +180,10 @@ impl StudioMessage<'_> {
 #[derive(Serialize)]
 pub(super) struct Observation<'a> {
     pub timestamp_ms: u64,
-    pub vector_clock: &'a VectorClock,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_clock: Option<&'a VectorClock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<obzenflow_core::event::observation::CaptureStamp>,
 }
 
 #[derive(Serialize)]
@@ -200,20 +214,20 @@ enum StageUpdate {
     #[serde(rename = "stage_draining")]
     Draining {
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
     },
     #[serde(rename = "stage_drained")]
     Drained,
     #[serde(rename = "stage_completed")]
     Completed {
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
     },
     #[serde(rename = "stage_cancelled")]
     Cancelled {
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
     },
     #[serde(rename = "stage_failed")]
     Failed {
@@ -221,7 +235,7 @@ enum StageUpdate {
         #[serde(skip_serializing_if = "Option::is_none")]
         recoverable: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<obzenflow_core::event::context::ExecutionAccounting>,
         #[serde(skip)]
         causal_event_id: Option<EventId>,
     },
@@ -343,6 +357,7 @@ pub(super) enum StreamErrorKind {
 pub(super) enum MiddlewareUpdate<'a> {
     CircuitBreaker(CircuitBreakerUpdate<'a>),
     RateLimiter(RateLimiterUpdate<'a>),
+    Backpressure(BackpressureUpdate),
 }
 
 #[derive(Serialize)]
@@ -355,8 +370,10 @@ pub(super) enum CircuitBreakerUpdate<'a> {
         context: CircuitTransition<'a>,
     },
     Summary {
-        current_state: String,
         summary: CircuitSummary,
+    },
+    Measurements {
+        measurements: obzenflow_core::event::context::CircuitBreakerMeasurements,
     },
 }
 
@@ -382,6 +399,9 @@ pub(super) enum CircuitTransition<'a> {
     HalfOpen {
         test_request_count: u32,
     },
+    StateChanged {
+        timestamp: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -391,18 +411,28 @@ pub(super) struct CircuitSummary {
     pub totals: CircuitTotals,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub(super) struct CircuitTotals {
-    pub requests_processed: u64,
-    pub requests_rejected: u64,
-    pub consecutive_failures: usize,
-    pub rejection_rate: f64,
-    pub successes_total: u64,
-    pub failures_total: u64,
-    pub opened_total: u64,
-    pub time_in_closed_s: f64,
-    pub time_in_open_s: f64,
-    pub time_in_half_open_s: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests_processed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests_rejected: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successes_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failures_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opened_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_in_closed_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_in_open_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_in_half_open_s: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -423,15 +453,40 @@ pub(super) enum RateLimiterUpdate<'a> {
     WindowUtilization {
         #[serde(flatten)]
         window: RateLimiterWindow,
-        mode: &'a str,
+    },
+    Measurements {
+        measurements: obzenflow_core::event::context::RateLimiterMeasurements,
     },
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Serialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub(super) enum BackpressureUpdate {
+    ActivityPulse {
+        window_ms: u64,
+        delayed_events: u64,
+        delay_ms_total: u64,
+        delay_ms_max: u64,
+        context: BackpressureContext,
+    },
+}
+
+#[derive(Serialize)]
+pub(super) struct BackpressureContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_credit: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limiting_downstream_stage_id: Option<String>,
+}
+
+#[derive(Clone, Default, Serialize)]
 pub(super) struct RateLimiterWindow {
-    pub utilization_pct: f64,
-    pub events_in_window: u64,
-    pub window_size_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub utilization_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events_in_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_size_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -458,20 +513,32 @@ pub(super) struct StageMiddlewareSnapshot<'a> {
     pub rate_limiter: Option<&'a RateLimiterSnapshot>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub(super) struct CircuitBreakerSnapshot {
-    pub state: String,
-    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_updated_at_ms: Option<u64>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub totals: Option<CircuitTotals>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totals_observed_at_ms: Option<u64>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 pub(super) struct RateLimiterSnapshot {
-    pub mode: String,
-    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_updated_at_ms: Option<u64>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub window: Option<RateLimiterWindow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_observed_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

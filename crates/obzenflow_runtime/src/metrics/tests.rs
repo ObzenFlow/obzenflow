@@ -14,13 +14,13 @@ use super::supervisor::MetricsAggregatorSupervisor;
 use crate::journal::FlowJournalFactory;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use async_trait::async_trait;
-use obzenflow_core::event::context::{RuntimeContext, StageType};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{ChainEventFactory, JournalEvent, SystemEvent, SystemEventFactory};
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{
-    ChainEvent, EventEnvelope, EventId, Journal, JournalId, JournalOwner, StageId, SystemId,
+    ChainEvent, EventId, Journal, JournalId, JournalOwner, JournalRecord, StageId, SystemId,
     WriterId,
 };
 use obzenflow_fsm::FsmAction;
@@ -71,7 +71,7 @@ struct ObservedReader<T: JournalEvent> {
 
 #[async_trait]
 impl<T: JournalEvent + 'static> JournalReader<T> for ObservedReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let call = self.probe.next_calls.fetch_add(1, Ordering::SeqCst) + 1;
         let gate = self.probe.read_gate.lock().unwrap().take();
         if let Some(gate) = gate {
@@ -107,8 +107,8 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if event.event_type_name() == "system.metrics.exported" {
             let gate = self.probe.export_gate.lock().unwrap().take();
             if let Some(gate) = gate {
@@ -122,14 +122,17 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
         &self,
         id: &str,
         events: Vec<T>,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(id, events, parent).await
     }
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
-    async fn read_event(&self, id: &EventId) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn read_event(
+        &self,
+        id: &EventId,
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_event(id).await
     }
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -138,7 +141,10 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
             probe: self.probe.clone(),
         }))
     }
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.probe.tail_requests.lock().unwrap().push(count);
         if self.probe.fail_tail.load(Ordering::SeqCst) {
             return Err(JournalError::Full);
@@ -195,23 +201,65 @@ fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent 
     let mut event =
         ChainEventFactory::data_event(writer, "metrics.fact", serde_json::json!({"total": total}));
     event.flow_context.stage_id = stage;
-    event.runtime_context = Some(RuntimeContext {
-        in_flight: gauge,
-        recent_p50_ms: gauge.into(),
-        recent_p90_ms: gauge.into(),
-        recent_p95_ms: gauge.into(),
-        recent_p99_ms: gauge.into(),
-        recent_p999_ms: gauge.into(),
-        processing_time_sum_nanos: total * 10,
-        failures_total: total,
-        events_processed_total: total,
-        cb_requests_total: total,
-        cb_state: f64::from(gauge % 3),
-        rl_events_total: total,
-        rl_bucket_tokens: f64::from(gauge),
-        rl_bucket_capacity: f64::from(gauge + 1),
-        ..super::instrumentation::StageInstrumentation::new().snapshot_with_control()
+    event.runtime = Some(RuntimeProvenance {
+        accounting: obzenflow_core::event::context::ExecutionAccounting {
+            failures_total: total,
+            events_processed_total: total,
+            ..Default::default()
+        },
+        ..Default::default()
     });
+    use obzenflow_core::event::{
+        context::*, observation::*, payloads::execution_payload::CircuitState,
+    };
+    let mut packet = ObservabilityContext::new(CaptureStamp {
+        capture_scope: CaptureScope {
+            flow_id: "00000000000000000000000001".parse().unwrap(),
+            resume_generation: Default::default(),
+        },
+        observer: stage.into(),
+        capture_seq: CaptureSeq(total),
+        capture_reason: CaptureReason::Record,
+        observed_at_ms: total,
+    });
+    packet.runtime = Some(RuntimeObservability {
+        in_flight: Some(gauge),
+        timing: Some(TimingMeasurements {
+            processing_time_count: total,
+            processing_time_sum_nanos: total * 10,
+            recent_p50_ms: Some(gauge.into()),
+            recent_p90_ms: Some(gauge.into()),
+            recent_p95_ms: Some(gauge.into()),
+            recent_p99_ms: Some(gauge.into()),
+            recent_p999_ms: Some(gauge.into()),
+            window: MeasurementWindow {
+                started_at_ms: 0,
+                ended_at_ms: total,
+            },
+        }),
+        circuit_breaker: Some(CircuitBreakerMeasurements {
+            observed_state: CircuitState::Open,
+            requests_total: total,
+            successes_total: 0,
+            failures_total: 0,
+            slow_total: 0,
+            rejections_total: 0,
+            opened_total: 0,
+            time_closed_seconds: 0.0,
+            time_open_seconds: 0.0,
+            time_half_open_seconds: 0.0,
+        }),
+        rate_limiter: Some(RateLimiterMeasurements {
+            events_total: total,
+            delayed_total: 0,
+            tokens_consumed_total: 0.0,
+            delay_seconds_total: 0.0,
+            bucket_tokens: f64::from(gauge),
+            bucket_capacity: f64::from(gauge + 1),
+        }),
+        ..Default::default()
+    });
+    event.envelope.observability = Some(packet);
     event
 }
 
@@ -250,7 +298,12 @@ async fn context(
     (ctx, io, system, exports)
 }
 
-async fn fold(ctx: &mut Context, stage: StageId, rail: Rail, row: EventEnvelope<ChainEvent>) {
+async fn fold(
+    ctx: &mut Context,
+    stage: StageId,
+    rail: Rail,
+    row: JournalRecord<obzenflow_core::event::ChainPayload>,
+) {
     Action::UpdateMetrics {
         envelope: Box::new(row),
         journal_kind: rail,
@@ -270,7 +323,10 @@ fn assert_values(ctx: &Context, stage: StageId, total: u64, gauge: u32) {
     assert_eq!(metrics.latest_events_processed_total, Some(total));
     assert_eq!(metrics.last_failures_total, Some(total));
     assert_eq!(metrics.processing_time_sum_nanos, Some(total * 10));
-    assert_eq!(store.circuit_breaker_state[&stage], f64::from(gauge % 3));
+    assert!(
+        !store.circuit_breaker_state.contains_key(&stage),
+        "measurement cannot establish control state"
+    );
     assert_eq!(store.rate_limiter_bucket_tokens[&stage], f64::from(gauge));
     assert_eq!(
         store.rate_limiter_bucket_capacity[&stage],
@@ -317,7 +373,14 @@ pub async fn metrics_cache_bounds_negative_search_and_reuses_examined_heads(
         .await
         .unwrap();
     observation.refresh(journal.as_ref(), stage).await.unwrap();
-    assert_eq!(observation.selected().unwrap().in_flight, 7);
+    assert_eq!(
+        observation
+            .measurements()
+            .into_iter()
+            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
+            .unwrap(),
+        7
+    );
 
     // Shared lifecycle helpers also stop at a successfully examined beginning.
     let empty = stage_journal(&mut *factory, stage, "empty");
@@ -362,7 +425,10 @@ pub async fn metrics_snapshot_selection_survives_both_refresh_failure_orders(
                 .events,
         );
     }
-    assert_eq!(prefetched[1].event.id, newer.event.id);
+    assert_eq!(
+        prefetched[1].envelope.provenance.event.id,
+        newer.envelope.provenance.event.id
+    );
     assert!(ctx.metrics_store.ensure_snapshots_reconciled().is_err());
     assert_eq!(ctx.metrics_store.total_events_processed, 0);
     fold(&mut ctx, stage, Rail::Data, older).await;
@@ -417,7 +483,14 @@ pub async fn metrics_capped_search_keeps_sequential_selection_and_search_uncerta
         observation.refresh(data.as_ref(), stage).await.unwrap();
         assert_eq!(observation.lookup_outcome(), Some(LookupOutcome::Capped));
         observation.fold(&first, stage).unwrap();
-        assert_eq!(observation.selected().unwrap().in_flight, 6);
+        assert_eq!(
+            observation
+                .measurements()
+                .into_iter()
+                .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
+                .unwrap(),
+            6
+        );
         observation.refresh(data.as_ref(), stage).await.unwrap();
         assert_eq!(observation.lookup_outcome(), Some(LookupOutcome::Capped));
         assert!(!observation.is_ahead_of_fold());
@@ -430,7 +503,13 @@ pub async fn metrics_capped_search_keeps_sequential_selection_and_search_uncerta
     data.probe.fail_tail.store(true, Ordering::SeqCst);
     assert!(cold.refresh(data.as_ref(), stage).await.is_err());
     assert_eq!(cold.lookup_outcome(), Some(LookupOutcome::Capped));
-    assert_eq!(cold.selected().unwrap().in_flight, 2);
+    assert_eq!(
+        cold.measurements()
+            .into_iter()
+            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
+            .unwrap(),
+        2
+    );
 }
 
 pub async fn metrics_tail_results_bind_to_the_window_actually_examined(
@@ -453,9 +532,23 @@ pub async fn metrics_tail_results_bind_to_the_window_actually_examined(
         gate.release.notify_one();
     });
     result.unwrap();
-    assert_eq!(observation.selected().unwrap().in_flight, 8);
+    assert_eq!(
+        observation
+            .measurements()
+            .into_iter()
+            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
+            .unwrap(),
+        8
+    );
     observation.refresh(data.as_ref(), stage).await.unwrap();
-    assert_eq!(observation.selected().unwrap().in_flight, 3);
+    assert_eq!(
+        observation
+            .measurements()
+            .into_iter()
+            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
+            .unwrap(),
+        3
+    );
 }
 
 pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence(
@@ -473,9 +566,9 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
         .await
         .unwrap();
     let mut b = fact(stage, stage.into(), 2, 5);
-    b.id = a.event.id;
+    b.id = a.envelope.provenance.event.id;
     let mut c = fact(stage, stage.into(), 3, 2);
-    c.id = a.event.id;
+    c.id = a.envelope.provenance.event.id;
     let group = data
         .append_group("repeated-event-id", vec![b, c], None)
         .await
@@ -505,7 +598,8 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
         .unwrap();
     fold(&mut ctx, stage, Rail::Error, error).await;
     Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_values(&ctx, stage, 3, 7);
+    // Capture 2 from the error journal cannot replace capture 3 from data.
+    assert_values(&ctx, stage, 3, 2);
     assert_eq!(ctx.metrics_store.stage_vector_clocks.get(&archived), None);
     assert_eq!(ctx.metrics_store.stage_vector_clocks[&stage], 2);
     ctx.metrics_store.ensure_snapshots_reconciled().unwrap();
@@ -733,7 +827,7 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
         "system reader stops at the current terminal"
     );
     let rows = system.read_all_unordered().await.unwrap();
-    let names: Vec<_> = rows.iter().map(|row| row.event.event_type_name()).collect();
+    let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
     let drained = names
         .iter()
         .position(|name| *name == "system.metrics.drained")
@@ -844,7 +938,7 @@ pub async fn metrics_pending_read_cancellation_never_publishes_drained(
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event.event_type_name() == "system.metrics.drained"));
+        .any(|row| row.event_type_name() == "system.metrics.drained"));
 }
 
 pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness(

@@ -16,7 +16,7 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -220,11 +220,11 @@ fn stalling_flow(journal_base: PathBuf, csv_path: PathBuf) -> FlowDefinition {
     })
 }
 
-fn eof_kinds(events: &[EventEnvelope<ChainEvent>]) -> Vec<EofKind> {
+fn eof_kinds(events: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<EofKind> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
             _ => None,
         })
         .collect()
@@ -238,23 +238,30 @@ struct ReceiptSummary {
 }
 
 fn receipt_summary(
-    source: &[EventEnvelope<ChainEvent>],
-    sink: &[EventEnvelope<ChainEvent>],
+    source: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    sink: &[JournalRecord<obzenflow_core::event::ChainPayload>],
 ) -> ReceiptSummary {
     let source_ids = source
         .iter()
-        .filter(|envelope| CsvRecord::from_event(&envelope.event).is_some())
-        .map(|envelope| envelope.event.id)
+        .filter(|envelope| CsvRecord::from_event(&envelope.authored()).is_some())
+        .map(|envelope| envelope.envelope.provenance.event.id)
         .collect::<HashSet<EventId>>();
     let mut summary = ReceiptSummary::default();
     let mut committed_parents = HashSet::new();
 
     for envelope in sink {
-        let ChainEventContent::Delivery(payload) = &envelope.event.content else {
+        let ChainPayload::Delivery(payload) = &envelope.payload else {
             continue;
         };
         assert_eq!(payload.destination, "csv_out");
-        let parent = envelope.event.causality.parent_ids.first().copied();
+        let parent = envelope
+            .envelope
+            .provenance
+            .event
+            .causality
+            .parent_ids
+            .first()
+            .copied();
         match (&payload.result, parent) {
             (DeliveryResult::Buffered { .. }, Some(parent)) if source_ids.contains(&parent) => {
                 summary.buffered += 1;
@@ -299,8 +306,8 @@ async fn wait_for_three_buffered_receipts(run_dir: &Path) {
             .iter()
             .filter(|envelope| {
                 matches!(
-                    &envelope.event.content,
-                    ChainEventContent::Delivery(payload)
+                    &envelope.payload,
+                    ChainPayload::Delivery(payload)
                         if matches!(payload.result, DeliveryResult::Buffered { .. })
                 )
             })

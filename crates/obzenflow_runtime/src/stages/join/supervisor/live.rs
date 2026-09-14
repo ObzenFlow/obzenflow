@@ -16,7 +16,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
+use obzenflow_core::event::{ChainEventFactory, JournalRecord};
 use obzenflow_core::ChainEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -147,7 +147,7 @@ async fn handle_reference_envelope<
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
-    envelope: EventEnvelope<ChainEvent>,
+    envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
@@ -169,8 +169,8 @@ async fn handle_reference_envelope<
         .join_reference_since_last_stream
         .store(ctx.reference_since_last_stream as u64, Ordering::Relaxed);
 
-    let directive = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+    let directive = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(signal) => {
             // FLOWIP-120n: consume the catch-up watermark before the generic
             // control resolution; the join authors its own at the flip.
             if let FlowControlPayload::CatchUpComplete {
@@ -192,7 +192,7 @@ async fn handle_reference_envelope<
             // FLOWIP-120n F17: an authored EOF can be the delivery that
             // completes the caught-up frontier; no watermark follows, so
             // re-run the flip before normal EOF handling.
-            if envelope.event.is_eof() {
+            if envelope.is_eof() {
                 if let Some(directive) = common::flip_join_caught_up_on_eof(
                     Some(&*subscription),
                     sup.stream_subscription.as_ref(),
@@ -209,7 +209,7 @@ async fn handle_reference_envelope<
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
             // FLOWIP-095k: fold the reference side's terminal kind; the join's
             // authored kind is the worst across both sides.
-            if envelope.event.is_eof() {
+            if envelope.is_eof() {
                 if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
                     ctx.terminal_eof_kind = Some(
                         ctx.terminal_eof_kind
@@ -219,7 +219,7 @@ async fn handle_reference_envelope<
             }
             if let Some(signal_snapshot) = common::signal_snapshot(
                 Some(crate::stages::observer::JoinSide::Reference),
-                &envelope.event,
+                &envelope.authored(),
             ) {
                 common::observe_join_input(
                     ctx,
@@ -228,7 +228,7 @@ async fn handle_reference_envelope<
                         None,
                         subscription.last_delivered_generation(),
                     ),
-                    &envelope.event,
+                    &envelope.authored(),
                     None,
                     Some(&signal_snapshot),
                     Some(&envelope),
@@ -254,21 +254,21 @@ async fn handle_reference_envelope<
             match resolution {
                 ControlAction::Forward | ControlAction::ForwardAndDrain => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         let _ = subscription.take_last_eof_outcome();
                     }
                 }
                 ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Join received cycle-only control resolution without cycle config"
                     );
                 }
                 ControlAction::Skip => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Skipping control event (dangerous!) during Live (reference)"
                     );
                 }
@@ -276,8 +276,8 @@ async fn handle_reference_envelope<
 
             Some(EventLoopDirective::Continue)
         }
-        obzenflow_core::event::ChainEventContent::Data { .. } => {
-            let event = envelope.event.clone();
+        payload if payload.consumes_data_credit() => {
+            let event = envelope.authored();
             let event_id = event.id;
             let source_id = ctx.reference_stage_id;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
@@ -311,7 +311,7 @@ async fn handle_reference_envelope<
             )
             .await?;
 
-            if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+            if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                 if let Some(state) = &heartbeat_state {
                     state.record_last_consumed(event_id);
                 }
@@ -420,7 +420,7 @@ async fn handle_reference_envelope<
                         ))));
                     }
                     let reason = format!("Join handler error during live reference: {err:?}");
-                    let mut error_event = envelope.event.clone().mark_as_error(reason, err.kind());
+                    let mut error_event = envelope.authored().mark_as_error(reason, err.kind());
                     ctx.instrumentation.record_error(err.kind());
                     common::observe_join_outputs(
                         ctx,
@@ -520,7 +520,7 @@ async fn handle_stream_envelope<
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
-    envelope: EventEnvelope<ChainEvent>,
+    envelope: JournalRecord<obzenflow_core::event::ChainPayload>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
@@ -539,8 +539,8 @@ async fn handle_stream_envelope<
         .join_reference_since_last_stream
         .store(0, Ordering::Relaxed);
 
-    let directive = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+    let directive = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(signal) => {
             // FLOWIP-120n: consume the catch-up watermark before the generic
             // control resolution; the join authors its own at the flip.
             if let FlowControlPayload::CatchUpComplete {
@@ -559,8 +559,8 @@ async fn handle_stream_envelope<
                 ));
             }
 
-            if envelope.event.is_eof() {
-                ctx.buffered_eof = Some(envelope.event.clone());
+            if envelope.is_eof() {
+                ctx.buffered_eof = Some(envelope.authored());
                 ctx.drain_parent = Some(envelope.clone());
 
                 // FLOWIP-120n F17: an authored EOF can be the delivery that
@@ -581,7 +581,7 @@ async fn handle_stream_envelope<
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
             // FLOWIP-095k: fold the stream side's terminal kind.
-            if envelope.event.is_eof() {
+            if envelope.is_eof() {
                 if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
                     ctx.terminal_eof_kind = Some(
                         ctx.terminal_eof_kind
@@ -591,7 +591,7 @@ async fn handle_stream_envelope<
             }
             if let Some(signal_snapshot) = common::signal_snapshot(
                 Some(crate::stages::observer::JoinSide::Stream),
-                &envelope.event,
+                &envelope.authored(),
             ) {
                 common::observe_join_input(
                     ctx,
@@ -600,7 +600,7 @@ async fn handle_stream_envelope<
                         None,
                         subscription.last_delivered_generation(),
                     ),
-                    &envelope.event,
+                    &envelope.authored(),
                     None,
                     Some(&signal_snapshot),
                     Some(&envelope),
@@ -626,14 +626,14 @@ async fn handle_stream_envelope<
             match resolution {
                 ControlAction::Forward => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         let _ = subscription.take_last_eof_outcome();
                     }
                     Some(EventLoopDirective::Continue)
                 }
                 ControlAction::ForwardAndDrain => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         if last_eof_outcome
                             .as_ref()
                             .is_some_and(|outcome| outcome.is_final)
@@ -647,7 +647,7 @@ async fn handle_stream_envelope<
                 ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Join received cycle-only control resolution without cycle config"
                     );
                     Some(EventLoopDirective::Continue)
@@ -655,14 +655,14 @@ async fn handle_stream_envelope<
                 ControlAction::Skip => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Skipping control event (dangerous!) during Live (stream)"
                     );
                     Some(EventLoopDirective::Continue)
                 }
             }
         }
-        obzenflow_core::event::ChainEventContent::Data { .. } => {
+        payload if payload.consumes_data_credit() => {
             // Edge identity comes from the reader slot that delivered the
             // envelope, never from `event.writer_id`, which is preserved
             // across stages for causal attribution (forwarded rows carry the
@@ -672,7 +672,7 @@ async fn handle_stream_envelope<
                 .last_delivered_upstream_stage()
                 .ok_or("No delivered upstream recorded for stream event")?;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-            let event = envelope.event.clone();
+            let event = envelope.authored();
             let event_id = event.id;
             let scope = ctx.runtime_execution.dispatch_scope(
                 ctx.stage_id,
@@ -705,7 +705,7 @@ async fn handle_stream_envelope<
             )
             .await?;
 
-            if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+            if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                 if let Some(state) = &heartbeat_state {
                     state.record_last_consumed(event_id);
                 }
@@ -742,7 +742,7 @@ async fn handle_stream_envelope<
 
             let mut merged_parent = envelope.clone();
             CausalOrderingService::update_with_parent(
-                &mut merged_parent.vector_clock,
+                &mut merged_parent.envelope.provenance.journal.vector_clock,
                 &ctx.reference_high_water_clock,
             );
 
@@ -824,7 +824,7 @@ async fn handle_stream_envelope<
                         ))));
                     }
                     let reason = format!("Join handler error during live enrichment: {err:?}");
-                    let mut error_event = envelope.event.clone().mark_as_error(reason, err.kind());
+                    let mut error_event = envelope.authored().mark_as_error(reason, err.kind());
                     ctx.instrumentation.record_error(err.kind());
                     common::observe_join_outputs(
                         ctx,
@@ -1184,7 +1184,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     side: JoinSubscriptionSide,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
-    pending_parent: Option<&EventEnvelope<ChainEvent>>,
+    pending_parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {

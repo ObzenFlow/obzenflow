@@ -6,11 +6,11 @@
 //! handles, clocks, controls or permission to classify unpublished execution.
 
 use obzenflow_core::event::{
-    PipelineLifecycleEvent as Lifecycle, PipelineStopAdmission, SystemEvent, SystemEventType,
+    PipelineLifecycleEvent as Lifecycle, PipelineStopAdmission, SystemEvent, SystemPayload,
     WriterId,
 };
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
-use obzenflow_core::{EventEnvelope, EventId};
+use obzenflow_core::{EventId, JournalRecord};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -79,11 +79,13 @@ impl Projection {
         }
     }
 
-    pub(crate) fn fold(&mut self, envelope: &EventEnvelope<SystemEvent>) {
-        if envelope.event.writer_id != self.writer || matches!(self.health, Health::Failed(_)) {
+    pub(crate) fn fold(&mut self, envelope: &JournalRecord<obzenflow_core::event::SystemPayload>) {
+        if envelope.envelope.provenance.event.writer_id != self.writer
+            || matches!(self.health, Health::Failed(_))
+        {
             return;
         }
-        let SystemEventType::PipelineLifecycle(event) = &envelope.event.event else {
+        let SystemPayload::PipelineLifecycle(event) = &envelope.payload else {
             return;
         };
         let outcome = match event {
@@ -94,10 +96,13 @@ impl Projection {
             _ => None,
         };
         if let Some(outcome) = outcome {
-            if self.terminal_id.is_some_and(|id| id != envelope.event.id) {
+            if self
+                .terminal_id
+                .is_some_and(|id| id != envelope.envelope.provenance.event.id)
+            {
                 self.fail(ObservationError::ConflictingTerminal);
             } else {
-                self.terminal_id = Some(envelope.event.id);
+                self.terminal_id = Some(envelope.envelope.provenance.event.id);
                 self.outcome = Some(outcome);
             }
             return;
@@ -335,7 +340,10 @@ mod tests {
             projection.health,
             Health::Failed(ObservationError::ConflictingTerminal)
         ));
-        assert_eq!(projection.terminal_id, Some(terminal.event.id));
+        assert_eq!(
+            projection.terminal_id,
+            Some(terminal.envelope.provenance.event.id)
+        );
         assert_eq!(projection.outcome, Some(Outcome::NotStarted));
     }
 
@@ -370,13 +378,15 @@ mod tests {
         task.await.unwrap();
     }
 
-    struct FailingReader(Option<EventEnvelope<SystemEvent>>);
+    struct FailingReader(Option<JournalRecord<obzenflow_core::event::SystemPayload>>);
     #[async_trait::async_trait]
     impl JournalReader<SystemEvent> for FailingReader {
         async fn next(
             &mut self,
-        ) -> Result<Option<EventEnvelope<SystemEvent>>, obzenflow_core::journal::JournalError>
-        {
+        ) -> Result<
+            Option<JournalRecord<obzenflow_core::event::SystemPayload>>,
+            obzenflow_core::journal::JournalError,
+        > {
             match self.0.take() {
                 Some(event) => Ok(Some(event)),
                 None => Err(obzenflow_core::journal::JournalError::Full),
@@ -403,6 +413,9 @@ mod tests {
         assert!(reader.catch_up().await);
         assert!(matches!(reader.projection.health, Health::Failed(_)));
         assert_eq!(reader.projection.outcome, Some(Outcome::NotStarted));
-        assert_eq!(reader.projection.terminal_id, Some(terminal.event.id));
+        assert_eq!(
+            reader.projection.terminal_id,
+            Some(terminal.envelope.provenance.event.id)
+        );
     }
 }

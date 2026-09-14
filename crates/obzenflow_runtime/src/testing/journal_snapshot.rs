@@ -16,10 +16,10 @@
 
 use crate::testing::probe::JournalProbeError;
 use crate::testing::FlowTestHarness;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{EventEnvelope, JournalEvent, WriterId};
+use obzenflow_core::event::{JournalEvent, JournalRecord, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::EventId;
 use std::sync::Arc;
@@ -70,13 +70,15 @@ pub enum SequenceMatchMode {
 ///
 /// This is used to prevent grouping fan-out assertions by payload identity (like
 /// `correlation_id`). A `ParentEventId` is obtained from an observed parent
-/// [`EventEnvelope`], not constructed from an arbitrary ID.
+/// [`JournalRecord`], not constructed from an arbitrary ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParentEventId(EventId);
 
 impl ParentEventId {
-    pub fn of<T: JournalEvent + 'static>(env: &EventEnvelope<T>) -> Self {
-        Self(*env.event.id())
+    pub fn of<P: obzenflow_core::event::journal_record::JournalPayload>(
+        env: &JournalRecord<P>,
+    ) -> Self {
+        Self(*env.id())
     }
 
     pub fn as_event_id(&self) -> EventId {
@@ -115,7 +117,7 @@ impl FanOutGroup {
     }
 }
 
-type EventPredicate<T> = dyn Fn(&EventEnvelope<T>) -> bool + Send + Sync;
+type EventPredicate<T> = dyn Fn(&JournalRecord<<T as JournalEvent>::Payload>) -> bool + Send + Sync;
 
 #[derive(Clone)]
 pub struct EventShape<T: JournalEvent + 'static> {
@@ -134,7 +136,7 @@ impl<T: JournalEvent + 'static> std::fmt::Debug for EventShape<T> {
 impl<T: JournalEvent + 'static> EventShape<T> {
     pub fn predicate(
         description: impl Into<String>,
-        predicate: impl Fn(&EventEnvelope<T>) -> bool + Send + Sync + 'static,
+        predicate: impl Fn(&JournalRecord<T::Payload>) -> bool + Send + Sync + 'static,
     ) -> Self {
         Self {
             description: description.into(),
@@ -142,7 +144,7 @@ impl<T: JournalEvent + 'static> EventShape<T> {
         }
     }
 
-    pub fn matches(&self, env: &EventEnvelope<T>) -> bool {
+    pub fn matches(&self, env: &JournalRecord<T::Payload>) -> bool {
         (self.predicate)(env)
     }
 
@@ -153,7 +155,7 @@ impl<T: JournalEvent + 'static> EventShape<T> {
     pub fn refine(
         self,
         extra_description: impl Into<String>,
-        extra: impl Fn(&EventEnvelope<T>) -> bool + Send + Sync + 'static,
+        extra: impl Fn(&JournalRecord<T::Payload>) -> bool + Send + Sync + 'static,
     ) -> Self {
         let prev = self.predicate.clone();
         let extra = Arc::new(extra);
@@ -170,10 +172,7 @@ impl EventShape<ChainEvent> {
     pub fn data_type(event_type: impl Into<String>) -> Self {
         let want = event_type.into();
         Self::predicate(format!("ChainEvent::Data({want})"), move |env| {
-            match &env.event.content {
-                ChainEventContent::Data { event_type, .. } => event_type == &want,
-                _ => false,
-            }
+            env.consumes_data_credit() && env.event_type_name() == want
         })
     }
 
@@ -184,9 +183,12 @@ impl EventShape<ChainEvent> {
         predicate: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
     ) -> Self {
         let predicate = Arc::new(predicate);
-        self.refine(description, move |env| match &env.event.content {
-            ChainEventContent::Data { payload, .. } => predicate(payload),
-            _ => false,
+        self.refine(description, move |env| {
+            env.consumes_data_credit()
+                && env
+                    .payload
+                    .contract_body()
+                    .is_ok_and(|body| predicate(&body))
         })
     }
 
@@ -201,19 +203,19 @@ impl EventShape<ChainEvent> {
     ) -> Self {
         let predicate = Arc::new(predicate);
         self.refine(description, move |env| {
-            predicate(&env.event.processing_info.status)
+            predicate(&env.envelope.provenance.event.processing.status)
         })
     }
 }
 
 impl EventShape<SystemEvent> {
-    /// Match a system envelope by predicate over its `SystemEventType`.
+    /// Match a system envelope by predicate over its `SystemPayload`.
     pub fn system_event_predicate(
         description: impl Into<String>,
-        predicate: impl Fn(&obzenflow_core::event::SystemEventType) -> bool + Send + Sync + 'static,
+        predicate: impl Fn(&obzenflow_core::event::SystemPayload) -> bool + Send + Sync + 'static,
     ) -> Self {
         let predicate = Arc::new(predicate);
-        Self::predicate(description, move |env| predicate(&env.event.event))
+        Self::predicate(description, move |env| predicate(&env.payload))
     }
 }
 
@@ -253,31 +255,37 @@ pub enum CausalAssertionError {
 }
 
 /// Assert strict happened-before (`a < b`) on envelope vector clocks.
-pub fn assert_happens_before<T: JournalEvent>(
-    a: &EventEnvelope<T>,
-    b: &EventEnvelope<T>,
+pub fn assert_happens_before<P: obzenflow_core::event::journal_record::JournalPayload>(
+    a: &JournalRecord<P>,
+    b: &JournalRecord<P>,
 ) -> Result<(), CausalAssertionError> {
-    if CausalOrderingService::happened_before(&a.vector_clock, &b.vector_clock) {
+    if CausalOrderingService::happened_before(
+        &a.envelope.provenance.journal.vector_clock,
+        &b.envelope.provenance.journal.vector_clock,
+    ) {
         Ok(())
     } else {
         Err(CausalAssertionError::NotHappensBefore {
-            a_id: *a.event.id(),
-            b_id: *b.event.id(),
+            a_id: *a.id(),
+            b_id: *b.id(),
         })
     }
 }
 
 /// Assert concurrency on envelope vector clocks.
-pub fn assert_concurrent<T: JournalEvent>(
-    a: &EventEnvelope<T>,
-    b: &EventEnvelope<T>,
+pub fn assert_concurrent<P: obzenflow_core::event::journal_record::JournalPayload>(
+    a: &JournalRecord<P>,
+    b: &JournalRecord<P>,
 ) -> Result<(), CausalAssertionError> {
-    if CausalOrderingService::are_concurrent(&a.vector_clock, &b.vector_clock) {
+    if CausalOrderingService::are_concurrent(
+        &a.envelope.provenance.journal.vector_clock,
+        &b.envelope.provenance.journal.vector_clock,
+    ) {
         Ok(())
     } else {
         Err(CausalAssertionError::NotConcurrent {
-            a_id: *a.event.id(),
-            b_id: *b.event.id(),
+            a_id: *a.id(),
+            b_id: *b.id(),
         })
     }
 }
@@ -286,7 +294,7 @@ pub fn assert_concurrent<T: JournalEvent>(
 struct SnapshotRow<T: JournalEvent + 'static> {
     #[allow(dead_code)]
     append_index: u64,
-    envelope: EventEnvelope<T>,
+    envelope: JournalRecord<T::Payload>,
 }
 
 /// Eager snapshot of a journal at a point in time.
@@ -334,7 +342,7 @@ impl JournalSnapshot<SystemEvent> {
 
 impl<T: JournalEvent + 'static> JournalSnapshot<T> {
     /// Captured envelopes in the requested order.
-    pub fn events(&self, order: JournalOrder) -> Vec<&EventEnvelope<T>> {
+    pub fn events(&self, order: JournalOrder) -> Vec<&JournalRecord<T::Payload>> {
         match order {
             JournalOrder::Append => self.rows.iter().map(|r| &r.envelope).collect(),
             JournalOrder::Causal => {
@@ -342,8 +350,10 @@ impl<T: JournalEvent + 'static> JournalSnapshot<T> {
                 indices.sort_by_cached_key(|&idx| {
                     let row = &self.rows[idx];
                     (
-                        CausalOrderingService::causal_rank(&row.envelope.vector_clock),
-                        *row.envelope.event.id(),
+                        CausalOrderingService::causal_rank(
+                            &row.envelope.envelope.provenance.journal.vector_clock,
+                        ),
+                        *row.envelope.id(),
                     )
                 });
                 indices
@@ -360,7 +370,7 @@ impl<T: JournalEvent + 'static> JournalSnapshot<T> {
         order: JournalOrder,
         shape: &EventShape<T>,
         n: u64,
-    ) -> Option<&EventEnvelope<T>> {
+    ) -> Option<&JournalRecord<T::Payload>> {
         if n < 1 {
             return None;
         }
@@ -549,16 +559,21 @@ fn assert_unordered_multiset<T: JournalEvent + DirectParentId + 'static>(
 ) -> Result<(), JournalExpectationError> {
     let selector = fan_out_group.parent_selector();
 
-    let group: Vec<&EventEnvelope<T>> = snapshot
+    let group: Vec<&JournalRecord<T::Payload>> = snapshot
         .rows
         .iter()
         .map(|r| &r.envelope)
         .filter(|env| match selector {
             ParentSelector::VectorClockComponent { writer_id, seq } => {
-                env.vector_clock.get(&writer_id.to_string()) == seq
+                env.envelope
+                    .provenance
+                    .journal
+                    .vector_clock
+                    .get(&writer_id.to_string())
+                    == seq
             }
             ParentSelector::ParentEventId(parent_id) => {
-                env.event.direct_parent_id() == Some(parent_id)
+                env.authored().direct_parent_id() == Some(parent_id)
             }
         })
         .collect();
@@ -593,7 +608,7 @@ fn assert_unordered_multiset<T: JournalEvent + DirectParentId + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
     use obzenflow_core::id::JournalId;
@@ -608,7 +623,7 @@ mod tests {
     struct RecordingJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> Default for RecordingJournal<T> {
@@ -622,7 +637,7 @@ mod tests {
     }
 
     struct RecordingJournalReader<T: JournalEvent> {
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
         pos: usize,
     }
 
@@ -631,7 +646,7 @@ mod tests {
     where
         T: JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self
                 .events
                 .lock()
@@ -666,16 +681,16 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let envelope =
-                EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+                JournalRecord::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             Ok(guard.clone())
         }
@@ -683,9 +698,9 @@ mod tests {
         async fn read_event(
             &self,
             event_id: &obzenflow_core::event::types::EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
-            Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
+            Ok(guard.iter().find(|e| e.id() == event_id).cloned())
         }
 
         async fn reader_from(
@@ -698,7 +713,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -759,37 +777,49 @@ mod tests {
         let mut b_clock = VectorClock::new();
         b_clock.clocks.insert("writer_a".to_string(), 2);
 
-        let a = EventEnvelope {
-            journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
-            vector_clock: a_clock,
-            timestamp: obzenflow_core::chrono::Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-            event: SystemEvent {
-                id: a_id,
-                writer_id: WriterId::from(obzenflow_core::SystemId::new()),
-                event: obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                    obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting,
-                ),
-                timestamp: 0,
+        let a = JournalRecord::<obzenflow_core::event::SystemPayload>::commit_event(
+            {
+                let mut event = SystemEvent::new(
+                    WriterId::from(obzenflow_core::SystemId::new()),
+                    obzenflow_core::event::SystemPayload::PipelineLifecycle(
+                        obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting,
+                    ),
+                );
+                event.id = a_id;
+                event.timestamp = 0;
+                event
             },
-        };
+            obzenflow_core::event::provenance::JournalProvenance {
+                journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+                vector_clock: a_clock,
+                timestamp: obzenflow_core::chrono::Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid committed fixture");
 
-        let b = EventEnvelope {
-            journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
-            vector_clock: b_clock,
-            timestamp: obzenflow_core::chrono::Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-            event: SystemEvent {
-                id: b_id,
-                writer_id: WriterId::from(obzenflow_core::SystemId::new()),
-                event: obzenflow_core::event::SystemEventType::PipelineLifecycle(
-                    obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting,
-                ),
-                timestamp: 0,
+        let b = JournalRecord::<obzenflow_core::event::SystemPayload>::commit_event(
+            {
+                let mut event = SystemEvent::new(
+                    WriterId::from(obzenflow_core::SystemId::new()),
+                    obzenflow_core::event::SystemPayload::PipelineLifecycle(
+                        obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting,
+                    ),
+                );
+                event.id = b_id;
+                event.timestamp = 0;
+                event
             },
-        };
+            obzenflow_core::event::provenance::JournalProvenance {
+                journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+                vector_clock: b_clock,
+                timestamp: obzenflow_core::chrono::Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid committed fixture");
 
         assert_happens_before(&a, &b).expect("a should happen before b");
         assert!(
@@ -803,13 +833,18 @@ mod tests {
         let stage = StageId::new();
         let writer = WriterId::from(stage);
 
-        let mk = |ty: &str| EventEnvelope {
-            journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
-            vector_clock: VectorClock::new(),
-            timestamp: obzenflow_core::chrono::Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-            event: ChainEventFactory::data_event(writer, ty, serde_json::json!({})),
+        let mk = |ty: &str| {
+            JournalRecord::commit_event(
+                ChainEventFactory::data_event(writer, ty, serde_json::json!({})),
+                obzenflow_core::event::provenance::JournalProvenance {
+                    journal_writer_id: obzenflow_core::JournalWriterId::from(JournalId::new()),
+                    vector_clock: VectorClock::new(),
+                    timestamp: obzenflow_core::chrono::Utc::now(),
+                    journal_group_id: None,
+                    journal_group_member: None,
+                },
+            )
+            .expect("valid committed fixture")
         };
 
         let snapshot = JournalSnapshot::<ChainEvent> {
@@ -860,14 +895,14 @@ mod tests {
 
         let child_a = ChainEventFactory::derived_data_event(
             writer,
-            &parent_env.event,
+            &parent_env.authored(),
             "child.a",
             serde_json::json!({ "i": 1 }),
             obzenflow_core::config::LineagePolicy::default(),
         );
         let child_b = ChainEventFactory::derived_data_event(
             writer,
-            &parent_env.event,
+            &parent_env.authored(),
             "child.b",
             serde_json::json!({ "i": 2 }),
             obzenflow_core::config::LineagePolicy::default(),
@@ -883,12 +918,12 @@ mod tests {
             .expect("append child.b");
 
         assert_eq!(
-            child_a_env.event.correlation_id(),
-            child_b_env.event.correlation_id(),
+            child_a_env.correlation_id(),
+            child_b_env.correlation_id(),
             "under fan-out, multiple derived children intentionally share correlation_id"
         );
         assert_eq!(
-            child_a_env.event.correlation_id(),
+            child_a_env.correlation_id(),
             Some(corr),
             "derived children should inherit parent's correlation_id"
         );

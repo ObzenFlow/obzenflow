@@ -23,7 +23,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::system_event::SystemFeedRole;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{
-    PipelineLifecycleEvent, SystemEvent, SystemEventFactory, SystemEventType,
+    PipelineLifecycleEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
 use obzenflow_core::{StageId, SystemId};
 use std::time::{Duration, Instant};
@@ -85,28 +85,55 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
     assert_happens_before(&group[0], &group[1]).unwrap();
     for (index, row) in group.iter().enumerate() {
         assert_eq!(
-            row.journal_group_id.as_deref(),
+            row.envelope.provenance.journal.journal_group_id.as_deref(),
             Some("fixture.causal-group")
         );
-        let member = row.journal_group_member.as_ref().unwrap();
+        let member = row
+            .envelope
+            .provenance
+            .journal
+            .journal_group_member
+            .as_ref()
+            .unwrap();
         assert_eq!(member.index as usize, index);
         assert_eq!(member.size, 2);
     }
-    let found = journal.read_event(&child.event.id).await.unwrap().unwrap();
-    assert_eq!(found.vector_clock, child.vector_clock);
+    let found = journal
+        .read_event(&child.envelope.provenance.event.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found.envelope.provenance.journal.vector_clock,
+        child.envelope.provenance.journal.vector_clock
+    );
     let stored = inner.read_all_unordered().await.unwrap();
     let observed = journal.read_causally_ordered().await.unwrap();
     assert_eq!(
-        stored.iter().map(|row| row.event.id).collect::<Vec<_>>(),
-        observed.iter().map(|row| row.event.id).collect::<Vec<_>>()
+        stored
+            .iter()
+            .map(|row| row.envelope.provenance.event.id)
+            .collect::<Vec<_>>(),
+        observed
+            .iter()
+            .map(|row| row.envelope.provenance.event.id)
+            .collect::<Vec<_>>()
     );
 
     let mut reader = journal.reader_from(1).await.unwrap();
     assert_eq!(reader.position(), 1);
     for expected in [&child, &group[0], &group[1]] {
         assert_eq!(
-            reader.next().await.unwrap().unwrap().event.id,
-            expected.event.id
+            reader
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .envelope
+                .provenance
+                .event
+                .id,
+            expected.envelope.provenance.event.id
         );
     }
     assert!(reader.next().await.unwrap().is_none());
@@ -116,13 +143,27 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
         .await
         .unwrap();
     assert_eq!(
-        reader.next().await.unwrap().unwrap().event.id,
-        later.event.id
+        reader
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .envelope
+            .provenance
+            .event
+            .id,
+        later.envelope.provenance.event.id
     );
     assert_eq!(reader.position(), 5);
     let tail = journal.read_last_n(2).await.unwrap();
-    assert_eq!(tail[0].event.id, later.event.id);
-    assert_eq!(tail[1].event.id, group[1].event.id);
+    assert_eq!(
+        tail[0].envelope.provenance.event.id,
+        later.envelope.provenance.event.id
+    );
+    assert_eq!(
+        tail[1].envelope.provenance.event.id,
+        group[1].envelope.provenance.event.id
+    );
 }
 
 pub async fn internal_input_admission_is_phase_specific_even_with_satisfied_guards(
@@ -404,7 +445,7 @@ fn contract_row(
 ) -> SystemEvent {
     SystemEvent::new(
         reader.into(),
-        SystemEventType::ContractStatus {
+        SystemPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type: selected.map(Into::into),
@@ -591,8 +632,8 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
             panic!("one completion announcement");
         };
         assert!(matches!(
-            event.event,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted { .. })
+            event.payload,
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted { .. })
         ));
         assert_eq!(machine.state(), &phase);
         assert!(ctx.flow_start_time.is_none());

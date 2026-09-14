@@ -19,7 +19,7 @@ use obzenflow_core::ChainEvent;
 /// (Validation, Domain) stay in the main pipeline so downstream stages can
 /// observe and potentially handle them.
 pub(crate) fn route_to_error_journal(event: &ChainEvent) -> bool {
-    match &event.processing_info.status {
+    match &event.processing.status {
         ProcessingStatus::Error { kind, .. } => match kind {
             Some(ErrorKind::Timeout)
             | Some(ErrorKind::Remote)

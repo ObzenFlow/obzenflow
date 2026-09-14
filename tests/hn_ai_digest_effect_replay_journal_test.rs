@@ -15,6 +15,8 @@ mod config;
 mod decoder;
 #[path = "../examples/hn_ai_digest_demo/domain.rs"]
 mod domain;
+#[path = "test_support/exported_jsonl.rs"]
+mod exported_jsonl;
 #[path = "../examples/hn_ai_digest_demo/flow.rs"]
 mod hn_demo_flow;
 #[path = "../examples/hn_ai_digest_demo/mock_server.rs"]
@@ -43,16 +45,15 @@ use obzenflow_core::ai::{
     TokenEstimator, TokenEstimatorFallbackReason, TokenEstimatorResolutionInfo,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
-    ObservabilityPayload,
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
 };
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
-    ChainEventContent, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload,
-    EffectRecord, EffectRecoveryAbandoned, PipelineLifecycleEvent, SystemEvent, SystemEventType,
+    ChainPayload, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload, EffectRecord,
+    EffectRecoveryAbandoned, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload, WriterId};
@@ -890,30 +891,21 @@ fn stage_writer(run_dir: &Path, stage_key: &str) -> WriterId {
 }
 
 fn is_generated_chunk_output(event: &ChainEvent) -> bool {
-    match &event.content {
-        ChainEventContent::Observability(ObservabilityPayload::Metrics(
-            obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom {
-                name,
-                ..
-            },
-        )) => name == "ai_chunking.snapshot",
-        ChainEventContent::Data { event_type, .. } => {
-            AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::event_type_matches(event_type)
-                || AiMapReducePlanningManifest::event_type_matches(event_type)
-                || AiMapReducePlanningFailed::event_type_matches(event_type)
-        }
-        _ => false,
-    }
+    matches!(event.payload, ChainPayload::CompositeData(_))
+        && (AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::event_type_matches(
+            &event.event_type(),
+        ) || AiMapReducePlanningManifest::event_type_matches(&event.event_type())
+            || AiMapReducePlanningFailed::event_type_matches(&event.event_type()))
 }
 
 fn final_eof_event_type_counts(
-    events: &[EventEnvelope<ChainEvent>],
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
 ) -> &std::collections::BTreeMap<obzenflow_core::EventType, obzenflow_core::event::types::SeqNo> {
     events
         .iter()
         .rev()
-        .find_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq_by_event_type,
                 ..
             }) => Some(writer_seq_by_event_type),
@@ -924,23 +916,23 @@ fn final_eof_event_type_counts(
 
 fn assert_generated_chunk_authorship(
     run_dir: &Path,
-    seed_events: &[EventEnvelope<ChainEvent>],
-    chunk_events: &[EventEnvelope<ChainEvent>],
+    seed_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    chunk_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
     expected_map_inputs: usize,
 ) {
     let seed = seed_events
         .iter()
-        .find(|envelope| DigestSeed::event_type_matches(&envelope.event.event_type()))
+        .find(|envelope| DigestSeed::event_type_matches(&envelope.event_type()))
         .expect("source journal contains the generated map-reduce seed");
     let chunk_writer = stage_writer(run_dir, "digest__chunk");
     assert_ne!(
-        seed.event.writer_id, chunk_writer,
+        seed.envelope.provenance.event.writer_id, chunk_writer,
         "seed and generated chunk stages must have distinct agency"
     );
 
     let generated = chunk_events
         .iter()
-        .filter(|envelope| is_generated_chunk_output(&envelope.event))
+        .filter(|envelope| is_generated_chunk_output(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(
         generated.len(),
@@ -949,23 +941,41 @@ fn assert_generated_chunk_authorship(
     );
 
     let chunk_clock_key = chunk_writer.to_string();
-    let seed_clock_key = seed.event.writer_id.to_string();
+    let seed_clock_key = seed.envelope.provenance.event.writer_id.to_string();
     for envelope in generated {
         assert_eq!(
-            envelope.event.writer_id, chunk_writer,
+            envelope.envelope.provenance.event.writer_id, chunk_writer,
             "new generated facts are authored by the chunk stage"
         );
         assert_eq!(
-            envelope.event.causality.parent_ids.first(),
-            Some(&seed.event.id),
+            envelope
+                .envelope
+                .provenance
+                .event
+                .causality
+                .parent_ids
+                .first(),
+            Some(&seed.envelope.provenance.event.id),
             "generated facts retain the seed parent"
         );
         assert!(
-            envelope.vector_clock.get(&chunk_clock_key) > 0,
+            envelope
+                .envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&chunk_clock_key)
+                > 0,
             "generated facts advance the chunk-stage clock component"
         );
         assert!(
-            envelope.vector_clock.get(&seed_clock_key) > 0,
+            envelope
+                .envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&seed_clock_key)
+                > 0,
             "generated facts merge the seed writer's causal component"
         );
     }
@@ -987,7 +997,7 @@ async fn assert_zero_chunk_archive(
         chunk
             .iter()
             .filter_map(|envelope| {
-                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.authored())
             })
             .count(),
         0,
@@ -996,7 +1006,7 @@ async fn assert_zero_chunk_archive(
 
     let manifests = chunk
         .iter()
-        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     let [manifest] = manifests.as_slice() else {
         panic!(
@@ -1031,20 +1041,19 @@ async fn assert_zero_chunk_archive(
         Some(&obzenflow_core::event::types::SeqNo(1)),
         "the selected manifest reconciles exactly through the map feed"
     );
-    assert!(map.iter().all(|envelope| {
-        !matches!(
-            &envelope.event.content,
-            ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
-            )) if name == "ai_chunking.snapshot"
-        )
-    }), "snapshot observability never enters the selected data feed");
+    assert!(
+        map.iter().all(|envelope| {
+            !matches!(
+                &envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(_))
+            )
+        }),
+        "snapshot observability never enters the selected data feed"
+    );
 
     assert_eq!(
         map.iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         0,
         "zero-chunk jobs allocate no logical map effect cursor"
@@ -1054,7 +1063,9 @@ async fn assert_zero_chunk_archive(
     let reduce_inputs = collect
         .iter()
         .filter_map(|envelope| {
-            AiMapReduceReduceInput::<DigestSeed, Many<DigestPartial>>::from_event(&envelope.event)
+            AiMapReduceReduceInput::<DigestSeed, Many<DigestPartial>>::from_event(
+                &envelope.authored(),
+            )
         })
         .collect::<Vec<_>>();
     let [reduce_input] = reduce_inputs.as_slice() else {
@@ -1071,9 +1082,7 @@ async fn assert_zero_chunk_archive(
     assert_eq!(
         finalise
             .iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         1,
         "an empty collected value still enters the existing finalise effect once"
@@ -1088,7 +1097,10 @@ async fn assert_zero_chunk_archive(
     effect_evidence_ids(&finalise)
 }
 
-async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn stage_envelopes(
+    run_dir: &Path,
+    stage_key: &str,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let relative = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
@@ -1115,16 +1127,16 @@ struct StableDeliveryReceipt {
 }
 
 fn stable_delivery_receipts(
-    parent_events: &[EventEnvelope<ChainEvent>],
-    sink_events: &[EventEnvelope<ChainEvent>],
+    parent_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    sink_events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
 ) -> Vec<StableDeliveryReceipt> {
     let parents = parent_events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => Some((envelope.event.id, (event_type.clone(), payload.clone()))),
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => Some((
+                envelope.envelope.provenance.event.id,
+                (envelope.event_type().to_string(), envelope.payload()),
+            )),
             _ => None,
         })
         .collect::<HashMap<_, _>>();
@@ -1132,10 +1144,12 @@ fn stable_delivery_receipts(
     sink_events
         .iter()
         .filter_map(|envelope| {
-            let ChainEventContent::Delivery(delivery) = &envelope.event.content else {
+            let ChainPayload::Delivery(delivery) = &envelope.payload else {
                 return None;
             };
             let parent_id = envelope
+                .envelope
+                .provenance
                 .event
                 .causality
                 .parent_ids
@@ -1174,7 +1188,7 @@ async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
         .await
         .expect("system journal is readable")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -1210,14 +1224,16 @@ async fn assert_archive_contract_rejected_before_port_resolution(
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-fn effect_evidence_ids(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<EventId> {
+fn effect_evidence_ids(
+    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<EventId> {
     let mut ids = envelopes
         .iter()
         .filter(|envelope| {
-            EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-                || chat_completion_reply(&envelope.event).is_some()
+            EffectAttemptStarted::event_type_matches(&envelope.event_type())
+                || chat_completion_reply(&envelope.authored()).is_some()
         })
-        .map(|envelope| envelope.event.id)
+        .map(|envelope| envelope.envelope.provenance.event.id)
         .collect::<Vec<_>>();
     ids.sort();
     ids
@@ -1226,19 +1242,13 @@ fn effect_evidence_ids(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<EventId> 
 const CHAT_COMPLETION_EFFECT_TYPE: &str = "obzenflow.ai.chat_completion";
 
 fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
-    let ChainEventContent::Data {
-        event_type,
-        payload,
-    } = &event.content
+    let ChainPayload::Execution(
+        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::EffectRecord(record),
+    ) = &event.payload
     else {
         return None;
     };
-
-    if event_type != EFFECT_RECORD_EVENT_TYPE {
-        return None;
-    }
-
-    let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
+    let record = record.clone();
     if record.descriptor.effect_type.as_str() != CHAT_COMPLETION_EFFECT_TYPE {
         return None;
     }
@@ -1248,21 +1258,30 @@ fn chat_completion_reply(event: &ChainEvent) -> Option<ChatCompletionReply> {
     }
 }
 
-fn assert_atomic_completion_groups(envelopes: &[EventEnvelope<ChainEvent>], expected: usize) {
+fn assert_atomic_completion_groups(
+    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    expected: usize,
+) {
     let completions = envelopes
         .iter()
-        .filter(|envelope| chat_completion_reply(&envelope.event).is_some())
+        .filter(|envelope| chat_completion_reply(&envelope.authored()).is_some())
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), expected);
     for completion in completions {
         assert!(
             completion
+                .envelope
+                .provenance
+                .journal
                 .journal_group_id
                 .as_deref()
                 .is_some_and(|group| group.starts_with("effect-outcome:v1:")),
             "completion must be committed under its cursor-derived outcome group"
         );
         let member = completion
+            .envelope
+            .provenance
+            .journal
             .journal_group_member
             .expect("atomic outcome carries physical-frame membership");
         assert!(member.size > 0);
@@ -1271,7 +1290,7 @@ fn assert_atomic_completion_groups(envelopes: &[EventEnvelope<ChainEvent>], expe
 }
 
 fn assert_completion_contract(
-    envelopes: &[EventEnvelope<ChainEvent>],
+    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
     expected: usize,
     expected_label: &str,
     expected_target: &ChatTarget,
@@ -1279,12 +1298,14 @@ fn assert_completion_contract(
     let completions = envelopes
         .iter()
         .filter_map(|envelope| {
-            chat_completion_reply(&envelope.event).map(|reply| (envelope, reply))
+            chat_completion_reply(&envelope.authored()).map(|reply| (envelope, reply))
         })
         .collect::<Vec<_>>();
     assert_eq!(completions.len(), expected);
     for (envelope, completion) in completions {
         let provenance = envelope
+            .envelope
+            .provenance
             .event
             .effect_provenance
             .as_ref()
@@ -1320,38 +1341,35 @@ fn assert_completion_contract(
     assert!(
         envelopes.iter().all(|envelope| {
             envelope
-                .event
-                .observability
+                .envelope.observability
                 .as_ref()
-                .and_then(|observability| observability.custom.as_ref())
-                .and_then(serde_json::Value::as_object)
-                .is_none_or(|custom| !custom.contains_key("llm"))
+                .is_none_or(|observability| !observability.records.iter().any(|record| matches!(record, obzenflow_core::event::observation::ObservationRecord::Llm { .. })))
         }),
-        "120j keeps LLM observation in framework reply evidence and does not copy custom[\"llm\"] onto generated facts"
+        "120j keeps LLM usage in framework reply evidence without copying it into optional LLM attachments"
     );
 }
 
 fn circuit_breaker_event_count(
-    envelopes: &[EventEnvelope<ChainEvent>],
-    predicate: impl Fn(&CircuitBreakerEvent) -> bool,
+    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    predicate: impl Fn(&CircuitBreakerFact) -> bool,
 ) -> usize {
     envelopes
         .iter()
         .filter(|envelope| {
             matches!(
-                &envelope.event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(event)
-                )) if predicate(event)
+                &envelope.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(event)) if predicate(event)
             )
         })
         .count()
 }
 
-fn chunk_failures(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<AiMapReduceChunkFailed> {
+fn chunk_failures(
+    envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<AiMapReduceChunkFailed> {
     envelopes
         .iter()
-        .filter_map(|envelope| AiMapReduceChunkFailed::from_event(&envelope.event))
+        .filter_map(|envelope| AiMapReduceChunkFailed::from_event(&envelope.authored()))
         .collect()
 }
 
@@ -1541,8 +1559,8 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     assert_eq!(prepare_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
     assert!(prepare_map.iter().all(|envelope| {
-        !EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            && chat_completion_reply(&envelope.event).is_none()
+        !EffectAttemptStarted::event_type_matches(&envelope.event_type())
+            && chat_completion_reply(&envelope.authored()).is_none()
     }));
     assert!(prepare_outputs
         .lock()
@@ -1636,22 +1654,20 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     assert_eq!(
         provider_map
             .iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         MAP_CHUNKS
     );
     assert_eq!(
         provider_map
             .iter()
-            .filter(|envelope| envelope.event.event_type() == EFFECT_RECORD_EVENT_TYPE)
+            .filter(|envelope| envelope.event_type() == EFFECT_RECORD_EVENT_TYPE)
             .count(),
         MAP_CHUNKS
     );
     assert!(provider_map
         .iter()
-        .all(|envelope| { chat_completion_reply(&envelope.event).is_none() }));
+        .all(|envelope| { chat_completion_reply(&envelope.authored()).is_none() }));
     assert!(provider_outputs
         .lock()
         .expect("provider outputs lock")
@@ -1847,7 +1863,7 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     let live_finalise = stage_envelopes(&live_archive, "digest__finalize").await;
     let manifests = live_chunk
         .iter()
-        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     let [manifest] = manifests.as_slice() else {
         panic!(
@@ -1865,18 +1881,14 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     assert_eq!(
         live_map
             .iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         expected_map_calls
     );
     assert_eq!(
         live_finalise
             .iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         1
     );
@@ -1996,6 +2008,10 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     std::fs::write(&manifest_path, original_manifest)
         .expect("compatible live manifest is restored");
 
+    // FLOWIP-145a: the same committed composite/effect history remains fully
+    // replayable after every optional attachment is removed.
+    assert!(exported_jsonl::omit_observations(&live_archive, |_| false) > 0);
+
     let divergent_resolutions = Arc::new(AtomicUsize::new(0));
     let divergent_calls = Arc::new(AtomicUsize::new(0));
     let divergent_result = FlowApplication::builder()
@@ -2070,11 +2086,11 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
         "map event types: {:?}; finalise event types: {:?}",
         replay_map
             .iter()
-            .map(|envelope| envelope.event.event_type())
+            .map(|envelope| envelope.event_type())
             .collect::<Vec<_>>(),
         replay_finalise
             .iter()
-            .map(|envelope| envelope.event.event_type())
+            .map(|envelope| envelope.event_type())
             .collect::<Vec<_>>()
     );
 
@@ -2185,15 +2201,13 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     assert_eq!(
         in_doubt_map
             .iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         1
     );
     assert!(in_doubt_map.iter().all(|envelope| {
-        envelope.event.event_type() != EFFECT_RECORD_EVENT_TYPE
-            && chat_completion_reply(&envelope.event).is_none()
+        envelope.event_type() != EFFECT_RECORD_EVENT_TYPE
+            && chat_completion_reply(&envelope.authored()).is_none()
     }));
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
@@ -2228,7 +2242,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     let map = stage_envelopes(&abandonment_archive, "recovery_digest__map").await;
     let starts = map
         .iter()
-        .filter_map(|envelope| EffectAttemptStarted::from_event(&envelope.event))
+        .filter_map(|envelope| EffectAttemptStarted::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(
         starts
@@ -2239,7 +2253,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     );
     let abandonments = map
         .iter()
-        .filter_map(|envelope| EffectRecoveryAbandoned::from_event(&envelope.event))
+        .filter_map(|envelope| EffectRecoveryAbandoned::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(abandonments.len(), 1);
     assert_eq!(abandonments[0].highest_started_attempt.get(), 1);
@@ -2254,20 +2268,20 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     ));
     assert!(!map
         .iter()
-        .any(|envelope| chat_completion_reply(&envelope.event).is_some()));
+        .any(|envelope| chat_completion_reply(&envelope.authored()).is_some()));
 
     let collect = stage_envelopes(&abandonment_archive, "recovery_digest__collect").await;
     assert_eq!(
         collect
             .iter()
-            .filter_map(|envelope| AiMapReduceJobFailed::from_event(&envelope.event))
+            .filter_map(|envelope| AiMapReduceJobFailed::from_event(&envelope.authored()))
             .count(),
         1
     );
     let finalise = stage_envelopes(&abandonment_archive, "recovery_digest__finalize").await;
     assert!(!finalise.iter().any(|envelope| {
-        EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            || chat_completion_reply(&envelope.event).is_some()
+        EffectAttemptStarted::event_type_matches(&envelope.event_type())
+            || chat_completion_reply(&envelope.authored()).is_some()
     }));
 
     let strict_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -2366,9 +2380,7 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
     assert_eq!(
         active_map
             .iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         1
     );
@@ -2413,15 +2425,13 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
     let map = stage_envelopes(&archive, "credit_digest__map").await;
     assert_eq!(
         map.iter()
-            .filter(|envelope| {
-                EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-            })
+            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
             .count(),
         2
     );
     assert_eq!(
         map.iter()
-            .filter(|envelope| chat_completion_reply(&envelope.event).is_some())
+            .filter(|envelope| chat_completion_reply(&envelope.authored()).is_some())
             .count(),
         2
     );
@@ -2461,31 +2471,18 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
     assert_eq!(
         interrupted_chunk
             .iter()
-            .filter(|envelope| {
-                matches!(
-                    &envelope.event.content,
-                    ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                        obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
-                    )) if name == "ai_chunking.snapshot"
-                )
+            .filter_map(|envelope| {
+                AiMapReducePlanningManifest::from_event(&envelope.authored())
             })
             .count(),
         1,
-        "the interrupted prefix contains its snapshot"
-    );
-    assert_eq!(
-        interrupted_chunk
-            .iter()
-            .filter_map(|envelope| { AiMapReducePlanningManifest::from_event(&envelope.event) })
-            .count(),
-        0,
-        "the withheld first acknowledgement prevents the manifest commit"
+        "the complete manifest is durable before its withheld acknowledgement"
     );
     assert_eq!(
         interrupted_chunk
             .iter()
             .filter_map(|envelope| {
-                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+                AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.authored())
             })
             .count(),
         3,
@@ -2520,22 +2517,15 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
     assert_eq!(
         resumed_chunk
             .iter()
-            .filter(|envelope| {
-                matches!(
-                    &envelope.event.content,
-                    ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                        obzenflow_core::event::payloads::observability_payload::MetricsLifecycle::Custom { name, .. }
-                    )) if name == "ai_chunking.snapshot"
-                )
-            })
+            .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
             .count(),
         1,
-        "resume authors one complete invocation snapshot"
+        "resume commits the complete invocation manifest once"
     );
     let resumed_map_inputs = resumed_chunk
         .iter()
         .filter_map(|envelope| {
-            AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.event)
+            AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::from_event(&envelope.authored())
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -2548,7 +2538,7 @@ async fn resume_closes_a_generated_plan_interrupted_between_snapshot_and_manifes
     );
     let manifests = resumed_chunk
         .iter()
-        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0].chunk_count, 5);
@@ -2751,7 +2741,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     );
     let manifests = live_chunk
         .iter()
-        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .filter_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     let [manifest] = manifests.as_slice() else {
         panic!(
@@ -2929,7 +2919,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let finalise = stage_envelopes(&archive, "digest__finalize").await;
     let manifest = chunks
         .iter()
-        .find_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.event))
+        .find_map(|envelope| AiMapReducePlanningManifest::from_event(&envelope.authored()))
         .expect("the generated plan should publish its manifest");
     let port_invocations = manifest.chunk_count + 1;
 
@@ -2944,18 +2934,18 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let starts = generated
         .iter()
         .flat_map(|stage| stage.iter())
-        .filter(|envelope| EffectAttemptStarted::event_type_matches(&envelope.event.event_type()))
+        .filter(|envelope| EffectAttemptStarted::event_type_matches(&envelope.event_type()))
         .count();
     let completions = generated
         .iter()
         .flat_map(|stage| stage.iter())
-        .filter(|envelope| chat_completion_reply(&envelope.event).is_some())
+        .filter(|envelope| chat_completion_reply(&envelope.authored()).is_some())
         .count();
     let settlements = generated
         .iter()
         .map(|stage| {
             circuit_breaker_event_count(stage, |event| {
-                matches!(event, CircuitBreakerEvent::AttemptSettled { .. })
+                matches!(event, CircuitBreakerFact::AttemptSettled { .. })
             })
         })
         .sum::<usize>();
@@ -2963,20 +2953,20 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
         .iter()
         .map(|stage| {
             circuit_breaker_event_count(stage, |event| {
-                matches!(event, CircuitBreakerEvent::RecoveryCompleted { .. })
+                matches!(event, CircuitBreakerFact::RecoveryCompleted { .. })
             })
         })
         .sum::<usize>();
     let direct_data_rows = generated
         .iter()
         .flat_map(|stage| stage.iter())
-        .filter(|envelope| matches!(envelope.event.content, ChainEventContent::Data { .. }))
+        .filter(|envelope| envelope.consumes_data_credit())
         .count();
     let direct_data_types = generated
         .iter()
         .flat_map(|stage| stage.iter())
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { event_type, .. } => Some(event_type.clone()),
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => Some(envelope.event_type().to_string()),
             _ => None,
         })
         .fold(
@@ -3054,17 +3044,15 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     let map = stage_envelopes(&archive, "digest__map").await;
     assert!(
         !map.iter().any(|envelope| {
-            EffectAttemptStarted::event_type_matches(&envelope.event.event_type())
-                || chat_completion_reply(&envelope.event).is_some()
-                || envelope.event.event_type() == EFFECT_RECORD_EVENT_TYPE
+            EffectAttemptStarted::event_type_matches(&envelope.event_type())
+                || chat_completion_reply(&envelope.authored()).is_some()
+                || envelope.event_type() == EFFECT_RECORD_EVENT_TYPE
         }),
         "client target validation must precede the attempt boundary"
     );
     assert!(
-        !map.iter().any(|envelope| matches!(
-            &envelope.event.content,
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(_))
-        )),
+        !map.iter()
+            .any(|envelope| matches!(&envelope.payload, ChainPayload::Execution(_))),
         "client target validation must precede policy observation"
     );
     assert!(
@@ -3134,10 +3122,10 @@ async fn endpoint_fingerprint_drift_is_rejected_by_effect_history_before_port_re
     let failure_reason = system_events(&failed_archive)
         .await
         .into_iter()
-        .find_map(|event| match event.event {
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
-                reason, ..
-            }) => Some(reason),
+        .find_map(|event| match event.payload {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed { reason, .. }) => {
+                Some(reason)
+            }
             _ => None,
         })
         .expect("the failed replay records its pipeline failure reason");
@@ -3178,7 +3166,7 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     let map = stage_envelopes(&archive, "digest__map").await;
     let starts = map
         .iter()
-        .filter(|envelope| EffectAttemptStarted::event_type_matches(&envelope.event.event_type()))
+        .filter(|envelope| EffectAttemptStarted::event_type_matches(&envelope.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(
         starts.len(),
@@ -3188,9 +3176,9 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
 
     let failed = map
         .iter()
-        .find(|envelope| envelope.event.event_type() == EFFECT_RECORD_EVENT_TYPE)
+        .find(|envelope| envelope.event_type() == EFFECT_RECORD_EVENT_TYPE)
         .expect("post-Start invariant commits a generic failed outcome");
-    let ChainEventContent::Data { payload, .. } = &failed.event.content else {
+    let ChainPayload::Fact(payload) = &failed.payload else {
         panic!("effect failure is a data fact");
     };
     let record: EffectRecord =
@@ -3212,6 +3200,8 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     assert_eq!(observed, "<not disclosed>");
     assert_eq!(
         failed
+            .envelope
+            .provenance
             .event
             .effect_provenance
             .as_ref()
@@ -3219,11 +3209,17 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
         Some(obzenflow_core::event::EffectAttemptOrdinal::new(1))
     );
     assert!(failed
+        .envelope
+        .provenance
+        .journal
         .journal_group_id
         .as_deref()
         .is_some_and(|group| group.starts_with("effect-outcome:v1:")));
     assert_eq!(
         failed
+            .envelope
+            .provenance
+            .journal
             .journal_group_member
             .expect("failed terminal has atomic membership")
             .index,
@@ -3233,14 +3229,12 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     let mut saw_ignored_settlement = false;
     let mut saw_completed_recovery = false;
     for envelope in &map {
-        let ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(event),
-        )) = &envelope.event.content
+        let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(event)) = &envelope.payload
         else {
             continue;
         };
         match event {
-            CircuitBreakerEvent::AttemptSettled {
+            CircuitBreakerFact::AttemptSettled {
                 attempt,
                 health_classification,
                 ..
@@ -3251,15 +3245,17 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
                     CircuitBreakerHealthClassification::Ignored
                 ));
                 assert_eq!(
-                    envelope.journal_group_id, failed.journal_group_id,
+                    envelope.envelope.provenance.journal.journal_group_id,
+                    failed.envelope.provenance.journal.journal_group_id,
                     "attempt settlement belongs to the same atomic terminal"
                 );
                 saw_ignored_settlement = true;
             }
-            CircuitBreakerEvent::RecoveryCompleted { total_attempts, .. } => {
+            CircuitBreakerFact::RecoveryCompleted { total_attempts, .. } => {
                 assert_eq!(*total_attempts, 1);
                 assert_eq!(
-                    envelope.journal_group_id, failed.journal_group_id,
+                    envelope.envelope.provenance.journal.journal_group_id,
+                    failed.envelope.provenance.journal.journal_group_id,
                     "recovery completion belongs to the same atomic terminal"
                 );
                 saw_completed_recovery = true;

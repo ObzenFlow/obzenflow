@@ -3,10 +3,9 @@
 // https://obzenflow.dev
 
 use crate::execution::{HeartbeatExecutionPolicy, RuntimeExecution};
-use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity, SystemEvent};
+use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity};
 use obzenflow_core::event::types::{DurationMs, SeqNo};
-use obzenflow_core::event::{EventId, SystemEventType, WriterId};
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::EventId;
 use obzenflow_core::StageId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -348,8 +347,9 @@ impl LivenessSnapshots {
     }
 
     pub fn upsert(&self, stage_id: StageId, snapshot: StageLivenessSnapshot) {
-        let mut guard = self.inner.write().expect("liveness snapshots lock");
-        guard.insert(stage_id, snapshot);
+        if let Ok(mut guard) = self.inner.try_write() {
+            guard.insert(stage_id, snapshot);
+        }
     }
 
     pub fn get(&self, stage_id: StageId) -> Option<StageLivenessSnapshot> {
@@ -397,7 +397,7 @@ impl HeartbeatHandle {
 
 impl Drop for HeartbeatHandle {
     fn drop(&mut self) {
-        // Channel closure alone cannot interrupt a pending journal append.
+        // Stop the optional sampler promptly when its stage owner is dropped.
         self.cancel();
     }
 }
@@ -405,181 +405,145 @@ impl Drop for HeartbeatHandle {
 pub fn spawn_heartbeat(
     stage_id: StageId,
     stage_name: String,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
+    instrumentation: Arc<crate::metrics::instrumentation::StageInstrumentation>,
     liveness_snapshots: LivenessSnapshots,
     state: Arc<HeartbeatState>,
     config: HeartbeatConfig,
     runtime_execution: RuntimeExecution,
 ) -> HeartbeatHandle {
     let (cancel, mut cancel_rx) = watch::channel(false);
-    let writer_id = WriterId::from(stage_id);
     let state_for_task = state.clone();
 
-    let publications = crate::supervised_base::publication::PublicationScope::current();
-    let owner = publications.clone();
     let task = tokio::spawn(async move {
-        let run = async move {
-            if !config.enabled {
-                return;
-            }
+        if !config.enabled {
+            return;
+        }
 
-            let mut heartbeat_seq = SeqNo(0);
-            let mut prev_stable_states: Vec<EdgeLivenessState> =
-                vec![EdgeLivenessState::Healthy; state_for_task.edges.len()];
+        let mut heartbeat_seq = SeqNo(0);
+        let mut previous_states = vec![EdgeLivenessState::Healthy; state_for_task.edges.len()];
 
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(config.interval) => {
-                        // FLOWIP-120n: DormantUntilLive spawns the task but emits
-                        // nothing; re-query per tick so emission starts once the
-                        // stage's frontier crosses to live.
-                        if runtime_execution.heartbeat_policy_for(stage_id)
-                            != HeartbeatExecutionPolicy::Active
-                        {
-                            continue;
-                        }
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(config.interval) => {
+                    // FLOWIP-120n: DormantUntilLive spawns the task but emits
+                    // nothing; re-query per tick so emission starts once the
+                    // stage's frontier crosses to live.
+                    if runtime_execution.heartbeat_policy_for(stage_id)
+                        != HeartbeatExecutionPolicy::Active
+                    {
+                        continue;
+                    }
 
-                        heartbeat_seq.0 = heartbeat_seq.0.saturating_add(1);
+                    heartbeat_seq.0 = heartbeat_seq.0.saturating_add(1);
 
-                        let activity = state_for_task.current_activity();
-                        let handler_blocked_ms = state_for_task.handler_blocked_ms();
-                        let processing_upstream = state_for_task.processing_upstream();
+                    let activity = state_for_task.current_activity();
+                    let handler_blocked_ms = state_for_task.handler_blocked_ms();
+                    let processing_upstream = state_for_task.processing_upstream();
 
-                        let stable_state_for_tick = match handler_blocked_ms {
-                            None => None,
-                            Some(ms) => {
-                                let warn_ms = config.handler_warn_threshold.as_millis() as u64;
-                                let stall_ms = config.handler_stall_threshold.as_millis() as u64;
-                                if ms.0 >= stall_ms {
-                                    Some(EdgeLivenessState::Stalled)
-                                } else if ms.0 >= warn_ms {
-                                    Some(EdgeLivenessState::Suspect)
-                                } else {
-                                    None
-                                }
-                            }
-                        };
-
-                        // Update the in-memory registry on every tick.
-                        let processing_below_warn =
-                            handler_blocked_ms.is_some() && stable_state_for_tick.is_none();
-                        let edges_snapshot: Vec<EdgeLivenessSnapshot> = state_for_task
-                            .edges
-                            .iter()
-                            .enumerate()
-                            .map(|(index, edge)| {
-                                let idle_ms = state_for_task.edge_idle_ms(index);
-                                let last_reader_seq = state_for_task.edge_reader_seq(index);
-                                let last_event_id = state_for_task.edge_last_event_id(index);
-
-                                let state_for_registry = if let Some(state) = stable_state_for_tick {
-                                    state
-                                } else if processing_below_warn
-                                    && processing_upstream.is_some_and(|u| u == edge.upstream)
-                                {
-                                    // Keep the active upstream edge healthy while an event is in-flight.
-                                    EdgeLivenessState::Healthy
-                                } else if idle_ms.0 >= config.idle_threshold.as_millis() as u64 {
-                                    EdgeLivenessState::Idle
-                                } else {
-                                    EdgeLivenessState::Healthy
-                                };
-
-                                EdgeLivenessSnapshot {
-                                    upstream: edge.upstream,
-                                    reader: stage_id,
-                                    state: state_for_registry,
-                                    idle_ms,
-                                    last_reader_seq,
-                                    last_event_id,
-                                }
-                            })
-                            .collect();
-
-                        liveness_snapshots.upsert(
-                            stage_id,
-                            StageLivenessSnapshot {
-                                stage_id,
-                                stage_name: stage_name.clone(),
-                                heartbeat_seq,
-                                activity,
-                                handler_blocked_ms,
-                                edges: edges_snapshot.clone(),
-                            },
-                        );
-
-                        // Journal only EdgeLiveness transitions (FLOWIP-063e).
-                        for (index, edge_snapshot) in edges_snapshot.iter().enumerate() {
-                            let stable_state = edge_snapshot.state;
-
-                            if prev_stable_states[index] == stable_state {
-                                continue;
-                            }
-
-                            let emitted_state = if stable_state == EdgeLivenessState::Healthy
-                                && prev_stable_states[index] != EdgeLivenessState::Healthy
-                            {
-                                EdgeLivenessState::Recovered
+                    let stable_state_for_tick = match handler_blocked_ms {
+                        None => None,
+                        Some(ms) => {
+                            let warn_ms = config.handler_warn_threshold.as_millis() as u64;
+                            let stall_ms = config.handler_stall_threshold.as_millis() as u64;
+                            if ms.0 >= stall_ms {
+                                Some(EdgeLivenessState::Stalled)
+                            } else if ms.0 >= warn_ms {
+                                Some(EdgeLivenessState::Suspect)
                             } else {
-                                stable_state
+                                None
+                            }
+                        }
+                    };
+
+                    // Update the in-memory registry on every tick.
+                    let processing_below_warn =
+                        handler_blocked_ms.is_some() && stable_state_for_tick.is_none();
+                    let edges_snapshot: Vec<EdgeLivenessSnapshot> = state_for_task
+                        .edges
+                        .iter()
+                        .enumerate()
+                        .map(|(index, edge)| {
+                            let idle_ms = state_for_task.edge_idle_ms(index);
+                            let last_reader_seq = state_for_task.edge_reader_seq(index);
+                            let last_event_id = state_for_task.edge_last_event_id(index);
+
+                            let state_for_registry = if let Some(state) = stable_state_for_tick {
+                                state
+                            } else if processing_below_warn
+                                && processing_upstream.is_some_and(|u| u == edge.upstream)
+                            {
+                                // Keep the active upstream edge healthy while an event is in-flight.
+                                EdgeLivenessState::Healthy
+                            } else if idle_ms.0 >= config.idle_threshold.as_millis() as u64 {
+                                EdgeLivenessState::Idle
+                            } else {
+                                EdgeLivenessState::Healthy
                             };
 
-                            let system_event = SystemEvent::new(
-                                writer_id,
-                                SystemEventType::EdgeLiveness {
-                                    upstream: edge_snapshot.upstream,
-                                    reader: stage_id,
-                                    state: emitted_state,
-                                    idle_ms: edge_snapshot.idle_ms,
-                                    last_reader_seq: Some(edge_snapshot.last_reader_seq),
-                                    last_event_id: edge_snapshot.last_event_id,
-                                },
-                            );
-
-                            let append_timeout = config.interval * 2;
-                            match tokio::time::timeout(append_timeout, crate::supervised_base::publication::append(&system_journal, system_event, None)).await {
-                                Ok(Ok(_)) => {
-                                    prev_stable_states[index] = stable_state;
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::warn!(
-                                        stage_name = %stage_name,
-                                        upstream = ?edge_snapshot.upstream,
-                                        error = %e,
-                                        "Failed to append EdgeLiveness; skipping"
-                                    );
-                                }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        stage_name = %stage_name,
-                                        upstream = ?edge_snapshot.upstream,
-                                        "EdgeLiveness journal append timed out; skipping"
-                                    );
-                                }
+                            EdgeLivenessSnapshot {
+                                upstream: edge.upstream,
+                                reader: stage_id,
+                                state: state_for_registry,
+                                idle_ms,
+                                last_reader_seq,
+                                last_event_id,
                             }
+                        })
+                        .collect();
+
+                    liveness_snapshots.upsert(
+                        stage_id,
+                        StageLivenessSnapshot {
+                            stage_id,
+                            stage_name: stage_name.clone(),
+                            heartbeat_seq,
+                            activity,
+                            handler_blocked_ms,
+                            edges: edges_snapshot.clone(),
+                        },
+                    );
+
+                    use obzenflow_core::event::observation::ObservationRecord;
+                    instrumentation.observe(ObservationRecord::StageHeartbeat {
+                        activity,
+                        handler_blocked_ms,
+                        last_consumed_event_id: state_for_task.last_consumed_event_id.try_lock().ok().and_then(|id| *id),
+                        last_output_event_id: state_for_task.last_output_event_id.try_lock().ok().and_then(|id| *id),
+                    });
+                    for (index, edge) in edges_snapshot.iter().enumerate() {
+                        if previous_states[index] == edge.state {
+                            continue;
                         }
+                        let observed_state = if edge.state == EdgeLivenessState::Healthy {
+                            EdgeLivenessState::Recovered
+                        } else {
+                            edge.state
+                        };
+                        previous_states[index] = edge.state;
+                        instrumentation.observe(ObservationRecord::EdgeLiveness {
+                            upstream: edge.upstream,
+                            reader: stage_id,
+                            state: observed_state,
+                            idle_ms: edge.idle_ms,
+                            last_reader_seq: Some(edge.last_reader_seq),
+                            last_event_id: edge.last_event_id,
+                        });
                     }
-                    changed = cancel_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if *cancel_rx.borrow() {
-                            break;
-                        }
+                }
+                changed = cancel_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    if *cancel_rx.borrow() {
+                        break;
                     }
                 }
             }
-        };
-        match publications {
-            Some(scope) => scope.enter(run).await,
-            None => run.await,
         }
     });
 
     let abort = task.abort_handle();
-    if let Some(owner) = owner {
-        owner.retain_auxiliary(task);
-    }
+    drop(task);
     HeartbeatHandle {
         state,
         cancel,
@@ -594,10 +558,11 @@ mod tests {
     use crate::replay::{ReplayArchive, ReplayError};
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
+    use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::vector_clock::CausalOrderingService;
+    use obzenflow_core::event::SystemEvent;
     use obzenflow_core::id::{JournalId, SystemId};
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -699,7 +664,7 @@ mod tests {
         id: JournalId,
         owner: Option<JournalOwner>,
         seq: AtomicU64,
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> TestJournal<T> {
@@ -718,7 +683,7 @@ mod tests {
     }
 
     struct TestJournalReader<T: JournalEvent> {
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
         pos: usize,
     }
 
@@ -735,27 +700,32 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
-            let mut env = EventEnvelope::new(JournalWriterId::from(self.id), event);
+            parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
 
             if let Some(parent) = parent {
                 CausalOrderingService::update_with_parent(
-                    &mut env.vector_clock,
-                    &parent.vector_clock,
+                    &mut env.envelope.provenance.journal.vector_clock,
+                    &parent.envelope.provenance.journal.vector_clock,
                 );
             }
 
-            let writer_key = env.event.writer_id().to_string();
+            let writer_key = env.writer_id().to_string();
             let seq = self.next_seq();
-            env.vector_clock.clocks.insert(writer_key, seq);
+            env.envelope
+                .provenance
+                .journal
+                .vector_clock
+                .clocks
+                .insert(writer_key, seq);
 
             let mut guard = self.events.lock().expect("journal events lock");
             guard.push(env.clone());
             Ok(env)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             Ok(guard.clone())
         }
@@ -763,7 +733,7 @@ mod tests {
         async fn read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
@@ -777,7 +747,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -787,7 +760,7 @@ mod tests {
 
     #[async_trait]
     impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             if self.pos >= guard.len() {
                 Ok(None)
@@ -817,7 +790,7 @@ mod tests {
 
         let state = HeartbeatState::new(vec![upstream]);
         let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
+        let _system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
         let config = HeartbeatConfig {
@@ -831,7 +804,7 @@ mod tests {
         let handle = spawn_heartbeat(
             stage_id,
             "test_stage".to_string(),
-            system_journal,
+            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
             liveness_snapshots.clone(),
             state.clone(),
             config,
@@ -882,7 +855,7 @@ mod tests {
 
         let state = HeartbeatState::new(vec![upstream]);
         let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
+        let _system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
         let config = HeartbeatConfig {
@@ -896,7 +869,7 @@ mod tests {
         let handle = spawn_heartbeat(
             stage_id,
             "test_stage".to_string(),
-            system_journal,
+            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
             liveness_snapshots.clone(),
             state.clone(),
             config,
@@ -935,7 +908,7 @@ mod tests {
 
         let state = HeartbeatState::new(vec![upstream]);
         let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
+        let _system_journal: Arc<dyn Journal<SystemEvent>> =
             Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
 
         // StubArchive's max recorded generation is 0, so the run enters
@@ -958,7 +931,7 @@ mod tests {
         let handle = spawn_heartbeat(
             stage_id,
             "test_stage".to_string(),
-            system_journal,
+            Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
             liveness_snapshots.clone(),
             state.clone(),
             config,

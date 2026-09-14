@@ -50,3 +50,13 @@ impl CircuitBreakerStateView for CircuitBreakerStateViewImpl {
         }
     }
 }
+
+impl From<CircuitState> for obzenflow_core::event::payloads::execution_payload::CircuitState {
+    fn from(state: CircuitState) -> Self {
+        match state {
+            CircuitState::Closed => Self::Closed,
+            CircuitState::Open => Self::Open,
+            CircuitState::HalfOpen => Self::HalfOpen,
+        }
+    }
+}

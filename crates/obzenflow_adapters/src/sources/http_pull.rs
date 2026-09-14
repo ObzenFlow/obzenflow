@@ -1096,7 +1096,7 @@ fn start_wait(
     }
 
     telemetry.state = HttpPullState::Waiting;
-    telemetry.wait_reason = Some(reason.clone());
+    telemetry.wait_reason = Some(reason);
     telemetry.next_wake_unix_secs = Some(wake_unix_secs);
 
     ScheduledWait {
@@ -1425,7 +1425,7 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollSource<D> {
 
             if let Some(wait) = inner.scheduled_wait.as_ref() {
                 let wake_at = wait.wake_at;
-                let reason = wait.reason.clone();
+                let reason = wait.reason;
 
                 if Instant::now() < wake_at {
                     tokio::time::sleep_until(wake_at).await;

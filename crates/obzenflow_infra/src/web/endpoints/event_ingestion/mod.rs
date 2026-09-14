@@ -325,10 +325,10 @@ fn create_ingestion_surface_from_state(state: IngestionState) -> WebSurfaceAttac
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::EventId;
+    use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventType};
+    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::id::SystemId;
     use obzenflow_core::ingress::{
@@ -606,22 +606,22 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "forced append failure".to_string(),
                 source: "forced append failure".into(),
             })
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             self.inner.read_all_unordered().await
         }
 
         async fn read_event(
             &self,
             event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             self.inner.read_event(event_id).await
         }
 
@@ -632,7 +632,10 @@ mod tests {
             self.inner.reader_from(position).await
         }
 
-        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             self.inner.read_last_n(count).await
         }
     }
@@ -771,8 +774,8 @@ mod tests {
             .await
             .expect("read system journal")
             .into_iter()
-            .filter_map(|env| match env.event.event {
-                SystemEventType::IngressRefusal {
+            .filter_map(|env| match env.payload {
+                SystemPayload::IngressRefusal {
                     reason,
                     event_count,
                     ..
@@ -790,8 +793,8 @@ mod tests {
             .await
             .expect("read system journal")
             .into_iter()
-            .filter_map(|env| match env.event.event {
-                SystemEventType::IngressRefusal {
+            .filter_map(|env| match env.payload {
+                SystemPayload::IngressRefusal {
                     reason,
                     event_count,
                     attempt_seq,
@@ -2025,8 +2028,8 @@ mod tests {
             .await
             .expect("read system journal")
             .into_iter()
-            .filter_map(|env| match env.event.event {
-                SystemEventType::IngressRefusal {
+            .filter_map(|env| match env.payload {
+                SystemPayload::IngressRefusal {
                     reason,
                     event_count,
                     ingress_key,

@@ -3,8 +3,9 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemEventType};
+use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -143,8 +144,11 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
     let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
         Arc::new(Mutex::new(None));
     let system_journal_slot_hook = system_journal_slot.clone();
+    let observations: Arc<Mutex<Option<Arc<dyn ObservationSource>>>> = Arc::new(Mutex::new(None));
+    let observations_hook = observations.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
+        *observations_hook.lock().unwrap() = Some(handle.observations());
         let system_journal = handle.system_journal().expect("system journal available");
         *system_journal_slot_hook
             .lock()
@@ -186,7 +190,19 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
     });
 
     let mut result = None;
+    let mut saw_suspect = false;
+    let mut saw_recovered = false;
     for _ in 0..240 {
+        if let Some(source) = observations.lock().unwrap().as_ref() {
+            for packet in source.snapshot() {
+                for record in packet.records {
+                    if let ObservationRecord::EdgeLiveness { state, .. } = record {
+                        saw_suspect |= state == EdgeLivenessState::Suspect;
+                        saw_recovered |= state == EdgeLivenessState::Recovered;
+                    }
+                }
+            }
+        }
         match run_task.poll() {
             Poll::Ready(res) => {
                 result = Some(res);
@@ -220,16 +236,9 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
         .await
         .expect("read system journal");
 
-    let mut saw_suspect = false;
-    let mut saw_recovered = false;
     for envelope in envelopes {
-        match &envelope.event.event {
-            SystemEventType::EdgeLiveness { state, .. } => match state {
-                EdgeLivenessState::Suspect => saw_suspect = true,
-                EdgeLivenessState::Recovered => saw_recovered = true,
-                _ => {}
-            },
-            SystemEventType::ContractStatus { pass, .. } => {
+        match &envelope.payload {
+            SystemPayload::ContractStatus { pass, .. } => {
                 assert!(
                     *pass,
                     "unexpected ContractStatus(pass=false) while exercising slow-but-healthy handler"

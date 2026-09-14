@@ -9,9 +9,9 @@
 
 use super::subscription_poller::{PollResult, SubscriptionPoller};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, JournalEvent};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent};
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::EventEnvelope;
+use obzenflow_core::JournalRecord;
 use std::any::Any;
 
 /// Wrapper for system/error journal readers
@@ -41,12 +41,12 @@ where
     }
 
     /// Check if an event represents EOF (only ChainEvent EOF is treated as terminal)
-    fn is_eof_event(&self, envelope: &EventEnvelope<T>) -> bool {
+    fn is_eof_event(&self, envelope: &JournalRecord<T::Payload>) -> bool {
         // For ChainEvent, check for explicit EOF flow control
-        if let Some(chain_event) = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>() {
+        if let Some(chain_event) = (&envelope.authored() as &dyn Any).downcast_ref::<ChainEvent>() {
             return matches!(
-                &chain_event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+                &chain_event.payload,
+                ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
             );
         }
         // System events are not considered terminal here; callers own termination policy.
@@ -88,7 +88,7 @@ where
                 tracing::trace!(
                     "SystemSubscription[{}] received event: {}",
                     self.stage_name,
-                    envelope.event.id()
+                    envelope.id()
                 );
 
                 PollResult::Event(envelope)

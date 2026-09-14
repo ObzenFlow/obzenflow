@@ -7,11 +7,9 @@ use crate::journal::MemoryJournal;
 use futures::StreamExt;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::composite::CompositeDefinition;
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::event_envelope::SystemEventEnvelope;
-use obzenflow_core::event::{
-    PipelineLifecycleEvent, StageLifecycleEvent, SystemEventType, WriterId,
-};
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::journal_record::SystemJournalRecord;
+use obzenflow_core::event::{PipelineLifecycleEvent, StageLifecycleEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::JournalOwner;
@@ -29,8 +27,8 @@ fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
 async fn append(
     journal: &dyn Journal<SystemEvent>,
     writer: WriterId,
-    event: SystemEventType,
-) -> SystemEventEnvelope {
+    event: SystemPayload,
+) -> SystemJournalRecord {
     journal
         .append(SystemEvent::new(writer, event), None)
         .await
@@ -117,7 +115,7 @@ async fn completed_tape() -> (
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: left,
             event: StageLifecycleEvent::Running,
         },
@@ -126,16 +124,16 @@ async fn completed_tape() -> (
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: left,
-            event: StageLifecycleEvent::Completed { metrics: None },
+            event: StageLifecycleEvent::Completed { accounting: None },
         },
     )
     .await;
     let terminal = append(
         journal.as_ref(),
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: right,
             event: StageLifecycleEvent::Drained,
         },
@@ -144,11 +142,15 @@ async fn completed_tape() -> (
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
     .await;
 
-    (journal, definition(left, right), terminal.event.id)
+    (
+        journal,
+        definition(left, right),
+        terminal.envelope.provenance.event.id,
+    )
 }
 
 #[tokio::test]
@@ -183,6 +185,134 @@ async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
     assert_eq!(frames(&missing, "bootstrap").len(), 1);
 }
 
+#[tokio::test]
+async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up() {
+    use obzenflow_core::event::observation::*;
+    use obzenflow_core::event::payloads::execution_payload::{
+        CircuitBreakerFact, CircuitState, MiddlewareFact,
+    };
+    use obzenflow_core::event::system_event::MiddlewareEventOrigin;
+    use obzenflow_core::event::types::SeqNo;
+    use obzenflow_runtime::metrics::observations::ObservationHub;
+
+    let system = SystemId::new();
+    let stage = StageId::new();
+    let writer = WriterId::from(system);
+    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)));
+    let prefix = append(
+        journal.as_ref(),
+        writer,
+        SystemPayload::StageLifecycle {
+            stage_id: stage,
+            event: StageLifecycleEvent::Running,
+        },
+    )
+    .await;
+    let scope = CaptureScope {
+        flow_id: obzenflow_core::FlowId::new(),
+        resume_generation: Default::default(),
+    };
+    let source = Arc::new(ObservationHub::default());
+    source.activate_scope(scope);
+    let sample = |seq| {
+        let mut packet = ObservabilityContext::new(CaptureStamp {
+            capture_scope: scope,
+            observer: stage.into(),
+            capture_seq: CaptureSeq(seq),
+            capture_reason: CaptureReason::Periodic,
+            observed_at_ms: seq,
+        });
+        packet
+            .records
+            .push(ObservationRecord::CircuitBreakerSummary {
+                effect_type: None,
+                window_duration_s: 1,
+                requests_processed: seq,
+                requests_rejected: 0,
+                observed_state: CircuitState::Closed,
+                consecutive_failures: 0,
+                rejection_rate: 0.0,
+                successes_total: seq,
+                failures_total: 0,
+                opened_total: 0,
+                time_in_closed_seconds: 1.0,
+                time_in_open_seconds: 0.0,
+                time_in_half_open_seconds: 0.0,
+            });
+        packet
+    };
+    let mut opened = SystemEvent::new(
+        writer,
+        SystemPayload::MiddlewareLifecycle {
+            stage_id: stage,
+            stage_name: Some("worker".into()),
+            flow_id: None,
+            flow_name: None,
+            origin: MiddlewareEventOrigin {
+                event_id: EventId::new(),
+                writer_key: stage.to_string(),
+                seq: SeqNo(420),
+            },
+            middleware: MiddlewareFact::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                from_state: CircuitState::Closed,
+                to_state: CircuitState::Open,
+                timestamp: 420,
+            }),
+        },
+    );
+    opened.envelope.observability = Some(sample(3));
+    let opened = journal.append(opened, None).await.unwrap();
+    source.offer(sample(11));
+    let (closing, receiver) = watch::channel(false);
+    let endpoint = StudioUpdatesEndpoint::new(
+        journal.clone(),
+        StudioProjection::new(vec![], ContractBoundaryAliases::default())
+            .unwrap()
+            .with_observations(source),
+        Some(RuntimeInstanceId::new()),
+        receiver,
+    );
+    let mut first = open(&endpoint, Some(&prefix.id().to_string())).await;
+    let fact = tokio::time::timeout(Duration::from_secs(2), first.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fact.id, Some(opened.id().to_string()));
+    assert_eq!(frame_payload(&fact)["revision"], 420);
+    drop(first); // Disconnect before the optional frame belonging to this fact.
+
+    let terminal = append(
+        journal.as_ref(),
+        writer,
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+    )
+    .await;
+    let resumed = collect_closing(&endpoint, closing, Some(&opened.id().to_string())).await;
+    let terminal_index = resumed
+        .iter()
+        .position(|frame| frame.id == Some(terminal.id().to_string()))
+        .unwrap();
+    let measurement_index = resumed
+        .iter()
+        .position(|frame| frame_payload(frame).get("capture").is_some())
+        .unwrap();
+    assert!(
+        terminal_index < measurement_index,
+        "live samples follow all committed catch-up facts"
+    );
+    let measurement = &resumed[measurement_index];
+    assert!(measurement.id.is_none());
+    let body = frame_payload(measurement);
+    assert_eq!(body["capture"]["capture_seq"], 11);
+    assert_eq!(body["timestamp_ms"], 11);
+    assert!(body.get("revision").is_none() && body.get("origin").is_none());
+    assert!(body.get("state").is_none() && body.get("state_to").is_none());
+    assert_eq!(
+        resumed.last().unwrap().event.as_deref(),
+        Some("server_shutdown")
+    );
+}
+
 async fn terminal_projection_body(
     events: Vec<(StageId, StageLifecycleEvent)>,
     definitions: Vec<CompositeDefinition>,
@@ -194,14 +324,14 @@ async fn terminal_projection_body(
         append(
             journal.as_ref(),
             writer,
-            SystemEventType::StageLifecycle { stage_id, event },
+            SystemPayload::StageLifecycle { stage_id, event },
         )
         .await;
     }
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
     .await;
     request_body(journal, definitions, None).await
@@ -217,14 +347,14 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
                 left,
                 StageLifecycleEvent::Cancelled {
                     reason: "operator stop".to_string(),
-                    metrics: None,
+                    accounting: None,
                 },
             ),
             (
                 right,
                 StageLifecycleEvent::Cancelled {
                     reason: "sibling stop".to_string(),
-                    metrics: None,
+                    accounting: None,
                 },
             ),
         ],
@@ -239,12 +369,12 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
     let right = StageId::new();
     let contradictory = terminal_projection_body(
         vec![
-            (left, StageLifecycleEvent::Completed { metrics: None }),
+            (left, StageLifecycleEvent::Completed { accounting: None }),
             (
                 left,
                 StageLifecycleEvent::Cancelled {
                     reason: "late contradiction".to_string(),
-                    metrics: None,
+                    accounting: None,
                 },
             ),
         ],
@@ -261,7 +391,7 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
 struct ScriptedReader {
     pending_read: Option<Arc<PendingOpen>>,
     reads: Arc<AtomicUsize>,
-    events: Vec<SystemEventEnvelope>,
+    events: Vec<SystemJournalRecord>,
     position: usize,
     fail_at: Option<usize>,
     dropped: Arc<AtomicBool>,
@@ -275,7 +405,7 @@ impl Drop for ScriptedReader {
 
 #[async_trait]
 impl JournalReader<SystemEvent> for ScriptedReader {
-    async fn next(&mut self) -> Result<Option<SystemEventEnvelope>, JournalError> {
+    async fn next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if let Some(probe) = &self.pending_read {
             let _guard = PendingOpenGuard(probe.clone());
@@ -368,19 +498,19 @@ impl Journal<SystemEvent> for ScriptedJournal {
     async fn append(
         &self,
         event: SystemEvent,
-        parent: Option<&EventEnvelope<SystemEvent>>,
-    ) -> Result<SystemEventEnvelope, JournalError> {
+        parent: Option<&JournalRecord<obzenflow_core::event::SystemPayload>>,
+    ) -> Result<SystemJournalRecord, JournalError> {
         self.inner.append(event, parent).await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<SystemEventEnvelope>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<SystemJournalRecord>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<SystemEventEnvelope>, JournalError> {
+    ) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
@@ -409,7 +539,7 @@ impl Journal<SystemEvent> for ScriptedJournal {
         Ok(reader)
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<SystemEventEnvelope>, JournalError> {
+    async fn read_last_n(&self, count: usize) -> Result<Vec<SystemJournalRecord>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }
@@ -424,7 +554,7 @@ async fn journal_open_and_read_failures_are_typed_route_errors_only() {
     append(
         &read_failure,
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: left,
             event: StageLifecycleEvent::Running,
         },
@@ -510,6 +640,8 @@ async fn empty_bootstrap_and_closing_admission_do_not_fabricate_cursors() {
 async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallback() {
     let (journal, definitions, _) = completed_tape().await;
     let last_id = journal.read_last_n(1).await.unwrap()[0]
+        .envelope
+        .provenance
         .event
         .id
         .to_string();
@@ -575,7 +707,7 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
         append(
             journal.as_ref(),
             WriterId::from(system),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id: stage,
                 event: StageLifecycleEvent::Running,
             },
@@ -620,7 +752,7 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
     let running = append(
         journal.as_ref(),
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: left,
             event: StageLifecycleEvent::Running,
         },
@@ -629,33 +761,37 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
     let fact = fast.next().await.unwrap();
     assert_eq!(
         fact.id.as_deref(),
-        Some(running.event.id.to_string().as_str())
+        Some(running.envelope.provenance.event.id.to_string().as_str())
     );
     // Disconnect after receiving the stage message and its reconnect ID, but
     // before receiving the accompanying composite status.
     drop(fast);
-    let mut resumed = open(&endpoint, Some(&running.event.id.to_string())).await;
+    let mut resumed = open(
+        &endpoint,
+        Some(&running.envelope.provenance.event.id.to_string()),
+    )
+    .await;
     let repaired = resumed.next().await.unwrap();
     assert_eq!(frame_payload(&repaired)["status"], "running");
     assert!(repaired.id.is_none());
     assert_eq!(
         frame_payload(&repaired)["as_of_event_id"],
-        running.event.id.to_string()
+        running.envelope.provenance.event.id.to_string()
     );
 
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: left,
-            event: StageLifecycleEvent::Completed { metrics: None },
+            event: StageLifecycleEvent::Completed { accounting: None },
         },
     )
     .await;
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::StageLifecycle {
+        SystemPayload::StageLifecycle {
             stage_id: right,
             event: StageLifecycleEvent::Drained,
         },
@@ -664,7 +800,7 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
     append(
         journal.as_ref(),
         writer,
-        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
     .await;
     closing.send(true).unwrap();
@@ -692,7 +828,7 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
 #[tokio::test]
 async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
     use obzenflow_adapters::monitoring::MetricsReadModel;
-    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEventType};
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload};
     use obzenflow_dsl::{flow, sink, source, FlowDefinition};
     use obzenflow_runtime::run_context::FlowBuildContext;
     use obzenflow_runtime::stages::sink::SinkTyped;
@@ -732,13 +868,21 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
         handle.run().await.unwrap();
 
         let mut reader = journal.reader_from(0).await.unwrap();
-        let cursor = reader.next().await.unwrap().unwrap().event.id;
+        let cursor = reader
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .envelope
+            .provenance
+            .event
+            .id;
         let mut duration = None;
         while let Some(envelope) = reader.next().await.unwrap() {
-            if let SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+            if let SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
                 duration_ms,
                 metrics,
-            }) = &envelope.event.event
+            }) = &envelope.payload
             {
                 assert_eq!(metrics.events_in_total, 3);
                 assert_eq!(metrics.events_out_total, 3);

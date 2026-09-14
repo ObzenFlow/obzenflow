@@ -74,12 +74,12 @@ pub(super) async fn dispatch_draining<
                 // Capture reference-side ancestry for FLOWIP-071h (conservative high-water interim).
                 common::observe_reference_envelope(ctx, &envelope);
 
-                if !envelope.event.is_control() {
-                    let event = envelope.event.clone();
+                if !envelope.is_control() {
+                    let event = envelope.authored();
                     let event_id = event.id;
                     let reference_stage_id = ctx.reference_stage_id;
                     if let Some(heartbeat) = &ctx.heartbeat {
-                        if event.is_data() {
+                        if event.consumes_data_credit() {
                             heartbeat
                                 .state
                                 .record_data_read(reference_stage_id, event_id);
@@ -87,7 +87,7 @@ pub(super) async fn dispatch_draining<
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -204,10 +204,10 @@ pub(super) async fn dispatch_draining<
                             ))));
                         }
                     }
-                } else if !envelope.event.is_eof() {
+                } else if !envelope.is_eof() {
                     tracing::debug!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Forwarding reference control event during join draining"
                     );
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
@@ -263,8 +263,8 @@ pub(super) async fn dispatch_draining<
                     .event_loops_with_work_total
                     .fetch_add(1, Ordering::Relaxed);
 
-                if !envelope.event.is_control() {
-                    let event = envelope.event.clone();
+                if !envelope.is_control() {
+                    let event = envelope.authored();
                     let event_id = event.id;
                     // Edge identity comes from the reader slot that delivered
                     // the envelope, never from `event.writer_id`, which is
@@ -282,13 +282,13 @@ pub(super) async fn dispatch_draining<
                         .unwrap_or(ctx.reference_stage_id);
 
                     if let Some(heartbeat) = &ctx.heartbeat {
-                        if event.is_data() {
+                        if event.consumes_data_credit() {
                             heartbeat.state.record_data_read(source_id, event_id);
                         }
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -316,7 +316,7 @@ pub(super) async fn dispatch_draining<
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let mut merged_parent = envelope.clone();
                     CausalOrderingService::update_with_parent(
-                        &mut merged_parent.vector_clock,
+                        &mut merged_parent.envelope.provenance.journal.vector_clock,
                         &ctx.reference_high_water_clock,
                     );
 
@@ -415,8 +415,7 @@ pub(super) async fn dispatch_draining<
                                 )));
                             }
                             let reason = format!("Join handler error during draining: {err:?}");
-                            let error_event =
-                                envelope.event.clone().mark_as_error(reason, err.kind());
+                            let error_event = envelope.authored().mark_as_error(reason, err.kind());
                             ctx.instrumentation.record_error(err.kind());
 
                             let upstream_stage = subscription.last_delivered_upstream_stage();
@@ -452,10 +451,10 @@ pub(super) async fn dispatch_draining<
                             }
                         }
                     }
-                } else if !envelope.event.is_eof() {
+                } else if !envelope.is_eof() {
                     tracing::debug!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Forwarding stream control event during join draining"
                     );
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
@@ -518,7 +517,7 @@ pub(super) async fn dispatch_draining<
                 })?;
                 match handler.on_stream_eof(
                     &mut final_state,
-                    final_stream_eof.event.clone(),
+                    final_stream_eof.authored(),
                     stream_source_id,
                     writer_id,
                 ) {
@@ -545,7 +544,10 @@ pub(super) async fn dispatch_draining<
             match handler
                 .drain(
                     &final_state,
-                    ctx.drain_parent.as_ref().map(|parent| &parent.event),
+                    ctx.drain_parent
+                        .as_ref()
+                        .map(|parent| parent.authored())
+                        .as_ref(),
                 )
                 .await
             {
@@ -588,7 +590,7 @@ pub(super) async fn dispatch_draining<
     if !ctx.pending_outputs.is_empty() {
         if let Some(mut frontier) = ctx.drain_parent.clone() {
             CausalOrderingService::update_with_parent(
-                &mut frontier.vector_clock,
+                &mut frontier.envelope.provenance.journal.vector_clock,
                 &ctx.reference_high_water_clock,
             );
             ctx.pending_parent = Some(frontier);
@@ -649,7 +651,7 @@ async fn dispatch_draining_live<
 
                     let eof_events = match handler.on_stream_eof(
                         &mut final_state,
-                        final_stream_eof.event.clone(),
+                        final_stream_eof.authored(),
                         stream_source_id,
                         writer_id,
                     ) {
@@ -685,7 +687,10 @@ async fn dispatch_draining_live<
                 let events = match handler
                     .drain(
                         &final_state,
-                        ctx.drain_parent.as_ref().map(|parent| &parent.event),
+                        ctx.drain_parent
+                            .as_ref()
+                            .map(|parent| parent.authored())
+                            .as_ref(),
                     )
                     .await
                 {
@@ -720,7 +725,7 @@ async fn dispatch_draining_live<
                 if !ctx.pending_outputs.is_empty() {
                     if let Some(mut frontier) = ctx.drain_parent.clone() {
                         CausalOrderingService::update_with_parent(
-                            &mut frontier.vector_clock,
+                            &mut frontier.envelope.provenance.journal.vector_clock,
                             &ctx.reference_high_water_clock,
                         );
                         ctx.pending_parent = Some(frontier);

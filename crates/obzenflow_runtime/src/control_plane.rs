@@ -134,10 +134,10 @@ pub trait CircuitBreakerStateView: Send + Sync + std::fmt::Debug {
 }
 
 /// Snapshotter closure type for circuit breaker metrics.
-pub type CircuitBreakerSnapshotter = dyn Fn() -> CircuitBreakerMetrics + Send + Sync;
+pub type CircuitBreakerSnapshotter = dyn Fn() -> Option<CircuitBreakerMetrics> + Send + Sync;
 
 /// Snapshotter closure type for rate limiter metrics.
-pub type RateLimiterSnapshotter = dyn Fn() -> RateLimiterMetrics + Send + Sync;
+pub type RateLimiterSnapshotter = dyn Fn() -> Option<RateLimiterMetrics> + Send + Sync;
 
 /// Runtime-facing provider of control-plane state and metrics.
 ///

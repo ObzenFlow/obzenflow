@@ -6,7 +6,7 @@
 
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
-use obzenflow_core::event::EventEnvelope;
+use obzenflow_core::event::JournalRecord;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{
     BoundedBindingEvidence, FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload,
@@ -48,7 +48,9 @@ struct EmptyJournalReader;
 
 #[async_trait]
 impl JournalReader<ChainEvent> for EmptyJournalReader {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn next(
+        &mut self,
+    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -74,23 +76,23 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
         if self.fail_append {
             return Err(JournalError::Implementation {
                 message: "injected transactional append failure".to_string(),
                 source: "test journal rejected append".into(),
             });
         }
-        Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
+        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
     }
 
     async fn append_group(
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         if self.fail_append {
             return Err(JournalError::Implementation {
                 message: "injected transactional terminal-group failure".to_string(),
@@ -99,18 +101,20 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
         }
         Ok(events
             .into_iter()
-            .map(|event| EventEnvelope::new(JournalWriterId::from(self.id), event))
+            .map(|event| JournalRecord::new(JournalWriterId::from(self.id), event))
             .collect())
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -124,7 +128,7 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -242,7 +246,7 @@ fn effect_context(
     mode: TransactionProbeMode,
 ) -> (EffectInvocationContext, EffectBindingUse<TransactionProbe>) {
     let writer_id = WriterId::from(stage_id);
-    let parent = EventEnvelope::new(
+    let parent = JournalRecord::new(
         JournalWriterId::new(),
         ChainEventFactory::data_event(
             writer_id,
@@ -355,7 +359,7 @@ async fn invoke_with_boundary_mode(
     mode: TransactionProbeMode,
 ) -> EffectError {
     let (context, binding) = effect_context(stage_id, calls, trace, mode);
-    let input = context.parent.event.clone();
+    let input = context.parent.authored().clone();
     let terminal_error = Arc::new(Mutex::new(None));
     let adapter = EffectfulTransformHandlerAdapter::new(
         TransactionProbeHandler {
@@ -510,7 +514,7 @@ async fn effect_resilience_guards_transactional_calls_without_retrying_them() {
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
     assert_eq!(breaker.len(), 1);
-    let breaker = breaker[0].1();
+    let breaker = breaker[0].1().expect("uncontended breaker measurements");
     assert_eq!(breaker.requests_total, 1);
     assert_eq!(breaker.failures_total, 1);
     assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
@@ -556,7 +560,7 @@ async fn transactional_missing_commit_consumes_attempt_without_health_sample() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let breaker = breaker[0].1();
+    let breaker = breaker[0].1().expect("uncontended breaker measurements");
     assert_eq!(breaker.requests_total, 1);
     assert_eq!(breaker.successes_total, 0);
     assert_eq!(breaker.failures_total, 0);
@@ -603,7 +607,7 @@ async fn transactional_terminal_group_failure_preserves_physical_success_sample(
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let breaker = control.effect_circuit_breaker_snapshotters(&stage_id);
-    let breaker = breaker[0].1();
+    let breaker = breaker[0].1().expect("uncontended breaker measurements");
     assert_eq!(breaker.requests_total, 1);
     assert_eq!(
         breaker.successes_total, 1,

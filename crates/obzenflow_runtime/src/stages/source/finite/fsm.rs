@@ -14,7 +14,7 @@ use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
 use obzenflow_core::event::{
-    ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SourceContractEventParams,
+    ChainEventFactory, ChainPayload, ConsumptionFinalEventParams, SourceContractEventParams,
     SystemEvent,
 };
 use obzenflow_core::journal::Journal;
@@ -27,8 +27,7 @@ use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
-use crate::metrics::tail_read;
+use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
@@ -455,19 +454,19 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let runtime_context = ctx.instrumentation.snapshot();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
                 // Emit EOF with writer positions populated
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
-                if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
                     last_event_id,
                     ..
-                }) = &mut eof_event.content
+                }) = &mut eof_event.payload
                 {
                     *writer_id_field = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
@@ -483,7 +482,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                eof_event.runtime_context = Some(runtime_context.clone());
+                eof_event.runtime = Some(runtime_context.clone());
 
                 // Emit consumption_final for the source itself (writer-side contract)
                 let mut final_event = ChainEventFactory::consumption_final_event(
@@ -508,7 +507,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                final_event.runtime_context = Some(runtime_context);
+                final_event.runtime = Some(runtime_context);
 
                 crate::supervised_base::publication::append(&ctx.data_journal, eof_event, None)
                     .await
@@ -536,16 +535,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 // Tail-read metrics for failure; if no runtime_context is present
                 // in the journals, fall back to a best-effort snapshot from
                 // instrumentation rather than failing the failure path.
-                let metrics = match tail_read::read_stage_metrics_from_tail(
-                    &ctx.data_journal,
-                    Some(&ctx.error_journal),
-                    ctx.stage_id,
-                )
-                .await
-                {
-                    Some(metrics) => metrics,
-                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
-                };
+                let metrics = snapshot_stage_accounting(ctx.instrumentation.as_ref());
                 let cancel_reason = match message.as_str() {
                     FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
                     STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
@@ -553,13 +543,13 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 let system_event = if let Some(reason) = cancel_reason {
-                    SystemEvent::stage_cancelled_with_metrics(
+                    SystemEvent::stage_cancelled_with_accounting(
                         ctx.stage_id,
                         reason.to_string(),
                         metrics,
                     )
                 } else {
-                    SystemEvent::stage_failed_with_metrics(
+                    SystemEvent::stage_failed_with_accounting(
                         ctx.stage_id,
                         message.clone(),
                         false, // not recoverable
@@ -701,23 +691,12 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
             }
 
             FiniteSourceAction::WriteStageCompleted => {
-                // Write completion event to system journal with tail-read metrics.
+                // Write completion with protected accounting from the stage owner.
                 //
-                // Some stages may legitimately complete without emitting any runtime-context
-                // bearing events (e.g. zero input). In that case, fall back to a best-effort
-                // snapshot from instrumentation instead of failing completion.
-                let metrics = match tail_read::read_stage_metrics_from_tail(
-                    &ctx.data_journal,
-                    Some(&ctx.error_journal),
-                    ctx.stage_id,
-                )
-                .await
-                {
-                    Some(metrics) => metrics,
-                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
-                };
+                // Zero-input stages need no journal lookup or optional final capture.
+                let metrics = snapshot_stage_accounting(ctx.instrumentation.as_ref());
                 let completion_event =
-                    SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
+                    SystemEvent::stage_completed_with_accounting(ctx.stage_id, metrics);
 
                 if let Err(e) = crate::supervised_base::publication::append(
                     &ctx.system_journal,
@@ -778,9 +757,9 @@ pub(crate) mod tests {
     use crate::message_bus::FsmMessageBus;
     use crate::metrics::instrumentation::StageInstrumentation;
     use async_trait::async_trait;
-    use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
+    use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::system_event::SystemEvent;
     use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::id::JournalId;
@@ -825,7 +804,7 @@ pub(crate) mod tests {
     pub(crate) struct TestJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> TestJournal<T> {
@@ -839,7 +818,7 @@ pub(crate) mod tests {
     }
 
     struct TestJournalReader<T: JournalEvent> {
-        events: Vec<EventEnvelope<T>>,
+        events: Vec<JournalRecord<T::Payload>>,
         pos: usize,
     }
 
@@ -856,15 +835,15 @@ pub(crate) mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
-            let env = EventEnvelope::new(JournalWriterId::from(self.id), event);
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let env = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(env.clone());
             Ok(env)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
         }
@@ -872,7 +851,7 @@ pub(crate) mod tests {
         async fn read_event(
             &self,
             _event_id: &obzenflow_core::EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             // Not needed for this test
             Ok(None)
         }
@@ -888,7 +867,10 @@ pub(crate) mod tests {
             }))
         }
 
-        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -899,7 +881,7 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -1049,20 +1031,20 @@ pub(crate) mod tests {
                         }
                     }
                     let events = ctx.data_journal.read_causally_ordered().await.unwrap();
-                    assert_eq!(events.iter().filter(|env| matches!(env.event.content,
-                        ChainEventContent::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
+                    assert_eq!(events.iter().filter(|env| matches!(env.payload,
+                        ChainPayload::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
                         usize::from($finite));
-                    let eof = events.iter().find(|env| env.event.is_eof()).expect("authored EOF");
-                    assert_eq!(eof.event.runtime_context.as_ref().unwrap().fsm_state, "Drained");
+                    let eof = events.iter().find(|env| env.is_eof()).expect("authored EOF");
+                    assert_eq!(eof.envelope.provenance.event.runtime.as_ref().unwrap().fsm_state, "Drained");
                     for env in &events {
-                        if matches!(env.event.content, ChainEventContent::FlowControl(
+                        if matches!(env.payload, ChainPayload::FlowControl(
                             FlowControlPayload::SourceContract { .. })) {
-                            assert_eq!(env.event.writer_id, WriterId::from(stage_id));
-                            assert_eq!(env.event.flow_context.stage_id, stage_id);
-                            assert_eq!(env.event.flow_context.stage_name, ctx.stage_name);
-                            assert_eq!(env.event.flow_context.stage_type, StageType::FiniteSource);
-                            assert_eq!(env.event.flow_context.flow_name, ctx.flow_name);
-                            assert_eq!(env.event.flow_context.flow_id, ctx.flow_id.to_string());
+                            assert_eq!(env.envelope.provenance.event.writer_id, WriterId::from(stage_id));
+                            assert_eq!(env.envelope.provenance.event.flow_context.stage_id, stage_id);
+                            assert_eq!(env.envelope.provenance.event.flow_context.stage_name, ctx.stage_name);
+                            assert_eq!(env.envelope.provenance.event.flow_context.stage_type, StageType::FiniteSource);
+                            assert_eq!(env.envelope.provenance.event.flow_context.flow_name, ctx.flow_name);
+                            assert_eq!(env.envelope.provenance.event.flow_context.flow_id, ctx.flow_id.to_string());
                         }
                     }
 
@@ -1201,8 +1183,8 @@ pub(crate) mod tests {
         let events_closed = data_journal.read_causally_ordered().await.unwrap();
         let eof_natural_closed = events_closed.iter().any(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. })
+                env.payload,
+                ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. })
                     if kind.is_natural()
             )
         });
@@ -1212,8 +1194,8 @@ pub(crate) mod tests {
         );
         let eof_writer_seq_by_event_type = events_closed
             .iter()
-            .find_map(|env| match &env.event.content {
-                ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            .find_map(|env| match &env.payload {
+                ChainPayload::FlowControl(FlowControlPayload::Eof {
                     writer_seq_by_event_type,
                     ..
                 }) => Some(writer_seq_by_event_type),
@@ -1247,8 +1229,8 @@ pub(crate) mod tests {
         let events_open = data_journal.read_causally_ordered().await.unwrap();
         let eof_poison = events_open.iter().any(|env| {
             matches!(
-                env.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. })
+                env.payload,
+                ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. })
                     if kind.is_poison()
             )
         });
@@ -1311,10 +1293,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .filter_map(|env| match &env.event.content {
-                    ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
-                        Some(*kind)
-                    }
+                .filter_map(|env| match &env.payload {
+                    ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => Some(*kind),
                     _ => None,
                 })
                 .collect();

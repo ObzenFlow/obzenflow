@@ -355,19 +355,19 @@ impl CircuitBreakerFactory {
         let last_state_change = middleware.last_state_change.clone();
         let snapshotter: Arc<CircuitBreakerSnapshotter> = Arc::new(move || {
             let state = state_view_for_snapshot.snapshot().state;
-            let mut closed = time_in_closed.lock().map(|d| *d).unwrap_or_default();
-            let mut open = time_in_open.lock().map(|d| *d).unwrap_or_default();
-            let mut half_open = time_in_half_open.lock().map(|d| *d).unwrap_or_default();
+            let mut closed = time_in_closed.try_lock().ok().map(|d| *d)?;
+            let mut open = time_in_open.try_lock().ok().map(|d| *d)?;
+            let mut half_open = time_in_half_open.try_lock().ok().map(|d| *d)?;
             let elapsed_current = last_state_change
-                .lock()
-                .map(|last| last.elapsed())
-                .unwrap_or_default();
+                .try_lock()
+                .ok()
+                .map(|last| last.elapsed())?;
             match state {
                 CircuitBreakerState::Closed => closed += elapsed_current,
                 CircuitBreakerState::Open => open += elapsed_current,
                 CircuitBreakerState::HalfOpen => half_open += elapsed_current,
             }
-            CircuitBreakerMetrics {
+            Some(CircuitBreakerMetrics {
                 requests_total: requests_total.load(Ordering::Relaxed),
                 successes_total: successes_total.load(Ordering::Relaxed),
                 failures_total: failures_total.load(Ordering::Relaxed),
@@ -378,7 +378,7 @@ impl CircuitBreakerFactory {
                 time_open_seconds: open.as_secs_f64(),
                 time_half_open_seconds: half_open.as_secs_f64(),
                 state,
-            }
+            })
         });
 
         context

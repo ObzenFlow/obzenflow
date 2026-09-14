@@ -7,7 +7,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, source, FlowDefinition};
@@ -184,7 +184,7 @@ async fn terminal_lifecycle_event(
         .map_err(|e| anyhow!("failed to read system journal tail: {e}"))?;
 
     for envelope in tail {
-        if let SystemEventType::PipelineLifecycle(ev) = &envelope.event.event {
+        if let SystemPayload::PipelineLifecycle(ev) = &envelope.payload {
             if matches!(
                 ev,
                 PipelineLifecycleEvent::Completed { .. }
@@ -374,8 +374,8 @@ async fn graceful_finite_stop_completes_admitted_work_without_exhausting_input()
         loop {
             if let Some(envelope) = reader.next().await? {
                 if matches!(
-                    envelope.event.event,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
+                    envelope.payload,
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
                         admission: PipelineStopAdmission::Graceful { .. }
                     })
                 ) {
@@ -454,8 +454,8 @@ async fn runtime_timeout_is_admitted_once_despite_duplicate_graceful_requests() 
         .iter()
         .filter(|fact| {
             matches!(
-                &fact.event.event,
-                SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
+                &fact.payload,
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
                     admission: PipelineStopAdmission::Cancel {
                         cause: PipelineCancellationCause::GracefulTimeout
                     }

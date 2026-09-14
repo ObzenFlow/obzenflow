@@ -215,7 +215,8 @@ pub(crate) async fn bind_managed_host(
     .map_err(|error| ManagedWebHostError::Implementation {
         message: format!("invalid composite lifecycle projection: {error}"),
         source: Some(Box::new(error)),
-    })?;
+    })?
+    .with_observations(flow_handle.observations());
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
     }
@@ -445,10 +446,10 @@ mod tests {
             .apply(map, &StageLifecycleEvent::Running)
             .unwrap();
         projection
-            .apply(map, &StageLifecycleEvent::Completed { metrics: None })
+            .apply(map, &StageLifecycleEvent::Completed { accounting: None })
             .unwrap();
         projection
-            .apply(finish, &StageLifecycleEvent::Completed { metrics: None })
+            .apply(finish, &StageLifecycleEvent::Completed { accounting: None })
             .unwrap();
 
         assert_eq!(

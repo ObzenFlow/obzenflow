@@ -50,6 +50,8 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiMapReducePlanningManifest {
+    pub oversize_policy: super::OversizePolicy,
+    pub exclusions_by_reason: std::collections::HashMap<ChunkExclusionReason, u64>,
     pub job_key: EventId,
     pub chunk_count: usize,
     pub planning: ChunkPlanningSummary,
@@ -65,6 +67,18 @@ pub struct AiMapReducePlanningManifest {
 impl TypedPayload for AiMapReducePlanningManifest {
     const EVENT_TYPE: &'static str = "ai.map_reduce.planning_manifest";
     const SCHEMA_VERSION: u32 = 1;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(payload, crate::event::ChainPayload::CompositeData(crate::event::payloads::composite_data_payload::CompositeDataPayload::PlanningManifest(_)))
+    }
 }
 
 /// Internal map-stage input carrying the activation-derived job key beside
@@ -85,6 +99,23 @@ where
 {
     const EVENT_TYPE: &'static str = "ai.map_reduce.map_input";
     const SCHEMA_VERSION: u32 = 1;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::CompositeData(
+                crate::event::payloads::composite_data_payload::CompositeDataPayload::MapInput(_)
+            )
+        )
+    }
 }
 
 /// Internal transport payload delivered to the finalise (reduce) stage.
@@ -107,6 +138,25 @@ where
 {
     const EVENT_TYPE: &'static str = "ai.map_reduce.reduce_input";
     const SCHEMA_VERSION: u32 = 2;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::CompositeData(
+                crate::event::payloads::composite_data_payload::CompositeDataPayload::ReduceInput(
+                    _
+                )
+            )
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +173,25 @@ where
 {
     const EVENT_TYPE: &'static str = "ai.map_reduce.tagged_partial";
     const SCHEMA_VERSION: u32 = 1;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::CompositeData(
+                crate::event::payloads::composite_data_payload::CompositeDataPayload::TaggedPartial(
+                    _
+                )
+            )
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,6 +205,25 @@ pub struct AiMapReduceChunkFailed {
 impl TypedPayload for AiMapReduceChunkFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.chunk_failed";
     const SCHEMA_VERSION: u32 = 2;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::CompositeData(
+                crate::event::payloads::composite_data_payload::CompositeDataPayload::ChunkFailed(
+                    _
+                )
+            )
+        )
+    }
 }
 
 /// Credential-free role logic failures. Framework and provider failures are
@@ -256,6 +344,18 @@ pub struct AiMapReducePlanningFailed {
 impl TypedPayload for AiMapReducePlanningFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.planning_failed";
     const SCHEMA_VERSION: u32 = 1;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(payload, crate::event::ChainPayload::CompositeData(crate::event::payloads::composite_data_payload::CompositeDataPayload::PlanningFailed(_)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,6 +367,18 @@ pub struct AiMapReduceFinaliseFailed {
 impl TypedPayload for AiMapReduceFinaliseFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.finalise_failed";
     const SCHEMA_VERSION: u32 = 1;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(payload, crate::event::ChainPayload::CompositeData(crate::event::payloads::composite_data_payload::CompositeDataPayload::FinaliseFailed(_)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +391,23 @@ pub struct AiMapReduceJobFailed {
 impl TypedPayload for AiMapReduceJobFailed {
     const EVENT_TYPE: &'static str = "ai.map_reduce.job_failed";
     const SCHEMA_VERSION: u32 = 1;
+
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        crate::event::payloads::composite_data_payload::CompositeDataPayload::decode(
+            &Self::versioned_event_type(),
+            serde_json::to_value(self)?,
+        )
+        .map(crate::event::ChainPayload::CompositeData)
+    }
+
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::CompositeData(
+                crate::event::payloads::composite_data_payload::CompositeDataPayload::JobFailed(_)
+            )
+        )
+    }
 }
 
 #[cfg(test)]

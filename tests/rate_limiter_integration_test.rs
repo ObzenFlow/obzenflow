@@ -54,8 +54,14 @@ async fn rate_limiter_delayed_total_from_runtime_context(
     loop {
         match reader.next().await {
             Ok(Some(envelope)) => {
-                if let Some(runtime_context) = &envelope.event.runtime_context {
-                    delayed_total = delayed_total.max(runtime_context.rl_delayed_total);
+                if let Some(limiter) = envelope
+                    .envelope
+                    .observability
+                    .as_ref()
+                    .and_then(|packet| packet.runtime.as_ref())
+                    .and_then(|runtime| runtime.rate_limiter.as_ref())
+                {
+                    delayed_total = delayed_total.max(limiter.delayed_total);
                 }
             }
             Ok(None) => return Ok(delayed_total),

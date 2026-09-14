@@ -51,7 +51,7 @@ mod tests {
             (serde_json::json!({}), "<missing>"),
             (serde_json::json!({"manifest_version": 3.0}), "3.0"),
             (serde_json::json!({"manifest_version": "2.0"}), "2.0"),
-            (serde_json::json!({"manifest_version": "4.0"}), "4.0"),
+            (serde_json::json!({"manifest_version": "5.0"}), "5.0"),
         ] {
             assert_eq!(
                 require_current_manifest_version(&value)

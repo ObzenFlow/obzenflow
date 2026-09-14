@@ -15,7 +15,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
-use obzenflow_core::event::SystemEventType;
+use obzenflow_core::event::SystemPayload;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
@@ -301,8 +301,8 @@ async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
 
         let envelopes = journal.read_causally_ordered().await?;
         for env in envelopes {
-            match &env.event.event {
-                SystemEventType::ContractResult {
+            match &env.payload {
+                SystemPayload::ContractResult {
                     contract_name,
                     status,
                     ..

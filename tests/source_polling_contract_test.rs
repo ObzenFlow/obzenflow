@@ -13,11 +13,9 @@ use obzenflow_adapters::middleware::{
     MiddlewareSurfaceKind, SourceAdmission, SourceAfterPoll, SourceBatchFacts, SourcePolicy,
     SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome,
 };
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{TypedPayload, WriterId};
@@ -35,7 +33,6 @@ use obzenflow_runtime::stages::observer::{
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::future::pending;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -74,14 +71,17 @@ impl InlineSink for NoopSink {
     }
 }
 
-fn custom_metric(writer_id: WriterId, name: impl Into<String>) -> ChainEvent {
-    ChainEventFactory::observability_event(
+// A closed factual control report exercises the source outbox without a
+// retired generic metrics payload.
+fn policy_report(writer_id: WriterId, reason: impl Into<String>) -> ChainEvent {
+    ChainEventFactory::create_event(
         writer_id,
-        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-            name: name.into(),
-            value: json!({}),
-            tags: None,
-        }),
+        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+            StageLifecycleFact::Draining {
+                stage_id: *writer_id.as_stage().expect("stage writer"),
+                reason: Some(reason.into()),
+            },
+        )),
     )
 }
 
@@ -203,7 +203,7 @@ impl SourcePolicy for SourceContractPolicy {
 
     async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
         if self.settings.reject {
-            ctx.write_control_event(custom_metric(ctx.writer_id(), "policy.rejection_outbox"));
+            ctx.write_control_event(policy_report(ctx.writer_id(), "policy.rejection_outbox"));
             return SourceAdmission::Reject {
                 reason: "source contract rejection".to_string(),
             };
@@ -221,7 +221,7 @@ impl SourcePolicy for SourceContractPolicy {
         }
         if self.settings.emit_after_poll {
             let ordinal = self.outbox_ordinal.fetch_add(1, Ordering::SeqCst);
-            ctx.write_control_event(custom_metric(
+            ctx.write_control_event(policy_report(
                 ctx.writer_id(),
                 format!("policy.outbox.{ordinal}"),
             ));
@@ -260,7 +260,7 @@ impl SourcePolicy for SourceContractPolicy {
         };
         self.log.push(observation);
         if self.settings.emit_on_observe {
-            ctx.write_control_event(custom_metric(ctx.writer_id(), "policy.observe_outbox"));
+            ctx.write_control_event(policy_report(ctx.writer_id(), "policy.observe_outbox"));
         }
     }
 }
@@ -935,12 +935,16 @@ fn offsets(times: &[tokio::time::Instant]) -> Vec<Duration> {
     times.iter().map(|instant| *instant - start).collect()
 }
 
-fn custom_metric_names(events: &[obzenflow_core::EventEnvelope<ChainEvent>]) -> Vec<String> {
+fn policy_report_names(
+    events: &[obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<String> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Metrics(
-                MetricsLifecycle::Custom { name, .. },
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Draining {
+                    reason: Some(name), ..
+                },
             )) if name.starts_with("source.batch.")
                 || name.starts_with("policy.outbox.")
                 || name == "policy.observe_outbox" =>
@@ -1093,7 +1097,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
         "async sources use 1/2/4/8/16/32/50ms and reset to 1ms after data"
     );
 
-    let names = custom_metric_names(
+    let names = policy_report_names(
         &source_journal
             .read_causally_ordered()
             .await
@@ -1139,13 +1143,13 @@ async fn wait_for_counter(counter: &AtomicUsize, expected: usize) {
 async fn wait_for_custom_rows(
     journal: &Arc<dyn Journal<ChainEvent>>,
     expected: usize,
-) -> Vec<obzenflow_core::EventEnvelope<ChainEvent>> {
+) -> Vec<obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload>> {
     for _ in 0..1_000 {
         let rows = journal
             .read_causally_ordered()
             .await
             .expect("source journal read succeeds");
-        if custom_metric_names(&rows).len() >= expected {
+        if policy_report_names(&rows).len() >= expected {
             return rows;
         }
         tokio::task::yield_now().await;
@@ -1211,7 +1215,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
     }
 
     let rows = wait_for_custom_rows(&source_journal, 7).await;
-    let names = custom_metric_names(&rows);
+    let names = policy_report_names(&rows);
     assert_eq!(
         names.len(),
         7,
@@ -1238,7 +1242,7 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
         "cancel interrupts the supervisor-owned delay without starting another poll"
     );
     assert_eq!(
-        custom_metric_names(
+        policy_report_names(
             &source_journal
                 .read_causally_ordered()
                 .await

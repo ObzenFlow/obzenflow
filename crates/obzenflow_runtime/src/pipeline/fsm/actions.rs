@@ -10,7 +10,7 @@ use crate::supervised_base::publication::BoxError;
 use crate::supervised_base::SupervisorHandle;
 use futures::{stream::FuturesUnordered, FutureExt};
 use obzenflow_core::event::{
-    MetricsCoordinationEvent, SystemEvent, SystemEventFactory, SystemEventType,
+    MetricsCoordinationEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
 use obzenflow_fsm::{FsmAction, FsmError};
 use std::sync::Mutex;
@@ -180,7 +180,7 @@ impl PipelineAction {
                             .read_last_n(1)
                             .await?
                             .first()
-                            .map(|row| row.event.id))
+                            .map(|row| row.envelope.provenance.event.id))
                     }
                     .boxed(),
                 ));
@@ -237,7 +237,7 @@ impl PipelineAction {
                         ctx,
                         SystemEvent::new(
                             ctx.system_id.into(),
-                            SystemEventType::MetricsCoordination(
+                            SystemPayload::MetricsCoordination(
                                 MetricsCoordinationEvent::DrainRequested,
                             ),
                         ),

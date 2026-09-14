@@ -106,5 +106,10 @@ pub struct SourceBoundaryReport {
 /// from the returned report. It does not know which, if any, middleware policies
 /// are composed behind the boundary.
 pub trait SourceBoundary: Send + Sync {
+    fn install_observation_recorder(
+        &self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     fn around_poll<'a>(&'a self, execute: SourcePollExecution<'a>) -> SourceBoundaryFuture<'a>;
 }

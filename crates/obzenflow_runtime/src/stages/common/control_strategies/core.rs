@@ -7,8 +7,7 @@
 //! This module contains the fundamental abstractions for implementing
 //! control event handling strategies in stage supervisors.
 
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::event::journal_record::JournalRecord;
 use std::time::Duration;
 
 /// Strategy for handling control events in stage supervisors
@@ -16,14 +15,14 @@ pub trait SignalGate: Send + Sync {
     /// Handle an EOF event
     fn handle_eof(
         &self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         ctx: &mut ProcessingContext,
     ) -> SignalDecision;
 
     /// Handle a watermark event
     fn handle_watermark(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         // Default: always forward watermarks
@@ -33,7 +32,7 @@ pub trait SignalGate: Send + Sync {
     /// Handle a checkpoint event (when implemented)
     fn handle_checkpoint(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         // Default: always forward checkpoints
@@ -43,7 +42,7 @@ pub trait SignalGate: Send + Sync {
     /// Handle a drain signal (when implemented)
     fn handle_drain(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         // Default: always forward drain signals
@@ -78,7 +77,7 @@ pub struct ProcessingContext {
     pub custom_state: std::collections::HashMap<String, String>,
 
     /// Buffered EOF event for control-flow coordination scenarios.
-    pub buffered_eof: Option<EventEnvelope<ChainEvent>>,
+    pub buffered_eof: Option<JournalRecord<obzenflow_core::event::ChainPayload>>,
 }
 
 impl ProcessingContext {

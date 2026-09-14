@@ -566,6 +566,7 @@ pub enum EffectOutcomePayload {
         output: Value,
     },
     SucceededFact {
+        event_kind: super::chain_payload::EventKind,
         event_type: EventType,
         output: Value,
         outcome_fact_ordinal: OutcomeFactOrdinal,
@@ -599,6 +600,19 @@ pub struct EffectAttemptStarted {
 impl TypedPayload for EffectAttemptStarted {
     const EVENT_TYPE: &'static str = "obzenflow.effect_attempt_started";
     const SCHEMA_VERSION: u32 = 1;
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        Ok(crate::event::ChainPayload::Execution(
+            super::execution_payload::ExecutionPayload::EffectAttemptStarted(self),
+        ))
+    }
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::Execution(
+                super::execution_payload::ExecutionPayload::EffectAttemptStarted(_)
+            )
+        )
+    }
 }
 
 /// Logical terminal that records a recovery decision without claiming a new
@@ -619,6 +633,19 @@ pub struct EffectRecoveryAbandoned {
 impl TypedPayload for EffectRecoveryAbandoned {
     const EVENT_TYPE: &'static str = "obzenflow.effect_recovery_abandoned";
     const SCHEMA_VERSION: u32 = 1;
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        Ok(crate::event::ChainPayload::Execution(
+            super::execution_payload::ExecutionPayload::EffectRecoveryAbandoned(self),
+        ))
+    }
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::Execution(
+                super::execution_payload::ExecutionPayload::EffectRecoveryAbandoned(_)
+            )
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

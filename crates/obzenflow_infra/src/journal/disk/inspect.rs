@@ -200,7 +200,7 @@ fn inspect_chain_journal(
         match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
-                    let ty = record.event.event_type();
+                    let ty = record.event_type();
                     if event_type.is_some_and(|filter| filter != ty.as_str()) {
                         continue;
                     }
@@ -291,13 +291,137 @@ fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn observation_omission_preserves_full_records_through_reader_and_export() {
+        use super::super::log_record::{serialize_atomic_group, serialize_record};
+        use crate::journal::DiskJournal;
+        use obzenflow_core::ai::AiMapReduceTaggedPartial;
+        use obzenflow_core::event::context::RuntimeObservability;
+        use obzenflow_core::event::observation::{
+            CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ObservabilityContext,
+        };
+        use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+        use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
+        use obzenflow_core::{FlowId, Journal, JournalOwner, StageId, TypedPayload, WriterId};
+
+        let dir = tempfile::tempdir_in("target").unwrap();
+        let stage = StageId::new();
+        let writer = WriterId::from(stage);
+        let scope = CaptureScope {
+            flow_id: FlowId::new(),
+            resume_generation: Default::default(),
+        };
+        let source =
+            ChainEventFactory::data_event(writer, "application.null.v1", serde_json::Value::Null);
+        let partial = AiMapReduceTaggedPartial {
+            job_key: source.id,
+            chunk_index: 0,
+            chunk_count: 1,
+            partial: serde_json::json!({"execution_type": "business-value", "items": [1, null]}),
+        }
+        .to_event(writer);
+        let progress = ChainEventFactory::create_event(
+            writer,
+            ChainPayload::Execution(ExecutionPayload::AccumulatorProgress {
+                inputs_since_last_report: 100,
+            }),
+        );
+        let mut events = vec![source, partial, progress];
+        for (index, event) in events.iter_mut().enumerate() {
+            let mut packet = ObservabilityContext::new(CaptureStamp {
+                capture_scope: scope,
+                observer: writer,
+                capture_seq: CaptureSeq(index as u64 + 1),
+                capture_reason: CaptureReason::Record,
+                observed_at_ms: 100 + index as u64,
+            });
+            packet.runtime = Some(RuntimeObservability {
+                in_flight: Some(index as u32),
+                ..Default::default()
+            });
+            event.envelope.observability = Some(packet);
+        }
+        let journal = DiskJournal::<ChainEvent>::with_owner(
+            dir.path().join("original.log"),
+            JournalOwner::stage(stage),
+        )
+        .unwrap();
+        let mut original = vec![journal.append(events.remove(0), None).await.unwrap()];
+        original.extend(
+            journal
+                .append_group("omission-proof", events, None)
+                .await
+                .unwrap(),
+        );
+
+        for mode in ["all", "none", "selected"] {
+            let mut expected = original.clone();
+            for (index, record) in expected.iter_mut().enumerate() {
+                if mode == "none" || (mode == "selected" && index != 1) {
+                    record.envelope.observability = None;
+                }
+                assert_eq!(
+                    serde_json::to_value(&record.envelope.provenance).unwrap(),
+                    serde_json::to_value(&original[index].envelope.provenance).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&record.payload).unwrap(),
+                    serde_json::to_value(&original[index].payload).unwrap()
+                );
+            }
+            let mut framed = Vec::new();
+            for body in [
+                serialize_record(&expected[0]).unwrap(),
+                serialize_atomic_group("omission-proof", &expected[1..]).unwrap(),
+            ] {
+                framed.extend_from_slice(
+                    format!("{}:{}:", body.len(), crc32fast::hash(&body)).as_bytes(),
+                );
+                framed.extend_from_slice(&body);
+                framed.push(b'\n');
+            }
+            let path = dir.path().join(format!("{mode}.log"));
+            std::fs::write(&path, framed).unwrap();
+            let restored =
+                DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                    .unwrap();
+            let mut reader = restored.reader().await.unwrap();
+            for expected_record in &expected {
+                let actual = reader.next().await.unwrap().unwrap();
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected_record).unwrap()
+                );
+            }
+            assert!(reader.next().await.unwrap().is_none());
+            let mut jsonl = Vec::new();
+            export_journal_file::<ChainEvent>(
+                &path,
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: false,
+                },
+                &mut jsonl,
+            )
+            .unwrap();
+            let decoded: Vec<JournalRecord<ChainPayload>> = String::from_utf8(jsonl)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+
     #[test]
     fn inspection_rejects_non_current_manifest_before_output_or_journal_access() {
         for (version, expected) in [
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
-            (Some(serde_json::json!("4.0")), "4.0"),
+            (Some(serde_json::json!("5.0")), "5.0"),
         ] {
             let temp = tempfile::tempdir().expect("temporary archive");
             let mut manifest = serde_json::json!({

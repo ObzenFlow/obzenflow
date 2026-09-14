@@ -8,11 +8,12 @@ pub mod causality_context;
 pub mod composite_activation_context;
 pub mod flow_context;
 pub mod intent_context;
+pub mod measurement_snapshots;
 pub mod middleware_execution_scope;
-pub mod observability_context;
 pub mod processing_context;
 pub mod replay_context;
-pub mod runtime_context;
+pub mod runtime_observability;
+pub mod runtime_provenance;
 pub mod stage_type;
 
 pub use composite_activation_context::CompositeActivationContext;
@@ -21,8 +22,12 @@ pub use intent_context::IntentContext;
 pub use middleware_execution_scope::MiddlewareExecutionScope;
 pub use processing_context::ProcessingContext;
 pub use replay_context::ReplayContext;
-pub use runtime_context::{
-    EffectCircuitBreakerContext, EffectRateLimiterContext, EventTypeCountContext, RuntimeContext,
+pub use runtime_observability::{
+    CircuitBreakerMeasurements, EffectCircuitBreakerContext, EffectRateLimiterContext,
+    MeasurementWindow, RateLimiterMeasurements, RuntimeObservability, TimingMeasurements,
+};
+pub use runtime_provenance::{
+    EventTypeCountContext, ExecutionAccounting, ExecutionProgress, RuntimeProvenance,
     UpstreamEventTypeCountContext,
 };
 pub use stage_type::{SimpleStageType, StageType};

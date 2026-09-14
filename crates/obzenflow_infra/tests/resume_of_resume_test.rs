@@ -17,11 +17,10 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
-    ChainEventContent, EventEnvelope, ReplayLifecycleEvent, SystemEvent, SystemEventType,
+    ChainPayload, JournalRecord, ReplayLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::run_manifest::RunManifest;
@@ -256,14 +255,14 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-fn resume_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<ResumeRow> {
+fn resume_rows(envelopes: &[JournalRecord<obzenflow_core::event::ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => {
-                Some(ResumeRow::Data(envelope.event.payload().clone()))
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some(ResumeRow::Data(envelope.payload().clone()))
             }
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
             }) => Some(ResumeRow::CatchUp {
@@ -410,8 +409,8 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
     let system_events = system_journal.read_causally_ordered().await?;
     let generation = system_events
         .iter()
-        .find_map(|envelope| match &envelope.event.event {
-            SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
+        .find_map(|envelope| match &envelope.payload {
+            SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
                 generation,
                 ..
             }) => Some(*generation),
@@ -457,8 +456,8 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
         replay_testkit::read_stage_envelopes_appended(&replay_run, "src").await;
     assert!(
         replay_src_envelopes.iter().any(|envelope| matches!(
-            &envelope.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+            &envelope.payload,
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
         )),
         "a bounded replay of the resumed archive must drain and author EOF"
     );

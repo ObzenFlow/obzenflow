@@ -21,7 +21,7 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
+use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 
 use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
@@ -438,7 +438,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     async fn forward_control_event(
         &self,
         ctx: &StatefulContext<H>,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = forward_control_event_helper(
             envelope,
@@ -483,13 +483,9 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         };
 
         // Capture a fresh runtime context snapshot for the heartbeat.
-        let runtime_context = ctx.instrumentation.snapshot_with_control();
+        let runtime_context = ctx.instrumentation.snapshot();
 
-        use obzenflow_core::event::payloads::observability_payload::{
-            MetricsLifecycle, ObservabilityPayload,
-        };
         use obzenflow_core::event::ChainEventFactory;
-        use serde_json::json;
 
         let flow_id = ctx.flow_id.to_string();
         let flow_context = make_flow_context(
@@ -500,18 +496,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             StageType::Stateful,
         );
 
-        let payload = ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-            name: "accumulator_heartbeat".to_string(),
-            value: json!({
-                "events_accumulated_since_last_heartbeat": delta,
-                "events_processed_total": runtime_context.events_processed_total,
-            }),
-            tags: None,
-        });
+        let payload = obzenflow_core::event::payloads::execution_payload::ExecutionPayload::AccumulatorProgress { inputs_since_last_report: delta };
 
-        let heartbeat = ChainEventFactory::observability_event(writer_id, payload)
+        let heartbeat = ChainEventFactory::execution_event(writer_id, payload)
             .with_flow_context(flow_context)
-            .with_runtime_context(runtime_context);
+            .with_runtime_provenance(runtime_context);
 
         crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
 

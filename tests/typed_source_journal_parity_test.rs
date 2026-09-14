@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
@@ -323,7 +323,10 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage_appended(
+    run_dir: &Path,
+    stage_name: &str,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name]["data_journal_file"]
         .as_str()
@@ -341,14 +344,15 @@ async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<EventEnvel
     events
 }
 
-fn data_signature(events: &[EventEnvelope<ChainEvent>]) -> Vec<(String, serde_json::Value)> {
+fn data_signature(
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+) -> Vec<(String, serde_json::Value)> {
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => Some((event_type.to_string(), payload.clone())),
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some((envelope.event_type().to_string(), envelope.payload()))
+            }
             _ => None,
         })
         .collect()
@@ -356,31 +360,31 @@ fn data_signature(events: &[EventEnvelope<ChainEvent>]) -> Vec<(String, serde_js
 
 fn assert_source_journal(
     stage_name: &str,
-    events: &[EventEnvelope<ChainEvent>],
+    events: &[JournalRecord<obzenflow_core::event::ChainPayload>],
     expected_data_writer: Option<WriterId>,
     eof_must_match_data_writer: bool,
 ) -> WriterId {
     let eof = events
         .iter()
-        .find(|envelope| envelope.event.is_eof())
+        .find(|envelope| envelope.is_eof())
         .unwrap_or_else(|| panic!("{stage_name} authors EOF"));
     let data = events
         .iter()
-        .filter(|envelope| envelope.event.is_data())
+        .filter(|envelope| envelope.consumes_data_credit())
         .collect::<Vec<_>>();
     assert_eq!(
         data.len(),
         2,
         "{stage_name} authors one member of each type"
     );
-    let writer = data[0].event.writer_id;
+    let writer = data[0].envelope.provenance.event.writer_id;
     assert!(writer.is_stage(), "{stage_name} has a stage-owned writer");
     assert!(
         data.iter()
-            .all(|envelope| envelope.event.writer_id == writer),
+            .all(|envelope| envelope.envelope.provenance.event.writer_id == writer),
         "{stage_name} data writers {:?} did not converge on {writer}",
         data.iter()
-            .map(|envelope| envelope.event.writer_id.to_string())
+            .map(|envelope| envelope.envelope.provenance.event.writer_id.to_string())
             .collect::<Vec<_>>()
     );
     if let Some(expected) = expected_data_writer {
@@ -391,26 +395,26 @@ fn assert_source_journal(
     }
     assert_eq!(
         data.iter()
-            .map(|envelope| envelope.event.event_type().to_string())
+            .map(|envelope| envelope.event_type().to_string())
             .collect::<Vec<_>>(),
         vec![Alpha::versioned_event_type(), Beta::versioned_event_type()]
     );
     assert!(data
         .iter()
-        .all(|envelope| !envelope.event.event_type().ends_with(".error")));
+        .all(|envelope| !envelope.event_type().ends_with(".error")));
 
     if eof_must_match_data_writer {
         assert_eq!(
-            eof.event.writer_id, writer,
+            eof.envelope.provenance.event.writer_id, writer,
             "{stage_name} live Data and EOF must use the installed stage writer"
         );
     }
-    let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_seq,
         writer_seq_by_event_type,
         last_event_id,
         ..
-    }) = &eof.event.content
+    }) = &eof.payload
     else {
         unreachable!("EOF shape")
     };
@@ -430,13 +434,14 @@ fn assert_source_journal(
     assert_eq!(writer_seq_by_event_type.len(), 2);
     assert_eq!(
         *last_event_id,
-        data.last().map(|envelope| envelope.event.id)
+        data.last()
+            .map(|envelope| envelope.envelope.provenance.event.id)
     );
 
     let final_contract = events
         .iter()
-        .find_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
                 pass,
                 consumed_count,
                 eof_seen,

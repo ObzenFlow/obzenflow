@@ -166,5 +166,7 @@ pub(super) fn effect_limiter_events(
         1,
         "one effect limiter should be registered"
     );
-    snapshots[0].1().events_total
+    snapshots[0].1()
+        .expect("uncontended limiter measurements")
+        .events_total
 }

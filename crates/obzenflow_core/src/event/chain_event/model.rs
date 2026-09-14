@@ -4,20 +4,13 @@
 
 use super::factory::ChainEventFactory;
 use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::observability_context::ObservabilityContext;
-use crate::event::context::{
-    FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext,
-};
+use crate::event::context::{FlowContext, RuntimeProvenance};
+use crate::event::observation::ObservabilityContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
-use crate::event::payloads::delivery_payload::DeliveryPayload;
-use crate::event::payloads::effect_payload::{is_framework_effect_event_type, EffectProvenance};
+use crate::event::payloads::effect_payload::EffectProvenance;
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
-use crate::event::payloads::observability_payload::{
-    MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, StageLifecycle,
-};
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use crate::event::types::{AdmissionSeq, CorrelationId, EventId, WriterId};
-use crate::id::{CycleDepth, SccId};
+use crate::event::types::CorrelationId;
 use crate::ingress::IngressContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,110 +56,71 @@ impl CorrelationContext {
     }
 }
 
-/// The definitive event structure for ObzenFlow
-/// Lives inside EventEnvelope.data as serialized bytes
-/// Focuses on application concerns, NOT infrastructure concerns
-/// Designed to support CHAIN maturity model levels 1-4
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// An authored chain record. Only the journal can supply commitment provenance.
+#[derive(Debug, Clone)]
 pub struct ChainEvent {
-    // === Identity (Application Level) ===
-    /// Unique event identifier (for application-level references)
-    pub id: EventId,
-
-    /// Which stage/service created this event (application identity)
-    pub writer_id: WriterId,
-
-    // === Core Event Content ===
-    /// The actual event content - what kind of event this is
-    pub content: ChainEventContent,
-
-    // === Integration Layer (FLOWIP-007) ===
-    /// Causality tracking
-    pub causality: CausalityContext,
-
-    /// Flow and stage context
-    pub flow_context: FlowContext,
-
-    /// Processing and monitoring metadata
-    pub processing_info: ProcessingContext,
-
-    // === CHAIN Maturity Support ===
-    /// Explicit intent (I1 maturity minimum)
-    pub intent: Option<IntentContext>,
-
-    // === Flow-Level Correlation (FLOWIP-054d) ===
-    /// Correlation metadata for flow-level provenance and fan-in inspection.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub correlation: Option<CorrelationContext>,
-
-    /// Provenance for replayed events (FLOWIP-095a).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replay_context: Option<ReplayContext>,
-
-    /// Gateway provenance for accepted ingress events.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ingress_context: Option<IngressContext>,
-
-    // === Cycle Iteration Tracking (FLOWIP-051p) ===
-    /// Per-event cycle depth counter. Incremented at the SCC entry point
-    /// on each round trip. None for events that have never entered a cycle.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cycle_depth: Option<CycleDepth>,
-
-    /// SCC identifier that `cycle_depth` belongs to. When an event enters
-    /// an SCC with a different ID, the depth is reset.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cycle_scc_id: Option<SccId>,
-
-    // === Runtime Instrumentation (FLOWIP-056c) ===
-    /// Runtime snapshot at event creation time
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_context: Option<RuntimeContext>,
-
-    // === Wide Events: Observability Data ===
-    /// Can be attached to ANY event type (Data, FlowSignal, or Delivery)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observability: Option<ObservabilityContext>,
-
-    /// Replay identity for facts produced by an effect boundary.
-    ///
-    /// This is not causal ancestry. Event ancestry remains in `causality`, and
-    /// write ordering remains in the journal envelope's vector clock. This
-    /// field identifies which deterministic `fx.perform` cursor and effect
-    /// descriptor this fact satisfies during replay, without putting framework
-    /// fields inside the domain payload.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effect_provenance: Option<EffectProvenance>,
-
-    /// Flow-global append order (FLOWIP-120n F18): stamped at the journal
-    /// append when absent, preserved through re-admission. The within-
-    /// generation comparator at source-fed ordered fan-ins.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admission_seq: Option<AdmissionSeq>,
+    pub envelope:
+        crate::event::provenance::AuthoredEnvelope<crate::event::provenance::ChainEventProvenance>,
+    pub payload: ChainPayload,
 }
 
-/// The core event content - what kind of event this is
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "content_type", rename_all = "snake_case")]
-pub enum ChainEventContent {
-    /// Application data events
-    #[serde(rename = "data")]
-    Data {
-        event_type: String, // Keep as String for user-defined domain events
-        payload: Value,
-    },
+pub use crate::event::payloads::chain_payload::ChainPayload;
 
-    /// Flow control signals
-    #[serde(rename = "flow_signal")]
-    FlowControl(FlowControlPayload),
+impl std::ops::Deref for ChainEvent {
+    type Target = crate::event::provenance::ChainEventProvenance;
+    fn deref(&self) -> &Self::Target {
+        &self.envelope.provenance.event
+    }
+}
+impl std::ops::DerefMut for ChainEvent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.envelope.provenance.event
+    }
+}
 
-    /// Sink delivery facts
-    #[serde(rename = "delivery")]
-    Delivery(DeliveryPayload),
+impl Serialize for ChainEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+        crate::event::journal_record::JournalPayload::validate(
+            &self.payload,
+            &self.envelope.provenance.event,
+        )
+        .map_err(S::Error::custom)?;
+        let mut event = serializer.serialize_struct("ChainEvent", 2)?;
+        event.serialize_field("envelope", &self.envelope)?;
+        event.serialize_field("payload", &self.payload)?;
+        event.end()
+    }
+}
 
-    /// Stage lifecycle and observability events
-    #[serde(rename = "lifecycle")]
-    Observability(ObservabilityPayload),
+impl<'de> Deserialize<'de> for ChainEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Authored {
+            envelope: crate::event::provenance::AuthoredEnvelope<
+                crate::event::provenance::ChainEventProvenance,
+            >,
+            payload: Value,
+        }
+        let raw = Authored::deserialize(deserializer)?;
+        let payload = ChainPayload::decode(
+            raw.envelope.provenance.event.event_kind,
+            &raw.envelope.provenance.event.event_type,
+            raw.payload,
+        )
+        .map_err(D::Error::custom)?;
+        crate::event::journal_record::JournalPayload::validate(
+            &payload,
+            &raw.envelope.provenance.event,
+        )
+        .map_err(D::Error::custom)?;
+        Ok(Self {
+            envelope: raw.envelope,
+            payload,
+        })
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -186,7 +140,7 @@ pub enum ReplayDisposition {
 impl ChainEvent {
     /// Attach observability context to any event (wide events pattern)
     pub fn with_observability_context(mut self, observability: ObservabilityContext) -> Self {
-        self.observability = Some(observability);
+        self.envelope.observability = Some(observability);
         self
     }
 
@@ -195,8 +149,8 @@ impl ChainEvent {
         self
     }
 
-    pub fn with_runtime_context(mut self, ctx: RuntimeContext) -> Self {
-        self.runtime_context = Some(ctx);
+    pub fn with_runtime_provenance(mut self, ctx: RuntimeProvenance) -> Self {
+        self.runtime = Some(ctx);
         self
     }
 
@@ -220,13 +174,13 @@ impl ChainEvent {
     /// Check event type helpers
     pub fn is_eof(&self) -> bool {
         matches!(
-            self.content,
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+            self.payload,
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
         )
     }
 
     pub fn is_control(&self) -> bool {
-        matches!(self.content, ChainEventContent::FlowControl(_))
+        matches!(self.payload, ChainPayload::FlowControl(_))
     }
 
     pub fn is_system(&self) -> bool {
@@ -234,16 +188,46 @@ impl ChainEvent {
         false
     }
 
-    pub fn is_data(&self) -> bool {
-        matches!(self.content, ChainEventContent::Data { .. })
+    pub fn is_fact(&self) -> bool {
+        matches!(self.payload, ChainPayload::Fact(_))
+    }
+
+    /// Physical input/output accounting and credit population, independent of
+    /// the meaning of a record. Framework effect rows retain their old charge.
+    pub fn consumes_data_credit(&self) -> bool {
+        self.payload.consumes_data_credit()
+    }
+
+    /// Payloads eligible for typed handler contracts and selected feeds.
+    pub fn is_typed_input(&self) -> bool {
+        matches!(
+            self.payload,
+            ChainPayload::Fact(_) | ChainPayload::CompositeData(_)
+        )
+    }
+
+    /// Protected execution facts formerly in the lifecycle lane are not
+    /// delivered to handlers. Effect evidence has its own history/credit rules.
+    pub fn is_transport_excluded_execution(&self) -> bool {
+        matches!(&self.payload, ChainPayload::Execution(p) if !p.consumes_data_credit())
+    }
+
+    pub fn typed_payload(&self) -> Option<Value> {
+        match &self.payload {
+            ChainPayload::Fact(value) => Some(value.clone()),
+            ChainPayload::CompositeData(value) => serde_json::to_value(value).ok(),
+            ChainPayload::Execution(_)
+            | ChainPayload::FlowControl(_)
+            | ChainPayload::Delivery(_) => None,
+        }
     }
 
     pub fn is_delivery(&self) -> bool {
-        matches!(self.content, ChainEventContent::Delivery(_))
+        matches!(self.payload, ChainPayload::Delivery(_))
     }
 
     pub fn is_lifecycle(&self) -> bool {
-        matches!(self.content, ChainEventContent::Observability(_))
+        matches!(&self.payload, ChainPayload::Execution(execution) if !execution.consumes_data_credit())
     }
 
     /// Source-replay disposition (FLOWIP-120n phase 6). `ReAdmit` rows are
@@ -255,39 +239,7 @@ impl ChainEvent {
     /// The one data-dependent case: framework-owned effect records ride the
     /// separate `EffectHistory::load` path, never the source re-injection.
     pub fn replay_disposition(&self) -> ReplayDisposition {
-        match &self.content {
-            ChainEventContent::Data { event_type, .. } => {
-                let is_framework_effect_record = self
-                    .effect_provenance
-                    .as_ref()
-                    .is_some_and(|provenance| provenance.fact_owner.is_framework())
-                    && is_framework_effect_event_type(event_type);
-                if is_framework_effect_record {
-                    ReplayDisposition::ReAuthor
-                } else {
-                    ReplayDisposition::ReAdmit
-                }
-            }
-            ChainEventContent::FlowControl(payload) => match payload {
-                // The catch-up boundary's meaning is its stream position, so
-                // it re-admits like Watermark; EOF re-authors because replay
-                // reproduces source exhaustion (FLOWIP-120n F8).
-                FlowControlPayload::Watermark { .. }
-                | FlowControlPayload::CatchUpComplete { .. } => ReplayDisposition::ReAdmit,
-                FlowControlPayload::Eof { .. }
-                | FlowControlPayload::Checkpoint { .. }
-                | FlowControlPayload::Drain
-                | FlowControlPayload::PipelineAbort { .. }
-                | FlowControlPayload::SourceContract { .. }
-                | FlowControlPayload::ConsumptionProgress { .. }
-                | FlowControlPayload::ConsumptionGap { .. }
-                | FlowControlPayload::ConsumptionFinal { .. }
-                | FlowControlPayload::ReaderStalled { .. }
-                | FlowControlPayload::AtLeastOnceViolation { .. } => ReplayDisposition::ReAuthor,
-            },
-            ChainEventContent::Delivery(_) => ReplayDisposition::ReAuthor,
-            ChainEventContent::Observability(_) => ReplayDisposition::ReAuthor,
-        }
+        self.payload.replay_disposition()
     }
 
     /// Whether this event should be re-injected as a fresh source event during
@@ -302,8 +254,8 @@ impl ChainEvent {
     /// the provided message and kind, and primes `error_hops_remaining` so
     /// stage supervisors can route the event according to FLOWIP-082e/082g.
     pub fn mark_as_error(mut self, reason: impl Into<String>, kind: ErrorKind) -> Self {
-        self.processing_info.status = ProcessingStatus::error_with_kind(reason.into(), Some(kind));
-        self.processing_info.error_hops_remaining = Some(1);
+        self.processing.status = ProcessingStatus::error_with_kind(reason.into(), Some(kind));
+        self.processing.error_hops_remaining = Some(1);
         self
     }
 
@@ -335,79 +287,13 @@ impl ChainEvent {
             .mark_as_error(reason_str, kind)
     }
 
-    /// Return a concise "category.kind" string for logging & metrics.
+    /// Declared application label or descriptor derived from the typed payload.
     pub fn event_type(&self) -> String {
-        match &self.content {
-            ChainEventContent::Data { event_type, .. } => event_type.clone(),
-
-            ChainEventContent::FlowControl(signal) => match signal {
-                FlowControlPayload::Eof { .. } => "control.eof".into(),
-                FlowControlPayload::Watermark { .. } => "control.watermark".into(),
-                FlowControlPayload::CatchUpComplete { .. } => "control.catch_up_complete".into(),
-                FlowControlPayload::Checkpoint { .. } => "control.checkpoint".into(),
-                FlowControlPayload::Drain => "control.drain".into(),
-                FlowControlPayload::PipelineAbort { .. } => "control.pipeline_abort".into(),
-                FlowControlPayload::SourceContract { .. } => "control.source_contract".into(),
-                FlowControlPayload::ConsumptionProgress { .. } => {
-                    "control.consumption_progress".into()
-                }
-                FlowControlPayload::ConsumptionGap { .. } => "control.consumption_gap".into(),
-                FlowControlPayload::ConsumptionFinal { .. } => "control.consumption_final".into(),
-                FlowControlPayload::ReaderStalled { .. } => "control.reader_stalled".into(),
-                FlowControlPayload::AtLeastOnceViolation { .. } => {
-                    "control.at_least_once_violation".into()
-                }
-            },
-
-            ChainEventContent::Delivery(_) => "sink.delivery".into(),
-
-            ChainEventContent::Observability(obs) => match obs {
-                ObservabilityPayload::Stage(stage) => match stage {
-                    StageLifecycle::Running { .. } => "lifecycle.stage.running".into(),
-                    StageLifecycle::Draining { .. } => "lifecycle.stage.draining".into(),
-                    StageLifecycle::Drained { .. } => "lifecycle.stage.drained".into(),
-                    StageLifecycle::Completed { .. } => "lifecycle.stage.completed".into(),
-                    StageLifecycle::Failed { .. } => "lifecycle.stage.failed".into(),
-                },
-                ObservabilityPayload::Metrics(metrics) => match metrics {
-                    MetricsLifecycle::Ready { .. } => "lifecycle.metrics.ready".into(),
-                    MetricsLifecycle::StateSnapshot { .. } => "lifecycle.metrics.state".into(),
-                    MetricsLifecycle::ResourceUsage { .. } => "lifecycle.metrics.resource".into(),
-                    MetricsLifecycle::HttpPullSnapshot { .. } => {
-                        "lifecycle.metrics.http_pull_snapshot".into()
-                    }
-                    MetricsLifecycle::Custom { .. } => "lifecycle.metrics.custom".into(),
-                    MetricsLifecycle::DrainRequested => "lifecycle.metrics.drain".into(),
-                    MetricsLifecycle::Drained { .. } => "lifecycle.metrics.drained".into(),
-                },
-                ObservabilityPayload::Middleware(mw) => match mw {
-                    MiddlewareLifecycle::CircuitBreaker(_) => {
-                        "lifecycle.middleware.circuit_breaker".into()
-                    }
-                    MiddlewareLifecycle::RateLimiter(_) => {
-                        "lifecycle.middleware.rate_limiter".into()
-                    }
-                },
-                // FLOWIP-115e: backpressure is runtime flow control, not
-                // middleware, so its label is not under `middleware`.
-                ObservabilityPayload::Backpressure(_) => "lifecycle.backpressure".into(),
-            },
-        }
+        self.envelope.provenance.event.event_type.clone()
     }
 
-    /// Get payload as JSON value
+    /// JSON body, without infrastructure wrappers.
     pub fn payload(&self) -> Value {
-        match &self.content {
-            ChainEventContent::Data { payload, .. } => payload.clone(),
-            ChainEventContent::FlowControl(signal) => {
-                serde_json::to_value(signal).unwrap_or_default()
-            }
-            ChainEventContent::Delivery(delivery) => {
-                serde_json::to_value(delivery).unwrap_or_default()
-            }
-            ChainEventContent::Observability(lifecycle) => {
-                serde_json::to_value(lifecycle).unwrap_or_default()
-            }
-        }
+        serde_json::to_value(&self.payload).expect("closed payloads serialize to JSON")
     }
 }

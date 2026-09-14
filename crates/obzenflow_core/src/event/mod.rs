@@ -11,7 +11,9 @@ pub mod chain_event;
 pub mod constants;
 pub mod event_envelope;
 pub mod journal_event;
+pub mod journal_record;
 pub mod observability;
+pub mod observation;
 pub mod system_event;
 pub mod types;
 pub mod vector_clock;
@@ -20,19 +22,21 @@ pub mod vector_clock;
 pub mod context;
 pub mod identity;
 pub mod payloads;
+pub mod provenance;
 pub mod schema;
 pub mod status;
 pub mod utils;
 
 // Re-export main types at root level for convenience
 pub use chain_event::{
-    ChainEvent, ChainEventContent, ChainEventFactory, CircuitBreakerAttemptSettledEventParams,
+    ChainEvent, ChainEventFactory, ChainPayload, CircuitBreakerAttemptSettledEventParams,
     CircuitBreakerOpenedEventParams, CircuitBreakerRecoveryCompletedEventParams,
     CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
     CorrelationContext, SourceContractEventParams,
 };
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
+pub use journal_record::JournalRecord;
 pub use payloads::effect_payload::{
     effect_escape_controls_group_id, CanonicalInputHash, EffectAttemptOrdinal,
     EffectAttemptStarted, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
@@ -53,10 +57,12 @@ pub use payloads::stage_fatal_payload::{
 pub use system_event::{
     EdgeLivenessState, MetricsCoordinationEvent, PipelineCancellationCause, PipelineLifecycleEvent,
     PipelineStopAdmission, ReplayLifecycleEvent, StageActivity, StageLifecycleEvent, SystemEvent,
-    SystemEventFactory, SystemEventType,
+    SystemEventFactory, SystemPayload,
 };
 pub use types::{
     AdmissionSeq, CorrelationId, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId,
 };
 
 pub use utils::EventFilter;
+
+pub use payloads::chain_payload::EventKind;

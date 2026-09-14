@@ -44,7 +44,7 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::{ChainEvent, ChainPayload};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -74,7 +74,10 @@ pub struct PositionalRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RowKind {
-    Data { event_type: String },
+    Payload {
+        event_kind: obzenflow_core::event::payloads::chain_payload::EventKind,
+        event_type: String,
+    },
     Watermark,
 }
 
@@ -107,19 +110,22 @@ pub struct EffectIdentity {
 
 /// Project one journal row. `None` means the row is excluded from comparison.
 pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
-    match &event.content {
-        ChainEventContent::Data {
-            event_type,
-            payload,
-        } => Some(ProjectedRow::Positional(PositionalRow {
-            kind: RowKind::Data {
-                event_type: event_type.clone(),
-            },
-            payload: comparable_data_payload(event_type, payload),
-            status: Some(semantic_status(event)),
-            identity: effect_identity(event),
-        })),
-        ChainEventContent::FlowControl(FlowControlPayload::Watermark { timestamp, .. }) => {
+    match &event.payload {
+        payload if payload.consumes_data_credit() => {
+            Some(ProjectedRow::Positional(PositionalRow {
+                kind: RowKind::Payload {
+                    event_kind: payload.kind(),
+                    event_type: event.event_type().to_owned(),
+                },
+                payload: comparable_data_payload(
+                    matches!(payload, ChainPayload::CompositeData(_)),
+                    &payload.contract_body().ok()?,
+                ),
+                status: Some(semantic_status(event)),
+                identity: effect_identity(event),
+            }))
+        }
+        ChainPayload::FlowControl(FlowControlPayload::Watermark { timestamp, .. }) => {
             Some(ProjectedRow::Positional(PositionalRow {
                 kind: RowKind::Watermark,
                 payload: json!({ "timestamp": timestamp }),
@@ -127,7 +133,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                 identity: None,
             }))
         }
-        ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        ChainPayload::FlowControl(FlowControlPayload::Eof {
             kind,
             writer_seq_by_event_type,
             ..
@@ -139,15 +145,17 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
             });
             Some(ProjectedRow::EofEvidence(evidence))
         }
-        ChainEventContent::FlowControl(_)
-        | ChainEventContent::Delivery(_)
-        | ChainEventContent::Observability(_) => None,
+        ChainPayload::FlowControl(_)
+        | ChainPayload::Delivery(_)
+        | ChainPayload::Execution(_)
+        | ChainPayload::Fact(_)
+        | ChainPayload::CompositeData(_) => None,
     }
 }
 
-fn comparable_data_payload(event_type: &str, payload: &Value) -> Value {
+fn comparable_data_payload(composite: bool, payload: &Value) -> Value {
     let mut payload = payload.clone();
-    if event_type.starts_with("ai.map_reduce.") {
+    if composite {
         if let Some(object) = payload.as_object_mut() {
             if object.contains_key("job_key") {
                 object.insert(
@@ -161,7 +169,7 @@ fn comparable_data_payload(event_type: &str, payload: &Value) -> Value {
 }
 
 fn semantic_status(event: &ChainEvent) -> SemanticStatus {
-    match &event.processing_info.status {
+    match &event.processing.status {
         ProcessingStatus::Success => SemanticStatus {
             status: "success".to_string(),
             error_message: None,
@@ -181,7 +189,7 @@ fn effect_identity(event: &ChainEvent) -> Option<EffectIdentity> {
     let provenance = event.effect_provenance.as_ref()?;
     Some(EffectIdentity {
         event_id: event.id.to_string(),
-        event_time: event.processing_info.event_time,
+        event_time: event.processing.event_time,
         namespace: provenance.cursor.recorded_flow_id.to_string(),
         provenance: serde_json::to_value(provenance).unwrap_or(Value::Null),
     })
@@ -209,7 +217,8 @@ mod tests {
         };
         assert_eq!(
             row.kind,
-            RowKind::Data {
+            RowKind::Payload {
+                event_kind: obzenflow_core::event::EventKind::Fact,
                 event_type: "order.placed".to_string()
             }
         );
@@ -220,15 +229,14 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_job_keys_are_normalised_as_run_local_identity() {
-        let event = ChainEventFactory::data_event(
-            writer(),
-            "ai.map_reduce.planning_manifest.v1",
-            json!({
-                "job_key": "01ABCDEFG",
-                "chunk_count": 2,
-                "seed_payload": {"id": 7}
-            }),
-        );
+        use obzenflow_core::TypedPayload;
+        let event = obzenflow_core::ai::AiMapReduceTaggedPartial {
+            job_key: obzenflow_core::EventId::new(),
+            chunk_index: 0,
+            chunk_count: 2,
+            partial: json!({"id": 7}),
+        }
+        .to_event(writer());
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
             panic!("AI map-reduce data row must project positionally");
         };
@@ -236,8 +244,9 @@ mod tests {
             row.payload,
             json!({
                 "job_key": "<run-local-composite-activation>",
+                "chunk_index": 0,
                 "chunk_count": 2,
-                "seed_payload": {"id": 7}
+                "partial": {"id": 7}
             })
         );
     }

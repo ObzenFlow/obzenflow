@@ -122,7 +122,7 @@ mod tests {
     fn unknown_fact() -> TypedFact {
         TypedFact {
             event_type: EventType::from("carrier.unknown.v1"),
-            payload: serde_json::json!({}),
+            payload: crate::event::ChainPayload::Fact(serde_json::json!({})),
         }
     }
 

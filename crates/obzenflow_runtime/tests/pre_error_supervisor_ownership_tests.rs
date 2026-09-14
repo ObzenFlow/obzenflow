@@ -11,7 +11,7 @@ const JOIN_ENRICHING: &str = include_str!("../src/stages/join/supervisor/enrichi
 const JOIN_LIVE: &str = include_str!("../src/stages/join/supervisor/live.rs");
 const JOIN_DRAINING: &str = include_str!("../src/stages/join/supervisor/draining.rs");
 
-const PRE_ERROR_GUARD: &str = "if matches!(event.processing_info.status, ProcessingStatus::Error";
+const PRE_ERROR_GUARD: &str = "if matches!(event.processing.status, ProcessingStatus::Error";
 const FATAL_BRANCH: &str = "if let Some(fatal) = err.as_fatal()";
 
 fn positions(source: &str, needle: &str) -> Vec<usize> {

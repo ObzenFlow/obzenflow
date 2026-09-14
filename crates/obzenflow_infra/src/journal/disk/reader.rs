@@ -10,9 +10,8 @@
 
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
-use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
-use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::{event_envelope::JournalGroupMember, journal_record::JournalRecord};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
@@ -102,8 +101,6 @@ pub struct DiskJournalReader<T: JournalEvent> {
     yielded_group_member: Option<JournalGroupMember>,
     /// Path to the journal file (for error messages)
     path: PathBuf,
-    /// Journal ID for creating JournalWriterId
-    journal_id: JournalId,
     /// Whether we've reached EOF
     at_end: bool,
     /// Shared lock to avoid reading partial writes
@@ -117,7 +114,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     /// Create a new live-tail reader starting from the beginning
     pub async fn new(
         path: PathBuf,
-        journal_id: JournalId,
+        _journal_id: JournalId,
         read_write_lock: Arc<RwLock<()>>,
     ) -> Result<Self, JournalError> {
         // If file doesn't exist, create an empty reader at EOF
@@ -139,7 +136,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 pending_group_next_index: 0,
                 yielded_group_member: None,
                 path,
-                journal_id,
                 at_end: true,
                 read_write_lock: read_write_lock.clone(),
                 create_if_missing: true,
@@ -176,7 +172,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             pending_group_next_index: 0,
             yielded_group_member: None,
             path,
-            journal_id,
             at_end: false,
             read_write_lock,
             create_if_missing: true,
@@ -189,7 +184,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     /// Archive readers pass a sealed policy (FLOWIP-120q).
     pub(crate) async fn open_existing(
         path: PathBuf,
-        journal_id: JournalId,
+        _journal_id: JournalId,
         read_write_lock: Arc<RwLock<()>>,
         policy: ReadPolicy,
     ) -> Result<Self, JournalError> {
@@ -220,7 +215,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             pending_group_next_index: 0,
             yielded_group_member: None,
             path,
-            journal_id,
             at_end: false,
             read_write_lock,
             create_if_missing: false,
@@ -427,7 +421,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
 #[async_trait]
 impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         // Don't permanently latch at_end: a live-tail reader retries after EOF to
         // pick up new appends. Only previously buffered complete frames can be
         // reused. A partial buffered suffix may have been repaired since the
@@ -463,22 +457,15 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         }
         match disposition {
             Disposition::Yield(frame) => {
-                let journal_group_id = frame.group_id().map(str::to_string);
-                let journal_group_member = self.yielded_group_member.take();
+                let _journal_group_id = frame.group_id().map(str::to_string);
+                let _journal_group_member = self.yielded_group_member.take();
                 let mut records = frame.into_records();
                 let record = records
                     .pop()
                     .expect("reader yields exactly one logical record");
                 self.at_end = false;
                 self.stall_polls = 0;
-                Ok(Some(EventEnvelope {
-                    journal_writer_id: JournalWriterId::from(self.journal_id),
-                    vector_clock: record.vector_clock,
-                    timestamp: record.timestamp,
-                    journal_group_id,
-                    journal_group_member,
-                    event: record.event,
-                }))
+                Ok(Some(record))
             }
             Disposition::EndOfCommittedRecords => {
                 // Clean EOF (live tail) or a tolerated final torn tail (sealed).
@@ -552,16 +539,14 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::disk::log_record::{serialize_record, LogRecord};
+    use crate::journal::disk::log_record::serialize_record;
     use chrono::Utc;
     use crc32fast::Hasher;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::JournalEvent;
     use obzenflow_core::{ChainEvent, JournalId, StageId, WriterId};
     use std::io::Write;
     use tempfile::NamedTempFile;
-    use ulid::Ulid;
 
     #[derive(Default)]
     pub(super) struct FrameReadGate {
@@ -620,8 +605,16 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(
-            reader.next().await.unwrap().unwrap().event.id,
-            first.event.id
+            reader
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .envelope
+                .provenance
+                .event
+                .id,
+            first.envelope.provenance.event.id
         );
         let gate = Arc::new(FrameReadGate::default());
         reader.frame_read_gate = Some(gate.clone());
@@ -635,14 +628,25 @@ mod tests {
             "cancellation must not retain a stream positioned after the unconsumed frame"
         );
         assert_eq!(
-            reader.next().await.unwrap().unwrap().event.id,
-            large.event.id
+            reader
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .envelope
+                .provenance
+                .event
+                .id,
+            large.envelope.provenance.event.id
         );
         for (index, expected) in group.iter().enumerate() {
             let row = reader.next().await.unwrap().unwrap();
-            assert_eq!(row.event.id, expected.event.id);
             assert_eq!(
-                row.journal_group_member,
+                row.envelope.provenance.event.id,
+                expected.envelope.provenance.event.id
+            );
+            assert_eq!(
+                row.envelope.provenance.journal.journal_group_member,
                 Some(JournalGroupMember {
                     index: index as u32,
                     size: 2
@@ -664,14 +668,17 @@ mod tests {
             let make_record = || {
                 let event =
                     ChainEventFactory::data_event(stage.into(), "tail", serde_json::json!({}));
-                LogRecord {
-                    event_id: Ulid::new(),
-                    writer_id: stage.into(),
-                    journal_id,
-                    vector_clock: VectorClock::new(),
-                    timestamp: Utc::now(),
+                obzenflow_core::event::JournalRecord::commit_event(
                     event,
-                }
+                    obzenflow_core::event::provenance::JournalProvenance {
+                        journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                        vector_clock: VectorClock::new(),
+                        timestamp: Utc::now(),
+                        journal_group_id: None,
+                        journal_group_member: None,
+                    },
+                )
+                .expect("valid record")
             };
             let first = make_record();
             write_framed_record(&mut file, &first);
@@ -685,8 +692,16 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(
-                reader.next().await.unwrap().unwrap().event.id,
-                first.event.id
+                reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .provenance
+                    .event
+                    .id,
+                first.envelope.provenance.event.id
             );
             if observe_partial {
                 assert!(reader.next().await.unwrap().is_none());
@@ -700,22 +715,41 @@ mod tests {
             let second = make_record();
             write_framed_record(&mut file, &second);
             assert_eq!(
-                reader.next().await.unwrap().unwrap().event.id,
-                second.event.id
+                reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .provenance
+                    .event
+                    .id,
+                second.envelope.provenance.event.id
             );
             assert!(reader.next().await.unwrap().is_none());
             assert!(reader.is_at_end());
             let third = make_record();
             write_framed_record(&mut file, &third);
             assert_eq!(
-                reader.next().await.unwrap().unwrap().event.id,
-                third.event.id
+                reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .provenance
+                    .event
+                    .id,
+                third.envelope.provenance.event.id
             );
             assert_eq!(reader.position(), 3);
         }
     }
 
-    fn write_framed_record<T: JournalEvent>(file: &mut NamedTempFile, record: &LogRecord<T>) {
+    fn write_framed_record<P: obzenflow_core::event::journal_record::JournalPayload>(
+        file: &mut NamedTempFile,
+        record: &obzenflow_core::event::JournalRecord<P>,
+    ) {
         let json_body = serialize_record(record).unwrap();
         let mut hasher = Hasher::new();
         hasher.update(&json_body);
@@ -741,14 +775,17 @@ mod tests {
                 "test.event",
                 serde_json::json!({"index": i}),
             );
-            let record = LogRecord {
-                journal_id,
-                event_id: Ulid::new(),
-                writer_id,
-                vector_clock: VectorClock::new(),
-                timestamp: Utc::now(),
+            let record = obzenflow_core::event::JournalRecord::commit_event(
                 event,
-            };
+                obzenflow_core::event::provenance::JournalProvenance {
+                    journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                    vector_clock: VectorClock::new(),
+                    timestamp: Utc::now(),
+                    journal_group_id: None,
+                    journal_group_member: None,
+                },
+            )
+            .expect("valid record");
             write_framed_record(&mut temp_file, &record);
         }
         temp_file.flush().unwrap();
@@ -762,7 +799,7 @@ mod tests {
 
         for i in 0..5 {
             let envelope = reader.next().await.unwrap().expect("Should have event");
-            assert_eq!(envelope.event.payload()["index"], i);
+            assert_eq!(envelope.payload()["index"], i);
             assert_eq!(reader.position(), i as u64 + 1);
         }
 
@@ -786,14 +823,17 @@ mod tests {
                 "test.event",
                 serde_json::json!({"index": i}),
             );
-            let record = LogRecord {
-                journal_id,
-                event_id: Ulid::new(),
-                writer_id,
-                vector_clock: VectorClock::new(),
-                timestamp: Utc::now(),
+            let record = obzenflow_core::event::JournalRecord::commit_event(
                 event,
-            };
+                obzenflow_core::event::provenance::JournalProvenance {
+                    journal_writer_id: obzenflow_core::JournalWriterId::from(journal_id),
+                    vector_clock: VectorClock::new(),
+                    timestamp: Utc::now(),
+                    journal_group_id: None,
+                    journal_group_member: None,
+                },
+            )
+            .expect("valid record");
             write_framed_record(&mut temp_file, &record);
         }
         temp_file.flush().unwrap();
@@ -811,7 +851,7 @@ mod tests {
         .unwrap();
         assert_eq!(reader.position(), 5);
         let envelope = reader.next().await.unwrap().expect("Should have event");
-        assert_eq!(envelope.event.payload()["index"], 5);
+        assert_eq!(envelope.payload()["index"], 5);
 
         // Create new reader from position 7
         let mut reader2 =
@@ -822,7 +862,7 @@ mod tests {
 
         // Should read index 7
         let envelope = reader2.next().await.unwrap().expect("Should have event");
-        assert_eq!(envelope.event.payload()["index"], 7);
+        assert_eq!(envelope.payload()["index"], 7);
     }
 
     #[tokio::test]

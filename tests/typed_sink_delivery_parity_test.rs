@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use obzenflow::sinks::{CsvProjection, CsvSink};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, EventEnvelope, StageFatalCode, StageFatalReason,
-    StageFatalRecorded,
+    ChainEvent, ChainPayload, JournalRecord, StageFatalCode, StageFatalReason, StageFatalRecorded,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
@@ -207,7 +206,7 @@ async fn read_stage_journal(
     run_dir: &Path,
     stage_name: &str,
     manifest_field: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
@@ -225,11 +224,17 @@ async fn read_stage_journal(
     events
 }
 
-async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage(
+    run_dir: &Path,
+    stage_name: &str,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
 }
 
-async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage_errors(
+    run_dir: &Path,
+    stage_name: &str,
+) -> Vec<JournalRecord<obzenflow_core::event::ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
@@ -245,23 +250,26 @@ struct DeliveryEvidence {
 }
 
 fn delivery_evidence(
-    source: &[EventEnvelope<ChainEvent>],
-    sink: &[EventEnvelope<ChainEvent>],
+    source: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+    sink: &[JournalRecord<obzenflow_core::event::ChainPayload>],
 ) -> Vec<DeliveryEvidence> {
     let inputs = source
         .iter()
         .filter_map(|envelope| {
-            SinkRecord::from_event(&envelope.event).map(|record| (envelope.event.id, record.id))
+            SinkRecord::from_event(&envelope.authored())
+                .map(|record| (envelope.envelope.provenance.event.id, record.id))
         })
         .collect::<HashMap<EventId, u64>>();
 
     sink.iter()
         .filter_map(|envelope| {
-            let ChainEventContent::Delivery(payload) = &envelope.event.content else {
+            let ChainPayload::Delivery(payload) = &envelope.payload else {
                 return None;
             };
             Some(DeliveryEvidence {
                 parent_record: envelope
+                    .envelope
+                    .provenance
                     .event
                     .causality
                     .parent_ids
@@ -477,12 +485,12 @@ async fn invalid_settlement_records_stage_fatal_without_a_delivery_receipt() {
     let data = read_stage(&run, "invalid").await;
     assert!(data
         .iter()
-        .all(|envelope| { !matches!(envelope.event.content, ChainEventContent::Delivery(_)) }));
+        .all(|envelope| { !matches!(envelope.payload, ChainPayload::Delivery(_)) }));
 
     let fatals = read_stage_errors(&run, "invalid")
         .await
         .iter()
-        .filter_map(|envelope| StageFatalRecorded::from_event(&envelope.event))
+        .filter_map(|envelope| StageFatalRecorded::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(fatals.len(), 1);
     assert_eq!(fatals[0].code, StageFatalCode::Protocol);

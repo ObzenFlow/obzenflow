@@ -801,10 +801,11 @@ impl FlowApplication {
                     None
                 };
 
-                if let (Some(collector), Some(system_journal)) =
+                if let (Some(collector), Some(_system_journal)) =
                     (surface_metrics_collector.clone(), system_journal)
                 {
-                    let emitter = HttpSurfaceMetricsEmitter::new(collector, system_journal);
+                    let emitter =
+                        HttpSurfaceMetricsEmitter::new(collector, flow_handle.host_observations());
                     application.tasks.push(ApplicationTask(
                         emitter.spawn_periodic(surface_metrics_interval),
                     ));

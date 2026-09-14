@@ -10,7 +10,7 @@
 //! The actual execution (forwarding, state transitions) is left to the caller.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
+use obzenflow_core::{JournalRecord, StageId};
 
 use crate::messaging::upstream_subscription::EofOutcome;
 use crate::pipeline::config::CycleGuardConfig;
@@ -59,7 +59,7 @@ pub(crate) enum ControlResolution {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_control_event_awaiting_pauses(
     signal: &FlowControlPayload,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     strategy: &dyn SignalGate,
     processing_ctx: &mut ProcessingContext,
     cycle_config: Option<&CycleGuardConfig>,
@@ -87,7 +87,7 @@ pub(crate) async fn resolve_control_event_awaiting_pauses(
             ControlResolution::Pause(duration) => {
                 tracing::info!(
                     stage_name = %stage_name,
-                    event_type = envelope.event.event_type(),
+                    event_type = envelope.event_type(),
                     duration = ?duration,
                     "Delaying control event"
                 );
@@ -105,7 +105,7 @@ pub(crate) async fn resolve_control_event_awaiting_pauses(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_control_event(
     signal: &FlowControlPayload,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     strategy: &dyn SignalGate,
     processing_ctx: &mut ProcessingContext,
     cycle_config: Option<&CycleGuardConfig>,
@@ -136,7 +136,7 @@ pub(crate) fn resolve_control_event(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_forward_control_event(
     signal: &FlowControlPayload,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     cycle_config: Option<&CycleGuardConfig>,
     mut cycle_guard: Option<&mut CycleGuard>,
     eof_outcome: Option<&EofOutcome>,
@@ -144,7 +144,7 @@ pub(crate) fn resolve_forward_control_event(
     contract_reader_count: usize,
     drain_is_terminal: bool,
 ) -> ControlAction {
-    if envelope.event.is_eof() {
+    if envelope.is_eof() {
         // The SCC entry point buffers external EOF and suppresses all other EOF
         // signals, so it does not participate in cycle-boundary drain readiness.
         let is_entry_point = cycle_config.is_some_and(|cfg| cfg.is_entry_point);
@@ -174,7 +174,7 @@ pub(crate) fn resolve_forward_control_event(
 /// Resolve an EOF event into a `ControlAction`.
 ///
 pub(crate) fn resolve_eof(
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     cycle_guard_config: Option<&CycleGuardConfig>,
     cycle_guard: Option<&CycleGuard>,
     eof_outcome: Option<&EofOutcome>,
@@ -232,21 +232,21 @@ pub(crate) fn resolve_drain(
 }
 
 pub(crate) fn is_terminal_eof(
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     upstream_stage: Option<StageId>,
 ) -> bool {
     let Some(upstream) = upstream_stage else {
         return true;
     };
 
-    match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof {
             writer_id,
             ..
         }) => match writer_id {
             Some(obzenflow_core::WriterId::Stage(eof_stage)) => *eof_stage == upstream,
             Some(_) => false,
-            None => match envelope.event.writer_id {
+            None => match envelope.envelope.provenance.event.writer_id {
                 obzenflow_core::WriterId::Stage(stage) => stage == upstream,
                 _ => false,
             },
@@ -269,15 +269,15 @@ mod tests {
         let other = StageId::new();
 
         let mut eof = ChainEventFactory::eof_event(WriterId::Stage(upstream), true);
-        if let obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        if let obzenflow_core::event::ChainPayload::FlowControl(FlowControlPayload::Eof {
             writer_id,
             ..
-        }) = &mut eof.content
+        }) = &mut eof.payload
         {
             *writer_id = None;
         }
 
-        let env = EventEnvelope::new(JournalWriterId::new(), eof);
+        let env = JournalRecord::new(JournalWriterId::new(), eof);
 
         assert!(
             is_terminal_eof(&env, Some(upstream)),

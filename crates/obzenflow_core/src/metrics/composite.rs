@@ -9,7 +9,6 @@
 //! output counts. The projection in this module never guesses a boundary from
 //! a first entry/exit member, stage names, payload heuristics, or display state.
 
-use crate::event::chain_event::ChainEventContent;
 use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
 use crate::event::ChainEvent;
 use crate::id::{CompositeId, StageId};
@@ -516,9 +515,10 @@ impl CompositeDurationAccumulator {
         journal_stage: StageId,
         event: &ChainEvent,
     ) {
-        let ChainEventContent::Data { event_type, .. } = &event.content else {
+        if !event.is_typed_input() {
             return;
-        };
+        }
+        let event_type = &event.envelope.provenance.event.event_type;
 
         for boundary in boundaries {
             let output_ports: Vec<_> = boundary
@@ -584,7 +584,7 @@ impl CompositeDurationAccumulator {
                     }
 
                     let Some(duration_ms) = event
-                        .processing_info
+                        .processing
                         .event_time
                         .checked_sub(activation.entered_at_ms)
                     else {
@@ -936,7 +936,7 @@ mod tests {
             "checkout.command.v1",
             json!({}),
         );
-        entry.processing_info.event_time = entered_at_ms;
+        entry.processing.event_time = entered_at_ms;
         let activation = entry.id;
         entry = entry
             .try_with_composite_activations(vec![CompositeActivationContext::new(
@@ -948,7 +948,7 @@ mod tests {
             .unwrap();
         let mut exit =
             ChainEventFactory::data_event(WriterId::Stage(exit_member), event_type, json!({}));
-        exit.processing_info.event_time = exited_at_ms;
+        exit.processing.event_time = exited_at_ms;
         exit.try_with_composite_activations(entry.composite_activations().to_vec())
             .unwrap()
     }
@@ -959,7 +959,7 @@ mod tests {
         let valid = exit_event(&boundary, success, "checkout.completed.v1", 1_000, 1_250);
         let mut second_exit = valid.clone();
         second_exit.id = EventId::new();
-        second_exit.processing_info.event_time = 1_300;
+        second_exit.processing.event_time = 1_300;
         let invalid = exit_event(&boundary, failed, "checkout.failed.v1", 2_000, 1_900);
         let mut accumulator = CompositeDurationAccumulator::new(vec![0.1, 0.25, 1.0]);
         accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
@@ -1015,7 +1015,7 @@ mod tests {
     fn duration_excludes_signals_unmatched_data_and_internal_member_output() {
         let (boundary, input, success, _, _, _) = boundary();
         let mut unmatched = exit_event(&boundary, success, "internal.fact.v1", 10, 20);
-        unmatched.content = ChainEventContent::Delivery(
+        unmatched.payload = crate::event::ChainPayload::Delivery(
             crate::event::payloads::delivery_payload::DeliveryPayload::success(
                 crate::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,

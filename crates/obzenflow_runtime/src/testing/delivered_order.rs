@@ -16,7 +16,7 @@
 //! Constraint: the projection only witnesses inputs that produced at least one
 //! output, so determinism fixtures should emit one output per consumed input.
 
-use obzenflow_core::event::{ChainEvent, EventEnvelope};
+use obzenflow_core::event::JournalRecord;
 use obzenflow_core::EventId;
 use std::collections::{HashMap, HashSet};
 
@@ -54,14 +54,17 @@ impl DeliveredOrderProjection {
     /// `(stable stage key, envelopes)`. Outputs whose parent is not found in
     /// any upstream (for example framework rows) are skipped.
     pub fn from_envelopes(
-        stage_outputs: &[EventEnvelope<ChainEvent>],
-        upstreams: &[(String, Vec<EventEnvelope<ChainEvent>>)],
+        stage_outputs: &[JournalRecord<obzenflow_core::event::ChainPayload>],
+        upstreams: &[(
+            String,
+            Vec<JournalRecord<obzenflow_core::event::ChainPayload>>,
+        )],
     ) -> Self {
         let mut parent_index: HashMap<EventId, &str> = HashMap::new();
         for (stage_key, envelopes) in upstreams {
             for envelope in envelopes {
-                if envelope.event.is_data() {
-                    parent_index.insert(envelope.event.id, stage_key.as_str());
+                if envelope.consumes_data_credit() {
+                    parent_index.insert(envelope.envelope.provenance.event.id, stage_key.as_str());
                 }
             }
         }
@@ -71,8 +74,8 @@ impl DeliveredOrderProjection {
         let mut rows = Vec::new();
 
         for envelope in stage_outputs {
-            let event = &envelope.event;
-            if !event.is_data() && !event.is_delivery() {
+            let event = &envelope.authored();
+            if !event.consumes_data_credit() && !event.is_delivery() {
                 continue;
             }
             let Some(parent_id) = event.causality.parent_ids.first().copied() else {
@@ -90,16 +93,13 @@ impl DeliveredOrderProjection {
                 })
                 .clone();
 
-            let payload = match &event.content {
-                obzenflow_core::event::ChainEventContent::Data { payload, .. } => {
-                    serde_json::to_string(payload).unwrap_or_default()
-                }
-                // Sink receipts include a fresh `processed_at` timestamp. The
-                // receipt's exact parent is the ordering witness; comparing
-                // its payload would turn wall-clock variance into a false
-                // replay-order divergence.
-                obzenflow_core::event::ChainEventContent::Delivery(_) => String::new(),
-                _ => String::new(),
+            // All credit-bearing payload families preserve their exact body.
+            // Delivery timestamps do not participate in the ordering witness.
+            let payload = if event.consumes_data_credit() {
+                serde_json::to_string(&event.payload.contract_body().expect("typed payload"))
+                    .expect("JSON body")
+            } else {
+                String::new()
             };
 
             rows.push(DeliveredOrderRow {

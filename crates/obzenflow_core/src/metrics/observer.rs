@@ -8,8 +8,7 @@
 //! without knowing their implementation details, maintaining clean
 //! architectural boundaries.
 
-use crate::event::event_envelope::EventEnvelope;
-use crate::event::{ChainEvent, SystemEvent};
+use crate::event::journal_record::JournalRecord;
 
 /// Trait for observing events for metrics collection
 ///
@@ -19,10 +18,10 @@ use crate::event::{ChainEvent, SystemEvent};
 /// from multiple threads concurrently.
 pub trait MetricsObserver: Send + Sync {
     /// Called when a chain event is written to any journal
-    fn on_chain_event(&self, envelope: &EventEnvelope<ChainEvent>);
+    fn on_chain_event(&self, envelope: &JournalRecord<crate::event::ChainPayload>);
 
     /// Called when a system event is written to the control journal
-    fn on_system_event(&self, envelope: &EventEnvelope<SystemEvent>);
+    fn on_system_event(&self, envelope: &JournalRecord<crate::event::SystemPayload>);
 
     /// Called periodically to allow time-based aggregations
     fn on_tick(&self);
@@ -43,11 +42,11 @@ impl NoOpMetricsObserver {
 }
 
 impl MetricsObserver for NoOpMetricsObserver {
-    fn on_chain_event(&self, _envelope: &EventEnvelope<ChainEvent>) {
+    fn on_chain_event(&self, _envelope: &JournalRecord<crate::event::ChainPayload>) {
         // No-op: metrics disabled
     }
 
-    fn on_system_event(&self, _envelope: &EventEnvelope<SystemEvent>) {
+    fn on_system_event(&self, _envelope: &JournalRecord<crate::event::SystemPayload>) {
         // No-op: metrics disabled
     }
 
@@ -76,7 +75,7 @@ mod tests {
 
         // Create the envelope with potentially different writer_id (who wrote to journal)
         let journal_writer = JournalWriterId::new();
-        let envelope = EventEnvelope::new(journal_writer, event);
+        let envelope = JournalRecord::new(journal_writer, event);
 
         // These should complete without panicking
         observer.on_chain_event(&envelope);
@@ -94,7 +93,7 @@ mod tests {
             ChainEventFactory::data_event(event_writer, "test.event", serde_json::json!({}));
 
         let journal_writer = JournalWriterId::new();
-        let envelope = EventEnvelope::new(journal_writer, event);
+        let envelope = JournalRecord::new(journal_writer, event);
 
         observer.on_chain_event(&envelope);
         // Note: Can't test on_system_event here as we created a ChainEvent
@@ -103,7 +102,7 @@ mod tests {
 
     #[test]
     fn test_system_event_observation() {
-        use crate::event::{StageLifecycleEvent, SystemEvent, SystemEventType};
+        use crate::event::{StageLifecycleEvent, SystemEvent, SystemPayload};
         use crate::id::{StageId, SystemId};
 
         let observer = NoOpMetricsObserver::new();
@@ -112,7 +111,7 @@ mod tests {
         let system_id = SystemId::new();
         let system_event = SystemEvent::new(
             WriterId::from(system_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id: StageId::new(),
                 event: StageLifecycleEvent::Running,
             },
@@ -120,7 +119,7 @@ mod tests {
 
         // Create the envelope
         let journal_writer = JournalWriterId::new();
-        let envelope = EventEnvelope::new(journal_writer, system_event);
+        let envelope = JournalRecord::new(journal_writer, system_event);
 
         // This should complete without panicking
         observer.on_system_event(&envelope);

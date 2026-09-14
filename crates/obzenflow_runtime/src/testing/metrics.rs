@@ -17,7 +17,7 @@ use std::sync::Arc;
 pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_coverage(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
-    use obzenflow_core::event::{MetricsCoordinationEvent, SystemEvent, SystemEventType};
+    use obzenflow_core::event::{MetricsCoordinationEvent, SystemEvent, SystemPayload};
     use obzenflow_core::metrics::{
         AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter,
     };
@@ -37,7 +37,7 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
     };
     use crate::metrics::MetricsInputs;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{context::RuntimeContext, ChainEventFactory};
+    use obzenflow_core::event::{context::RuntimeProvenance, ChainEventFactory};
 
     let mut journals = make_journals();
     let system_id = SystemId::new();
@@ -74,12 +74,14 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
             ChainEventFactory::data_event(stage.into(), "test.fact", serde_json::json!({}));
         event.flow_context.stage_id = stage;
         event = event
-            .with_runtime_context(RuntimeContext {
-                events_processed_total: count,
-                errors_total: count,
-                errors_by_kind: HashMap::from([(ErrorKind::Unknown, count)]),
-                ..crate::metrics::instrumentation::StageInstrumentation::new()
-                    .snapshot_with_control()
+            .with_runtime_provenance(RuntimeProvenance {
+                accounting: obzenflow_core::event::context::ExecutionAccounting {
+                    events_processed_total: count,
+                    errors_total: count,
+                    errors_by_kind: HashMap::from([(ErrorKind::Unknown, count)]),
+                    ..Default::default()
+                },
+                ..crate::metrics::instrumentation::StageInstrumentation::new().snapshot()
             })
             .mark_as_error("expected", ErrorKind::Unknown);
         rows.push((kind, target.append(event, None).await.unwrap()));
@@ -115,7 +117,7 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
     assert!(context.metrics_store.last_event_id.is_none());
     assert!(matches!(
         io.data_subscription.poll_batch().await,
-        Ok(Some(batch)) if batch.events[0].event.id == rows[0].1.event.id
+        Ok(Some(batch)) if batch.events[0].envelope.provenance.event.id == rows[0].1.envelope.provenance.event.id
     ));
     assert!(!system
         .read_all_unordered()
@@ -124,8 +126,8 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
         .iter()
         .any(|row| {
             matches!(
-                row.event.event,
-                SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Drained)
+                row.payload,
+                SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained)
             )
         }));
 

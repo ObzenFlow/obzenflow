@@ -6,10 +6,10 @@ use super::*;
 use crate::application::lifecycle_observation::{Progress, Reader};
 use obzenflow_core::event::{
     PipelineCancellationCause, PipelineLifecycleEvent as Lifecycle, PipelineStopAdmission,
-    SystemEvent, SystemEventType,
+    SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::{JournalError, JournalReader};
-use obzenflow_core::{EventEnvelope, TypedPayload};
+use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -140,20 +140,22 @@ struct GatedReader {
     before_running: bool,
     gate: Option<oneshot::Receiver<Result<(), JournalError>>>,
     entered: Option<oneshot::Sender<()>>,
-    held: Option<EventEnvelope<SystemEvent>>,
+    held: Option<JournalRecord<obzenflow_core::event::SystemPayload>>,
     saw_ready: bool,
 }
 #[async_trait::async_trait]
 impl JournalReader<SystemEvent> for GatedReader {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<SystemEvent>>, JournalError> {
+    async fn next(
+        &mut self,
+    ) -> Result<Option<JournalRecord<obzenflow_core::event::SystemPayload>>, JournalError> {
         let event = match self.held.take() {
             Some(event) => Some(event),
             None => {
                 let event = self.inner.next().await?;
                 if event.as_ref().is_some_and(|event| {
                     matches!(
-                        event.event.event,
-                        SystemEventType::PipelineLifecycle(Lifecycle::ReadyForRun { .. })
+                        event.payload,
+                        SystemPayload::PipelineLifecycle(Lifecycle::ReadyForRun { .. })
                     )
                 }) {
                     self.saw_ready = true;
@@ -163,8 +165,8 @@ impl JournalReader<SystemEvent> for GatedReader {
                     && self.saw_ready
                     && event.as_ref().is_some_and(|event| {
                         matches!(
-                            event.event.event,
-                            SystemEventType::PipelineLifecycle(
+                            event.payload,
+                            SystemPayload::PipelineLifecycle(
                                 Lifecycle::Starting | Lifecycle::Running { .. }
                             )
                         )
@@ -181,8 +183,8 @@ impl JournalReader<SystemEvent> for GatedReader {
             || self.saw_ready
                 && event.as_ref().is_some_and(|event| {
                     matches!(
-                        event.event.event,
-                        SystemEventType::PipelineLifecycle(
+                        event.payload,
+                        SystemPayload::PipelineLifecycle(
                             Lifecycle::Starting | Lifecycle::Running { .. }
                         )
                     )
@@ -321,8 +323,8 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
                 .unwrap();
             let admissions: Vec<_> = facts
                 .into_iter()
-                .filter_map(|fact| match fact.event.event {
-                    SystemEventType::PipelineLifecycle(Lifecycle::StopAdmitted { admission }) => {
+                .filter_map(|fact| match fact.payload {
+                    SystemPayload::PipelineLifecycle(Lifecycle::StopAdmitted { admission }) => {
                         Some(admission)
                     }
                     _ => None,

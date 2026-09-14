@@ -236,8 +236,12 @@ impl Iterator for JournalRows {
                 self.policy,
             ) {
                 Disposition::Yield(frame) => {
-                    self.pending
-                        .extend(frame.into_records().into_iter().map(|record| record.event));
+                    self.pending.extend(
+                        frame
+                            .into_records()
+                            .into_iter()
+                            .map(|record| record.into_authored()),
+                    );
                     return self.pending.pop_front().map(Ok);
                 }
                 // A tolerated final torn tail ends the sealed history cleanly.
@@ -268,7 +272,7 @@ mod tests {
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
-            (Some(serde_json::json!("4.0")), "4.0"),
+            (Some(serde_json::json!("5.0")), "5.0"),
         ] {
             let temp = tempfile::tempdir().expect("temporary archive");
             let mut manifest = serde_json::json!({

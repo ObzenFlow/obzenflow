@@ -55,9 +55,9 @@ impl SourceBatchFacts {
     pub fn from_events(events: &[ChainEvent]) -> Self {
         Self {
             event_count: events.len(),
-            has_error_marked: events.iter().any(|event| {
-                matches!(event.processing_info.status, ProcessingStatus::Error { .. })
-            }),
+            has_error_marked: events
+                .iter()
+                .any(|event| matches!(event.processing.status, ProcessingStatus::Error { .. })),
         }
     }
 
@@ -167,13 +167,25 @@ pub trait SourcePolicy: Send + Sync {
 
 /// Source boundary backed by a declared-order policy chain.
 pub struct PerSourcePolicyBoundary {
+    recorder: std::sync::OnceLock<
+        std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    >,
     policies: Arc<Vec<Arc<dyn SourcePolicy>>>,
     writer_id: WriterId,
 }
 
 impl PerSourcePolicyBoundary {
+    fn observation_recorder(
+        &self,
+    ) -> std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder> {
+        self.recorder.get().cloned().unwrap_or_else(|| {
+            std::sync::Arc::new(obzenflow_core::event::observation::NoObservations)
+        })
+    }
+
     pub fn new(policies: Vec<Arc<dyn SourcePolicy>>, writer_id: WriterId) -> Self {
         Self {
+            recorder: std::sync::OnceLock::new(),
             policies: Arc::new(policies),
             writer_id,
         }
@@ -187,6 +199,13 @@ impl PerSourcePolicyBoundary {
 type SourceAdmitGuard = Option<Box<dyn SourceAdmissionGuard>>;
 
 impl SourceBoundary for PerSourcePolicyBoundary {
+    fn install_observation_recorder(
+        &self,
+        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+        let _ = self.recorder.set(recorder);
+    }
+
     fn around_poll<'a>(&'a self, execute: SourcePollExecution<'a>) -> SourceBoundaryFuture<'a> {
         Box::pin(async move {
             if self.policies.is_empty() {
@@ -197,6 +216,9 @@ impl SourceBoundary for PerSourcePolicyBoundary {
             }
 
             let mut ctx = SourcePolicyCtx::new(self.writer_id);
+            ctx.middleware_ctx = ctx
+                .middleware_ctx
+                .with_observation_recorder(self.observation_recorder());
             let mut admitted: Vec<(&Arc<dyn SourcePolicy>, SourceAdmitGuard)> = Vec::new();
 
             for policy in self.policies.iter() {

@@ -12,7 +12,7 @@ use obzenflow_adapters::sources::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
@@ -434,7 +434,7 @@ async fn source_events(run_dir: &Path) -> Vec<ChainEvent> {
         .await
         .expect("read source journal")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -708,13 +708,16 @@ async fn resume_initializes_only_after_the_recorded_prefix_crosses_continue_live
     let resumed_archive = latest_run_dir(&journal_base);
     let events = source_events(&resumed_archive).await;
     assert_eq!(
-        events.iter().filter(|event| event.is_data()).count(),
+        events
+            .iter()
+            .filter(|event| event.consumes_data_credit())
+            .count(),
         RECORDED + 1
     );
     assert!(events.iter().any(|event| {
         matches!(
-            &event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            &event.payload,
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
         )
     }));
 }

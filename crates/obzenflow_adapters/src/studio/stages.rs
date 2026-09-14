@@ -5,20 +5,20 @@
 //! Keeps each stage's latest status and any final metrics for Studio's initial
 //! display, including stages that finished before the browser connected.
 
-use obzenflow_core::event::event_envelope::SystemEventEnvelope;
+use obzenflow_core::event::journal_record::SystemJournalRecord;
 use obzenflow_core::web::SseFrame;
 
 #[derive(Clone, Default)]
 pub(super) struct StageLifecycleView {
-    latest_by_stage: std::collections::BTreeMap<obzenflow_core::StageId, SystemEventEnvelope>,
+    latest_by_stage: std::collections::BTreeMap<obzenflow_core::StageId, SystemJournalRecord>,
 }
 
 impl StageLifecycleView {
-    pub(super) fn observe(&mut self, envelope: &SystemEventEnvelope) {
+    pub(super) fn observe(&mut self, envelope: &SystemJournalRecord) {
         use obzenflow_core::event::system_event::StageLifecycleEvent;
-        use obzenflow_core::event::SystemEventType;
+        use obzenflow_core::event::SystemPayload;
 
-        let SystemEventType::StageLifecycle { stage_id, event } = &envelope.event.event else {
+        let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
             return;
         };
 
@@ -26,28 +26,40 @@ impl StageLifecycleView {
         // earlier totals so a newly connected browser still sees them.
         let should_replace = match (self.latest_by_stage.get(stage_id), event) {
             (None, _) => true,
-            (Some(prev), StageLifecycleEvent::Completed { metrics: None }) => !matches!(
-                prev.event.event,
-                SystemEventType::StageLifecycle {
-                    event: StageLifecycleEvent::Completed { metrics: Some(_) },
+            (Some(prev), StageLifecycleEvent::Completed { accounting: None }) => !matches!(
+                prev.payload,
+                SystemPayload::StageLifecycle {
+                    event: StageLifecycleEvent::Completed {
+                        accounting: Some(_)
+                    },
                     ..
                 }
             ),
-            (Some(prev), StageLifecycleEvent::Cancelled { metrics: None, .. }) => !matches!(
-                prev.event.event,
-                SystemEventType::StageLifecycle {
+            (
+                Some(prev),
+                StageLifecycleEvent::Cancelled {
+                    accounting: None, ..
+                },
+            ) => !matches!(
+                prev.payload,
+                SystemPayload::StageLifecycle {
                     event: StageLifecycleEvent::Cancelled {
-                        metrics: Some(_),
+                        accounting: Some(_),
                         ..
                     },
                     ..
                 }
             ),
-            (Some(prev), StageLifecycleEvent::Failed { metrics: None, .. }) => !matches!(
-                prev.event.event,
-                SystemEventType::StageLifecycle {
+            (
+                Some(prev),
+                StageLifecycleEvent::Failed {
+                    accounting: None, ..
+                },
+            ) => !matches!(
+                prev.payload,
+                SystemPayload::StageLifecycle {
                     event: StageLifecycleEvent::Failed {
-                        metrics: Some(_),
+                        accounting: Some(_),
                         ..
                     },
                     ..

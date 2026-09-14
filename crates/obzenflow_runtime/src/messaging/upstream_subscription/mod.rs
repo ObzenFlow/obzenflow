@@ -37,7 +37,7 @@ use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
+use obzenflow_core::event::{ChainEvent, JournalEvent, JournalRecord};
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{AdmissionSeq, EventId, EventType, ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -111,7 +111,7 @@ fn record_receipt(
     };
 
     let upstream_stage = reader_progress[index].stage_id;
-    let obzenflow_core::event::ChainEventContent::Delivery(payload) = &receipt.content else {
+    let obzenflow_core::event::ChainPayload::Delivery(payload) = &receipt.payload else {
         tracing::warn!(
             owner = %owner_label,
             receipt_id = %receipt.id,
@@ -199,7 +199,7 @@ pub(super) struct ReaderSlot<T: JournalEvent> {
 /// specially (tiebreak-only ordering, exhaustion at delivery) without
 /// re-deriving it on the delivery side.
 pub(super) struct HeldHead<T: JournalEvent> {
-    pub(super) envelope: EventEnvelope<T>,
+    pub(super) envelope: JournalRecord<T::Payload>,
     pub(super) is_authored_eof: bool,
     pub(super) is_drain: bool,
     /// The announced generation when this head is a catch-up watermark
@@ -597,7 +597,7 @@ where
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`
     /// for the upstream that delivered the consumed parent event.
     ///
-    /// This is used by sink supervisors to feed `ChainEventContent::Delivery`
+    /// This is used by sink supervisors to feed `ChainPayload::Delivery`
     /// events (written to the sink's own journal) into the same per-edge
     /// contract chain that observed the consumed input event via `on_read`.
     pub fn notify_delivery_receipt(&mut self, receipt: &ChainEvent, upstream_stage: StageId) {
@@ -633,7 +633,7 @@ where
 
     /// Record a just-journalled delivery receipt and advance the receipt watermark if possible.
     ///
-    /// This is called by sink supervisors after appending a `ChainEventContent::Delivery` event.
+    /// This is called by sink supervisors after appending a `ChainPayload::Delivery` event.
     /// It clears exact-parent bookkeeping for every terminal receipt and returns the new receipt
     /// watermark triple when (and only when) accounted receipts become contiguous. Forwarded data
     /// is settled without entering the immediate upstream's authored-prefix contract population.
@@ -692,20 +692,13 @@ where
         &self,
         parent_event_id: EventId,
         reader_progress: &[ReaderProgress],
-    ) -> Option<(StageId, EventEnvelope<ChainEvent>)> {
+    ) -> Option<(StageId, JournalRecord<obzenflow_core::event::ChainPayload>)> {
         reader_progress.iter().find_map(|progress| {
             progress
                 .pending_delivery_inputs
                 .get(&parent_event_id)
                 .map(|pending| {
-                    let envelope = EventEnvelope {
-                        journal_writer_id: JournalWriterId::default(),
-                        vector_clock: pending.vector_clock.clone(),
-                        timestamp: chrono::Utc::now(),
-                        journal_group_id: None,
-                        journal_group_member: None,
-                        event: pending.event.clone(),
-                    };
+                    let envelope = pending.clone();
                     (progress.stage_id, envelope)
                 })
         })

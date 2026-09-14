@@ -10,11 +10,9 @@ use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimit
 use obzenflow_core::{
     event::chain_event::ChainEvent,
     event::payloads::delivery_payload::DeliveryMethod,
+    event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
-    event::payloads::observability_payload::{
-        CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
-    },
-    event::{ChainEventContent, StageLifecycleEvent, SystemEvent, SystemEventType},
+    event::{ChainPayload, StageLifecycleEvent, SystemEvent, SystemPayload},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
     BoundedBindingEvidence, StageOutputs, TypedPayload,
@@ -25,12 +23,11 @@ use obzenflow_dsl::{
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    is_framework_effect_event_type, transactional_effect_port_slot, Effect, EffectBinding,
-    EffectBindingEvidence, EffectBindingUse, EffectCommitHandle, EffectContext, EffectCursor,
-    EffectError, EffectOutcomePayload, EffectPortResolver, EffectPortSlot, EffectPortSlotSet,
-    EffectRecord, EffectRegistrationBuilder, EffectSafety, Effects, IdempotencyKey,
-    LogicalEffectBindingName, Named, NamedEffect, SinkRedeliverySafety, TransactionalEffectPort,
-    EFFECT_RECORD_EVENT_TYPE,
+    transactional_effect_port_slot, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse,
+    EffectCommitHandle, EffectContext, EffectCursor, EffectError, EffectOutcomePayload,
+    EffectPortResolver, EffectPortSlot, EffectPortSlotSet, EffectRecord, EffectRegistrationBuilder,
+    EffectSafety, Effects, IdempotencyKey, LogicalEffectBindingName, Named, NamedEffect,
+    SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -1594,7 +1591,7 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .await
         .expect("stage journal should read")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -1615,7 +1612,7 @@ async fn read_stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEv
         .await
         .expect("stage error journal should read")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -1636,7 +1633,7 @@ async fn read_system_events(run_dir: &Path) -> Vec<SystemEvent> {
         .await
         .expect("system journal should read")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -1673,8 +1670,8 @@ async fn assert_replay_stateful_contract_failure_archive(
     let stage_events = read_stage_events(run_dir, "effectful").await;
     assert!(
         !stage_events.iter().any(|event| matches!(
-            event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+            event.payload,
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
         )),
         "a stateful contract violation must prevent the effectful stage from committing EOF"
     );
@@ -1703,10 +1700,10 @@ async fn assert_replay_stateful_contract_failure_archive(
     let system_events = read_system_events(run_dir).await;
     let mut failure_count = 0;
     for system_event in system_events {
-        let SystemEventType::StageLifecycle {
+        let SystemPayload::StageLifecycle {
             stage_id: lifecycle_stage_id,
             event,
-        } = system_event.event
+        } = system_event.payload
         else {
             continue;
         };
@@ -1715,7 +1712,11 @@ async fn assert_replay_stateful_contract_failure_archive(
         }
 
         match event {
-            StageLifecycleEvent::Failed { error, metrics, .. } => {
+            StageLifecycleEvent::Failed {
+                error,
+                accounting: metrics,
+                ..
+            } => {
                 failure_count += 1;
                 let (offending_fact_id, offending_fact_type) = fact_identities
                     .get(offending_fact_index)
@@ -1765,46 +1766,33 @@ async fn assert_replay_stateful_contract_failure_archive(
 /// for capture and failure compatibility.
 fn is_framework_effect_fact(event: &ChainEvent) -> bool {
     matches!(
-        &event.content,
-        ChainEventContent::Data { event_type, .. }
-            if event
-                .effect_provenance
-                .as_ref()
-                .is_some_and(|provenance| provenance.fact_owner.is_framework())
-                && is_framework_effect_event_type(event_type)
-    )
+        &event.payload,
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+    ) && event
+        .effect_provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.fact_owner.is_framework())
 }
 
 fn is_domain_effect_outcome_fact(event: &ChainEvent) -> bool {
-    matches!(
-        &event.content,
-        ChainEventContent::Data { event_type, .. }
-            if event_type == ReplayEffectValue::versioned_event_type().as_str()
+    event.is_fact()
+        && event.event_type() == ReplayEffectValue::versioned_event_type()
+        && event
+            .effect_provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.fact_owner.is_user())
+}
+
+fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
+    match &event.payload {
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+            if event.event_type() == EFFECT_RECORD_EVENT_TYPE
                 && event
                     .effect_provenance
                     .as_ref()
-                    .is_some_and(|provenance| provenance.fact_owner.is_user())
-    )
-}
-
-/// Decode the `EffectRecord` carried by a framework-owned effect-record `Data`
-/// fact, mirroring the runtime's replay-history reader. Returns `None` for any
-/// other event, including capture facts.
-fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
-    match &event.content {
-        ChainEventContent::Data {
-            event_type,
-            payload,
-        } if event
-            .effect_provenance
-            .as_ref()
-            .is_some_and(|provenance| provenance.fact_owner.is_framework())
-            && event_type == EFFECT_RECORD_EVENT_TYPE =>
+                    .is_some_and(|provenance| provenance.fact_owner.is_framework()) =>
         {
-            Some(
-                serde_json::from_value(payload.clone())
-                    .expect("framework-owned effect record should decode"),
-            )
+            Some(record.clone())
         }
         _ => None,
     }
@@ -1814,7 +1802,7 @@ fn recorded_effect_cursor(event: &ChainEvent) -> Option<EffectCursor> {
     if let Some(record) = framework_effect_record(event) {
         return Some(record.cursor);
     }
-    if matches!(event.content, ChainEventContent::Data { .. }) {
+    if event.consumes_data_credit() {
         return event
             .effect_provenance
             .as_ref()
@@ -1830,14 +1818,12 @@ async fn circuit_breaker_retry_events_in_stage(run_dir: &Path, stage_key: &str) 
         .into_iter()
         .filter(|event| {
             matches!(
-                event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::RetryScheduled { .. }
-                            | CircuitBreakerEvent::RetrySucceeded { .. }
-                            | CircuitBreakerEvent::RetryExhausted { .. }
-                            | CircuitBreakerEvent::RetryStoppedNonRetryable { .. }
-                    )
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::RetryScheduled { .. }
+                        | CircuitBreakerFact::RetrySucceeded { .. }
+                        | CircuitBreakerFact::RetryExhausted { .. }
+                        | CircuitBreakerFact::RetryStoppedNonRetryable { .. }
                 ))
             )
         })
@@ -1868,14 +1854,14 @@ async fn circuit_breaker_recovery_completions_in_stage(
     read_stage_events(run_dir, stage_key)
         .await
         .into_iter()
-        .filter_map(|event| match event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RecoveryCompleted {
                     cursor,
                     total_attempts,
                     backoff_elapsed_ms,
                     recovery_elapsed_ms,
-                }),
+                },
             )) => Some(RecoveryCompletionEvidence {
                 cursor,
                 total_attempts,
@@ -1904,10 +1890,8 @@ async fn rate_limiter_events_in_stage(run_dir: &Path, stage_key: &str) -> usize 
         .into_iter()
         .filter(|event| {
             matches!(
-                event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::RateLimiter(_)
-                ))
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::RateLimiter(_))
             )
         })
         .count()
@@ -1927,15 +1911,22 @@ async fn rate_limiter_runtime_activity_in_stage(
     run_dir: &Path,
     stage_key: &str,
 ) -> (u64, u64, f64) {
+    let manifest = archive_manifest(run_dir);
+    let flow_id = manifest["flow_id"].as_str().expect("flow identity");
     read_stage_events(run_dir, stage_key)
         .await
         .into_iter()
-        .filter_map(|event| event.runtime_context)
-        .fold((0u64, 0u64, 0f64), |(ev, dl, ds), rc| {
+        .filter_map(|event| event.envelope.observability)
+        // Archived samples keep their original identity during replay. Only
+        // captures made by this execution describe new limiter activity.
+        .filter(|packet| packet.capture.capture_scope.flow_id.to_string() == flow_id)
+        .filter_map(|packet| packet.runtime)
+        .filter_map(|runtime| runtime.rate_limiter)
+        .fold((0u64, 0u64, 0f64), |(ev, dl, ds), rl| {
             (
-                ev.max(rc.rl_events_total),
-                dl.max(rc.rl_delayed_total),
-                ds.max(rc.rl_delay_seconds_total),
+                ev.max(rl.events_total),
+                dl.max(rl.delayed_total),
+                ds.max(rl.delay_seconds_total),
             )
         })
 }
@@ -1948,10 +1939,16 @@ async fn effect_rate_limiter_runtime_activity_in_stage(
     run_dir: &Path,
     stage_key: &str,
 ) -> (u64, u64, f64) {
+    let manifest = archive_manifest(run_dir);
+    let flow_id = manifest["flow_id"].as_str().expect("flow identity");
     read_stage_events(run_dir, stage_key)
         .await
         .into_iter()
-        .filter_map(|event| event.runtime_context)
+        .filter_map(|event| event.envelope.observability)
+        // Archived samples keep their original identity during replay. Only
+        // captures made by this execution describe new limiter activity.
+        .filter(|packet| packet.capture.capture_scope.flow_id.to_string() == flow_id)
+        .filter_map(|packet| packet.runtime)
         .fold((0u64, 0u64, 0f64), |(ev, dl, ds), rc| {
             let (sum_ev, sum_dl, sum_ds) =
                 rc.effect_rate_limiters
@@ -2182,16 +2179,15 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
         .iter()
         .filter(|event| {
             matches!(
-                &event.content,
-                ChainEventContent::Data { event_type, .. }
-                    if event_type == ReplayOutput::versioned_event_type().as_str()
+                &event.payload,
+                ChainPayload::Fact(_) if event.event_type() == ReplayOutput::versioned_event_type()
             )
         })
         .count();
     let eof_writer_seq = effectful_events
         .iter()
-        .find_map(|event| match &event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) => {
+        .find_map(|event| match &event.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) => {
                 writer_seq.map(|seq| seq.0)
             }
             _ => None,
@@ -2684,7 +2680,8 @@ async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
     // The limiter embeds tokens-consumed (`rl_events_total`), delayed-event
     // (`rl_delayed_total`), and delay-seconds (`rl_delay_seconds_total`) totals via
     // the instrumentation snapshotter. Strict replay must leave every one at zero on
-    // every stage. The live run above proves the source limiter is active
+    // every stage. Original attached captures are retained without being relabelled
+    // as new activity. The live run above proves the source limiter is active
     // (`live_delayed > 0`), so the zero-on-replay assertion is not vacuous.
     for stage in ["inputs", "effectful", "collector"] {
         let (events_total, delayed_total, delay_seconds) =
@@ -2860,12 +2857,11 @@ async fn effectful_stateful_policy_rejection_authors_flat_domain_fact_live_and_r
     let allocation_events = read_stage_events(&archive_dir, "allocate").await;
     let failed_effect_records = allocation_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } if event_type == EFFECT_RECORD_EVENT_TYPE => {
-                serde_json::from_value::<EffectRecord>(payload.clone()).ok()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
+                if event.event_type() == EFFECT_RECORD_EVENT_TYPE =>
+            {
+                Some(record.clone())
             }
             _ => None,
         })
@@ -4251,14 +4247,14 @@ async fn collected_binding_dispatches_transactional_effect_through_port() {
     let exported_transactional_completions: Vec<_> =
         exported_chain_events(&live_archive, &temp.path().join("transactional-live.jsonl"))
             .into_iter()
-            .filter_map(|event| match event.content {
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+            .filter_map(|event| match event.payload {
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::RecoveryCompleted {
                         cursor,
                         total_attempts,
                         backoff_elapsed_ms,
                         recovery_elapsed_ms,
-                    }),
+                    },
                 )) => Some(RecoveryCompletionEvidence {
                     cursor,
                     total_attempts,
@@ -4307,14 +4303,14 @@ async fn collected_binding_dispatches_transactional_effect_through_port() {
         &temp.path().join("transactional-replay.jsonl"),
     )
     .into_iter()
-    .filter_map(|event| match event.content {
-        ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+    .filter_map(|event| match event.payload {
+        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+            CircuitBreakerFact::RecoveryCompleted {
                 cursor,
                 total_attempts,
                 backoff_elapsed_ms,
                 recovery_elapsed_ms,
-            }),
+            },
         )) => Some(RecoveryCompletionEvidence {
             cursor,
             total_attempts,
@@ -4649,7 +4645,7 @@ async fn per_effect_breaker_builds_on_multi_effect_stages() {
     let effect_breakers: Vec<(String, u64)> = read_stage_events(&run_dir, "effectful")
         .await
         .into_iter()
-        .filter_map(|event| event.runtime_context)
+        .filter_map(|event| event.envelope.observability?.runtime)
         .flat_map(|rc| {
             rc.effect_circuit_breakers
                 .into_iter()

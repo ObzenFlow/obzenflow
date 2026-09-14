@@ -445,7 +445,7 @@ impl ApplicationLifecycle {
                 #[cfg(feature = "warp-server")]
                 if let Some(emitter) = self.metrics_emitter.take() {
                     self.begin(Box::pin(async move {
-                        emitter.flush().await;
+                        emitter.capture_final();
                         Observed::MetricsFlushed
                     }));
                     return;

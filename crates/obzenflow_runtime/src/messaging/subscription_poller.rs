@@ -13,9 +13,11 @@ use std::fmt::Debug;
 
 /// Result of polling a subscription for events
 #[derive(Debug)]
+// Keep the delivered record inline, preserving the existing allocation-free poll handoff.
+#[allow(clippy::large_enum_variant)]
 pub enum PollResult<T: JournalEvent> {
     /// An event is available
-    Event(obzenflow_core::EventEnvelope<T>),
+    Event(obzenflow_core::JournalRecord<T::Payload>),
 
     /// The journal cursor advanced across a transport-filtered row.
     ///

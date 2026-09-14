@@ -26,7 +26,7 @@ use std::sync::Arc;
 /// ```ignore
 /// use obzenflow_runtime::stages::common::handlers::TransformHandler;
 /// use obzenflow_core::ChainEvent;
-/// use obzenflow_core::event::ChainEventContent;
+/// use obzenflow_core::event::ChainPayload;
 /// use obzenflow_runtime::stages::common::handler_error::HandlerError;
 /// use std::collections::HashMap;
 /// use serde_json::{json, Value};
@@ -43,7 +43,7 @@ use std::sync::Arc;
 ///     fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>> {
 ///         // Enrich event with cached metadata
 ///         if let Some(metadata) = self.cache.get(&event.event_type()) {
-///             if let ChainEventContent::Data { ref mut payload, .. } = event.content {
+///             if let ChainPayload::Data { ref mut payload, .. } = event.payload {
 ///                 payload["metadata"] = metadata.clone();
 ///             }
 ///         }
@@ -85,6 +85,12 @@ pub trait TransformHandler: Send + Sync {
     /// default ignores it.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 
+    fn install_observation_recorder(
+        &mut self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
+
     /// Install the runtime-owned writer identity for this transform stage.
     ///
     /// Framework adapters that create new events use this identity rather
@@ -125,6 +131,12 @@ pub trait UnifiedTransformHandler: private::SealedUnifiedTransformHandler + Send
     /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
     fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 
+    fn install_observation_recorder(
+        &mut self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
+
     /// Runtime-owned transform-stage identity forwarded to internal adapters.
     #[doc(hidden)]
     fn install_writer_id(&mut self, _writer_id: WriterId) {}
@@ -149,6 +161,13 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         TransformHandler::install_lineage_policy(self, policy)
+    }
+
+    fn install_observation_recorder(
+        &mut self,
+        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+        TransformHandler::install_observation_recorder(self, recorder)
     }
 
     fn install_writer_id(&mut self, writer_id: WriterId) {
@@ -311,6 +330,13 @@ impl<H> UnifiedTransformHandler for EffectfulTransformHandlerAdapter<H>
 where
     H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
+    fn install_observation_recorder(
+        &mut self,
+        recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+        self.effect_boundary.install_observation_recorder(recorder);
+    }
+
     async fn process(
         &self,
         event: ChainEvent,

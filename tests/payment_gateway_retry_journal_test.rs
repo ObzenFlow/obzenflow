@@ -10,14 +10,10 @@ pub mod payment_domain;
 mod retry_fixture;
 
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
-use obzenflow_core::event::payloads::effect_payload::EFFECT_RECORD_EVENT_TYPE;
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
-    ObservabilityPayload,
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
 };
-use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, EffectFailureCause, EffectOutcomePayload, EffectRecord,
-};
+use obzenflow_core::event::{ChainEvent, ChainPayload, EffectFailureCause, EffectOutcomePayload};
 use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_runtime::effects::EffectCursor;
 use obzenflow_runtime::runtime_config::{
@@ -172,11 +168,11 @@ fn exported_events(jsonl: &str) -> impl Iterator<Item = serde_json::Value> + '_ 
 fn data_event_count(jsonl: &str, event_type: &str) -> usize {
     exported_events(jsonl)
         .filter(|row| {
-            row.pointer("/event/content/content_type")
+            row.pointer("/envelope/provenance/event/event_kind")
                 .and_then(|value| value.as_str())
-                == Some("data")
+                == Some("fact")
                 && row
-                    .pointer("/event/content/event_type")
+                    .pointer("/envelope/provenance/event/event_type")
                     .and_then(|value| value.as_str())
                     == Some(event_type)
         })
@@ -186,11 +182,11 @@ fn data_event_count(jsonl: &str, event_type: &str) -> usize {
 fn payment_effect_outcome_group_count(jsonl: &str) -> usize {
     exported_events(jsonl)
         .filter_map(|row| {
-            (row.pointer("/event/effect_provenance/descriptor/effect_type")
+            (row.pointer("/envelope/provenance/event/effect_provenance/descriptor/effect_type")
                 .and_then(|value| value.as_str())
                 == Some("payment.authorize"))
             .then(|| {
-                row.pointer("/event/effect_provenance/group_id")
+                row.pointer("/envelope/provenance/event/effect_provenance/group_id")
                     .and_then(|value| value.as_str())
                     .expect("payment effect fact should carry its outcome group")
                     .to_string()
@@ -203,26 +199,18 @@ fn payment_effect_outcome_group_count(jsonl: &str) -> usize {
 fn payment_terminal_group_counters(jsonl: &str) -> (u64, u64) {
     exported_events(jsonl)
         .filter(|row| {
-            row.pointer("/event/runtime_context/effect_circuit_breakers")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|breakers| {
-                    breakers.iter().any(|breaker| {
-                        breaker
-                            .get("effect_type")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("payment.authorize")
-                    })
-                })
+            row.pointer("/envelope/provenance/event/flow_context/stage_name")
+                .and_then(serde_json::Value::as_str) == Some("authorize_payment")
         })
         .fold((0, 0), |(committed, failed), row| {
             (
                 committed.max(
-                    row.pointer("/event/runtime_context/terminal_groups_committed_total")
+                    row.pointer("/envelope/provenance/event/runtime/accounting/terminal_groups_committed_total")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                 ),
                 failed.max(
-                    row.pointer("/event/runtime_context/terminal_group_commit_failures_total")
+                    row.pointer("/envelope/provenance/event/runtime/accounting/terminal_group_commit_failures_total")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0),
                 ),
@@ -249,14 +237,14 @@ struct AttemptSettlement {
 
 fn attempt_settlements(jsonl: &str) -> Vec<AttemptSettlement> {
     exported_chain_events(jsonl)
-        .filter_map(|event| match event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::AttemptSettled {
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::AttemptSettled {
                     cursor,
                     attempt,
                     health_classification,
                     ..
-                }),
+                },
             )) => Some(AttemptSettlement {
                 cursor,
                 attempt,
@@ -269,17 +257,17 @@ fn attempt_settlements(jsonl: &str) -> Vec<AttemptSettlement> {
 
 fn breaker_transition_counts(jsonl: &str) -> (usize, usize, usize) {
     exported_chain_events(jsonl).fold((0, 0, 0), |(opened, half_open, closed), event| match event
-        .content
+        .payload
     {
-        ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Opened { .. }),
-        )) => (opened + 1, half_open, closed),
-        ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::HalfOpen { .. }),
+        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+            ..
+        })) => (opened + 1, half_open, closed),
+        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+            CircuitBreakerFact::HalfOpen { .. },
         )) => (opened, half_open + 1, closed),
-        ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Closed { .. }),
-        )) => (opened, half_open, closed + 1),
+        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+            ..
+        })) => (opened, half_open, closed + 1),
         _ => (opened, half_open, closed),
     })
 }
@@ -292,13 +280,13 @@ struct RetrySchedule {
 
 fn retry_schedules(jsonl: &str) -> Vec<RetrySchedule> {
     exported_chain_events(jsonl)
-        .filter_map(|event| match event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryScheduled {
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RetryScheduled {
                     cursor,
                     next_attempt,
                     ..
-                }),
+                },
             )) => Some(RetrySchedule {
                 cursor,
                 next_attempt,
@@ -317,13 +305,13 @@ struct RetrySuccess {
 
 fn retry_successes(jsonl: &str) -> Vec<RetrySuccess> {
     exported_chain_events(jsonl)
-        .filter_map(|event| match event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetrySucceeded {
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RetrySucceeded {
                     cursor,
                     total_attempts,
                     terminal_classification,
-                }),
+                },
             )) => Some(RetrySuccess {
                 cursor,
                 total_attempts,
@@ -338,12 +326,10 @@ fn retry_terminal_failure_count(jsonl: &str) -> usize {
     exported_chain_events(jsonl)
         .filter(|event| {
             matches!(
-                event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::RetryExhausted { .. }
-                            | CircuitBreakerEvent::RetryStoppedNonRetryable { .. }
-                    )
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::RetryExhausted { .. }
+                        | CircuitBreakerFact::RetryStoppedNonRetryable { .. }
                 ))
             )
         })
@@ -358,15 +344,13 @@ struct TerminalFailure {
 
 fn payment_terminal_failures(jsonl: &str) -> Vec<TerminalFailure> {
     let mut failures: Vec<_> = exported_chain_events(jsonl)
-        .filter_map(|event| match event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } if event_type == EFFECT_RECORD_EVENT_TYPE => {
-                let record: EffectRecord = serde_json::from_value(payload)
-                    .expect("framework effect-record payload should decode");
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) => {
                 assert_eq!(
                     event
+                        .envelope
+                        .provenance
+                        .event
                         .effect_provenance
                         .as_ref()
                         .map(|provenance| &provenance.cursor),
@@ -406,14 +390,14 @@ struct RecoveryCompletion {
 
 fn recovery_completions(jsonl: &str) -> Vec<RecoveryCompletion> {
     exported_chain_events(jsonl)
-        .filter_map(|event| match event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RecoveryCompleted {
+        .filter_map(|event| match event.payload {
+            ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                CircuitBreakerFact::RecoveryCompleted {
                     cursor,
                     total_attempts,
                     backoff_elapsed_ms,
                     recovery_elapsed_ms,
-                }),
+                },
             )) => Some(RecoveryCompletion {
                 cursor,
                 total_attempts,
@@ -429,6 +413,9 @@ fn payment_outcome_cursors(jsonl: &str) -> std::collections::HashSet<EffectCurso
     exported_chain_events(jsonl)
         .filter_map(|event| {
             event
+                .envelope
+                .provenance
+                .event
                 .effect_provenance
                 .filter(|provenance| provenance.descriptor.effect_type == "payment.authorize")
                 .map(|provenance| provenance.cursor)
@@ -462,7 +449,7 @@ fn last_payment_breaker_counts(jsonl: &str) -> BreakerCounts {
     let mut last = None;
     for row in exported_events(jsonl) {
         let Some(breakers) = row
-            .pointer("/event/runtime_context/effect_circuit_breakers")
+            .pointer("/envelope/observability/runtime/effect_circuit_breakers")
             .and_then(|value| value.as_array())
         else {
             continue;
@@ -504,7 +491,10 @@ struct LimiterCounts {
 
 fn payment_limiter_counts(event: &ChainEvent) -> Option<LimiterCounts> {
     event
-        .runtime_context
+        .envelope
+        .observability
+        .as_ref()?
+        .runtime
         .as_ref()?
         .effect_rate_limiters
         .iter()
@@ -530,18 +520,10 @@ fn last_payment_limiter_counts(jsonl: &str) -> LimiterCounts {
 fn payment_failure_limiter_snapshots(jsonl: &str) -> Vec<(EffectCursor, LimiterCounts)> {
     exported_chain_events(jsonl)
         .filter_map(|event| {
-            let ChainEventContent::Data {
-                ref event_type,
-                ref payload,
-            } = event.content
+            let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload
             else {
                 return None;
             };
-            if event_type != EFFECT_RECORD_EVENT_TYPE {
-                return None;
-            }
-            let record: EffectRecord = serde_json::from_value(payload.clone())
-                .expect("framework effect-record payload should decode");
             if record.descriptor.effect_type.as_str() != "payment.authorize"
                 || !matches!(record.outcome, EffectOutcomePayload::Failed { .. })
             {
@@ -549,7 +531,7 @@ fn payment_failure_limiter_snapshots(jsonl: &str) -> Vec<(EffectCursor, LimiterC
             }
             let snapshot = payment_limiter_counts(&event)
                 .expect("live payment failure record should carry its limiter snapshot");
-            Some((record.cursor, snapshot))
+            Some((record.cursor.clone(), snapshot))
         })
         .collect()
 }

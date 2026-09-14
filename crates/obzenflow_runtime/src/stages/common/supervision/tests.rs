@@ -27,7 +27,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventEnvelope, SccId, StageId, WriterId};
+use obzenflow_core::{JournalRecord, SccId, StageId, WriterId};
 use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -45,7 +45,7 @@ struct FixedActionStrategy {
 impl SignalGate for FixedActionStrategy {
     fn handle_eof(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         self.eof.clone()
@@ -53,7 +53,7 @@ impl SignalGate for FixedActionStrategy {
 
     fn handle_watermark(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         self.other.clone()
@@ -61,7 +61,7 @@ impl SignalGate for FixedActionStrategy {
 
     fn handle_checkpoint(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         self.other.clone()
@@ -69,7 +69,7 @@ impl SignalGate for FixedActionStrategy {
 
     fn handle_drain(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         self.drain.clone()
@@ -82,7 +82,7 @@ struct PauseEofOnceStrategy;
 impl SignalGate for PauseEofOnceStrategy {
     fn handle_eof(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
         ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         if ctx.custom_state.contains_key("paused_eof_once") {
@@ -112,9 +112,9 @@ fn resolve_control_event_entry_point_suppresses_non_terminal_forwarded_eof() {
     let forwarded_origin = StageId::new_const(2);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(forwarded_origin), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -151,9 +151,9 @@ fn resolve_control_event_entry_point_buffers_external_terminal_eof() {
     let upstream = StageId::new_const(1);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -191,9 +191,9 @@ fn resolve_control_event_entry_point_suppresses_internal_terminal_eof() {
     let internal = StageId::new_const(2);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(internal), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -230,9 +230,9 @@ fn resolve_control_event_drain_respects_stage_policy() {
     let stage = StageId::new_const(1);
 
     let drain = ChainEventFactory::drain_event(WriterId::from(stage));
-    let envelope = EventEnvelope::new(JournalWriterId::new(), drain);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), drain);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -288,9 +288,9 @@ fn resolve_control_event_drain_respects_stage_policy() {
 fn resolve_forward_control_event_notes_cycle_eof_before_resolving() {
     let upstream = StageId::new_const(1);
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -332,9 +332,9 @@ fn resolve_forward_control_event_does_not_note_non_terminal_forwarded_eof() {
     let forwarded_origin = StageId::new_const(2);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(forwarded_origin), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -365,9 +365,9 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
     let upstream = StageId::new_const(1);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -416,9 +416,9 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
     let upstream = StageId::new_const(1);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -460,9 +460,9 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
     let upstream = StageId::new_const(1);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+    let envelope = JournalRecord::new(JournalWriterId::new(), eof);
+    let signal = match &envelope.payload {
+        obzenflow_core::event::ChainPayload::FlowControl(payload) => payload,
         _ => unreachable!(),
     };
 
@@ -582,8 +582,8 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         assert_eq!(
             self.writer.min_downstream_credit(),
             self.expected_credit_at_append
@@ -591,15 +591,15 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         self.appended.lock().unwrap().extend(events.clone());
         Ok(events
             .into_iter()
-            .map(|event| EventEnvelope::new(JournalWriterId::from(self.id), event))
+            .map(|event| JournalRecord::new(JournalWriterId::from(self.id), event))
             .collect())
     }
 
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        _parent: Option<&JournalRecord<obzenflow_core::event::ChainPayload>>,
+    ) -> Result<JournalRecord<obzenflow_core::event::ChainPayload>, JournalError> {
         let credit = self.writer.min_downstream_credit();
         assert_eq!(credit, self.expected_credit_at_append);
 
@@ -622,17 +622,19 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
             .expect("CreditCheckingJournal: poisoned lock")
             .push(event.clone());
 
-        Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
+        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::event::types::EventId,
-    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Option<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -646,7 +648,7 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<obzenflow_core::event::ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -665,7 +667,7 @@ impl<T: JournalEvent> Default for NoopReader<T> {
 
 #[async_trait]
 impl<T: JournalEvent> JournalReader<T> for NoopReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
@@ -706,23 +708,23 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
+        _parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if let Some(gate) = &self.append_gate {
             gate.entered.notify_one();
             gate.release.notified().await;
         }
-        Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
+        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::event::types::EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
@@ -730,7 +732,10 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
         Ok(Box::new(NoopReader::<T>::default()))
     }
 
-    async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        _count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -755,6 +760,92 @@ fn make_writer_with_window(window: NonZeroU64) -> (StageId, BackpressureWriter) 
     let _reader = registry.reader(s, d);
 
     (s, writer)
+}
+
+#[tokio::test]
+async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_accounting() {
+    use super::output_committer::{CommitOptions, OutputCommitter};
+    use crate::execution::{RuntimeExecution, RuntimeMode};
+    use crate::metrics::instrumentation::snapshot_stage_accounting;
+    use obzenflow_core::event::context::RuntimeObservability;
+    use obzenflow_core::event::observation::*;
+
+    let stage = StageId::new();
+    let flow = obzenflow_core::FlowId::new();
+    let event =
+        ChainEventFactory::data_event(stage.into(), "business.null.v1", serde_json::Value::Null);
+    let journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage)));
+    let mut protected = Vec::new();
+    for saturated in [false, true] {
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        if saturated {
+            let scope = CaptureScope {
+                flow_id: flow,
+                resume_generation: Default::default(),
+            };
+            execution.observations().activate_scope(scope);
+            // Exhaust the bounded retained view using independent owners.
+            for _ in 0..4096 {
+                let mut packet = ObservabilityContext::new(CaptureStamp {
+                    capture_scope: scope,
+                    observer: StageId::new().into(),
+                    capture_seq: CaptureSeq(1),
+                    capture_reason: CaptureReason::Record,
+                    observed_at_ms: 1,
+                });
+                packet.runtime = Some(RuntimeObservability {
+                    in_flight: Some(0),
+                    ..Default::default()
+                });
+                assert_eq!(
+                    execution.observations().offer(packet),
+                    ObservationOffer::Accepted
+                );
+            }
+            instrumentation.bind_observations(flow, stage.into(), &execution);
+        }
+        let committer = OutputCommitter {
+            data_journal: &journal,
+            flow_context: None,
+            system_journal: None,
+            instrumentation: Some(&instrumentation),
+            heartbeat_state: None,
+            output_contract: None,
+            backpressure_writer: None,
+            observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        };
+        let written = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            committer.commit_prebuilt(
+                event.clone(),
+                None,
+                CommitOptions {
+                    count_output: true,
+                    validate_output_contract: false,
+                },
+            ),
+        )
+        .await
+        .expect("optional capture cannot delay append acknowledgement")
+        .unwrap();
+        assert_eq!(written.id(), &event.id);
+        assert_eq!(written.payload(), serde_json::Value::Null);
+        let before = snapshot_stage_accounting(&instrumentation);
+        instrumentation.offer_capture(CaptureReason::Final);
+        let after = snapshot_stage_accounting(&instrumentation);
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+        protected.push(serde_json::to_value(&written.envelope.provenance.event).unwrap());
+        assert_eq!(
+            execution.observations().snapshot().len(),
+            if saturated { 4096 } else { 0 }
+        );
+    }
+    assert_eq!(protected[0], protected[1]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -880,9 +971,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
         AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
     };
     use crate::supervised_base::publication::PublicationScope;
-    use obzenflow_core::event::payloads::observability_payload::{
-        CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
-    };
+
     use std::sync::atomic::Ordering;
     let (stage, writer) = make_writer_with_window(NonZeroU64::new(2).unwrap());
     let journal = Arc::new(CreditCheckingJournal::new(
@@ -925,10 +1014,10 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
                     observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 };
                 let mut entries = vec![AtomicCommitEntry {
-                    event: ChainEventFactory::observability_event(
+                    event: ChainEventFactory::create_event(
                         stage.into(),
-                        ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                            CircuitBreakerEvent::Closed {
+                        obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::CircuitBreaker(
+                            obzenflow_core::event::payloads::execution_payload::CircuitBreakerFact::Closed {
                                 success_count: 1,
                                 recovery_duration_ms: 1,
                             },
@@ -1378,7 +1467,7 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
 
     let appended = journal.appended();
     assert_eq!(appended.len(), 1);
-    let obzenflow_core::event::ChainEventContent::FlowControl(
+    let obzenflow_core::event::ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
             writer_id,
             writer_seq,
@@ -1387,7 +1476,7 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
             kind,
             ..
         },
-    ) = &appended[0].content
+    ) = &appended[0].payload
     else {
         panic!("expected sealed EOF")
     };
@@ -1431,12 +1520,12 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         WriterId::from(stage_id),
         obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
     );
-    if let obzenflow_core::event::ChainEventContent::FlowControl(
+    if let obzenflow_core::event::ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
             writer_seq,
             ..
         },
-    ) = &mut terminal.content
+    ) = &mut terminal.payload
     {
         *writer_seq = Some(obzenflow_core::event::types::SeqNo(99));
     }
@@ -1480,12 +1569,12 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         WriterId::from(stage_id),
         obzenflow_core::event::payloads::flow_control_payload::EofKind::Poison,
     );
-    if let obzenflow_core::event::ChainEventContent::FlowControl(
+    if let obzenflow_core::event::ChainPayload::FlowControl(
         obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
             writer_id,
             ..
         },
-    ) = &mut terminal.content
+    ) = &mut terminal.payload
     {
         *writer_id = Some(WriterId::from(foreign_stage));
     }
@@ -1677,10 +1766,8 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
     for event in &appended {
         assert!(
             !matches!(
-                &event.content,
-                obzenflow_core::event::ChainEventContent::Observability(
-                    obzenflow_core::event::payloads::observability_payload::ObservabilityPayload::Backpressure(
-                        obzenflow_core::event::payloads::observability_payload::BackpressureEvent::Stalled { .. }
+                &event.payload,
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::Backpressure(obzenflow_core::event::payloads::execution_payload::BackpressureFact::Stalled { .. }
                     )
                 )
             ),
@@ -1688,8 +1775,8 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
         );
         assert!(
             !matches!(
-                &event.content,
-                obzenflow_core::event::ChainEventContent::FlowControl(
+                &event.payload,
+                obzenflow_core::event::ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }
                 )
             ),

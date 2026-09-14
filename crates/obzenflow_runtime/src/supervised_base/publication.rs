@@ -14,7 +14,7 @@
 
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
-use obzenflow_core::event::{EventEnvelope, JournalEvent};
+use obzenflow_core::event::{JournalEvent, JournalRecord};
 use obzenflow_core::journal::{Journal, JournalError};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -111,7 +111,6 @@ struct State {
     admission: Admission,
     next_id: u64,
     operations: BTreeMap<u64, Operation>,
-    auxiliary: Option<Operation>,
     tail: Option<Shared<BoxFuture<'static, ()>>>,
     failure: Option<SharedError>,
 }
@@ -155,7 +154,6 @@ impl PublicationScope {
                 admission: Admission::Open,
                 next_id: 0,
                 operations: BTreeMap::new(),
-                auxiliary: None,
                 tail: None,
                 failure: None,
             }),
@@ -166,29 +164,6 @@ impl PublicationScope {
 
     pub(crate) fn current() -> Option<Arc<Self>> {
         CURRENT.try_with(|context| context.scope.clone()).ok()
-    }
-
-    /// Retain the stage's heartbeat task without putting its lifetime ahead
-    /// of publications in writer order. Construction installs one heartbeat
-    /// before the supervisor starts; closing that supervisor aborts it.
-    pub(crate) fn retain_auxiliary(&self, task: tokio::task::JoinHandle<()>) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(state.admission == Admission::Open);
-        assert!(state.auxiliary.is_none());
-        let abort = task.abort_handle();
-        let completion = async move {
-            match task.await {
-                Ok(()) => Ok(()),
-                Err(error) if error.is_cancelled() => Ok(()),
-                Err(error) => Err(SharedError::from(Box::new(error) as BoxError)),
-            }
-        }
-        .boxed()
-        .shared();
-        state.auxiliary = Some(Operation {
-            task: abort,
-            completion,
-        });
     }
 
     pub(crate) fn enter_sync<T>(self: &Arc<Self>, f: impl FnOnce() -> T) -> T {
@@ -441,21 +416,6 @@ impl PublicationScope {
     /// consume another waiter's capability or release accepted work.
     pub(crate) async fn join(&self) -> Result<(), SharedError> {
         self.close();
-        let auxiliary = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .auxiliary
-            .as_ref()
-            .map(|operation| operation.completion.clone());
-        if let Some(completion) = auxiliary {
-            let result = completion.await;
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(error) = result {
-                state.failure.get_or_insert(error);
-            }
-            state.auxiliary = None;
-        }
         loop {
             let next = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -528,8 +488,8 @@ pub(crate) fn commit_in<T: Send + 'static>(
 pub(crate) fn append<T: JournalEvent + 'static>(
     journal: &Arc<dyn Journal<T>>,
     event: T,
-    parent: Option<&EventEnvelope<T>>,
-) -> BoxFuture<'static, Result<EventEnvelope<T>, BoxError>> {
+    parent: Option<&JournalRecord<T::Payload>>,
+) -> BoxFuture<'static, Result<JournalRecord<T::Payload>, BoxError>> {
     let journal = journal.clone();
     let parent = parent.cloned();
     commit(async move {
@@ -818,21 +778,6 @@ mod tests {
         assert!(is_indeterminate(&error));
         assert_eq!(count.load(Ordering::Relaxed), 0);
         assert!(is_indeterminate(&scope.join().await.unwrap_err()));
-    }
-
-    #[tokio::test]
-    async fn auxiliary_lifetime_is_joined_without_blocking_writer_order() {
-        let scope = PublicationScope::new();
-        let (release, gate) = oneshot::channel();
-        scope.retain_auxiliary(tokio::spawn(async move {
-            gate.await.unwrap();
-        }));
-        scope.accept(async { Ok(()) }).await.unwrap();
-        let mut abandoned = Box::pin(scope.join());
-        assert!(futures::poll!(abandoned.as_mut()).is_pending());
-        drop(abandoned);
-        release.send(()).unwrap();
-        scope.join().await.unwrap();
     }
 
     #[tokio::test]

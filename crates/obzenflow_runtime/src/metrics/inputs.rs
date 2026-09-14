@@ -19,6 +19,7 @@ use std::sync::Arc;
 /// centralized ErrorSink.
 #[derive(Clone)]
 pub struct MetricsInputs {
+    pub observations: Arc<super::observations::ObservationHub>,
     /// Stage data journals - normal outputs from pipeline stages
     pub stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
@@ -30,12 +31,21 @@ pub struct MetricsInputs {
 }
 
 impl MetricsInputs {
+    pub fn with_observations(
+        mut self,
+        observations: Arc<super::observations::ObservationHub>,
+    ) -> Self {
+        self.observations = observations;
+        self
+    }
+
     /// Create a new MetricsInputs with both data and error journals
     pub fn new(
         stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
         error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     ) -> Self {
         Self {
+            observations: Arc::new(super::observations::ObservationHub::default()),
             stage_data_journals,
             error_journals,
             backpressure_registry: None,

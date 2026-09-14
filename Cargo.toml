@@ -143,6 +143,7 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+crc32fast = { workspace = true }
 # Used by examples/tests/benchmarks in this crate
 tokio = { workspace = true, features = ["full", "tracing"] }
 async-trait = { workspace = true }

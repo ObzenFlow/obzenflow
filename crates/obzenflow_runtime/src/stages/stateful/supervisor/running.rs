@@ -127,7 +127,6 @@ pub(super) async fn dispatch_accumulating<
 
     match poll_result {
         PollResult::Event(envelope) => {
-            use obzenflow_core::event::JournalEvent;
             let stage_input_position = sup
                 .subscription
                 .as_ref()
@@ -141,15 +140,15 @@ pub(super) async fn dispatch_accumulating<
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_upstream_stage())
                 .expect("delivered event must identify its upstream stage");
-            if envelope.event.is_data() {
+            if envelope.consumes_data_credit() {
                 ctx.last_input_position = stage_input_position;
             }
             tracing::trace!(
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
-                event_type = %envelope.event.event_type_name(),
-                event_id = ?envelope.event.id,
+                event_type = %envelope.event_type_name(),
+                event_id = ?envelope.envelope.provenance.event.id,
                 "stateful: poll_next returned Event"
             );
 
@@ -159,12 +158,16 @@ pub(super) async fn dispatch_accumulating<
             match ctx.last_consumed_envelope.as_mut() {
                 Some(merged) => {
                     CausalOrderingService::update_with_parent(
-                        &mut merged.vector_clock,
-                        &envelope.vector_clock,
+                        &mut merged.envelope.provenance.journal.vector_clock,
+                        &envelope.envelope.provenance.journal.vector_clock,
                     );
-                    merged.journal_writer_id = envelope.journal_writer_id;
-                    merged.timestamp = envelope.timestamp;
-                    merged.event = envelope.event.clone();
+                    merged.envelope.provenance.journal.journal_writer_id =
+                        envelope.envelope.provenance.journal.journal_writer_id;
+                    merged.envelope.provenance.journal.timestamp =
+                        envelope.envelope.provenance.journal.timestamp;
+                    merged.envelope.provenance.event = envelope.envelope.provenance.event.clone();
+                    merged.envelope.observability = envelope.envelope.observability.clone();
+                    merged.payload = envelope.payload.clone();
                 }
                 None => ctx.last_consumed_envelope = Some(envelope.clone()),
             }
@@ -176,8 +179,8 @@ pub(super) async fn dispatch_accumulating<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
-            let directive = match &envelope.event.content {
-                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+            let directive = match &envelope.payload {
+                obzenflow_core::event::ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; each stage authors its own.
                     if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {
@@ -219,7 +222,7 @@ pub(super) async fn dispatch_accumulating<
                     // FLOWIP-120n F17: an authored EOF can be the delivery
                     // that completes the caught-up frontier; no watermark
                     // follows, so re-run the flip before normal EOF handling.
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         let subscription = sup
                             .subscription
                             .as_ref()
@@ -259,7 +262,7 @@ pub(super) async fn dispatch_accumulating<
                         .and_then(|subscription| subscription.last_eof_outcome().cloned());
 
                     // FLOWIP-095k: fold the joined terminal kind before resolution.
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
                             ctx.terminal_eof_kind = Some(
                                 ctx.terminal_eof_kind
@@ -285,7 +288,7 @@ pub(super) async fn dispatch_accumulating<
 
                     match resolution {
                         ControlAction::Forward => {
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     drop(
                                         subscription
@@ -299,7 +302,7 @@ pub(super) async fn dispatch_accumulating<
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
-                            ctx.buffered_eof = Some(envelope.event.clone());
+                            ctx.buffered_eof = Some(envelope.authored());
                             ctx.terminal_envelope = Some(envelope.clone());
                             ctx.drain_requested_by_handle = false;
                             EventLoopDirective::Transition(StatefulEvent::ReceivedEOF)
@@ -308,28 +311,28 @@ pub(super) async fn dispatch_accumulating<
                         ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Stateful stage received entry-point buffering resolution without cycle config"
                             );
                             EventLoopDirective::Transition(StatefulEvent::Error(format!(
                                 "Stateful stage reached cycle-entry buffering without cycle config: {}",
-                                envelope.event.event_type()
+                                envelope.event_type()
                             )))
                         }
                         ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Skipping control event (dangerous!)"
                             );
                             EventLoopDirective::Continue
                         }
                     }
                 }
-                obzenflow_core::event::ChainEventContent::Data { .. } => {
+                payload if payload.consumes_data_credit() => {
                     // Accumulate into state without emitting domain events yet,
                     // but still record per-event processing time + counts.
-                    let event = envelope.event.clone();
+                    let event = envelope.authored();
                     let event_id = event.id;
 
                     let upstream_stage = sup
@@ -362,13 +365,17 @@ pub(super) async fn dispatch_accumulating<
                         stage_input_position,
                         delivered_generation,
                     );
+                    let _observer_parent = ctx
+                        .last_consumed_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.authored());
                     let observer_ctx = StatefulObserverContext::new(
                         ctx.flow_id,
                         &flow_context,
                         Some(&event),
                         stage_input_position,
                     );
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -542,7 +549,7 @@ pub(super) async fn dispatch_accumulating<
                             );
                             let enriched_error = error_event
                                 .with_flow_context(flow_ctx)
-                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                .with_runtime_provenance(ctx.instrumentation.snapshot());
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,
@@ -854,12 +861,14 @@ pub(super) async fn dispatch_emitting<
     match emit_result {
         Ok(events) if !events.is_empty() => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+            let observer_parent = ctx
+                .last_consumed_envelope
+                .as_ref()
+                .map(|envelope| envelope.authored());
             let observer_ctx = StatefulObserverContext::new(
                 ctx.flow_id,
                 &flow_context,
-                ctx.last_consumed_envelope
-                    .as_ref()
-                    .map(|envelope| &envelope.event),
+                observer_parent.as_ref(),
                 ctx.last_input_position,
             );
             run_stateful_after_emit_observers(
@@ -901,7 +910,7 @@ pub(super) async fn dispatch_emitting<
                     );
 
                     // Error events are still data for output accounting.
-                    if event.is_data() {
+                    if event.consumes_data_credit() {
                         if let Some(subscription) = sup.subscription.as_mut() {
                             subscription.track_output_event();
                         }

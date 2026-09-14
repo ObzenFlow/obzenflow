@@ -106,6 +106,11 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         let instrumentation = self
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        instrumentation.bind_observations(
+            self.resources.flow_id,
+            obzenflow_core::WriterId::from(self.config.stage_id),
+            &self.resources.runtime_execution,
+        );
 
         // Bind factories for reference and stream subscriptions (after DSL split)
         let mut reference_subscription_factory = self.resources.subscription_factory.bind(&[(
@@ -154,7 +159,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 spawn_heartbeat(
                     self.config.stage_id,
                     self.config.stage_name.clone(),
-                    self.resources.system_journal.clone(),
+                    instrumentation.clone(),
                     self.resources.liveness_snapshots.clone(),
                     heartbeat_state,
                     heartbeat_config,

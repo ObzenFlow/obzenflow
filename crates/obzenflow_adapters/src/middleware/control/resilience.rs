@@ -20,7 +20,7 @@ use crate::middleware::{
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceAttachmentKind,
     PolicyAdmission,
 };
-use obzenflow_core::event::payloads::observability_payload::{
+use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
 };
 use obzenflow_core::event::{

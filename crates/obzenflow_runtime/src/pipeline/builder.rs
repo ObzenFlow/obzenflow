@@ -73,12 +73,24 @@ pub struct PipelineBuilder {
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
+    observations: Arc<crate::metrics::observations::ObservationHub>,
+    host_observations: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
     feed_plan: FeedPlan,
     run_substrate: Option<RunSubstrateState>,
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 }
 
 impl PipelineBuilder {
+    pub fn with_observations(
+        mut self,
+        observations: Arc<crate::metrics::observations::ObservationHub>,
+        host: Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) -> Self {
+        self.observations = observations;
+        self.host_observations = host;
+        self
+    }
+
     /// Create a new pipeline builder
     pub fn new(
         topology: Arc<Topology>,
@@ -98,6 +110,8 @@ impl PipelineBuilder {
             contract_attachments: None,
             backpressure_registry: None,
             liveness_snapshots: None,
+            observations: Arc::new(crate::metrics::observations::ObservationHub::default()),
+            host_observations: Arc::new(obzenflow_core::event::observation::NoObservations),
             feed_plan: FeedPlan::default(),
             run_substrate: None,
             flow_effective_config: None,
@@ -338,6 +352,7 @@ impl PipelineBuilder {
             stage_data_journals: self.stage_journals.unwrap_or_default(),
             stage_error_journals: self.error_journals.unwrap_or_default(),
             backpressure_registry: self.backpressure_registry.clone(),
+            observations: self.observations.clone(),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
             resources: Default::default(),
@@ -443,6 +458,8 @@ impl PipelineBuilder {
                 contract_attachments,
                 system_journal: Some(self.system_journal.clone()),
                 pipeline_writer_id: WriterId::from(system_id),
+                observations: self.observations.clone(),
+                host_observations: self.host_observations.clone(),
                 liveness_snapshots: self.liveness_snapshots.clone(),
                 run_substrate: self
                     .run_substrate

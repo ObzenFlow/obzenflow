@@ -591,6 +591,11 @@ impl AffineEffectBoundaryReport {
 /// whichever arm ended it.
 #[async_trait]
 pub trait EffectBoundary: Send + Sync {
+    fn install_observation_recorder(
+        &self,
+        _recorder: std::sync::Arc<dyn obzenflow_core::event::observation::ObservationRecorder>,
+    ) {
+    }
     async fn around_repeatable_effect(
         &self,
         identity: &EffectIdentity,

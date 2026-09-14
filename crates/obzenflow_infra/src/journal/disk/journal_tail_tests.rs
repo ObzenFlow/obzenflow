@@ -51,7 +51,7 @@ impl Fixture {
 
 async fn assert_tail(
     journal: &DiskJournal<ChainEvent>,
-    expected: &[EventEnvelope<ChainEvent>],
+    expected: &[JournalRecord<obzenflow_core::event::ChainPayload>],
     count: usize,
 ) {
     let actual = journal.read_last_n(count).await.unwrap();
@@ -59,20 +59,29 @@ async fn assert_tail(
     assert_eq!(actual.len(), expected.len(), "requested {count} records");
     for (actual, expected) in actual.iter().zip(expected) {
         assert_eq!(
-            actual.event.id, expected.event.id,
+            actual.envelope.provenance.event.id, expected.envelope.provenance.event.id,
             "newest-first event identity"
         );
         assert_eq!(
-            serde_json::to_value(&actual.event).unwrap(),
-            serde_json::to_value(&expected.event).unwrap(),
+            serde_json::to_value(&actual.authored()).unwrap(),
+            serde_json::to_value(&expected.authored()).unwrap(),
         );
-        assert_eq!(actual.journal_group_id, expected.journal_group_id);
+        assert_eq!(
+            actual.envelope.provenance.journal.journal_group_id,
+            expected.envelope.provenance.journal.journal_group_id
+        );
         assert_eq!(
             actual
+                .envelope
+                .provenance
+                .journal
                 .journal_group_member
                 .as_ref()
                 .map(|m| (m.index, m.size)),
             expected
+                .envelope
+                .provenance
+                .journal
                 .journal_group_member
                 .as_ref()
                 .map(|m| (m.index, m.size)),
@@ -87,20 +96,20 @@ async fn metrics_tail_read_keeps_the_latest_snapshot_across_chunks() {
 
     let f = Fixture::new();
     let mut snapshot = StageInstrumentation::new().snapshot();
-    snapshot.events_processed_total = 1;
+    snapshot.accounting.events_processed_total = 1;
     f.journal
         .append(
-            f.event(0, "old").with_runtime_context(snapshot.clone()),
+            f.event(0, "old").with_runtime_provenance(snapshot.clone()),
             None,
         )
         .await
         .unwrap();
-    snapshot.events_processed_total = 100_000;
-    snapshot.errors_total = 1_000;
+    snapshot.accounting.events_processed_total = 100_000;
+    snapshot.accounting.errors_total = 1_000;
     f.journal
         .append(
             f.event(1, &"é🙂".repeat(30_000))
-                .with_runtime_context(snapshot),
+                .with_runtime_provenance(snapshot),
             None,
         )
         .await
@@ -114,8 +123,8 @@ async fn metrics_tail_read_keeps_the_latest_snapshot_across_chunks() {
     let latest = read_latest_runtime_context_for_stage(&journal, f.stage)
         .await
         .unwrap();
-    assert_eq!(latest.events_processed_total, 100_000);
-    assert_eq!(latest.errors_total, 1_000);
+    assert_eq!(latest.accounting.events_processed_total, 100_000);
+    assert_eq!(latest.accounting.errors_total, 1_000);
 }
 
 #[tokio::test]

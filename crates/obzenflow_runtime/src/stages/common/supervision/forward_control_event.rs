@@ -6,19 +6,22 @@
 
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
+use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use std::sync::Arc;
 
 pub(crate) async fn forward_control_event(
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<obzenflow_core::event::ChainPayload>,
     stage_id: StageId,
     stage_name: &str,
     stage_type: StageType,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-) -> Result<EventEnvelope<ChainEvent>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    JournalRecord<obzenflow_core::event::ChainPayload>,
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     // Re-stamp flow and runtime context so metrics remain local to the
     // forwarding stage even when forwarding control events.
-    let mut forward_event = envelope.event.clone();
+    let mut forward_event = envelope.authored();
 
     let flow_name = forward_event.flow_context.flow_name.clone();
     let flow_id = forward_event.flow_context.flow_id.clone();
@@ -30,10 +33,10 @@ pub(crate) async fn forward_control_event(
         stage_type,
     });
 
-    // RuntimeContext will be refreshed by instrumentation when this stage
+    // RuntimeProvenance will be refreshed by instrumentation when this stage
     // emits observability events; forwarded control events themselves may
     // omit runtime_context to avoid leaking upstream snapshots.
-    forward_event.runtime_context = None;
+    forward_event.runtime = None;
 
     let written =
         crate::supervised_base::publication::append(data_journal, forward_event, Some(envelope))

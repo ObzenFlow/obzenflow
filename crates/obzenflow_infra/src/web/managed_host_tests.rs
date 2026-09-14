@@ -296,7 +296,7 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
     use crate::web::endpoints::studio::StudioUpdatesEndpoint;
     use crate::web::surface_metrics::HttpSurfaceMetricsCollector;
     use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
-    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemPayload, WriterId};
     use obzenflow_core::{id::SystemId, Journal, JournalOwner};
 
     async fn read_through(socket: &mut TcpStream, marker: &str) -> String {
@@ -352,7 +352,7 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
         .append(
             SystemEvent::new(
                 WriterId::from(system),
-                SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
             ),
             None,
         )
@@ -364,7 +364,7 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
     let mut tail = String::new();
     socket.read_to_string(&mut tail).await.unwrap();
     close.await.unwrap().unwrap();
-    assert!(tail.contains(&format!("id:{}", terminal.event.id)));
+    assert!(tail.contains(&format!("id:{}", terminal.envelope.provenance.event.id)));
     assert!(
         tail.find("event:flow_lifecycle").unwrap() < tail.find("event:server_shutdown").unwrap()
     );

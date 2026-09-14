@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, EventId, WriterId};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, WriterId};
 use obzenflow_core::id::StageId;
 use serde_json::json;
 
@@ -52,7 +52,7 @@ fn test_is_control_detection() {
         ChainEventFactory::data_event(writer_id, "user.data.processed", json!({"value": 42}));
     assert!(!data_event.is_control());
     assert!(!data_event.is_eof());
-    assert!(data_event.is_data());
+    assert!(data_event.consumes_data_credit());
 }
 
 #[test]
@@ -61,8 +61,8 @@ fn test_flow_signal_payloads() {
 
     // Test natural EOF kind
     let natural_eof = ChainEventFactory::eof_event(writer_id, true);
-    match &natural_eof.content {
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+    match &natural_eof.payload {
+        ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
             assert!(kind.is_natural());
         }
         _ => panic!("Expected EOF signal"),
@@ -70,8 +70,8 @@ fn test_flow_signal_payloads() {
 
     // Test poison EOF kind
     let forced_eof = ChainEventFactory::eof_event(writer_id, false);
-    match &forced_eof.content {
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+    match &forced_eof.payload {
+        ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
             assert!(kind.is_poison());
         }
         _ => panic!("Expected EOF signal"),
@@ -211,7 +211,7 @@ fn test_data_vs_control_events() {
 
     for event_type in data_types {
         let event = ChainEventFactory::data_event(writer_id, event_type, json!({"test": true}));
-        assert!(event.is_data());
+        assert!(event.consumes_data_credit());
         assert!(!event.is_control());
         assert!(!event.is_eof());
         assert_eq!(event.event_type(), event_type);
@@ -227,7 +227,7 @@ fn test_data_vs_control_events() {
 
     for event in control_events {
         assert!(event.is_control());
-        assert!(!event.is_data());
+        assert!(!event.consumes_data_credit());
         assert!(event.event_type().starts_with("control."));
     }
 }
@@ -235,10 +235,9 @@ fn test_data_vs_control_events() {
 #[test]
 fn test_direct_chain_event_construction() {
     // Test that we can still create events directly using the new structure
-    let event = ChainEvent {
-        id: EventId::new(),
-        writer_id: WriterId::from(StageId::new()),
-        content: ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    let event = ChainEventFactory::create_event(
+        WriterId::from(StageId::new()),
+        ChainPayload::FlowControl(FlowControlPayload::Eof {
             kind: EofKind::Natural,
             timestamp: 12345,
             writer_id: Some(WriterId::from(StageId::new())),
@@ -247,20 +246,7 @@ fn test_direct_chain_event_construction() {
             vector_clock: None,
             last_event_id: None,
         }),
-        causality: Default::default(),
-        flow_context: Default::default(),
-        processing_info: Default::default(),
-        intent: None,
-        correlation: None,
-        replay_context: None,
-        ingress_context: None,
-        cycle_depth: None,
-        cycle_scc_id: None,
-        runtime_context: None,
-        observability: None,
-        effect_provenance: None,
-        admission_seq: None,
-    };
+    );
 
     assert!(event.is_control());
     assert!(event.is_eof());

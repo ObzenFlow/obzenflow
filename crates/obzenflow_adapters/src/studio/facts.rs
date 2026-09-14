@@ -8,12 +8,12 @@
 use super::messages::{ContractEdge, MetricsUpdate, Observation, StudioMessage};
 use super::{middleware::MiddlewareView, ContractBoundaryAliases};
 use obzenflow_core::event::{
-    event_envelope::SystemEventEnvelope, MetricsCoordinationEvent, SystemEventType,
+    journal_record::SystemJournalRecord, MetricsCoordinationEvent, SystemPayload,
 };
 use obzenflow_core::web::SseFrame;
 
-pub(super) fn stage_message(envelope: &SystemEventEnvelope) -> Option<StudioMessage<'_>> {
-    let SystemEventType::StageLifecycle { stage_id, event } = &envelope.event.event else {
+pub(super) fn stage_message(envelope: &SystemJournalRecord) -> Option<StudioMessage<'_>> {
+    let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
         return None;
     };
     Some(StudioMessage::StageLifecycle {
@@ -24,20 +24,26 @@ pub(super) fn stage_message(envelope: &SystemEventEnvelope) -> Option<StudioMess
 }
 
 pub(super) fn frame(
-    envelope: &SystemEventEnvelope,
+    envelope: &SystemJournalRecord,
     middleware: &MiddlewareView,
     aliases: &ContractBoundaryAliases,
 ) -> Option<SseFrame> {
     let at = observation(envelope);
-    let message = match &envelope.event.event {
-        SystemEventType::StageLifecycle { .. } => stage_message(envelope)?,
-        SystemEventType::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
-        SystemEventType::ReplayLifecycle(event) => StudioMessage::ReplayLifecycle {
-            stage_id: envelope.event.writer_id.as_stage().map(|id| id.to_string()),
+    let message = match &envelope.payload {
+        SystemPayload::StageLifecycle { .. } => stage_message(envelope)?,
+        SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
+        SystemPayload::ReplayLifecycle(event) => StudioMessage::ReplayLifecycle {
+            stage_id: envelope
+                .envelope
+                .provenance
+                .event
+                .writer_id
+                .as_stage()
+                .map(|id| id.to_string()),
             event,
             at,
         },
-        SystemEventType::SourceCleanupFailed {
+        SystemPayload::SourceCleanupFailed {
             stage_id,
             stage_name,
             error,
@@ -47,7 +53,7 @@ pub(super) fn frame(
             error,
             at,
         },
-        SystemEventType::MiddlewareLifecycle {
+        SystemPayload::MiddlewareLifecycle {
             stage_id,
             stage_name,
             flow_id,
@@ -69,7 +75,7 @@ pub(super) fn frame(
                 at,
             }
         }
-        SystemEventType::ContractStatus {
+        SystemPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -92,7 +98,7 @@ pub(super) fn frame(
             reason: reason.as_ref(),
             at,
         },
-        SystemEventType::ContractResult {
+        SystemPayload::ContractResult {
             upstream,
             reader,
             selected_event_type,
@@ -117,30 +123,14 @@ pub(super) fn frame(
             cause: cause.as_deref(),
             at,
         },
-        SystemEventType::EdgeLiveness {
-            upstream,
-            reader,
-            state,
-            idle_ms,
-            last_reader_seq,
-            last_event_id,
-        } => StudioMessage::EdgeLiveness {
-            upstream_stage_id: *upstream,
-            reader_stage_id: *reader,
-            state: *state,
-            idle_ms: *idle_ms,
-            last_reader_seq: *last_reader_seq,
-            last_event_id: *last_event_id,
-            at,
-        },
-        SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark }) => {
+        SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark }) => {
             StudioMessage::MetricsWatermark {
                 watermark,
-                export_id: envelope.event.id,
+                export_id: envelope.envelope.provenance.event.id,
                 at,
             }
         }
-        SystemEventType::MetricsCoordination(event) => StudioMessage::MetricsCoordination {
+        SystemPayload::MetricsCoordination(event) => StudioMessage::MetricsCoordination {
             event_type: match event {
                 MetricsCoordinationEvent::Ready => MetricsUpdate::Ready,
                 MetricsCoordinationEvent::DrainRequested => MetricsUpdate::DrainRequested,
@@ -150,16 +140,15 @@ pub(super) fn frame(
             },
             at,
         },
-        SystemEventType::StageHeartbeat { .. }
-        | SystemEventType::HttpSurfaceSnapshot { .. }
-        | SystemEventType::IngressRefusal { .. } => return None,
+        SystemPayload::IngressRefusal { .. } => return None,
     };
-    Some(message.frame(Some(envelope.event.id)))
+    Some(message.frame(Some(envelope.envelope.provenance.event.id)))
 }
 
-fn observation(envelope: &SystemEventEnvelope) -> Observation<'_> {
+fn observation(envelope: &SystemJournalRecord) -> Observation<'_> {
     Observation {
-        timestamp_ms: envelope.event.timestamp,
-        vector_clock: &envelope.vector_clock,
+        timestamp_ms: envelope.envelope.provenance.event.timestamp,
+        vector_clock: Some(&envelope.envelope.provenance.journal.vector_clock),
+        capture: None,
     }
 }
