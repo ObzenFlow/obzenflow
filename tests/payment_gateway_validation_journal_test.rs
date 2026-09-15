@@ -156,4 +156,39 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
             .and_then(serde_json::Value::as_u64),
         Some(0)
     );
+
+    let deliveries: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.pointer("/envelope/provenance/event/event_kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("delivery")
+        })
+        .collect();
+    assert_eq!(deliveries.len(), 2);
+    let destinations: BTreeSet<_> = deliveries
+        .iter()
+        .map(|row| {
+            row.pointer("/payload/destination")
+                .and_then(serde_json::Value::as_str)
+                .expect("delivery receipt names its destination")
+        })
+        .collect();
+    assert_eq!(
+        destinations,
+        BTreeSet::from(["cancelled_orders", "paid_orders"])
+    );
+
+    // Both the closure sink and the named shipping sink deliver one item
+    // without measuring its byte count. Verify the persisted fields.
+    for delivery in deliveries {
+        assert_eq!(
+            delivery.pointer("/payload/items_delivered"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            delivery.pointer("/payload/bytes_processed"),
+            Some(&serde_json::Value::Null)
+        );
+    }
 }

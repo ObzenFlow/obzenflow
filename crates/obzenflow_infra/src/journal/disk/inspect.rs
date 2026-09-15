@@ -301,7 +301,7 @@ mod tests {
         use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
         use obzenflow_core::{FlowId, Journal, JournalOwner, StageId, TypedPayload, WriterId};
 
-        let dir = tempfile::tempdir_in("target").unwrap();
+        let dir = tempfile::tempdir().expect("temporary journal directory");
         let stage = StageId::new();
         let writer = WriterId::from(stage);
         let scope = CaptureScope {

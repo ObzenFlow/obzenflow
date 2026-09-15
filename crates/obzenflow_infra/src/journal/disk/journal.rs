@@ -1066,7 +1066,7 @@ mod tests {
     async fn cancelled_append_retains_index_clock_and_writer_serialisation() {
         use futures::FutureExt;
         for grouped in [false, true] {
-            let directory = tempfile::tempdir_in("target").unwrap();
+            let directory = tempfile::tempdir().expect("temporary journal directory");
             let path = directory.path().join("retained.log");
             let stage = StageId::new();
             let writer = WriterId::from(stage);

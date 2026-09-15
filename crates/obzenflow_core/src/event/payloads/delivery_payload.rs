@@ -26,12 +26,11 @@ pub struct DeliveryPayload {
     pub destination: String,
     pub delivery_method: DeliveryMethod,
 
-    /// Performance
+    /// Bytes processed, when measured by the connector.
     pub bytes_processed: Option<u64>,
 
-    /// Items delivered (typed deliveries, FLOWIP-120s). Distinct from
-    /// `bytes_processed`, which some closure-tier sinks historically misuse
-    /// as an item count.
+    /// Items delivered (typed deliveries, FLOWIP-120s).
+    /// Report item counts here even when the byte count is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_delivered: Option<u64>,
 
