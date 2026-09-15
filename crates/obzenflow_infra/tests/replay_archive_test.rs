@@ -19,9 +19,11 @@ use obzenflow_core::journal::run_manifest::{
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
+use obzenflow_core::Journal;
 use obzenflow_core::{JournalWriterId, WriterId};
-use obzenflow_infra::journal::disk::log_record::{LogRecord, RECORD_FRAME_KIND};
+use obzenflow_infra::journal::disk::log_record::LogRecord;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
+use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -69,7 +71,7 @@ fn write_manifest(dir: &Path) {
     std::fs::write(dir.join(RUN_MANIFEST_FILENAME), body).unwrap();
 }
 
-fn write_system_log_completed(dir: &Path) {
+async fn write_system_log_completed(dir: &Path) {
     let writer_id = WriterId::from(SystemId::new());
     let event = SystemEvent::new(
         writer_id,
@@ -95,24 +97,16 @@ fn write_system_log_completed(dir: &Path) {
     )
     .expect("valid record");
 
-    write_framed_log_record(dir, &record);
+    write_framed_log_record(dir, &record).await;
 }
 
-fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
-    let json_body = serde_json::to_vec(&serde_json::json!({
-        "frame_kind": RECORD_FRAME_KIND,
-        "record": record,
-    }))
+async fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
+    let journal = DiskJournal::<SystemEvent>::with_owner(
+        dir.join("system.log"),
+        obzenflow_core::JournalOwner::system(SystemId::new()),
+    )
     .unwrap();
-    let mut hasher = Hasher::new();
-    hasher.update(&json_body);
-    let crc = hasher.finalize();
-
-    let mut bytes = format!("{}:{}:", json_body.len(), crc).into_bytes();
-    bytes.extend_from_slice(&json_body);
-    bytes.push(b'\n');
-
-    std::fs::write(dir.join("system.log"), bytes).unwrap();
+    journal.append(record.authored(), None).await.unwrap();
 }
 
 fn write_released_legacy_retry_row(dir: &Path) {
@@ -130,7 +124,7 @@ fn write_released_legacy_retry_row(dir: &Path) {
     )
     .expect("valid record");
     let mut frame = serde_json::json!({
-        "frame_kind": RECORD_FRAME_KIND,
+        "frame_kind": "record_v2",
         "record": record,
     });
     frame["record"]["event"]["content"] = serde_json::json!({
@@ -262,7 +256,7 @@ async fn open_requires_completed_status_by_default() {
     )
     .expect("valid record");
 
-    write_framed_log_record(dir.path(), &record);
+    write_framed_log_record(dir.path(), &record).await;
 
     let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
@@ -323,7 +317,7 @@ async fn open_rejects_archive_from_newer_minor_version() {
     };
     let future_version = format!("{}.{}.0", major, minor + 1);
     write_manifest_with_version(dir.path(), &future_version);
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
 
     let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
@@ -355,7 +349,7 @@ async fn open_rejects_archive_from_older_minor_version() {
         let old_version = format!("{}.{}.0", major, minor - 1);
         write_manifest_with_version(dir.path(), &old_version);
     }
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
 
     let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
@@ -381,7 +375,7 @@ async fn open_rejects_archive_with_different_patch_version() {
     let alt_patch = if patch == 0 { 99 } else { 0 };
     let compat_version = format!("{}.{}.{}", major, minor, alt_patch);
     write_manifest_with_version(dir.path(), &compat_version);
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
 
     let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
@@ -394,7 +388,7 @@ async fn open_rejects_archive_with_different_patch_version() {
 async fn open_rejects_archive_with_unparseable_version() {
     let dir = tempdir().unwrap();
     write_manifest_with_version(dir.path(), "not-a-version");
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
 
     let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
@@ -436,7 +430,7 @@ async fn open_rejects_previous_manifest_version_before_typed_parse() {
         serde_json::to_string_pretty(&old_manifest).unwrap(),
     )
     .unwrap();
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
 
     let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await
@@ -499,7 +493,7 @@ async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
 async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
     write_released_legacy_retry_row(dir.path());
 
     let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
@@ -531,7 +525,7 @@ async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows()
 async fn open_source_reader_errors_when_journal_missing() {
     let dir = tempdir().unwrap();
     write_manifest(dir.path());
-    write_system_log_completed(dir.path());
+    write_system_log_completed(dir.path()).await;
 
     let archive = DiskReplayArchive::open(dir.path().to_path_buf(), false)
         .await

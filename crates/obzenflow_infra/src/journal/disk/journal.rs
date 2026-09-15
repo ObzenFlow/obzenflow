@@ -6,7 +6,9 @@
 //!
 //! Provides optimal sequential writes and natural event ordering
 
-use super::log_record::{serialize_atomic_group, serialize_record};
+use super::codec::{self, Decoder, DefinitionStore};
+#[cfg(test)]
+use super::log_record::serialize_atomic_group;
 use super::reader::DiskJournalReader;
 use super::reverse_reader::ReverseFrameReader;
 use super::scanner::{
@@ -14,7 +16,6 @@ use super::scanner::{
 };
 use async_trait::async_trait;
 use chrono::Utc;
-use crc32fast::Hasher;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
 use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
@@ -87,6 +88,7 @@ pub struct DiskJournal<T: JournalEvent> {
     /// stamp sequence-less events under the write lock, so sequence order
     /// equals append order. None outside factory-built flow journals.
     admission_sequencer: Option<Arc<AtomicU64>>,
+    definitions: DefinitionStore,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -211,6 +213,7 @@ impl<T: JournalEvent> DiskJournal<T> {
 
         Ok(Self {
             owner: None,
+            definitions: DefinitionStore::default(),
             journal_id: JournalId::new(),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
@@ -252,6 +255,7 @@ impl<T: JournalEvent> DiskJournal<T> {
 
         Ok(Self {
             owner: Some(owner),
+            definitions: DefinitionStore::for_archive(&log_path),
             journal_id: JournalId::new(),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
@@ -326,6 +330,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
     let mut buf = Vec::new();
     let mut offset = 0u64;
     let mut committed_end = 0u64;
+    let mut decoder = Decoder::new(log_path);
 
     while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|e| JournalError::Implementation {
@@ -335,12 +340,8 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
     {
         let record_offset = offset;
         offset += consumed as u64;
-        if buf.iter().all(u8::is_ascii_whitespace) {
-            committed_end = offset;
-            continue;
-        }
         match dispose(
-            classify_frame::<T>(&buf),
+            classify_frame::<T>(&buf, &mut decoder, record_offset),
             termination,
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: true,
@@ -388,6 +389,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             writer_clocks: self.writer_clocks.clone(),
             poisoned: self.poisoned.clone(),
             admission_sequencer: self.admission_sequencer.clone(),
+            definitions: self.definitions.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -493,22 +495,16 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         // Create log record
         let record = envelope.clone();
 
-        // Serialize with newline
-        let json_body =
-            serialize_record::<T::Payload>(&record).map_err(|e| JournalError::Implementation {
-                message: "Failed to serialize record".to_string(),
-                source: Box::new(e),
-            })?;
-
-        // Frame with length and checksum so readers can detect torn reads
-        let mut hasher = Hasher::new();
-        hasher.update(&json_body);
-        let crc = hasher.finalize();
-        let framed_line = format!("{}:{}:", json_body.len(), crc);
-
-        let mut bytes = framed_line.into_bytes();
-        bytes.extend_from_slice(&json_body);
-        bytes.push(b'\n');
+        let mut prepared = codec::prepare(
+            std::slice::from_ref(&record),
+            None,
+            &self.path,
+            self.definitions.clone(),
+        )
+        .map_err(|e| JournalError::Implementation {
+            message: "Failed to serialize record".to_string(),
+            source: Box::new(e),
+        })?;
 
         // Write the framed record on a blocking thread. The commit point is the
         // successful write+flush: only then do the index and the writer clock
@@ -516,7 +512,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         // if rollback fails the journal is poisoned.
         let path = self.path.clone();
         let write_file = self.write_file.clone();
-        let write_bytes = bytes;
+        let write_bytes = std::mem::take(&mut prepared.bytes);
 
         let outcome =
             tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
@@ -567,6 +563,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             }
         };
 
+        prepared.commit(committed.offset);
         tracing::debug!(
             path = %self.path.display(),
             offset = committed.offset,
@@ -674,18 +671,17 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             records.push(envelopes.last().expect("record was just authored").clone());
         }
 
-        let json_body = serialize_atomic_group::<T::Payload>(group_id, &records).map_err(|e| {
-            JournalError::Implementation {
-                message: format!("Failed to serialize atomic journal group '{group_id}'"),
-                source: Box::new(e),
-            }
+        let mut prepared = codec::prepare(
+            &records,
+            Some(group_id),
+            &self.path,
+            self.definitions.clone(),
+        )
+        .map_err(|e| JournalError::Implementation {
+            message: format!("Failed to serialize atomic journal group '{group_id}'"),
+            source: Box::new(e),
         })?;
-        let mut hasher = Hasher::new();
-        hasher.update(&json_body);
-        let crc = hasher.finalize();
-        let mut bytes = format!("{}:{}:", json_body.len(), crc).into_bytes();
-        bytes.extend_from_slice(&json_body);
-        bytes.push(b'\n');
+        let bytes = std::mem::take(&mut prepared.bytes);
 
         let path = self.path.clone();
         let write_file = self.write_file.clone();
@@ -727,6 +723,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             }
         };
 
+        prepared.commit(committed.offset);
         tracing::debug!(
             path = %self.path.display(),
             group_id,
@@ -810,6 +807,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let mut reader = tokio::io::BufReader::new(file);
         let mut buf = Vec::new();
         let mut offset = 0u64;
+        let mut decoder = Decoder::new(&self.path);
 
         while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
             .await
@@ -820,11 +818,8 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         {
             let record_offset = offset;
             offset += consumed as u64;
-            if buf.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
             match dispose(
-                classify_frame::<T>(&buf),
+                classify_frame::<T>(&buf, &mut decoder, record_offset),
                 termination,
                 ReadPolicy::SealedScan {
                     tolerate_torn_tail: false,
@@ -898,7 +893,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             }
         })? {
             Some((_, termination)) => match dispose(
-                classify_frame::<T>(&buf),
+                classify_frame::<T>(&buf, &mut Decoder::new(&self.path), offset),
                 termination,
                 // Indexed offsets name committed records; an unterminated frame
                 // here is corruption.
@@ -983,6 +978,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let mut results = Vec::with_capacity(count);
         let mut reader = ReverseFrameReader::new(file, file_len);
         let mut buffer = Vec::new();
+        let mut decoder = Decoder::new(&self.path);
         while results.len() < count {
             let Some(termination) = reader.read_frame(&mut buffer).await.map_err(|error| {
                 JournalError::Implementation {
@@ -993,14 +989,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             else {
                 break;
             };
-            if buffer.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-
             // This remains a best-effort observability helper, but commitment
             // and frame validation use the same policy as forward readers.
             match dispose(
-                classify_frame::<T>(&buffer),
+                classify_frame::<T>(&buffer, &mut decoder, reader.offset()),
                 termination,
                 ReadPolicy::SealedScan {
                     tolerate_torn_tail: true,
@@ -1195,15 +1187,13 @@ mod tests {
             .await
             .expect("atomic group append");
         assert_eq!(written.len(), 3);
+        let bytes = std::fs::read(&log_path).unwrap();
         assert_eq!(
-            std::fs::read(&log_path)
-                .unwrap()
-                .iter()
-                .filter(|byte| **byte == b'\n')
-                .count(),
-            1,
+            codec::frame::frame_length(&bytes).unwrap(),
+            bytes.len(),
             "the whole group must have one physical commit marker"
         );
+        codec::frame::validate(&bytes).unwrap();
 
         let all = log.read_all_unordered().await.unwrap();
         assert_eq!(all.len(), 3);
@@ -1254,12 +1244,7 @@ mod tests {
                 .expect("valid record")
             })
             .collect();
-        let body = serialize_atomic_group("effect-outcome:test", &records).unwrap();
-        let mut hasher = Hasher::new();
-        hasher.update(&body);
-        let mut frame = format!("{}:{}:", body.len(), hasher.finalize()).into_bytes();
-        frame.extend_from_slice(&body);
-        frame.push(b'\n');
+        let frame = serialize_atomic_group("effect-outcome:test", &records).unwrap();
 
         for cut in 0..frame.len() {
             std::fs::write(&log_path, &frame[..cut]).unwrap();
@@ -1595,17 +1580,12 @@ mod tests {
             log.append(e, None).await.unwrap();
         }
 
-        // Flip a byte inside the second record's body (just before its
-        // terminating newline) so its CRC no longer matches: committed corruption
+        // Flip a byte inside the second record's body so its CRC no longer matches: committed corruption
         // with intact records on either side.
         let mut bytes = std::fs::read(&log_path).unwrap();
-        let newlines: Vec<usize> = bytes
-            .iter()
-            .enumerate()
-            .filter(|(_, &b)| b == b'\n')
-            .map(|(i, _)| i)
-            .collect();
-        let target = newlines[1] - 5;
+        let first_end = codec::frame::frame_length(&bytes).unwrap();
+        let second_end = first_end + codec::frame::frame_length(&bytes[first_end..]).unwrap();
+        let target = second_end - codec::frame::TRAILER_LEN - 1;
         bytes[target] ^= 0xff;
         std::fs::write(&log_path, &bytes).unwrap();
 
@@ -1650,7 +1630,7 @@ mod tests {
             .unwrap();
         let id = env.envelope.provenance.event.id;
 
-        // Truncate the committed record's frame (drop the newline and some body),
+        // Truncate the committed record's frame (drop part of the commit trailer),
         // leaving the index pointing at now-torn bytes.
         let bytes = std::fs::read(&log_path).unwrap();
         std::fs::write(&log_path, &bytes[..bytes.len() - 5]).unwrap();
@@ -1688,13 +1668,9 @@ mod tests {
         // Flip a byte in the second record's body so its CRC fails: mid-file
         // committed corruption with intact records on either side.
         let mut bytes = std::fs::read(&log_path).unwrap();
-        let newlines: Vec<usize> = bytes
-            .iter()
-            .enumerate()
-            .filter(|(_, &b)| b == b'\n')
-            .map(|(i, _)| i)
-            .collect();
-        let target = newlines[1] - 5;
+        let first_end = codec::frame::frame_length(&bytes).unwrap();
+        let second_end = first_end + codec::frame::frame_length(&bytes[first_end..]).unwrap();
+        let target = second_end - codec::frame::TRAILER_LEN - 1;
         bytes[target] ^= 0xff;
         std::fs::write(&log_path, &bytes).unwrap();
 
@@ -1728,9 +1704,9 @@ mod tests {
             log.append(e, None).await.unwrap();
         }
 
-        // Drop the final newline: the last record becomes an unterminated tail.
+        // Drop the final commit-marker byte: the last record becomes a torn tail.
         let mut bytes = std::fs::read(&log_path).unwrap();
-        assert_eq!(*bytes.last().unwrap(), b'\n');
+        assert_eq!(*bytes.last().unwrap(), b'O');
         bytes.pop();
         std::fs::write(&log_path, &bytes).unwrap();
 
@@ -1853,19 +1829,14 @@ mod tests {
                         journal_writer_id: JournalWriterId::from(journal_id),
                         vector_clock: VectorClock::new(),
                         timestamp: Utc::now(),
-                        journal_group_id: None,
-                        journal_group_member: None,
+                        journal_group_id: Some("effect-outcome:test".into()),
+                        journal_group_member: Some(JournalGroupMember { index, size: 3 }),
                     },
                 )
                 .expect("valid record")
             })
             .collect();
-        let body = serialize_atomic_group("effect-outcome:test", &records).unwrap();
-        let mut hasher = Hasher::new();
-        hasher.update(&body);
-        let mut frame = format!("{}:{}:", body.len(), hasher.finalize()).into_bytes();
-        frame.extend_from_slice(&body);
-        frame.push(b'\n');
+        let frame = serialize_atomic_group("effect-outcome:test", &records).unwrap();
 
         for fail_after in 0..=frame.len() {
             let mut sink = MockSink {

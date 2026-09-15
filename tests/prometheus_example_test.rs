@@ -887,10 +887,10 @@ mod managed_lifecycle_regressions {
         );
     }
 
-    const JOURNAL_PROOF_INPUTS: u64 = 5_000;
+    const JOURNAL_PROOF_INPUTS: u64 = 100_000;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prometheus_example_5k_completes_without_reporting() {
+    async fn prometheus_example_100k_completes_without_reporting() {
         prometheus_example_journal_and_metrics_proof(
             MetricsProofMode::Disabled,
             JOURNAL_PROOF_INPUTS,
@@ -899,7 +899,7 @@ mod managed_lifecycle_regressions {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prometheus_example_5k_completes_with_reporting() {
+    async fn prometheus_example_100k_completes_with_reporting() {
         prometheus_example_journal_and_metrics_proof(
             MetricsProofMode::HostedReporting,
             JOURNAL_PROOF_INPUTS,
@@ -1195,6 +1195,28 @@ enabled = {hosted}
             println!(
                 "Prometheus proof: {count} inputs, mode={mode:?}, archive={}",
                 archive.display()
+            );
+        }
+        if count == JOURNAL_PROOF_INPUTS {
+            let audit = obzenflow_infra::testing::journal::audit_archive(&archive).unwrap();
+            let evidence = serde_json::to_string_pretty(&audit).unwrap();
+            std::fs::write(dir.join("storage-audit.json"), &evidence).unwrap();
+            println!("FLOWIP-145c storage audit: {evidence}");
+            assert!(audit.provenance_bytes < audit.logical_provenance_bytes);
+            assert!(audit.observability_bytes < audit.logical_observability_bytes);
+            assert!(
+                audit.ordinary_provenance.mean <= 200.0,
+                "ordinary provenance: {:?}",
+                audit.ordinary_provenance
+            );
+            assert!(
+                audit.attached_observability.mean <= 256.0,
+                "attached observations: {:?}",
+                audit.attached_observability
+            );
+            assert!(
+                audit.archive_bytes - audit.payload_bytes <= 180 * 1024 * 1024,
+                "combined envelope budget: {audit:?}"
             );
         }
         drop(flow);

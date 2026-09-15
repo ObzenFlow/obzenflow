@@ -486,7 +486,7 @@ fn checked_schema_v3_studio_fixture_is_a_complete_run_manifest() {
     let manifest: RunManifest =
         serde_json::from_str(fixture).expect("Studio fixture must be a valid RunManifest");
     assert_eq!(manifest.manifest_version, "3.0");
-    assert_eq!(manifest.journal_format_version, 2);
+    assert_eq!(manifest.journal_format_version, 3);
     let evidence = manifest
         .effective_config
         .expect("Studio fixture must carry effective-config evidence");

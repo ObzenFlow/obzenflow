@@ -11,10 +11,10 @@ retries = 1
 slow-timeout = { period = "300s", terminate-after = 2 }
 retries = 2
 
-# The 5k proofs include rate-limited execution and full journal verification.
+# The 100k proofs include rate-limited execution and full journal verification.
 # Use the main-branch time budget when running them before merge.
 [[profile.ci-fast.overrides]]
-filter = "binary(=prometheus_example_test) & test(prometheus_example_5k_completes_)"
+filter = "binary(=prometheus_example_test) & test(prometheus_example_100k_completes_)"
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 [[profile.ci-fast.overrides]]

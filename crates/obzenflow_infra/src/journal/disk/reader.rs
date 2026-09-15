@@ -8,6 +8,7 @@
 //! reused between polls. A poll takes ownership of the buffer before awaiting;
 //! cancellation discards it and the next poll reopens at the committed offset.
 
+use super::codec::Decoder;
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::{
@@ -74,6 +75,7 @@ fn open_existing_std_file(path: &Path) -> Result<StdFile, JournalError> {
 
 /// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
+    decoder: Decoder,
     /// Current position (number of committed events read)
     position: u64,
     /// Byte offset of the next unread record. Advances only past a committed
@@ -123,6 +125,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             let _std_file = open_readable_std_file(&path)?;
 
             return Ok(Self {
+                decoder: Decoder::new(&path),
                 position: 0,
                 read_offset: 0,
                 stall_polls: 0,
@@ -159,6 +162,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
+            decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
             stall_polls: 0,
@@ -202,6 +206,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
+            decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
             stall_polls: 0,
@@ -340,12 +345,11 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 gate.release.notified().await;
             }
 
-            if self.buf.iter().all(u8::is_ascii_whitespace) {
-                self.read_offset += consumed as u64;
-                continue;
-            }
-
-            match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
+            match dispose(
+                classify_frame::<T>(&self.buf, &mut self.decoder, frame_start),
+                termination,
+                self.policy,
+            ) {
                 Disposition::Yield(frame) => {
                     self.read_offset += consumed as u64;
                     self.pending_group_id = frame.group_id().map(str::to_string);
@@ -542,7 +546,6 @@ mod tests {
     use super::*;
     use crate::journal::disk::log_record::serialize_record;
     use chrono::Utc;
-    use crc32fast::Hasher;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::journal_record::JournalPayload;
     use obzenflow_core::event::provenance::JournalProvenance;
@@ -687,7 +690,8 @@ mod tests {
             let first = make_record();
             write_framed_record(&mut file, &first);
             let committed_end = file.as_file().metadata().unwrap().len();
-            file.write_all(b"100:123:uncommitted tail").unwrap();
+            file.write_all(&serialize_record(&make_record()).unwrap()[..20])
+                .unwrap();
             let mut reader = DiskJournalReader::<ChainEvent>::new(
                 file.path().to_path_buf(),
                 journal_id,
@@ -751,13 +755,7 @@ mod tests {
     }
 
     fn write_framed_record<P: JournalPayload>(file: &mut NamedTempFile, record: &JournalRecord<P>) {
-        let json_body = serialize_record(record).unwrap();
-        let mut hasher = Hasher::new();
-        hasher.update(&json_body);
-        let crc = hasher.finalize();
-        let mut bytes = format!("{}:{}:", json_body.len(), crc).into_bytes();
-        bytes.extend_from_slice(&json_body);
-        bytes.push(b'\n');
+        let bytes = serialize_record(record).unwrap();
         file.write_all(&bytes).unwrap();
     }
 

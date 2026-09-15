@@ -223,13 +223,9 @@ async fn read_last_n_retains_best_effort_behavior_for_real_corruption() {
     f.journal.append(f.event(1, "corrupt"), None).await.unwrap();
     let last = f.journal.append(f.event(2, "newer"), None).await.unwrap();
     let mut bytes = std::fs::read(&f.path).unwrap();
-    let crc_start = middle_offset
-        + bytes[middle_offset..]
-            .iter()
-            .position(|b| *b == b':')
-            .unwrap()
-        + 1;
-    bytes[crc_start] = if bytes[crc_start] == b'1' { b'2' } else { b'1' };
+    let middle_end = middle_offset + codec::frame::frame_length(&bytes[middle_offset..]).unwrap();
+    let crc_start = middle_end - codec::frame::TRAILER_LEN;
+    bytes[crc_start] ^= 1;
     std::fs::write(&f.path, bytes).unwrap();
     assert_tail(&f.journal, &[first, last], 10).await;
 }

@@ -2,84 +2,110 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Byte-oriented reverse framing for best-effort journal tail reads.
-//!
-//! I/O chunks are not record boundaries. Retain fragments until a newline or
-//! BOF identifies the complete frame, then let the shared scanner validate it.
+//! Reverse reads use fixed binary trailers. A damaged or torn trailer falls
+//! back to checked forward lengths, never delimiter searches through payloads.
 
-use super::scanner::LineTermination;
-use std::io::SeekFrom;
+use super::codec::frame;
+use super::scanner::FrameTermination;
+use std::io::{self, SeekFrom};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-
-const BUFFER_SIZE: usize = 64 * 1024;
 
 pub(super) struct ReverseFrameReader<R> {
     reader: R,
-    /// Start of the buffered chunk; bytes before this offset remain unread.
+    end: u64,
     offset: u64,
-    buffer: Vec<u8>,
-    /// Unconsumed prefix of the buffered chunk.
-    cursor: usize,
-    termination: LineTermination,
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ReverseFrameReader<R> {
-    /// The caller holds the journal read lock over this fixed EOF snapshot.
     pub(super) fn new(reader: R, end: u64) -> Self {
         Self {
             reader,
+            end,
             offset: end,
-            buffer: Vec::with_capacity(BUFFER_SIZE),
-            cursor: 0,
-            termination: LineTermination::Unterminated,
         }
     }
+    pub(super) fn offset(&self) -> u64 {
+        self.offset
+    }
 
-    /// Return the next nonempty frame, newest first, without its newline.
-    /// Fragments accumulate in reverse byte order so even a frame spanning
-    /// many chunks takes linear work, without repeatedly prepending/copying it.
+    async fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> io::Result<()> {
+        self.reader.seek(SeekFrom::Start(offset)).await?;
+        self.reader.read_exact(bytes).await?;
+        Ok(())
+    }
+
+    /// Exceptional recovery only. Following validated header lengths prevents a
+    /// trailer-shaped byte string inside an opaque payload becoming a boundary.
+    async fn recover_start(&mut self) -> io::Result<u64> {
+        let mut position = 0;
+        let mut previous = 0;
+        while position < self.end {
+            let count = (self.end - position).min(frame::HEADER_LEN as u64) as usize;
+            let mut header = [0; frame::HEADER_LEN];
+            self.read_at(position, &mut header[..count]).await?;
+            let Ok(length) = frame::frame_length(&header[..count]) else {
+                return Ok(position);
+            };
+            let Some(next) = position.checked_add(length as u64) else {
+                return Ok(position);
+            };
+            if next > self.end {
+                return Ok(position);
+            }
+            previous = position;
+            position = next;
+        }
+        Ok(previous)
+    }
+
     pub(super) async fn read_frame(
         &mut self,
-        frame: &mut Vec<u8>,
-    ) -> std::io::Result<Option<LineTermination>> {
-        frame.clear();
-        loop {
-            if self.cursor == 0 {
-                if self.offset == 0 {
-                    if frame.is_empty() {
-                        return Ok(None);
-                    }
-                    frame.reverse();
-                    return Ok(Some(self.termination));
-                }
-
-                let start = self.offset.saturating_sub(BUFFER_SIZE as u64);
-                self.buffer.resize((self.offset - start) as usize, 0);
-                self.reader.seek(SeekFrom::Start(start)).await?;
-                // AsyncRead may legally return a short read. Advancing by the
-                // requested size after one read would silently skip bytes.
-                self.reader.read_exact(&mut self.buffer).await?;
-                self.offset = start;
-                self.cursor = self.buffer.len();
-            }
-
-            let bytes = &self.buffer[..self.cursor];
-            if let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
-                frame.extend(bytes[newline + 1..].iter().rev());
-                self.cursor = newline;
-                let termination =
-                    std::mem::replace(&mut self.termination, LineTermination::Terminated);
-                if frame.is_empty() {
-                    // Includes the delimiter at EOF and empty physical lines.
-                    continue;
-                }
-                frame.reverse();
-                return Ok(Some(termination));
-            }
-
-            frame.extend(bytes.iter().rev());
-            self.cursor = 0;
+        bytes: &mut Vec<u8>,
+    ) -> io::Result<Option<FrameTermination>> {
+        bytes.clear();
+        if self.end == 0 {
+            return Ok(None);
         }
+        let mut start = None;
+        if self.end >= (frame::HEADER_LEN + frame::TRAILER_LEN) as u64 {
+            let mut trailer = [0u8; frame::TRAILER_LEN];
+            self.read_at(self.end - frame::TRAILER_LEN as u64, &mut trailer)
+                .await?;
+            let length = u64::from_le_bytes(trailer[4..12].try_into().unwrap());
+            if trailer[12..] == frame::COMMIT_MAGIC
+                && length >= (frame::HEADER_LEN + frame::TRAILER_LEN) as u64
+                && length <= self.end
+            {
+                let candidate = self.end - length;
+                let mut header = [0u8; frame::HEADER_LEN];
+                self.read_at(candidate, &mut header).await?;
+                if frame::frame_length(&header).is_ok_and(|actual| actual as u64 == length) {
+                    start = Some(candidate);
+                }
+            }
+        }
+        let start = match start {
+            Some(start) => start,
+            None => self.recover_start().await?,
+        };
+        self.reader.seek(SeekFrom::Start(start)).await?;
+        let length = self.end - start;
+        (&mut self.reader).take(length).read_to_end(bytes).await?;
+        if bytes.len() as u64 != length {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "journal changed during reverse read",
+            ));
+        }
+        self.end = start;
+        self.offset = start;
+        let termination =
+            if frame::frame_length(bytes).is_ok_and(|expected| expected == bytes.len()) {
+                FrameTermination::Committed
+            } else {
+                FrameTermination::Incomplete
+            };
+        Ok(Some(termination))
     }
 }
 
@@ -92,52 +118,43 @@ mod tests {
     use tokio::io::ReadBuf;
 
     #[tokio::test]
-    async fn reconstructs_bytes_and_commit_markers_across_multiple_chunks() {
-        let frames: Vec<_> = [
-            1,
-            BUFFER_SIZE - 1,
-            BUFFER_SIZE,
-            BUFFER_SIZE + 1,
-            3 * BUFFER_SIZE,
-        ]
-        .into_iter()
-        .map(|size| "é🙂:".repeat(size / 7 + 1).into_bytes())
-        .collect();
-        for terminated in [false, true] {
+    async fn reconstructs_binary_frames_and_commit_markers_across_multiple_chunks() {
+        let frames: Vec<_> = [1, 65535, 65536, 65537, 3 * 65536]
+            .into_iter()
+            .map(|size| frame::encode("é🙂:\n\0".repeat(size / 9 + 1).as_bytes()))
+            .collect();
+        for torn in [false, true] {
             let mut input = Vec::new();
             for (index, frame) in frames.iter().enumerate() {
-                input.extend(frame);
-                if index + 1 < frames.len() || terminated {
-                    input.push(b'\n');
-                }
+                let end = frame.len() - usize::from(torn && index + 1 == frames.len());
+                input.extend_from_slice(&frame[..end]);
             }
-            let len = input.len() as u64;
-            let mut reader = ReverseFrameReader::new(Cursor::new(input), len);
+            let length = input.len() as u64;
+            let mut reader = ReverseFrameReader::new(Cursor::new(input), length);
             let mut actual = Vec::new();
             for (index, expected) in frames.iter().rev().enumerate() {
-                let ending = reader.read_frame(&mut actual).await.unwrap().unwrap();
-                assert_eq!(&actual, expected);
+                let incomplete = torn && index == 0;
                 assert_eq!(
-                    ending,
-                    if index == 0 && !terminated {
-                        LineTermination::Unterminated
+                    reader.read_frame(&mut actual).await.unwrap(),
+                    Some(if incomplete {
+                        FrameTermination::Incomplete
                     } else {
-                        LineTermination::Terminated
-                    }
+                        FrameTermination::Committed
+                    })
                 );
+                assert_eq!(actual, expected[..expected.len() - usize::from(incomplete)]);
             }
             assert_eq!(reader.read_frame(&mut actual).await.unwrap(), None);
         }
     }
 
     struct ShortReads(Cursor<Vec<u8>>);
-
     impl AsyncRead for ShortReads {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
             buf: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        ) -> Poll<io::Result<()>> {
             let limit = buf.remaining().min(3);
             let mut limited = ReadBuf::new(buf.initialize_unfilled_to(limit));
             let result = Pin::new(&mut self.0).poll_read(cx, &mut limited);
@@ -146,48 +163,64 @@ mod tests {
             result
         }
     }
-
     impl AsyncSeek for ShortReads {
-        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+        fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
             Pin::new(&mut self.0).start_seek(position)
         }
-
-        fn poll_complete(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<u64>> {
+        fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
             Pin::new(&mut self.0).poll_complete(cx)
         }
     }
 
     #[tokio::test]
     async fn short_reads_do_not_skip_bytes() {
-        let input = "first\né🙂:0:1372:\nlast\n".as_bytes().to_vec();
-        let len = input.len() as u64;
-        let mut reader = ReverseFrameReader::new(ShortReads(Cursor::new(input)), len);
-        let mut frame = Vec::new();
-        for expected in ["last", "é🙂:0:1372:", "first"] {
+        let frames: Vec<_> = ["first", "é🙂:0:1372:\n", "last"]
+            .map(|body| frame::encode(body.as_bytes()))
+            .into();
+        let input = frames.concat();
+        let length = input.len() as u64;
+        let mut reader = ReverseFrameReader::new(ShortReads(Cursor::new(input)), length);
+        let mut actual = Vec::new();
+        for expected in frames.iter().rev() {
             assert_eq!(
-                reader.read_frame(&mut frame).await.unwrap(),
-                Some(LineTermination::Terminated)
+                reader.read_frame(&mut actual).await.unwrap(),
+                Some(FrameTermination::Committed)
             );
-            assert_eq!(frame, expected.as_bytes());
+            assert_eq!(&actual, expected);
         }
-        assert_eq!(reader.read_frame(&mut frame).await.unwrap(), None);
+        assert_eq!(reader.read_frame(&mut actual).await.unwrap(), None);
     }
 
     #[tokio::test]
-    async fn unexpected_eof_is_an_io_error() {
-        let mut reader = ReverseFrameReader::new(Cursor::new(b"short\n".to_vec()), 20);
-        let error = reader.read_frame(&mut Vec::new()).await.unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    async fn torn_payload_with_embedded_valid_frame_does_not_invent_a_boundary() {
+        let first = frame::encode(b"first");
+        let embedded = frame::encode(b"this is only opaque payload");
+        let second = frame::encode(&embedded);
+        let mut bytes = first.clone();
+        bytes.extend_from_slice(&second[..second.len() - 7]);
+        let length = bytes.len() as u64;
+        let mut reader = ReverseFrameReader::new(Cursor::new(bytes), length);
+        let mut actual = Vec::new();
+        assert_eq!(
+            reader.read_frame(&mut actual).await.unwrap(),
+            Some(FrameTermination::Incomplete)
+        );
+        assert_eq!(reader.offset(), first.len() as u64);
+        assert_eq!(
+            reader.read_frame(&mut actual).await.unwrap(),
+            Some(FrameTermination::Committed)
+        );
+        assert_eq!(actual, first);
     }
 
     #[tokio::test]
-    async fn empty_files_and_empty_lines_have_no_frames() {
-        for input in [b"".as_slice(), b"\n", b"\n\n"] {
-            let mut reader = ReverseFrameReader::new(Cursor::new(input), input.len() as u64);
-            assert_eq!(reader.read_frame(&mut Vec::new()).await.unwrap(), None);
-        }
+    async fn unexpected_eof_is_an_io_error_and_empty_file_has_no_frames() {
+        let mut reader = ReverseFrameReader::new(Cursor::new(b"short".to_vec()), 20);
+        assert_eq!(
+            reader.read_frame(&mut Vec::new()).await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let mut empty = ReverseFrameReader::new(Cursor::new(Vec::<u8>::new()), 0);
+        assert_eq!(empty.read_frame(&mut Vec::new()).await.unwrap(), None);
     }
 }
