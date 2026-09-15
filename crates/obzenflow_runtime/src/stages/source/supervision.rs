@@ -332,9 +332,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             pending.event.processing.status,
             ProcessingStatus::Error { .. }
         ) {
-            let event = pending
-                .event
-                .with_runtime_provenance(instrumentation.snapshot());
+            let event = instrumentation.capture_runtime().attach_to(pending.event);
             crate::supervised_base::publication::append(error_journal, event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
@@ -395,9 +393,7 @@ where
             pending.event.processing.status,
             ProcessingStatus::Error { .. }
         ) {
-            let event = pending
-                .event
-                .with_runtime_provenance(instrumentation.snapshot());
+            let event = instrumentation.capture_runtime().attach_to(pending.event);
             crate::supervised_base::publication::append(error_journal, event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;

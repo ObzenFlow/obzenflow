@@ -438,9 +438,10 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                     stage_type: obzenflow_core::event::context::StageType::Transform,
                 };
 
-                let error_event = (*error_event)
-                    .with_flow_context(flow_context)
-                    .with_runtime_provenance(ctx.instrumentation.snapshot());
+                let error_event = ctx
+                    .instrumentation
+                    .capture_runtime()
+                    .attach_to((*error_event).with_flow_context(flow_context));
 
                 let journal = ctx.error_journal.clone();
                 let parent = envelope.clone();

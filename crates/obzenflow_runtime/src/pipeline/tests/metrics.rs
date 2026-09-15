@@ -376,7 +376,6 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
                     },
                     ..Default::default()
                 },
-                ..Default::default()
             });
             if failed {
                 event = event.mark_as_error("expected", ErrorKind::Unknown);

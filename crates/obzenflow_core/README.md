@@ -23,6 +23,8 @@ Manifest 4.0 journals and JSONL exports contain exactly `envelope` and `payload`
 
 Optional `envelope.observability` attachments carry typed measurements and their capture identity. Removing an attachment does not remove execution accounting, causal identity, effect evidence or atomic membership. Live measurements use the runtime's bounded observation view; they do not create journal entries. Missing measurement families stay unavailable, and a measured zero remains a measurement.
 
+`envelope.provenance.event.runtime.accounting` retains factual counters. Diagnostic progress positions, copied event IDs/clocks and the instrumentation FSM label live together in `envelope.observability.runtime_snapshot`. That snapshot has its own capture stamp because the appending stage can differ from the owner of existing handler or forwarded measurements. These copies establish neither recovery positions nor factual lifecycle state.
+
 The manifest change is a clean schema break. Journal framing remains version 2; older record layouts require recording a new run with this build.
 
 ## License

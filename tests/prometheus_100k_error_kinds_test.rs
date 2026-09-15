@@ -391,7 +391,12 @@ enabled = false
                         .or_default() += 1;
                 }
             }
-            if let Some(runtime) = &event.runtime {
+            if let Some(runtime) = event
+                .envelope
+                .observability
+                .as_ref()
+                .and_then(|packet| packet.runtime_snapshot.as_ref())
+            {
                 assert_ne!(
                     runtime.fsm_state, "Created",
                     "emitted snapshot from {}",

@@ -293,13 +293,18 @@ mod tests {
         use super::super::log_record::{serialize_atomic_group, serialize_record};
         use crate::journal::DiskJournal;
         use obzenflow_core::ai::AiMapReduceTaggedPartial;
-        use obzenflow_core::event::context::RuntimeObservability;
+        use obzenflow_core::event::context::{
+            ExecutionProgress, RuntimeObservability, RuntimeProvenance, RuntimeSnapshot,
+        };
         use obzenflow_core::event::observation::{
             CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ObservabilityContext,
         };
         use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+        use obzenflow_core::event::vector_clock::VectorClock;
         use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
-        use obzenflow_core::{FlowId, Journal, JournalOwner, StageId, TypedPayload, WriterId};
+        use obzenflow_core::{
+            FlowId, Journal, JournalOwner, JournalWriterId, StageId, TypedPayload, WriterId,
+        };
 
         let dir = tempfile::tempdir().expect("temporary journal directory");
         let stage = StageId::new();
@@ -336,6 +341,28 @@ mod tests {
                 in_flight: Some(index as u32),
                 ..Default::default()
             });
+            let mut clock = VectorClock::new();
+            clock.clocks.insert(writer.to_string(), index as u64 + 1);
+            packet.runtime_snapshot = Some(RuntimeSnapshot {
+                capture: packet.capture,
+                progress: ExecutionProgress {
+                    reader_seq: 12,
+                    receipted_seq: 10,
+                    writer_seq: index as u64 + 1,
+                    last_consumed_event_id: Some(event.id),
+                    last_consumed_writer: Some(JournalWriterId::new()),
+                    last_consumed_vector_clock: Some(clock.clone()),
+                    last_receipted_event_id: Some(event.id),
+                    last_receipted_vector_clock: Some(clock),
+                    last_emitted_event_id: Some(event.id),
+                    last_emitted_writer: Some(writer),
+                },
+                fsm_state: "Running".into(),
+            });
+            let mut runtime = RuntimeProvenance::default();
+            runtime.accounting.events_processed_total = 12;
+            runtime.accounting.events_emitted_total = index as u64 + 1;
+            event.runtime = Some(runtime);
             event.envelope.observability = Some(packet);
         }
         let journal = DiskJournal::<ChainEvent>::with_owner(

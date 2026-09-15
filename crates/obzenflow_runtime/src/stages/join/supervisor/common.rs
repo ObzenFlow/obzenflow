@@ -393,7 +393,7 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         return Ok(());
     }
 
-    let runtime_context = ctx.instrumentation.snapshot();
+    let runtime_context = ctx.instrumentation.capture_runtime();
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -407,9 +407,9 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         reference_inputs_since_last_report: events_since_last,
     };
 
-    let heartbeat = ChainEventFactory::execution_event(writer_id, payload)
-        .with_flow_context(flow_context)
-        .with_runtime_provenance(runtime_context);
+    let heartbeat =
+        ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
+    let heartbeat = runtime_context.attach_to(heartbeat);
 
     crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
     ctx.events_since_last_heartbeat = 0;

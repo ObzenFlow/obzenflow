@@ -5,7 +5,7 @@
 //! Optional observation packets shared by live handoff and committed attachments.
 
 use super::context::measurement_snapshots::{MetricsSnapshot, SliSnapshot};
-use super::context::RuntimeObservability;
+use super::context::{RuntimeObservability, RuntimeSnapshot};
 use super::payloads::execution_payload::CircuitState;
 use crate::ai::LlmObservability;
 use crate::id::FlowId;
@@ -45,14 +45,17 @@ pub struct CaptureStamp {
     pub observed_at_ms: u64,
 }
 
-/// A packet belongs to one capture owner. Forwarding preserves this stamp;
-/// individual populated families are selected independently by backend views.
+/// Forwarding preserves the capture stamp of the existing measurement families.
+/// The runtime snapshot carries its own stamp because the appending stage can
+/// differ from that owner. Backend views select each populated family separately.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservabilityContext {
     pub capture: CaptureStamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeObservability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_snapshot: Option<RuntimeSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_time: Option<MetricsDuration>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +71,7 @@ impl ObservabilityContext {
         Self {
             capture,
             runtime: None,
+            runtime_snapshot: None,
             processing_time: None,
             metrics: None,
             sli: None,
@@ -77,10 +81,27 @@ impl ObservabilityContext {
 
     pub fn is_empty(&self) -> bool {
         self.runtime.is_none()
+            && self.runtime_snapshot.is_none()
             && self.processing_time.is_none()
             && self.metrics.is_none()
             && self.sli.is_none()
             && self.records.is_empty()
+    }
+
+    /// Retain only evidence captured by the requested owner. The surrounding
+    /// packet's owner does not determine ownership of its runtime snapshot.
+    pub fn for_observer(&self, observer: WriterId) -> Option<Self> {
+        let snapshot = self
+            .runtime_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.capture.observer == observer);
+        let mut packet = if self.capture.observer == observer {
+            self.clone()
+        } else {
+            Self::new(snapshot?.capture)
+        };
+        packet.runtime_snapshot = snapshot.cloned();
+        (!packet.is_empty()).then_some(packet)
     }
 }
 
