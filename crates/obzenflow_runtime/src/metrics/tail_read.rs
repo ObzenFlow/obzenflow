@@ -129,7 +129,7 @@ pub async fn read_stage_metrics_from_tail(
         {
             for row in rows.into_iter().rev() {
                 if let Some(observation) = row.envelope.observability {
-                    if observation.capture.observer == WriterId::from(stage_id) {
+                    if let Some(observation) = observation.for_observer(WriterId::from(stage_id)) {
                         observations.offer_recorded(observation);
                     }
                 }
@@ -208,9 +208,7 @@ pub async fn read_flow_metrics_from_tails(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::context::{
-        ExecutionAccounting, ExecutionProgress, RuntimeProvenance,
-    };
+    use obzenflow_core::event::context::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
     use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -338,18 +336,6 @@ mod tests {
         by_kind: &[(ErrorKind, u64)],
     ) -> RuntimeProvenance {
         RuntimeProvenance {
-            progress: ExecutionProgress {
-                reader_seq: 0,
-                receipted_seq: 0,
-                writer_seq: 0,
-                last_consumed_event_id: None,
-                last_consumed_writer: None,
-                last_consumed_vector_clock: None,
-                last_receipted_event_id: None,
-                last_receipted_vector_clock: None,
-                last_emitted_event_id: None,
-                last_emitted_writer: None,
-            },
             accounting: ExecutionAccounting {
                 events_processed_total,
                 events_accumulated_total: 0,
@@ -362,7 +348,6 @@ mod tests {
                 failures_total: 0,
                 errors_by_kind: by_kind.iter().cloned().collect(),
             },
-            fsm_state: "Running".to_string(),
         }
     }
 

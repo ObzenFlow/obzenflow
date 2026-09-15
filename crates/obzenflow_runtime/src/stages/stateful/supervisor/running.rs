@@ -548,9 +548,10 @@ pub(super) async fn dispatch_accumulating<
                                 ctx.stage_id,
                                 StageType::Stateful,
                             );
-                            let enriched_error = error_event
-                                .with_flow_context(flow_ctx)
-                                .with_runtime_provenance(ctx.instrumentation.snapshot());
+                            let enriched_error = ctx
+                                .instrumentation
+                                .capture_runtime()
+                                .attach_to(error_event.with_flow_context(flow_ctx));
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,

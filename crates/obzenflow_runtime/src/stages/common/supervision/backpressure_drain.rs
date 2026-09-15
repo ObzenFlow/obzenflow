@@ -458,8 +458,8 @@ async fn emit_stalled_fact(
             in_flight: detail.in_flight,
         }),
     )
-    .with_flow_context(flow_context.clone())
-    .with_runtime_provenance(instrumentation.snapshot());
+    .with_flow_context(flow_context.clone());
+    let event = instrumentation.capture_runtime().attach_to(event);
 
     if let Err(e) = crate::supervised_base::publication::append(data_journal, event, None).await {
         tracing::warn!(

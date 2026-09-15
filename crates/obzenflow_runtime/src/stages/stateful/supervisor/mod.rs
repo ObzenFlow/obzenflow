@@ -485,7 +485,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         };
 
         // Capture a fresh runtime context snapshot for the heartbeat.
-        let runtime_context = ctx.instrumentation.snapshot();
+        let runtime_context = ctx.instrumentation.capture_runtime();
 
         use obzenflow_core::event::ChainEventFactory;
 
@@ -502,9 +502,9 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             inputs_since_last_report: delta,
         };
 
-        let heartbeat = ChainEventFactory::execution_event(writer_id, payload)
-            .with_flow_context(flow_context)
-            .with_runtime_provenance(runtime_context);
+        let heartbeat =
+            ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
+        let heartbeat = runtime_context.attach_to(heartbeat);
 
         crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
 

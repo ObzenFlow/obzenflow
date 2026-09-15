@@ -44,13 +44,11 @@ pub(super) fn with_committed_receipt_snapshot(
     event: ChainEvent,
     instrumentation: &crate::metrics::instrumentation::StageInstrumentation,
 ) -> ChainEvent {
-    let mut snapshot = instrumentation.snapshot();
+    let mut snapshot = instrumentation.capture_runtime();
     snapshot.accounting.events_emitted_total =
         snapshot.accounting.events_emitted_total.saturating_add(1);
-    snapshot.progress.writer_seq = snapshot.progress.writer_seq.saturating_add(1);
-    snapshot.progress.last_emitted_event_id = Some(event.id);
-    snapshot.progress.last_emitted_writer = Some(event.writer_id);
-    event.with_runtime_provenance(snapshot)
+    snapshot.project_emission(&event);
+    snapshot.attach_to(event)
 }
 
 // Re-export public API

@@ -37,7 +37,6 @@
 //! framework effect/capture record path supplies only the journal, preserving
 //! its compatibility append until typed outcome facts replace it.
 
-use obzenflow_core::event::context::RuntimeProvenance;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use std::sync::Arc;
 
@@ -51,7 +50,7 @@ use obzenflow_core::{ChainEvent, WriterId};
 
 use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::StageInstrumentation;
+use crate::metrics::instrumentation::{RuntimeCapture, StageInstrumentation};
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
 
@@ -128,15 +127,13 @@ pub(crate) fn commit_control_output(
             *writer_seq_by_event_type = by_type;
             *last_event_id = last;
         }
-        let mut snapshot = instrumentation.snapshot();
-        snapshot.progress.writer_seq = snapshot.progress.writer_seq.saturating_add(1);
-        snapshot.progress.last_emitted_event_id = Some(event.id);
-        snapshot.progress.last_emitted_writer = Some(event.writer_id);
-        event = event.with_runtime_provenance(snapshot);
+        let mut snapshot = instrumentation.capture_runtime();
+        snapshot.project_emission(&event);
         let runtime_capture = instrumentation.capture_for_record();
         if event.envelope.observability.is_none() {
             event.envelope.observability = runtime_capture;
         }
+        event = snapshot.attach_to(event);
         let written = journal.append(event, None).await?;
         instrumentation.record_emitted(&written.authored());
         Ok(written)
@@ -156,19 +153,17 @@ pub(crate) fn commit_error_output(
     let instrumentation = instrumentation.clone();
     let parent = parent.cloned();
     crate::supervised_base::publication::commit(async move {
-        let mut snapshot = instrumentation.snapshot();
+        let mut snapshot = instrumentation.capture_runtime();
         if event.consumes_data_credit() {
             snapshot.accounting.events_emitted_total =
                 snapshot.accounting.events_emitted_total.saturating_add(1);
-            snapshot.progress.writer_seq = snapshot.progress.writer_seq.saturating_add(1);
-            snapshot.progress.last_emitted_event_id = Some(event.id);
-            snapshot.progress.last_emitted_writer = Some(event.writer_id);
+            snapshot.project_emission(&event);
         }
-        event = event.with_runtime_provenance(snapshot);
         let runtime_capture = instrumentation.capture_for_record();
         if event.envelope.observability.is_none() {
             event.envelope.observability = runtime_capture;
         }
+        event = snapshot.attach_to(event);
         let written = journal.append(event, parent.as_ref()).await?;
         if written.consumes_data_credit() {
             instrumentation.record_error_journal_output_event(&written.authored());
@@ -644,7 +639,7 @@ impl OutputCommitter<'_> {
         let mut metadata = Vec::with_capacity(entries.len());
         let mut snapshot = self
             .instrumentation
-            .map(|instrumentation| instrumentation.snapshot());
+            .map(|instrumentation| instrumentation.capture_runtime_in_scope(self.observer_scope));
         if let Some(snapshot) = &mut snapshot {
             snapshot.accounting.terminal_groups_committed_total = snapshot
                 .accounting
@@ -657,7 +652,14 @@ impl OutputCommitter<'_> {
                 .await?;
             if let Some(snapshot) = &mut snapshot {
                 self.project_committed_output(snapshot, &event, entry.options);
-                event = event.with_runtime_provenance(snapshot.clone());
+                // Every member carries a distinct projected prefix. Give that
+                // body its own identity while retaining the group capture time.
+                let member = snapshot.for_group_member(
+                    self.instrumentation
+                        .expect("group capture has instrumentation"),
+                    self.observer_scope,
+                );
+                event = member.attach_to(event);
             }
             prepared.push(event);
             metadata.push((entry.options, entry.intent));
@@ -800,9 +802,9 @@ impl OutputCommitter<'_> {
                     event.envelope.observability = runtime_capture;
                 }
             }
-            let mut snapshot = instrumentation.snapshot();
+            let mut snapshot = instrumentation.capture_runtime_in_scope(self.observer_scope);
             self.project_committed_output(&mut snapshot, &event, options);
-            event = event.with_runtime_provenance(snapshot);
+            event = snapshot.attach_to(event);
         }
 
         Ok(event)
@@ -812,7 +814,7 @@ impl OutputCommitter<'_> {
     /// counters still advance only after append acknowledgement.
     fn project_committed_output(
         &self,
-        snapshot: &mut RuntimeProvenance,
+        snapshot: &mut RuntimeCapture,
         event: &ChainEvent,
         options: CommitOptions,
     ) {
@@ -821,9 +823,7 @@ impl OutputCommitter<'_> {
         }
         snapshot.accounting.events_emitted_total =
             snapshot.accounting.events_emitted_total.saturating_add(1);
-        snapshot.progress.writer_seq = snapshot.progress.writer_seq.saturating_add(1);
-        snapshot.progress.last_emitted_event_id = Some(event.id);
-        snapshot.progress.last_emitted_writer = Some(event.writer_id);
+        snapshot.project_emission(event);
         if self
             .flow_context
             .is_none_or(|context| event_is_authored_by_stage(event, context, self.observer_scope))

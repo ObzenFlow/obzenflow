@@ -454,7 +454,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.snapshot();
+                let runtime_context = ctx.instrumentation.capture_runtime();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
@@ -482,7 +482,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                eof_event.runtime = Some(runtime_context.clone());
+                eof_event = runtime_context.clone().attach_to(eof_event);
 
                 // Emit consumption_final for the source itself (writer-side contract)
                 let mut final_event = ChainEventFactory::consumption_final_event(
@@ -507,7 +507,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                final_event.runtime = Some(runtime_context);
+                final_event = runtime_context.attach_to(final_event);
 
                 crate::supervised_base::publication::append(&ctx.data_journal, eof_event, None)
                     .await
@@ -1011,7 +1011,8 @@ pub(crate) mod tests {
                         backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
                         output_contract: StageOutputContract::empty(),
                     });
-                    assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Created");
+                    ctx.instrumentation.bind_observations(ctx.flow_id, WriterId::from(stage_id), &ctx.runtime_execution);
+                    assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Created");
                     let mut fsm = build_fsm($state::Created);
                     for (event, destination) in [
                         ($event::Initialize, "Initialized"),
@@ -1024,7 +1025,7 @@ pub(crate) mod tests {
                         *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
                         let actions = fsm.handle(event, &mut ctx).await.unwrap();
                         assert_eq!(fsm.state().variant_name(), destination);
-                        assert_eq!(ctx.instrumentation.snapshot().fsm_state, destination);
+                        assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), destination);
                         assert!(*ctx.instrumentation.state_entered_at.read().unwrap() > old_entry);
                         for action in actions {
                             action.execute(&mut ctx).await.unwrap();
@@ -1035,7 +1036,7 @@ pub(crate) mod tests {
                         ChainPayload::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
                         usize::from($finite));
                     let eof = events.iter().find(|env| env.is_eof()).expect("authored EOF");
-                    assert_eq!(eof.envelope.provenance.event.runtime.as_ref().unwrap().fsm_state, "Drained");
+                    assert_eq!(eof.envelope.observability.as_ref().unwrap().runtime_snapshot.as_ref().unwrap().fsm_state, "Drained");
                     for env in &events {
                         if matches!(env.payload, ChainPayload::FlowControl(
                             FlowControlPayload::SourceContract { .. })) {
@@ -1061,14 +1062,14 @@ pub(crate) mod tests {
                         let expected_reason = if repeated { "first" } else { "failure" };
                         assert_eq!(fsm.state(), &$state::Failed(expected_reason.into()));
                         assert_eq!(actions.is_empty(), repeated);
-                        assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Failed");
+                        assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Failed");
                         assert_eq!(*ctx.instrumentation.state_entered_at.read().unwrap() == old_entry, repeated);
                     }
                     if $finite {
                         ctx.instrumentation.transition_to_state("Running");
                         let mut fsm = build_fsm($state::Running);
                         let actions = fsm.handle($event::Completed, &mut ctx).await.unwrap();
-                        assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Draining");
+                        assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Draining");
                         assert!(actions.is_empty());
                     }
                 }

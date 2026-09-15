@@ -4,7 +4,7 @@
 
 use super::factory::ChainEventFactory;
 use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::{FlowContext, RuntimeProvenance};
+use crate::event::context::{FlowContext, RuntimeProvenance, RuntimeSnapshot};
 use crate::event::journal_record::JournalPayload;
 use crate::event::observation::ObservabilityContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
@@ -142,6 +142,17 @@ impl ChainEvent {
 
     pub fn with_runtime_provenance(mut self, ctx: RuntimeProvenance) -> Self {
         self.runtime = Some(ctx);
+        self
+    }
+
+    /// Attach the local runtime's diagnostic snapshot without re-stamping any
+    /// existing handler or forwarded measurements.
+    pub fn with_runtime_snapshot(mut self, snapshot: RuntimeSnapshot) -> Self {
+        let capture = snapshot.capture;
+        self.envelope
+            .observability
+            .get_or_insert_with(|| ObservabilityContext::new(capture))
+            .runtime_snapshot = Some(snapshot);
         self
     }
 

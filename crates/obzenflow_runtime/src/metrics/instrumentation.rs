@@ -4,6 +4,9 @@
 
 //! FSM instrumentation for HandlerSupervised stages
 
+mod runtime_capture;
+pub(crate) use runtime_capture::RuntimeCapture;
+
 use crate::control_plane::{
     CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView, ControlPlaneProvider,
     NoControlPlane, RateLimiterSnapshotter,
@@ -281,26 +284,10 @@ impl StageInstrumentation {
         Ok(())
     }
 
-    /// Capture protected positions and accounting without touching measurement
+    /// Capture protected accounting without touching diagnostic snapshot or measurement
     /// locks, control snapshotters, or the observation handoff.
     pub fn snapshot(&self) -> RuntimeProvenance {
         RuntimeProvenance {
-            progress: ExecutionProgress {
-                reader_seq: self.reader_seq.load(Ordering::Relaxed),
-                receipted_seq: self.receipted_seq.load(Ordering::Relaxed),
-                writer_seq: self.writer_seq.load(Ordering::Relaxed),
-                last_consumed_event_id: *self.last_consumed_event_id.read().unwrap(),
-                last_consumed_writer: *self.last_consumed_writer.read().unwrap(),
-                last_consumed_vector_clock: self.last_consumed_vector_clock.read().unwrap().clone(),
-                last_receipted_event_id: *self.last_receipted_event_id.read().unwrap(),
-                last_receipted_vector_clock: self
-                    .last_receipted_vector_clock
-                    .read()
-                    .unwrap()
-                    .clone(),
-                last_emitted_event_id: *self.last_emitted_event_id.read().unwrap(),
-                last_emitted_writer: *self.last_emitted_writer.read().unwrap(),
-            },
             accounting: ExecutionAccounting {
                 events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
                 events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
@@ -356,7 +343,6 @@ impl StageInstrumentation {
                     counts
                 },
             },
-            fsm_state: self.current_state.read().unwrap().clone(),
         }
     }
 
@@ -788,8 +774,8 @@ impl StageInstrumentation {
 }
 
 use obzenflow_core::event::context::{
-    CircuitBreakerMeasurements, ExecutionAccounting, ExecutionProgress, MeasurementWindow,
-    RateLimiterMeasurements, RuntimeObservability, RuntimeProvenance, TimingMeasurements,
+    CircuitBreakerMeasurements, ExecutionAccounting, MeasurementWindow, RateLimiterMeasurements,
+    RuntimeObservability, RuntimeProvenance, TimingMeasurements,
 };
 use obzenflow_core::event::observation::{
     CaptureReason, NoObservations, ObservabilityContext, ObservationRecord, ObservationRecorder,
@@ -906,8 +892,7 @@ mod tests {
         *instrumentation.state_entered_at.write().unwrap() = entered;
         instrumentation.transition_to_state("Created");
         assert_eq!(*instrumentation.state_entered_at.read().unwrap(), entered);
-        let snapshot = instrumentation.snapshot();
-        assert_eq!(snapshot.fsm_state, "Created");
+        assert_eq!(*instrumentation.current_state.read().unwrap(), "Created");
         assert!(
             instrumentation
                 .state_entered_at
@@ -921,7 +906,7 @@ mod tests {
         let before_transition = Instant::now();
         instrumentation.transition_to_state("Running");
         assert!(*instrumentation.state_entered_at.read().unwrap() >= before_transition);
-        assert_eq!(instrumentation.snapshot().fsm_state, "Running");
+        assert_eq!(*instrumentation.current_state.read().unwrap(), "Running");
     }
 
     #[test]
@@ -952,14 +937,21 @@ mod tests {
 
     #[test]
     fn record_receipted_position_updates_snapshot() {
-        let instrumentation = StageInstrumentation::new();
+        let instrumentation = std::sync::Arc::new(StageInstrumentation::new());
+        let execution =
+            crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
+        instrumentation.bind_observations(
+            obzenflow_core::FlowId::new(),
+            StageId::new().into(),
+            &execution,
+        );
         let event_id = EventId::new();
         let mut vector_clock = VectorClock::new();
         vector_clock.clocks.insert("sink".to_string(), 7);
 
         instrumentation.record_receipted_position(7, event_id, vector_clock.clone());
 
-        let snapshot = instrumentation.snapshot();
+        let snapshot = instrumentation.capture_runtime().observation.unwrap();
         assert_eq!(snapshot.progress.receipted_seq, 7);
         assert_eq!(snapshot.progress.last_receipted_event_id, Some(event_id));
         assert_eq!(

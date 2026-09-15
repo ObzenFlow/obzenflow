@@ -508,8 +508,10 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     // Ensure happened-before is preserved: the persisted aggregate event should
     // carry the upstream vector-clock entries via a parented append.
     let parent_vc = event
-        .runtime
+        .envelope
+        .observability
         .as_ref()
+        .and_then(|packet| packet.runtime_snapshot.as_ref())
         .and_then(|ctx| ctx.progress.last_consumed_vector_clock.clone())
         .ok_or_else(|| anyhow!("aggregate event missing last_consumed_vector_clock"))?;
 

@@ -19,6 +19,7 @@ impl ObservabilityContext {
     /// A malformed timing bundle is omitted without discarding other families.
     pub fn validated(mut self) -> Option<Self> {
         let mut families = self.records.len()
+            + usize::from(self.runtime_snapshot.is_some())
             + usize::from(self.processing_time.is_some())
             + usize::from(self.metrics.is_some())
             + usize::from(self.sli.is_some());

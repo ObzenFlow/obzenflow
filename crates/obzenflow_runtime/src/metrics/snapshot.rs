@@ -94,8 +94,8 @@ impl SnapshotObservation {
 
     fn retain_measurements(&self, row: &JournalRecord<ChainPayload>, stage: StageId) {
         if let Some(packet) = &row.envelope.observability {
-            if packet.capture.observer == WriterId::from(stage) {
-                self.measurements.offer_recorded(packet.clone());
+            if let Some(packet) = packet.for_observer(WriterId::from(stage)) {
+                self.measurements.offer_recorded(packet);
             }
         }
     }

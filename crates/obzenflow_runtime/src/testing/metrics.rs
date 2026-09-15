@@ -4,7 +4,6 @@
 
 //! Metrics journal scenarios supplied with real journals by outer tests.
 
-use crate::metrics::instrumentation::StageInstrumentation;
 pub use crate::metrics::tests::*;
 use obzenflow_core::event::context::ExecutionAccounting;
 
@@ -83,7 +82,6 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
                     errors_by_kind: HashMap::from([(ErrorKind::Unknown, count)]),
                     ..Default::default()
                 },
-                ..StageInstrumentation::new().snapshot()
             })
             .mark_as_error("expected", ErrorKind::Unknown);
         rows.push((kind, target.append(event, None).await.unwrap()));

@@ -209,7 +209,6 @@ fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent 
             events_processed_total: total,
             ..Default::default()
         },
-        ..Default::default()
     });
     use obzenflow_core::event::{
         context::*, observation::*, payloads::execution_payload::CircuitState,

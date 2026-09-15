@@ -20,6 +20,7 @@ const MAX_OWNERS: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Kind {
+    RuntimeSnapshot,
     InFlight,
     JoinReference,
     StateAge,
@@ -334,6 +335,11 @@ impl ObservationRecorder for ObservationOwner {
 fn split(packet: ObservabilityContext) -> Option<Vec<(Kind, ObservabilityContext)>> {
     let mut families = Vec::new();
     let stamp = packet.capture;
+    if let Some(snapshot) = packet.runtime_snapshot {
+        let mut part = ObservabilityContext::new(snapshot.capture);
+        part.runtime_snapshot = Some(snapshot);
+        families.push((Kind::RuntimeSnapshot, part));
+    }
     if let Some(runtime) = packet.runtime {
         macro_rules! field {
             ($name:ident, $kind:ident) => {
@@ -462,6 +468,90 @@ mod tests {
             ..Default::default()
         });
         packet
+    }
+
+    #[test]
+    fn runtime_snapshot_uses_its_own_stamp_and_replaces_the_whole_family() {
+        use obzenflow_core::event::context::{ExecutionProgress, RuntimeSnapshot};
+
+        let hub = ObservationHub::default();
+        let scope = CaptureScope {
+            flow_id: FlowId::new(),
+            resume_generation: ReaderGeneration(0),
+        };
+        hub.activate_scope(scope);
+        let upstream = StageId::new().into();
+        let local = StageId::new().into();
+        let mut carrier = packet(scope, upstream, 100, 9);
+        let local_stamp = packet(scope, local, 5, 0).capture;
+        carrier.runtime_snapshot = Some(RuntimeSnapshot {
+            capture: local_stamp,
+            progress: ExecutionProgress {
+                reader_seq: 12,
+                last_consumed_event_id: Some(obzenflow_core::EventId::new()),
+                ..Default::default()
+            },
+            fsm_state: "Running".into(),
+        });
+        assert_eq!(hub.select_recorded(carrier.clone()).unwrap().len(), 2);
+        let first = hub
+            .snapshot()
+            .into_iter()
+            .find_map(|packet| packet.runtime_snapshot)
+            .unwrap();
+        assert_eq!(first.capture, local_stamp);
+        assert_eq!(first.progress.reader_seq, 12);
+
+        carrier.capture.capture_seq = CaptureSeq(101);
+        carrier
+            .runtime_snapshot
+            .as_mut()
+            .unwrap()
+            .capture
+            .capture_seq = CaptureSeq(4);
+        carrier.runtime_snapshot.as_mut().unwrap().fsm_state = "Created".into();
+        let selected = hub.select_recorded(carrier).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].runtime_snapshot.is_none());
+
+        let mut newer = ObservabilityContext::new(local_stamp);
+        newer.runtime_snapshot = Some(RuntimeSnapshot {
+            capture: CaptureStamp {
+                capture_seq: CaptureSeq(6),
+                ..local_stamp
+            },
+            progress: ExecutionProgress::default(),
+            fsm_state: "Drained".into(),
+        });
+        assert_eq!(hub.select_recorded(newer.clone()).unwrap().len(), 1);
+        assert!(hub.select_recorded(newer.clone()).unwrap().is_empty());
+        let latest = hub
+            .snapshot()
+            .into_iter()
+            .find_map(|packet| packet.runtime_snapshot)
+            .unwrap();
+        assert_eq!(latest.capture.capture_seq, CaptureSeq(6));
+        assert_eq!(latest.progress.reader_seq, 0);
+        assert!(latest.progress.last_consumed_event_id.is_none());
+        assert_eq!(latest.fsm_state, "Drained");
+
+        let resumed = CaptureScope {
+            resume_generation: ReaderGeneration(1),
+            ..scope
+        };
+        hub.activate_scope(resumed);
+        assert!(hub.select(newer.clone()).unwrap().is_empty());
+        let snapshot = newer.runtime_snapshot.as_mut().unwrap();
+        snapshot.capture.capture_scope = resumed;
+        snapshot.capture.capture_seq = CaptureSeq(1);
+        assert_eq!(hub.select(newer).unwrap().len(), 1);
+        let latest = hub
+            .snapshot()
+            .into_iter()
+            .find_map(|packet| packet.runtime_snapshot)
+            .unwrap();
+        assert_eq!(latest.capture.capture_scope, resumed);
+        assert_eq!(latest.capture.capture_seq, CaptureSeq(1));
     }
 
     #[test]

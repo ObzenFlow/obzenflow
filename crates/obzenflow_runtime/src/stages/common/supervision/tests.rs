@@ -968,7 +968,9 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     use super::output_committer::{
         AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
     };
+    use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::supervised_base::publication::PublicationScope;
+    use obzenflow_core::event::observation::ObservationSource;
 
     use std::sync::atomic::Ordering;
     let (stage, writer) = make_writer_with_window(NonZeroU64::new(2).unwrap());
@@ -987,6 +989,8 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     mirror.append_gate = Some(gate.clone());
     let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(mirror);
     let instrumentation = Arc::new(StageInstrumentation::new());
+    let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+    instrumentation.bind_observations(FlowId::new(), stage.into(), &execution);
     let retained = instrumentation.clone();
     let scope = PublicationScope::new();
     let stage_scope = scope.clone();
@@ -1044,6 +1048,37 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
         .await
         .unwrap();
     assert_eq!(journal.appended().len(), 3);
+    let rows = journal.appended();
+    let selected = crate::metrics::observations::ObservationHub::default();
+    let mut previous_capture = None;
+    for (index, row) in rows.iter().enumerate() {
+        let packet = row.envelope.observability.as_ref().unwrap();
+        let snapshot = packet.runtime_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.progress.writer_seq, index as u64);
+        if index > 0 {
+            assert_eq!(snapshot.progress.last_emitted_event_id, Some(row.id));
+        }
+        if let Some(previous) = previous_capture {
+            assert!(snapshot.capture.capture_seq > previous);
+        }
+        previous_capture = Some(snapshot.capture.capture_seq);
+        let accounting = &row.runtime.as_ref().unwrap().accounting;
+        assert_eq!(accounting.events_emitted_total, index as u64);
+        assert_eq!(accounting.terminal_groups_committed_total, 1);
+        selected.select_recorded(packet.clone()).unwrap();
+    }
+    let snapshot = selected
+        .snapshot()
+        .into_iter()
+        .find_map(|packet| packet.runtime_snapshot)
+        .unwrap();
+    assert_eq!(snapshot.progress.writer_seq, 2);
+    assert_eq!(snapshot.progress.last_emitted_event_id, Some(rows[2].id));
+    assert!(execution
+        .observations()
+        .snapshot()
+        .iter()
+        .all(|packet| packet.runtime_snapshot.is_none()));
     assert_eq!(
         instrumentation.events_emitted_total.load(Ordering::Relaxed),
         2
@@ -1066,7 +1101,9 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
 
 #[tokio::test]
 async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
+    use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::supervised_base::publication::{is_indeterminate, PublicationScope};
+    use obzenflow_core::event::observation::ObservationSource;
     use std::sync::atomic::Ordering;
     for result in [
         CommitResult::Committed,
@@ -1088,6 +1125,8 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
             Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
         let scope = PublicationScope::new();
         let instrumentation = Arc::new(StageInstrumentation::new());
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        instrumentation.bind_observations(FlowId::new(), stage_id.into(), &execution);
         let stage_scope = scope.clone();
         let stage_instrumentation = instrumentation.clone();
         let stage_writer = writer.clone();
@@ -1128,6 +1167,11 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                 .await
         });
         gate.entered.notified().await;
+        assert!(execution
+            .observations()
+            .snapshot()
+            .iter()
+            .all(|packet| packet.runtime_snapshot.is_none()));
         scope.close();
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
@@ -1145,6 +1189,17 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
             CommitResult::Committed => {
                 settled.unwrap();
                 assert_eq!(journal.appended().len(), 1);
+                let rows = journal.appended();
+                let snapshot = rows[0]
+                    .envelope
+                    .observability
+                    .as_ref()
+                    .unwrap()
+                    .runtime_snapshot
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(snapshot.progress.writer_seq, 1);
+                assert_eq!(snapshot.progress.last_emitted_event_id, Some(rows[0].id));
                 assert_eq!(
                     instrumentation.events_emitted_total.load(Ordering::Relaxed),
                     1

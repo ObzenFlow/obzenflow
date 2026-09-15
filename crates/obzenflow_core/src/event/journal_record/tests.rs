@@ -6,7 +6,8 @@ use super::*;
 use crate::ai::{AiProvider, LlmHashes, LlmObservability};
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::context::{
-    CompositeActivationContext, FlowContext, RuntimeObservability, RuntimeProvenance,
+    CompositeActivationContext, ExecutionProgress, FlowContext, RuntimeObservability,
+    RuntimeProvenance, RuntimeSnapshot,
 };
 use crate::event::event_envelope::JournalGroupMember;
 use crate::event::observation::{
@@ -27,7 +28,6 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
     let id = EventId::new();
     let mut runtime = RuntimeProvenance::default();
     runtime.accounting.events_processed_total = 7;
-    runtime.progress.reader_seq = 9;
     let provenance = ChainEventProvenance {
         id,
         writer_id: WriterId::from(stage_id),
@@ -70,6 +70,14 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
     observation.runtime = Some(RuntimeObservability {
         in_flight: Some(0),
         ..Default::default()
+    });
+    observation.runtime_snapshot = Some(RuntimeSnapshot {
+        capture: observation.capture,
+        progress: ExecutionProgress {
+            reader_seq: 9,
+            ..Default::default()
+        },
+        fsm_state: "Running".into(),
     });
     JournalRecord::commit(
         AuthoredEnvelope {
@@ -184,6 +192,13 @@ fn removing_observations_preserves_complete_provenance_and_atomic_membership() {
         "application.result.v1",
     ))
     .unwrap();
+    assert_eq!(
+        original["envelope"]["provenance"]["event"]["runtime"],
+        json!({"accounting": original["envelope"]["provenance"]["event"]["runtime"]["accounting"]})
+    );
+    let snapshot = &original["envelope"]["observability"]["runtime_snapshot"];
+    assert_eq!(snapshot["progress"]["reader_seq"], 9);
+    assert_eq!(snapshot["fsm_state"], "Running");
     let mut omitted = original.clone();
     omitted["envelope"]["observability"] = Value::Null;
     let decoded: JournalRecord<ChainPayload> = serde_json::from_value(omitted).unwrap();

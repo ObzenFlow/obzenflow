@@ -2,35 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Protected execution positions and accounting. These are never sampled.
+//! Protected execution accounting. These counts survive observation omission.
 
 use crate::event::status::processing_status::ErrorKind;
-use crate::event::vector_clock::VectorClock;
-use crate::{EventId, EventType, JournalWriterId, StageId, WriterId};
+use crate::{EventType, StageId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProvenance {
-    pub progress: ExecutionProgress,
     pub accounting: ExecutionAccounting,
-    pub fsm_state: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionProgress {
-    pub reader_seq: u64,
-    pub receipted_seq: u64,
-    pub writer_seq: u64,
-    pub last_consumed_event_id: Option<EventId>,
-    pub last_consumed_writer: Option<JournalWriterId>,
-    pub last_consumed_vector_clock: Option<VectorClock>,
-    pub last_receipted_event_id: Option<EventId>,
-    pub last_receipted_vector_clock: Option<VectorClock>,
-    pub last_emitted_event_id: Option<EventId>,
-    pub last_emitted_writer: Option<WriterId>,
 }
 
 /// Counts retain their existing physical input/output populations. In particular,

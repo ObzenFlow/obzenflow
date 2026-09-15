@@ -463,6 +463,29 @@ fn observe_live_composite_duration(
 }
 
 impl MetricsAggregatorContext {
+    fn refresh_measurements(&mut self) {
+        use obzenflow_core::event::observation::ObservationSource;
+
+        self.metrics_store.refresh_measurements();
+        for packet in self.metrics_store.observations.snapshot() {
+            let Some(snapshot) = packet.runtime_snapshot else {
+                continue;
+            };
+            let Some(stage_id) = snapshot.capture.observer.as_stage() else {
+                continue;
+            };
+            if let Some(meta) = self.stage_metadata.get_mut(stage_id) {
+                // This is only a reporting label. Factual lifecycle state and
+                // collector coverage never come from the diagnostic snapshot.
+                if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
+                    meta.reference_mode =
+                        infer_join_reference_mode_from_fsm_state(&snapshot.fsm_state)
+                            .map(str::to_owned);
+                }
+            }
+        }
+    }
+
     pub(crate) async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
@@ -1478,19 +1501,6 @@ impl FsmAction for MetricsAggregatorAction {
                             meta.flow_id = Some(flow_id);
                         }
                     }
-
-                    // Best-effort: infer join reference mode from the observed FSM state.
-                    // This enables reporting projections to attach a `reference_mode` label for joins
-                    // without requiring the pipeline to plumb join config into metrics metadata.
-                    if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
-                        if let Some(runtime_ctx) = &event.runtime {
-                            if let Some(mode) =
-                                infer_join_reference_mode_from_fsm_state(&runtime_ctx.fsm_state)
-                            {
-                                meta.reference_mode = Some(mode.to_string());
-                            }
-                        }
-                    }
                 }
 
                 // Skip system events entirely; they are not part of per-stage wide metrics.
@@ -1594,7 +1604,9 @@ impl FsmAction for MetricsAggregatorAction {
                     // errors across forwarded rows and tail refreshes.
                 } // metrics reference dropped here
 
-                store.refresh_measurements();
+                // Retain captures while folding, then project their latest values
+                // at export. Rebuilding every stage's measurement view for each
+                // journal record makes catch-up depend on observation cardinality.
                 Ok(())
             }
 
@@ -1603,7 +1615,6 @@ impl FsmAction for MetricsAggregatorAction {
                 ctx.metrics_store
                     .observations
                     .capture_registered(CaptureReason::Periodic);
-                ctx.metrics_store.refresh_measurements();
                 // Keep wide metrics current even when the physical cursors lag.
                 // This refresh does not advance input coverage or its watermark:
                 // only the collector's sequential reads can authorise Drained.
@@ -1634,14 +1645,6 @@ impl FsmAction for MetricsAggregatorAction {
                         ctx.metrics_store.observations.offer_recorded(packet);
                     }
                     if let Some(runtime_ctx) = observation.selected().cloned() {
-                        if let Some(meta) = ctx.stage_metadata.get_mut(stage_id) {
-                            if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
-                                meta.reference_mode = infer_join_reference_mode_from_fsm_state(
-                                    &runtime_ctx.fsm_state,
-                                )
-                                .map(str::to_owned);
-                            }
-                        }
                         ctx.metrics_store
                             .stage_metrics
                             .entry(*stage_id)
@@ -1649,7 +1652,7 @@ impl FsmAction for MetricsAggregatorAction {
                             .merge_runtime_context(&runtime_ctx);
                     }
                 }
-                ctx.metrics_store.refresh_measurements();
+                ctx.refresh_measurements();
                 if ctx.metrics_store.inputs_covered {
                     ctx.metrics_store.ensure_snapshots_reconciled()?;
                 }

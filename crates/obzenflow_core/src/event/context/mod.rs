@@ -14,6 +14,7 @@ pub mod processing_context;
 pub mod replay_context;
 pub mod runtime_observability;
 pub mod runtime_provenance;
+pub mod runtime_snapshot;
 pub mod stage_type;
 
 pub use composite_activation_context::CompositeActivationContext;
@@ -27,7 +28,7 @@ pub use runtime_observability::{
     MeasurementWindow, RateLimiterMeasurements, RuntimeObservability, TimingMeasurements,
 };
 pub use runtime_provenance::{
-    EventTypeCountContext, ExecutionAccounting, ExecutionProgress, RuntimeProvenance,
-    UpstreamEventTypeCountContext,
+    EventTypeCountContext, ExecutionAccounting, RuntimeProvenance, UpstreamEventTypeCountContext,
 };
+pub use runtime_snapshot::{ExecutionProgress, RuntimeSnapshot};
 pub use stage_type::{SimpleStageType, StageType};

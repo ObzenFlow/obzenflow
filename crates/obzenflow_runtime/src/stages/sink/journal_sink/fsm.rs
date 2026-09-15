@@ -680,8 +680,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 &ctx.receipt_destination,
                                 payload,
                             )
-                            .with_flow_context(flow_ctx)
-                            .with_runtime_provenance(ctx.instrumentation.snapshot());
+                            .with_flow_context(flow_ctx);
+                            let evt = ctx.instrumentation.capture_runtime().attach_to(evt);
 
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
@@ -878,8 +878,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
 
                         let evt =
                             journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
-                                .with_flow_context(flow_ctx)
-                                .with_runtime_provenance(ctx.instrumentation.snapshot());
+                                .with_flow_context(flow_ctx);
+                        let evt = ctx.instrumentation.capture_runtime().attach_to(evt);
 
                         crate::supervised_base::publication::append(&ctx.data_journal, evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
@@ -1111,6 +1111,8 @@ mod tests {
             failure_lifecycle_recorded: false,
             failure_causal_event_id: None,
         };
+        ctx.instrumentation
+            .bind_observations(ctx.flow_id, stage_id.into(), &ctx.runtime_execution);
         let supervisor = JournalSinkSupervisor::<AuditSink> {
             name: "sink_audit_sink".into(),
             stage_id,
@@ -1126,7 +1128,10 @@ mod tests {
             (JournalSinkEvent::BeginDrain, "Drained"),
         ] {
             let actions = fsm.handle(event, &mut ctx).await.unwrap();
-            assert_eq!(ctx.instrumentation.snapshot().fsm_state, destination);
+            assert_eq!(
+                *ctx.instrumentation.current_state.read().unwrap(),
+                destination
+            );
             assert_eq!(fsm.state().variant_name(), destination);
             for action in actions {
                 action.execute(&mut ctx).await.unwrap();
@@ -1135,10 +1140,9 @@ mod tests {
         let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
         let flush = rows.iter().find(|env| {
             env.envelope
-                .provenance
-                .event
-                .runtime
+                .observability
                 .as_ref()
+                .and_then(|packet| packet.runtime_snapshot.as_ref())
                 .is_some_and(|runtime| runtime.fsm_state == "Flushing")
         });
         assert!(
@@ -1156,7 +1160,10 @@ mod tests {
             .handle(JournalSinkEvent::ReceivedEOF, &mut ctx)
             .await
             .unwrap();
-        assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Drained");
+        assert_eq!(
+            *ctx.instrumentation.current_state.read().unwrap(),
+            "Drained"
+        );
         assert_eq!(
             ctx.data_journal.read_all_unordered().await.unwrap().len(),
             before
@@ -1167,7 +1174,13 @@ mod tests {
         let rows = ctx.data_journal.read_all_unordered().await.unwrap();
         let snapshots: Vec<_> = rows[before..]
             .iter()
-            .filter_map(|env| env.envelope.provenance.event.runtime.as_ref())
+            .filter_map(|env| {
+                env.envelope
+                    .observability
+                    .as_ref()?
+                    .runtime_snapshot
+                    .as_ref()
+            })
             .collect();
         assert!(!snapshots.is_empty());
         assert!(snapshots
@@ -1228,7 +1241,7 @@ mod tests {
                 &JournalSinkState::Failed(expected_reason.into())
             );
             assert_eq!(actions.is_empty(), repeated);
-            assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Failed");
+            assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Failed");
             assert_eq!(
                 *ctx.instrumentation.state_entered_at.read().unwrap() == entered,
                 repeated

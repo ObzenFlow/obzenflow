@@ -802,7 +802,7 @@ async fn journal_policy_evidence<
                 .with_correlation_from(&parent.authored())
                 .with_cycle_state_from(&parent.authored());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
-        event = event.with_runtime_provenance(ctx.instrumentation.snapshot());
+        event = ctx.instrumentation.capture_runtime().attach_to(event);
         let written =
             crate::supervised_base::publication::append(&ctx.data_journal, event, Some(parent))
                 .await?;
