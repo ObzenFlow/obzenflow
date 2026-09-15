@@ -8,14 +8,16 @@
 //! ensuring that FSMs control sleep timing and preventing busy loops.
 
 use obzenflow_core::event::JournalEvent;
-use obzenflow_core::StageId;
+use obzenflow_core::{JournalRecord, StageId};
 use std::fmt::Debug;
 
 /// Result of polling a subscription for events
 #[derive(Debug)]
+// Keep the delivered record inline, preserving the existing allocation-free poll handoff.
+#[allow(clippy::large_enum_variant)]
 pub enum PollResult<T: JournalEvent> {
     /// An event is available
-    Event(obzenflow_core::EventEnvelope<T>),
+    Event(JournalRecord<T::Payload>),
 
     /// The journal cursor advanced across a transport-filtered row.
     ///

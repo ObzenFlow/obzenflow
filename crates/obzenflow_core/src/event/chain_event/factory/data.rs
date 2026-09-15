@@ -6,7 +6,7 @@ use super::ChainEventFactory;
 use crate::config::LineagePolicy;
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::types::WriterId;
-use crate::event::{ChainEvent, ChainEventContent};
+use crate::event::{ChainEvent, ChainPayload};
 use serde_json::Value;
 
 impl ChainEventFactory {
@@ -16,13 +16,9 @@ impl ChainEventFactory {
         event_type: impl Into<String>,
         payload: Value,
     ) -> ChainEvent {
-        Self::create_event(
-            writer_id,
-            ChainEventContent::Data {
-                event_type: event_type.into(),
-                payload,
-            },
-        )
+        let mut event = Self::create_event(writer_id, ChainPayload::Fact(payload));
+        event.event_type = event_type.into();
+        event
     }
 
     /// Create a data event from a serializable struct
@@ -42,13 +38,13 @@ impl ChainEventFactory {
     pub fn derived_event(
         writer_id: WriterId,
         parent: &ChainEvent,
-        content: ChainEventContent,
+        content: ChainPayload,
         lineage: LineagePolicy,
     ) -> ChainEvent {
         let mut event = Self::create_event(writer_id, content);
 
         event.correlation = parent.correlation.clone();
-        event.observability = parent.inherited_composite_observability();
+        event.composite_activations = parent.composite_activations().to_vec();
         event.replay_context = parent.replay_context.clone();
         event.ingress_context = parent.ingress_context.clone();
         event.cycle_depth = parent.cycle_depth;
@@ -63,7 +59,12 @@ impl ChainEventFactory {
             .take(lineage.max_lineage_depth.saturating_sub(1));
 
         for ancestor in ancestors_to_add {
-            event.causality = event.causality.add_parent(*ancestor);
+            event.envelope.provenance.event.causality = event
+                .envelope
+                .provenance
+                .event
+                .causality
+                .add_parent(*ancestor);
         }
 
         event
@@ -77,22 +78,17 @@ impl ChainEventFactory {
         payload: Value,
         lineage: LineagePolicy,
     ) -> ChainEvent {
-        Self::derived_event(
-            writer_id,
-            parent,
-            ChainEventContent::Data {
-                event_type: event_type.into(),
-                payload,
-            },
-            lineage,
-        )
+        let mut event =
+            Self::derived_event(writer_id, parent, ChainPayload::Fact(payload), lineage);
+        event.event_type = event_type.into();
+        event
     }
 
     /// Create an event for a source (flow entry point) with new correlation
     pub fn source_event(
         writer_id: WriterId,
         stage_name: impl Into<String>,
-        content: ChainEventContent,
+        content: ChainPayload,
     ) -> ChainEvent {
         Self::create_event(writer_id, content).with_new_correlation(stage_name)
     }
@@ -103,13 +99,7 @@ impl ChainEventFactory {
         event_type: impl Into<String>,
         payload: Value,
     ) -> ChainEvent {
-        Self::create_event(
-            writer_id,
-            ChainEventContent::Data {
-                event_type: event_type.into(),
-                payload,
-            },
-        )
+        Self::data_event(writer_id, event_type, payload)
     }
 }
 

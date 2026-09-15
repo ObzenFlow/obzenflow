@@ -12,9 +12,8 @@ use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::supervisor::PipelineSupervisor;
-use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::tests::support::{
-    empty_system_subscription, make_fsm_context, source_sink_topology,
+    empty_system_subscription, make_fsm_context, new_system_journal, source_sink_topology,
     source_sink_topology_with_source, spawn_supervisor_loop, test_context, test_supervisor,
     TestPipelineStageHandle,
 };
@@ -23,24 +22,29 @@ use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised}
 use async_trait::async_trait;
 use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::{EventEnvelope, StageId, SystemId};
+use obzenflow_core::{JournalRecord, StageId, SystemId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 struct PausedReader {
-    row: Option<EventEnvelope<SystemEvent>>,
+    row: Option<JournalRecord<SystemPayload>>,
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+    lock: Option<Arc<tokio::sync::RwLock<()>>>,
 }
 
 #[async_trait]
 impl JournalReader<SystemEvent> for PausedReader {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<SystemEvent>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
+        let _guard = match &self.lock {
+            Some(lock) => Some(lock.read().await),
+            None => None,
+        };
         self.calls.fetch_add(1, Ordering::Relaxed);
         // Moving the cursor before suspension intentionally makes cancellation
         // unsafe. A recreated read would skip this committed envelope.
@@ -112,8 +116,8 @@ pub async fn graceful_deadline_bounds_a_stalled_source_control_send(
     let facts = journal.read_all_unordered().await.unwrap();
     let admissions: Vec<_> = facts
         .iter()
-        .filter_map(|envelope| match &envelope.event.event {
-            obzenflow_core::event::SystemEventType::PipelineLifecycle(
+        .filter_map(|envelope| match &envelope.payload {
+            SystemPayload::PipelineLifecycle(
                 obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { admission },
             ) => Some(admission.clone()),
             _ => None,
@@ -348,6 +352,7 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
             calls: calls.clone(),
             entered: entered.clone(),
             release: release.clone(),
+            lock: None,
         }),
         "paused reader".into(),
     );
@@ -397,7 +402,10 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
             .await
             .unwrap()
         {
-            assert_eq!(envelope.event.id, row.event.id);
+            assert_eq!(
+                envelope.envelope.provenance.event.id,
+                row.envelope.provenance.event.id
+            );
             delivered = true;
             break;
         }
@@ -407,6 +415,94 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
         "ready journal input must be served despite the full control queue"
     );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+pub async fn producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let system_id = SystemId::new();
+    let mut journals = make_journals();
+    let journal = new_system_journal(&mut *journals, system_id);
+    let (topology, sink) = source_sink_topology();
+    let row = journal
+        .append(SystemEvent::stage_running(sink), None)
+        .await
+        .unwrap();
+    let id = *row.id();
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let subscription = SystemSubscription::new(
+        Box::new(PausedReader {
+            row: Some(row),
+            calls: calls.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+            lock: Some(lock.clone()),
+        }),
+        "read holding the journal lock".into(),
+    );
+    let mut ctx = test_context(topology, system_id, journal, Some(subscription));
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
+    let mut supervisor =
+        PipelineSupervisor::new(system_id, receiver, watcher, ctx.resources.failure.clone());
+    let mut dispatch = Box::pin(supervisor.dispatch_state(&PipelineFsmState::Running, &mut ctx));
+    assert!(futures::poll!(&mut dispatch).is_pending());
+    entered.notified().await;
+    sender.send(PipelineFsmEvent::Start).await.unwrap();
+    assert!(matches!(
+        dispatch.await.unwrap(),
+        EventLoopDirective::Transition(PipelineFsmEvent::Start)
+    ));
+
+    // Tokio's fair lock queues the next reader behind this writer. Pausing
+    // the already-owned read while awaiting the tail would deadlock all three.
+    let mut writer = Box::pin(lock.clone().write_owned());
+    assert!(futures::poll!(&mut writer).is_pending());
+    ctx.resources.producer_tail = ProducerTail::Reading(Mutex::new(
+        async move {
+            let _guard = lock.read().await;
+            Ok(Some(id))
+        }
+        .boxed(),
+    ));
+    release.notify_one();
+    let directive = tokio::time::timeout(
+        Duration::from_secs(2),
+        supervisor.dispatch_state(&PipelineFsmState::CatchingUpProducers, &mut ctx),
+    )
+    .await
+    .expect("the existing journal read must finish before tail capture")
+    .unwrap();
+    let EventLoopDirective::Transition(event @ PipelineFsmEvent::Journal(_)) = directive else {
+        panic!("the owned journal record must be delivered first: {directive:?}");
+    };
+    let mut fsm = crate::pipeline::fsm::build_pipeline_fsm_with_initial(
+        PipelineFsmState::CatchingUpProducers,
+    );
+    fsm.handle(event, &mut ctx).await.unwrap();
+    assert_eq!(ctx.last_system_event_id_seen, Some(id));
+    let writer = tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .expect("delivering the owned read releases its journal lock");
+    let mut capture =
+        Box::pin(supervisor.dispatch_state(&PipelineFsmState::CatchingUpProducers, &mut ctx));
+    assert!(futures::poll!(&mut capture).is_pending());
+    drop(writer);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), capture)
+            .await
+            .expect("tail capture resumes after the writer")
+            .unwrap(),
+        EventLoopDirective::Continue
+    ));
+    assert!(matches!(ctx.resources.producer_tail, ProducerTail::Reached));
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "no new forward read during tail capture"
+    );
 }
 
 pub async fn expired_stop_is_dispatched_before_a_full_external_control_queue(

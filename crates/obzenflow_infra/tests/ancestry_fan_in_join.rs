@@ -9,7 +9,7 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
@@ -30,11 +30,11 @@ use serde::{Deserialize, Serialize};
 /// Helper: create a FlowControl EOF event with advertised writer_seq.
 fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
     let mut eof = ChainEventFactory::eof_event(writer, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         ref mut writer_id,
         ref mut writer_seq,
         ..
-    }) = eof.content
+    }) = eof.payload
     {
         *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));
@@ -381,7 +381,7 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
         .expect("read join journal");
     let drain_env = events
         .iter()
-        .find(|env| DrainOnlyOutput::from_event(&env.event).is_some())
+        .find(|env| DrainOnlyOutput::from_event(&env.authored()).is_some())
         .expect("expected a drain-only output event");
 
     // FLOWIP-071h: drain-time outputs must still preserve ancestry from both contributors,
@@ -389,12 +389,22 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
     let reference_key = reference_writer.to_string();
     let stream_key = stream_writer.to_string();
     assert_ne!(
-        drain_env.vector_clock.get(&reference_key),
+        drain_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&reference_key),
         0,
         "drain-only output vector clock must include reference writer ancestry"
     );
     assert_ne!(
-        drain_env.vector_clock.get(&stream_key),
+        drain_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&stream_key),
         0,
         "drain-only output vector clock must include stream writer ancestry"
     );
@@ -575,9 +585,9 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
         .expect("read join journal");
     let matched_env = events
         .iter()
-        .find(|env| MatchOutput::from_event(&env.event).is_some())
+        .find(|env| MatchOutput::from_event(&env.authored()).is_some())
         .expect("expected a matched output event");
-    let matched = MatchOutput::from_event(&matched_env.event).expect("parse matched payload");
+    let matched = MatchOutput::from_event(&matched_env.authored()).expect("parse matched payload");
 
     assert_eq!(matched, MatchOutput { key: "k1".into() });
 
@@ -587,17 +597,32 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
     let key_b = reference_writer_b.to_string();
     let key_stream = stream_writer.to_string();
     assert_ne!(
-        matched_env.vector_clock.get(&key_a),
+        matched_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&key_a),
         0,
         "matched output must include reference writer a ancestry"
     );
     assert_ne!(
-        matched_env.vector_clock.get(&key_stream),
+        matched_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&key_stream),
         0,
         "matched output must include stream writer ancestry"
     );
     assert_ne!(
-        matched_env.vector_clock.get(&key_b),
+        matched_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&key_b),
         0,
         "conservative interim must over-claim by including reference writer b ancestry"
     );
@@ -763,7 +788,7 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
         .expect("read join journal");
     let out_envs: Vec<_> = events
         .iter()
-        .filter(|env| FanOutOutput::from_event(&env.event).is_some())
+        .filter(|env| FanOutOutput::from_event(&env.authored()).is_some())
         .collect();
     assert_eq!(out_envs.len(), 3, "expected 3 fan-out outputs");
 
@@ -771,12 +796,20 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
     let stream_key = stream_writer.to_string();
     for env in out_envs {
         assert_ne!(
-            env.vector_clock.get(&reference_key),
+            env.envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&reference_key),
             0,
             "fan-out output must include reference ancestry"
         );
         assert_ne!(
-            env.vector_clock.get(&stream_key),
+            env.envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&stream_key),
             0,
             "fan-out output must include stream ancestry"
         );
@@ -784,7 +817,7 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
 
     let payloads: Vec<FanOutOutput> = events
         .iter()
-        .filter_map(|env| FanOutOutput::from_event(&env.event))
+        .filter_map(|env| FanOutOutput::from_event(&env.authored()))
         .collect();
     assert_eq!(
         payloads,
@@ -972,7 +1005,7 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
         .iter()
         .find(|env| {
             matches!(
-                env.event.processing_info.status,
+                env.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             )
         })
@@ -982,12 +1015,22 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
     let reference_key = reference_writer.to_string();
     let stream_key = stream_writer.to_string();
     assert_ne!(
-        error_env.vector_clock.get(&reference_key),
+        error_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&reference_key),
         0,
         "error-journal entry must include reference ancestry"
     );
     assert_ne!(
-        error_env.vector_clock.get(&stream_key),
+        error_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&stream_key),
         0,
         "error-journal entry must include stream ancestry"
     );

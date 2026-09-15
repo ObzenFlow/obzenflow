@@ -18,7 +18,7 @@ use crate::middleware::{
     SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::observability_payload::CircuitBreakerRejectionReason;
+use obzenflow_core::event::payloads::execution_payload::CircuitBreakerRejectionReason;
 use obzenflow_runtime::control_plane::CircuitBreakerStateView;
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,

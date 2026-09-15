@@ -3,13 +3,11 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::journal::MemoryJournal;
 use crate::web::surface_metrics::HttpSurfaceMetricsEmitter;
-use obzenflow_core::event::SystemEventType;
 use obzenflow_core::id::SystemId;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{EndpointMetadata, RoutePolicy};
+use obzenflow_core::FlowId;
+use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -88,7 +86,7 @@ impl std::io::Write for LogCapture {
 }
 
 #[tokio::test]
-async fn get_and_post_failures_select_safe_500_before_journalled_accounting() {
+async fn get_and_post_failures_select_safe_500_before_optional_measurements() {
     let logs = LogCapture::default();
     let writer = logs.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -107,9 +105,8 @@ async fn get_and_post_failures_select_safe_500_before_journalled_accounting() {
         ] {
             let calls = Arc::new(AtomicUsize::new(0));
             let metrics = Arc::new(HttpSurfaceMetricsCollector::new());
-            let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
-                SystemId::new(),
-            )));
+            let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+            let recorder = execution.observation_recorder(FlowId::new(), SystemId::new().into());
             let mut host = WarpWebHost::new();
             host.with_surface_metrics(metrics.clone());
             host.register_endpoint(Box::new(Endpoint {
@@ -146,11 +143,10 @@ async fn get_and_post_failures_select_safe_500_before_journalled_accounting() {
             }
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(metrics.total_requests(), 1);
-            HttpSurfaceMetricsEmitter::new(metrics, journal.clone())
-                .flush()
-                .await;
-            let facts = journal.read_all_unordered().await.unwrap();
-            let SystemEventType::HttpSurfaceSnapshot { snapshot } = &facts[0].event.event else {
+            HttpSurfaceMetricsEmitter::new(metrics, recorder).capture_final();
+            use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+            let captures = execution.observations().snapshot();
+            let ObservationRecord::HttpSurface { snapshot } = &captures[0].records[0] else {
                 panic!("expected surface snapshot")
             };
             assert_eq!(snapshot.routes.len(), 1);

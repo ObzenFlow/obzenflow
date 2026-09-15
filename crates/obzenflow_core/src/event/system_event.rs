@@ -4,15 +4,18 @@
 
 //! System orchestration events (written to control journal)
 
-use crate::event::observability::HttpSurfaceMetricsSnapshot;
+use crate::event::context::ExecutionAccounting;
+use crate::event::journal_record::JournalPayload;
+use crate::event::payloads::chain_payload::EventKind;
+use crate::event::payloads::execution_payload::MiddlewareFact;
 use crate::event::payloads::flow_control_payload::EofKind;
-use crate::event::payloads::observability_payload::MiddlewareLifecycle;
+use crate::event::provenance::{AuthoredEnvelope, SystemEventProvenance};
 use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, StageKey, SystemId};
 use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
 use crate::journal::{ArchiveStatus, StatusDerivation};
-use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
+use crate::metrics::FlowLifecycleMetricsSnapshot;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -95,27 +98,57 @@ impl FromStr for SystemFeedRole {
     }
 }
 
-/// System orchestration event with metadata (written to control journal)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// An authored system record, without journal commitment provenance.
+#[derive(Debug, Clone)]
 pub struct SystemEvent {
-    /// Unique event identifier
-    pub id: EventId,
+    pub envelope: AuthoredEnvelope<SystemEventProvenance>,
+    pub payload: SystemPayload,
+}
 
-    /// Which component created this event
-    pub writer_id: WriterId,
+impl std::ops::Deref for SystemEvent {
+    type Target = SystemEventProvenance;
+    fn deref(&self) -> &Self::Target {
+        &self.envelope.provenance.event
+    }
+}
+impl std::ops::DerefMut for SystemEvent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.envelope.provenance.event
+    }
+}
 
-    /// The actual system event type
-    #[serde(flatten)]
-    pub event: SystemEventType,
-
-    /// When this event was created (ms since epoch)
-    pub timestamp: u64,
+impl Serialize for SystemEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+        JournalPayload::validate(&self.payload, &self.envelope.provenance.event)
+            .map_err(S::Error::custom)?;
+        let mut record = serializer.serialize_struct("SystemEvent", 2)?;
+        record.serialize_field("envelope", &self.envelope)?;
+        record.serialize_field("payload", &self.payload)?;
+        record.end()
+    }
+}
+impl<'de> Deserialize<'de> for SystemEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = crate::event::record_serde::deserialize::<
+            _,
+            AuthoredEnvelope<SystemEventProvenance>,
+            SystemPayload,
+        >(deserializer)?;
+        JournalPayload::validate(&raw.payload, &raw.envelope.provenance.event)
+            .map_err(D::Error::custom)?;
+        Ok(Self {
+            envelope: raw.envelope,
+            payload: raw.payload,
+        })
+    }
 }
 
 /// Types of system events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
-pub enum SystemEventType {
+pub enum SystemPayload {
     /// Best-effort async source cleanup failed after the stage entered live
     /// execution (FLOWIP-134g). Cleanup never authors data and never delays a
     /// terminal transition.
@@ -145,44 +178,6 @@ pub enum SystemEventType {
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
 
-    /// Periodic heartbeat from a stage supervisor.
-    ///
-    /// FLOWIP-063e: Under the resolved design, this is retained for future use
-    /// (e.g. broadcast SSE) but is not journalled in v1.
-    #[serde(rename = "stage_heartbeat")]
-    StageHeartbeat {
-        stage_id: StageId,
-        stage_name: String,
-        /// Monotonically increasing counter per stage, so consumers can detect gaps.
-        heartbeat_seq: SeqNo,
-        /// What the supervisor is currently doing.
-        activity: StageActivity,
-        /// Last event the handler consumed (if any).
-        last_consumed_event_id: Option<EventId>,
-        /// Last event the stage emitted (if any).
-        last_output_event_id: Option<EventId>,
-        /// Wall-clock duration the handler has been blocked (if currently processing).
-        handler_blocked_ms: Option<DurationMs>,
-    },
-
-    /// Per-edge liveness verdict derived from heartbeats and/or stall detection.
-    ///
-    /// FLOWIP-063e: non-gating, system journal only.
-    #[serde(rename = "edge_liveness")]
-    EdgeLiveness {
-        upstream: StageId,
-        reader: StageId,
-        state: EdgeLivenessState,
-        /// Milliseconds since last observed progress on this edge.
-        idle_ms: DurationMs,
-        /// Reader sequence observed on this edge (if known).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_reader_seq: Option<SeqNo>,
-        /// Last event ID observed on this edge (if known).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        last_event_id: Option<EventId>,
-    },
-
     /// Middleware lifecycle events mirrored into `system.log` (FLOWIP-059c).
     ///
     /// Middleware observability originates in stage journals via middleware control events.
@@ -198,7 +193,7 @@ pub enum SystemEventType {
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_name: Option<String>,
         origin: MiddlewareEventOrigin,
-        middleware: MiddlewareLifecycle,
+        middleware: MiddlewareFact,
     },
 
     /// Contract status reported by a reader/subscriber (per upstream)
@@ -243,16 +238,6 @@ pub enum SystemEventType {
         advertised_writer_seq: Option<crate::event::types::SeqNo>,
     },
 
-    /// Generic hosted HTTP surface metrics snapshot emitted by the application host (FLOWIP-093a).
-    ///
-    /// This is intentionally a system journal event because hosted surfaces are not topology
-    /// stages, but their observability must still be reconstructible from journaled facts.
-    #[serde(rename = "http_surface_snapshot")]
-    HttpSurfaceSnapshot {
-        #[serde(flatten)]
-        snapshot: HttpSurfaceMetricsSnapshot,
-    },
-
     /// Durable hosted-ingress refusal fact (FLOWIP-115d).
     ///
     /// A rejected or shed submission attempt is a domain fact, so the hosted
@@ -287,7 +272,7 @@ pub enum SystemEventType {
     },
 }
 
-/// Stable status labels for `SystemEventType::ContractResult`.
+/// Stable status labels for `SystemPayload::ContractResult`.
 ///
 /// The `system.log` schema stores these as strings for compatibility with JSON
 /// consumers (SSE, metrics aggregation). Prefer this enum when emitting or
@@ -338,12 +323,12 @@ pub enum StageLifecycleEvent {
     Running,
     Draining {
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<ExecutionAccounting>,
     },
     Drained,
     Completed {
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<ExecutionAccounting>,
     },
     /// Stage terminated due to an intentional stop/cancel request.
     ///
@@ -352,14 +337,14 @@ pub enum StageLifecycleEvent {
     Cancelled {
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<ExecutionAccounting>,
     },
     Failed {
         error: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         recoverable: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        metrics: Option<StageMetricsSnapshot>,
+        accounting: Option<ExecutionAccounting>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         causal_event_id: Option<EventId>,
     },
@@ -517,12 +502,23 @@ pub enum EdgeLivenessState {
 
 impl SystemEvent {
     /// Create a new system event
-    pub fn new(writer_id: WriterId, event: SystemEventType) -> Self {
-        Self {
+    pub fn new(writer_id: WriterId, event: SystemPayload) -> Self {
+        use crate::event::provenance::{
+            AuthoredEnvelope, AuthoredProvenance, SystemEventProvenance,
+        };
+        let provenance = SystemEventProvenance {
             id: EventId::new(),
             writer_id,
-            event,
+            event_kind: EventKind::System,
+            event_type: event.event_type().to_string(),
             timestamp: current_timestamp(),
+        };
+        Self {
+            envelope: AuthoredEnvelope {
+                provenance: AuthoredProvenance { event: provenance },
+                observability: None,
+            },
+            payload: event,
         }
     }
 
@@ -530,7 +526,7 @@ impl SystemEvent {
     pub fn stage_running(stage_id: StageId) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Running,
             },
@@ -541,9 +537,9 @@ impl SystemEvent {
     pub fn stage_completed(stage_id: StageId) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
-                event: StageLifecycleEvent::Completed { metrics: None },
+                event: StageLifecycleEvent::Completed { accounting: None },
             },
         )
     }
@@ -552,11 +548,11 @@ impl SystemEvent {
     pub fn stage_cancelled(stage_id: StageId, reason: String) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Cancelled {
                     reason,
-                    metrics: None,
+                    accounting: None,
                 },
             },
         )
@@ -566,12 +562,12 @@ impl SystemEvent {
     pub fn stage_failed(stage_id: StageId, error: String, recoverable: bool) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
-                    metrics: None,
+                    accounting: None,
                     causal_event_id: None,
                 },
             },
@@ -579,46 +575,52 @@ impl SystemEvent {
     }
 
     /// Helper for stages to create draining events with metrics
-    pub fn stage_draining_with_metrics(stage_id: StageId, metrics: StageMetricsSnapshot) -> Self {
+    pub fn stage_draining_with_accounting(
+        stage_id: StageId,
+        accounting: ExecutionAccounting,
+    ) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Draining {
-                    metrics: Some(metrics),
+                    accounting: Some(accounting),
                 },
             },
         )
     }
 
     /// Helper for stages to create completed events with metrics
-    pub fn stage_completed_with_metrics(stage_id: StageId, metrics: StageMetricsSnapshot) -> Self {
+    pub fn stage_completed_with_accounting(
+        stage_id: StageId,
+        accounting: ExecutionAccounting,
+    ) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Completed {
-                    metrics: Some(metrics),
+                    accounting: Some(accounting),
                 },
             },
         )
     }
 
     /// Helper for stages to create failed events with metrics
-    pub fn stage_failed_with_metrics(
+    pub fn stage_failed_with_accounting(
         stage_id: StageId,
         error: String,
         recoverable: bool,
-        metrics: StageMetricsSnapshot,
+        accounting: ExecutionAccounting,
     ) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
-                    metrics: Some(metrics),
+                    accounting: Some(accounting),
                     causal_event_id: None,
                 },
             },
@@ -627,21 +629,21 @@ impl SystemEvent {
 
     /// Construct correctness-bearing failed lifecycle evidence causally linked
     /// to the final chain event in a sink failure sequence.
-    pub fn stage_failed_with_metrics_causal(
+    pub fn stage_failed_with_accounting_causal(
         stage_id: StageId,
         error: String,
         recoverable: bool,
-        metrics: StageMetricsSnapshot,
+        accounting: ExecutionAccounting,
         causal_event_id: EventId,
     ) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
-                    metrics: Some(metrics),
+                    accounting: Some(accounting),
                     causal_event_id: Some(causal_event_id),
                 },
             },
@@ -649,18 +651,18 @@ impl SystemEvent {
     }
 
     /// Helper for stages to create cancelled events with metrics
-    pub fn stage_cancelled_with_metrics(
+    pub fn stage_cancelled_with_accounting(
         stage_id: StageId,
         reason: String,
-        metrics: StageMetricsSnapshot,
+        accounting: ExecutionAccounting,
     ) -> Self {
         Self::new(
             WriterId::from(stage_id),
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Cancelled {
                     reason,
-                    metrics: Some(metrics),
+                    accounting: Some(accounting),
                 },
             },
         )
@@ -693,7 +695,7 @@ impl SystemEventFactory {
     pub fn stage_running(&self, stage_id: StageId) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Running,
             },
@@ -703,9 +705,9 @@ impl SystemEventFactory {
     pub fn stage_draining(&self, stage_id: StageId) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
-                event: StageLifecycleEvent::Draining { metrics: None },
+                event: StageLifecycleEvent::Draining { accounting: None },
             },
         )
     }
@@ -713,7 +715,7 @@ impl SystemEventFactory {
     pub fn stage_drained(&self, stage_id: StageId) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Drained,
             },
@@ -723,9 +725,9 @@ impl SystemEventFactory {
     pub fn stage_completed(&self, stage_id: StageId) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
-                event: StageLifecycleEvent::Completed { metrics: None },
+                event: StageLifecycleEvent::Completed { accounting: None },
             },
         )
     }
@@ -733,12 +735,12 @@ impl SystemEventFactory {
     pub fn stage_failed(&self, stage_id: StageId, error: String, recoverable: bool) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Failed {
                     error,
                     recoverable: Some(recoverable),
-                    metrics: None,
+                    accounting: None,
                     causal_event_id: None,
                 },
             },
@@ -748,11 +750,11 @@ impl SystemEventFactory {
     pub fn stage_cancelled(&self, stage_id: StageId, reason: String) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::StageLifecycle {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Cancelled {
                     reason,
-                    metrics: None,
+                    accounting: None,
                 },
             },
         )
@@ -770,7 +772,7 @@ impl SystemEventFactory {
     ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::ContractStatus {
+            SystemPayload::ContractStatus {
                 upstream,
                 reader,
                 selected_event_type: None,
@@ -788,44 +790,42 @@ impl SystemEventFactory {
     pub fn pipeline_starting(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Starting),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
         )
     }
 
     pub fn pipeline_running(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running {
-                stage_count: None,
-            }),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { stage_count: None }),
         )
     }
 
     pub fn pipeline_ready_for_run(&self, stage_count: Option<usize>) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::ReadyForRun { stage_count }),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::ReadyForRun { stage_count }),
         )
     }
 
     pub fn pipeline_stop_admitted(&self, admission: PipelineStopAdmission) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted { admission }),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted { admission }),
         )
     }
 
     pub fn pipeline_not_started(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::NotStarted),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::NotStarted),
         )
     }
 
     pub fn pipeline_all_stages_completed(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::AllStagesCompleted {
                 metrics: None,
             }),
         )
@@ -834,14 +834,14 @@ impl SystemEventFactory {
     pub fn pipeline_draining(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Draining { metrics: None }),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Draining { metrics: None }),
         )
     }
 
     pub fn pipeline_drained(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
         )
     }
 
@@ -852,7 +852,7 @@ impl SystemEventFactory {
     ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
                 duration_ms,
                 metrics,
             }),
@@ -868,7 +868,7 @@ impl SystemEventFactory {
     ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed {
                 reason,
                 duration_ms,
                 metrics,
@@ -886,7 +886,7 @@ impl SystemEventFactory {
     ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Cancelled {
                 reason,
                 duration_ms,
                 metrics,
@@ -900,28 +900,28 @@ impl SystemEventFactory {
     pub fn metrics_ready(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Ready),
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Ready),
         )
     }
 
     pub fn metrics_drain_requested(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::DrainRequested),
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::DrainRequested),
         )
     }
 
     pub fn metrics_drained(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Drained),
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained),
         )
     }
 
     pub fn metrics_shutdown(&self) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
-            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Shutdown),
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Shutdown),
         )
     }
 }
@@ -933,6 +933,17 @@ use crate::event::journal_event::{JournalEvent, Sealed};
 impl Sealed for SystemEvent {}
 
 impl JournalEvent for SystemEvent {
+    type Payload = SystemPayload;
+    fn into_parts(self) -> (AuthoredEnvelope<SystemEventProvenance>, Self::Payload) {
+        (self.envelope, self.payload)
+    }
+    fn from_parts(
+        envelope: AuthoredEnvelope<SystemEventProvenance>,
+        payload: Self::Payload,
+    ) -> Self {
+        Self { envelope, payload }
+    }
+
     fn id(&self) -> &EventId {
         &self.id
     }
@@ -942,9 +953,15 @@ impl JournalEvent for SystemEvent {
     }
 
     fn event_type_name(&self) -> &str {
-        match &self.event {
-            SystemEventType::SourceCleanupFailed { .. } => "system.source.cleanup_failed",
-            SystemEventType::StageLifecycle { event, .. } => match event {
+        self.payload.event_type()
+    }
+}
+
+impl SystemPayload {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            SystemPayload::SourceCleanupFailed { .. } => "system.source.cleanup_failed",
+            SystemPayload::StageLifecycle { event, .. } => match event {
                 StageLifecycleEvent::Running => "system.stage.running",
                 StageLifecycleEvent::Draining { .. } => "system.stage.draining",
                 StageLifecycleEvent::Drained => "system.stage.drained",
@@ -952,7 +969,7 @@ impl JournalEvent for SystemEvent {
                 StageLifecycleEvent::Failed { .. } => "system.stage.failed",
                 StageLifecycleEvent::Cancelled { .. } => "system.stage.cancelled",
             },
-            SystemEventType::PipelineLifecycle(event) => match event {
+            SystemPayload::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
                 PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",
                 PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
@@ -967,36 +984,33 @@ impl JournalEvent for SystemEvent {
                 PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
                 PipelineLifecycleEvent::Cancelled { .. } => "system.pipeline.cancelled",
             },
-            SystemEventType::ReplayLifecycle(event) => match event {
+            SystemPayload::ReplayLifecycle(event) => match event {
                 ReplayLifecycleEvent::Started { .. } => "system.replay.started",
                 ReplayLifecycleEvent::Completed { .. } => "system.replay.completed",
                 ReplayLifecycleEvent::ResumedLive { .. } => "system.replay.resumed_live",
             },
-            SystemEventType::MetricsCoordination(event) => match event {
+            SystemPayload::MetricsCoordination(event) => match event {
                 MetricsCoordinationEvent::Ready => "system.metrics.ready",
                 MetricsCoordinationEvent::DrainRequested => "system.metrics.drain_requested",
                 MetricsCoordinationEvent::Drained => "system.metrics.drained",
                 MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
                 MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
             },
-            SystemEventType::StageHeartbeat { .. } => "system.stage.heartbeat",
-            SystemEventType::EdgeLiveness { .. } => "system.edge.liveness",
-            SystemEventType::MiddlewareLifecycle { .. } => "system.middleware.lifecycle",
-            SystemEventType::ContractStatus { pass, .. } => {
+            SystemPayload::MiddlewareLifecycle { .. } => "system.middleware.lifecycle",
+            SystemPayload::ContractStatus { pass, .. } => {
                 if *pass {
                     "system.contract.pass"
                 } else {
                     "system.contract.fail"
                 }
             }
-            SystemEventType::ContractResult { status, .. } => match status {
+            SystemPayload::ContractResult { status, .. } => match status {
                 ContractResultStatusLabel::Passed => "system.contract.result.passed",
                 ContractResultStatusLabel::Failed => "system.contract.result.failed",
                 ContractResultStatusLabel::Pending => "system.contract.result.pending",
                 ContractResultStatusLabel::Healthy => "system.contract.result",
             },
-            SystemEventType::HttpSurfaceSnapshot { .. } => "system.http_surface.snapshot",
-            SystemEventType::IngressRefusal { .. } => "system.ingress.refusal",
+            SystemPayload::IngressRefusal { .. } => "system.ingress.refusal",
         }
     }
 }
@@ -1056,7 +1070,7 @@ mod tests {
 
     #[test]
     fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
-        let payload = SystemEventType::ContractResult {
+        let payload = SystemPayload::ContractResult {
             upstream: StageId::new(),
             reader: StageId::new(),
             selected_event_type: Some(EventType::from("test.selected.v1")),
@@ -1074,7 +1088,7 @@ mod tests {
         assert_eq!(serialized["contract_name"], "TransportContract");
         assert_eq!(serialized["status"], "healthy");
 
-        let decoded: SystemEventType = serde_json::from_value(json!({
+        let decoded: SystemPayload = serde_json::from_value(json!({
             "system_event_type": "contract_result",
             "upstream": serialized["upstream"].clone(),
             "reader": serialized["reader"].clone(),
@@ -1088,7 +1102,7 @@ mod tests {
         .expect("string-label system event should deserialize");
 
         match decoded {
-            SystemEventType::ContractResult {
+            SystemPayload::ContractResult {
                 selected_event_type,
                 feed_role,
                 contract_name,

@@ -10,19 +10,18 @@
 //! `RateLimiterMiddleware` and the surface adapters call into here.
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
-};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::WriterId;
 
 use super::admission_core::RateLimitDelayEvent;
 
 /// Build the durable observability `ChainEvent` for one rate-limiter lifecycle
 /// fact.
-pub(super) fn rate_limiter_event(writer_id: WriterId, event: RateLimiterEvent) -> ChainEvent {
-    ChainEventFactory::observability_event(
+pub(super) fn rate_limiter_event(writer_id: WriterId, event: RateLimiterFact) -> ChainEvent {
+    ChainEventFactory::create_event(
         writer_id,
-        ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(event)),
+        ChainPayload::Execution(ExecutionPayload::RateLimiter(event)),
     )
 }
 
@@ -31,7 +30,7 @@ pub(super) fn rate_limiter_event(writer_id: WriterId, event: RateLimiterEvent) -
 pub(super) fn delayed_event(writer_id: WriterId, info: RateLimitDelayEvent) -> ChainEvent {
     rate_limiter_event(
         writer_id,
-        RateLimiterEvent::Delayed {
+        RateLimiterFact::Delayed {
             delay_ms: info.delay_ms,
             current_rate: info.current_rate,
             limit_rate: info.limit_rate,

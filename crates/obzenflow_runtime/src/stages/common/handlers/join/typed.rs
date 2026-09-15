@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, OneFactStageOutput, StageId, TypedPayload, WriterId};
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -228,14 +228,8 @@ where
             }
             let fact = facts.pop().expect("length checked above");
             let event = match parent {
-                Some(parent) => ChainEventFactory::derived_data_event(
-                    writer_id,
-                    parent,
-                    fact.event_type,
-                    fact.payload,
-                    self.lineage,
-                ),
-                None => ChainEventFactory::data_event(writer_id, fact.event_type, fact.payload),
+                Some(parent) => fact.into_derived_event(writer_id, parent, self.lineage),
+                None => fact.into_event(writer_id),
             };
             let event = event
                 .try_with_composite_activations(selected_activations.clone())
@@ -369,6 +363,7 @@ mod tests {
     use super::*;
     use crate::stages::join::StrictJoinBuilder;
     use obzenflow_core::event::context::CompositeActivationContext;
+    use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::CompositeId;
     use obzenflow_core::{OneFactStageOutput, StageOutputFacts};
     use serde::de::{self, Deserializer};

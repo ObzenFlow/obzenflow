@@ -83,7 +83,6 @@ fn pending_lifetime_source() -> (
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_application_cancels_runtime_and_pending_stage_work() {
-    use obzenflow_core::event::JournalEvent;
     use obzenflow_dsl::async_infinite_source;
 
     for hosted in [true, false] {
@@ -168,7 +167,7 @@ async fn dropped_application_cancels_runtime_and_pending_stage_work() {
         let facts = journal.read_all_unordered().await.unwrap();
         assert!(
             !facts.iter().any(|fact| matches!(
-                fact.event.event_type_name(),
+                fact.event_type_name(),
                 "system.pipeline.completed" | "system.pipeline.cancelled"
             )),
             "emergency cancellation must not invent a published outcome"
@@ -285,7 +284,6 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ready_startup_signals_withhold_automatic_run() {
-    use obzenflow_core::event::JournalEvent;
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[derive(Clone, Debug)]
     struct CountingSource(Arc<AtomicUsize>);
@@ -363,7 +361,7 @@ enabled = false
             .unwrap();
         let terminals: Vec<_> = facts
             .iter()
-            .map(|event| event.event.event_type_name())
+            .map(|event| event.event_type_name())
             .filter(|kind| {
                 matches!(
                     *kind,
@@ -380,8 +378,6 @@ enabled = false
 
 #[tokio::test(start_paused = true)]
 async fn startup_failure_retains_prior_hook_joins_and_the_not_started_journal_outcome() {
-    use obzenflow_core::event::JournalEvent;
-
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("obzenflow.toml");
     std::fs::write(
@@ -472,7 +468,7 @@ enabled = false
         .unwrap();
     let terminals: Vec<_> = facts
         .iter()
-        .map(|event| event.event.event_type_name())
+        .map(|event| event.event_type_name())
         .filter(|kind| {
             matches!(
                 *kind,
@@ -497,7 +493,7 @@ async fn host_completion_and_panic_remain_primary_across_application_phases() {
     use crate::application::lifecycle_observation::Reader;
     use crate::web::host_error::ManagedWebHostError;
     use futures::FutureExt;
-    use obzenflow_core::event::{PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType};
+    use obzenflow_core::event::{PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Debug)]
@@ -700,8 +696,8 @@ enabled = false
             if let Some(admission) = observed_admission.lock().unwrap().as_ref() {
                 let graceful: Vec<_> = events
                     .iter()
-                    .filter_map(|envelope| match &envelope.event.event {
-                        SystemEventType::PipelineLifecycle(
+                    .filter_map(|envelope| match &envelope.payload {
+                        SystemPayload::PipelineLifecycle(
                             PipelineLifecycleEvent::StopAdmitted {
                                 admission: value @ PipelineStopAdmission::Graceful { .. },
                             },
@@ -718,10 +714,8 @@ enabled = false
             if matches!(phase, FaultPhase::Terminal) {
                 assert!(
                     events.iter().any(|event| matches!(
-                        event.event.event,
-                        SystemEventType::PipelineLifecycle(
-                            PipelineLifecycleEvent::Completed { .. }
-                        )
+                        event.payload,
+                        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed { .. })
                     )),
                     "host cleanup must join terminal publication"
                 );
@@ -923,7 +917,6 @@ enabled = false
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signals_preserve_published_failures_and_repeatable_observation() {
-    use obzenflow_core::event::JournalEvent;
     for started in [false, true] {
         for on_terminal in ["park", "exit"] {
             for signal in [ShutdownSignal::Sigint, ShutdownSignal::Sigterm] {
@@ -1022,11 +1015,10 @@ enabled = false
                     .unwrap();
                 assert!(!events
                     .iter()
-                    .any(|envelope| envelope.event.event_type_name()
-                        == "system.pipeline.stop_admitted"));
+                    .any(|envelope| envelope.event_type_name() == "system.pipeline.stop_admitted"));
                 let terminal: Vec<_> = events
                     .iter()
-                    .map(|event| event.event.event_type_name())
+                    .map(|event| event.event_type_name())
                     .filter(|kind| {
                         matches!(
                             *kind,
@@ -1045,7 +1037,6 @@ enabled = false
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn graceful_finite_completion_and_infinite_cancellation_match_application_results() {
-    use obzenflow_core::event::JournalEvent;
     #[derive(Clone, Debug)]
     struct WaitingFiniteSource;
     impl TypedFiniteSourceHandler for WaitingFiniteSource {
@@ -1164,7 +1155,7 @@ enabled = false
                 .unwrap();
             let terminals: Vec<_> = facts
                 .iter()
-                .map(|event| event.event.event_type_name())
+                .map(|event| event.event_type_name())
                 .filter(|kind| {
                     matches!(
                         *kind,

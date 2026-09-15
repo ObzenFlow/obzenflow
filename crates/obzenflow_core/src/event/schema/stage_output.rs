@@ -77,11 +77,14 @@ where
         facts
             .iter()
             .map(|fact| {
-                serde_json::from_value(fact.payload.clone()).map_err(|error| {
-                    TypedFactSetError::DeserializationFailed {
-                        event_type: fact.event_type.clone(),
-                        error: error.to_string(),
-                    }
+                serde_json::from_value(
+                    fact.payload
+                        .contract_body()
+                        .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
+                )
+                .map_err(|error| TypedFactSetError::DeserializationFailed {
+                    event_type: fact.event_type.clone(),
+                    error: error.to_string(),
                 })
             })
             .collect::<Result<Vec<T>, _>>()
@@ -144,6 +147,7 @@ impl<T: TypedPayload + Send + Sync + 'static> OneFactStageOutput for T {}
 mod tests {
     use super::*;
     use crate::event::schema::{StageOutputFacts, TypedFact, TypedFactSetError};
+    use crate::event::ChainPayload;
     use serde::{Deserialize, Serialize, Serializer};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,14 +312,23 @@ mod tests {
             .into_facts()
             .expect("one output lowers");
         assert_eq!(one.len(), 1);
-        assert_eq!(one[0].payload, serde_json::json!({ "value": 4 }));
+        assert_eq!(
+            serde_json::to_value(&one[0].payload).unwrap(),
+            serde_json::json!({ "value": 4 })
+        );
 
         let many = StageOutputs::many([Solo { value: 3 }, Solo { value: 7 }])
             .into_facts()
             .expect("many outputs lower");
         assert_eq!(many.len(), 2);
-        assert_eq!(many[0].payload, serde_json::json!({ "value": 3 }));
-        assert_eq!(many[1].payload, serde_json::json!({ "value": 7 }));
+        assert_eq!(
+            serde_json::to_value(&many[0].payload).unwrap(),
+            serde_json::json!({ "value": 3 })
+        );
+        assert_eq!(
+            serde_json::to_value(&many[1].payload).unwrap(),
+            serde_json::json!({ "value": 7 })
+        );
         assert_eq!(
             <StageOutputs<Solo> as StageFactSet>::member_fact_types(),
             <Solo as StageFactSet>::member_fact_types()
@@ -402,7 +415,7 @@ mod tests {
     fn sum_of_products_fails_closed_on_bad_groups() {
         let foreign = vec![TypedFact {
             event_type: crate::event::types::EventType::from("stage_output.unknown.v1"),
-            payload: serde_json::json!({}),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         }];
         assert!(matches!(
             ClassificationOutcome::try_from_facts(&foreign),

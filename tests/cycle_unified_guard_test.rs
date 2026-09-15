@@ -465,6 +465,8 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
         .expect_event(1)
         .await?
         .envelope()
+        .envelope
+        .provenance
         .event
         .cycle_scc_id
         .expect("scc id");

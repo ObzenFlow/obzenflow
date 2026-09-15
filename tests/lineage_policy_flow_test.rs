@@ -163,8 +163,14 @@ async fn file_configured_lineage_depth_caps_journalled_parent_ids() {
     let mut deepest_parent_count = 0usize;
     for stage in ["t1", "t2", "t3", "t4"] {
         let envelopes = replay_testkit::read_stage_envelopes(&run_dir, stage).await;
-        for envelope in envelopes.iter().filter(|e| e.event.is_data()) {
-            let parents = envelope.event.causality.parent_ids.len();
+        for envelope in envelopes.iter().filter(|e| e.consumes_data_credit()) {
+            let parents = envelope
+                .envelope
+                .provenance
+                .event
+                .causality
+                .parent_ids
+                .len();
             assert!(
                 parents <= 3,
                 "stage {stage} derived event exceeds the configured cap: {parents} parents"

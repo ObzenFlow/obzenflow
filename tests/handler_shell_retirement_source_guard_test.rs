@@ -81,7 +81,7 @@ fn generic_handler_shell_and_standalone_retry_vocabulary_stay_absent() {
         "create_for_effect",
         "TopologyMiddlewareConfigSlot::Retry",
         "MiddlewareKind",
-        "MiddlewareLifecycle::Retry",
+        "ExecutionPayload::Retry",
         "RetryEvent",
         "lifecycle.middleware.retry",
         "MiddlewarePlanContribution",
@@ -162,7 +162,7 @@ fn standalone_retry_discovery_and_topology_production_stay_absent() {
             vec!["lifecycle.middleware.retry"],
         ),
         (
-            "crates/obzenflow_core/src/event/payloads/observability_payload.rs",
+            "crates/obzenflow_core/src/event/payloads/execution_payload.rs",
             vec!["Retry(RetryEvent)", "enum RetryEvent"],
         ),
     ];
@@ -203,7 +203,7 @@ fn retry_contracts_with_live_non_middleware_owners_stay_present() {
             vec!["HttpRetryConfig"],
         ),
         (
-            "crates/obzenflow_core/src/event/payloads/observability_payload.rs",
+            "crates/obzenflow_core/src/event/payloads/execution_payload.rs",
             vec![
                 "RetryScheduled",
                 "RetrySucceeded",

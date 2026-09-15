@@ -12,7 +12,7 @@ use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
-use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
+use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::UnifiedSinkHandler;
@@ -27,8 +27,7 @@ use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::SinkOperationPhase;
-use obzenflow_core::event::{EventEnvelope, SystemEvent};
+use obzenflow_core::event::{ChainPayload, JournalRecord, SinkOperationPhase, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -553,11 +552,11 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
             JournalSinkAction::SendFailure { message } => {
                 if !ctx.failure_lifecycle_recorded {
                     if let Some(causal_event_id) = ctx.failure_causal_event_id {
-                        let event = SystemEvent::stage_failed_with_metrics_causal(
+                        let event = SystemEvent::stage_failed_with_accounting_causal(
                             ctx.stage_id,
                             message.clone(),
                             false,
-                            snapshot_stage_metrics(ctx.instrumentation.as_ref()),
+                            snapshot_stage_accounting(ctx.instrumentation.as_ref()),
                             causal_event_id,
                         );
                         crate::supervised_base::publication::append(
@@ -682,7 +681,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 payload,
                             )
                             .with_flow_context(flow_ctx)
-                            .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            .with_runtime_provenance(ctx.instrumentation.snapshot());
 
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
@@ -723,7 +722,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                     "Failed to record sink flush failure: {error}"
                                 ))
                             })?;
-                            ctx.failure_causal_event_id = Some(recorded.operation.event.id);
+                            ctx.failure_causal_event_id =
+                                Some(recorded.operation.envelope.provenance.event.id);
                             ctx.failure_lifecycle_recorded = true;
                         }
                         if let Some(fatal) = e.as_fatal() {
@@ -816,7 +816,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                         "Failed to record sink drain failure: {record_error}"
                                     ))
                                 })?;
-                                ctx.failure_causal_event_id = Some(recorded.operation.event.id);
+                                ctx.failure_causal_event_id = Some(recorded.operation.envelope.provenance.event.id);
                                 ctx.failure_lifecycle_recorded = true;
                             }
                             if let Some(fatal) = error.as_fatal() {
@@ -879,7 +879,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         let evt =
                             journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
                                 .with_flow_context(flow_ctx)
-                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                .with_runtime_provenance(ctx.instrumentation.snapshot());
 
                         crate::supervised_base::publication::append(&ctx.data_journal, evt, None).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
@@ -966,7 +966,7 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
 
 async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
-    parent_envelope: &EventEnvelope<ChainEvent>,
+    parent_envelope: &JournalRecord<ChainPayload>,
     payload: DeliveryPayload,
 ) -> Result<(), obzenflow_fsm::FsmError> {
     let writer_id = ctx.writer_id.ok_or_else(|| {
@@ -982,11 +982,13 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
 
     let evt = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
         .with_flow_context(flow_ctx)
-        .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
-        .with_correlation_from(&parent_envelope.event)
-        .with_cycle_state_from(&parent_envelope.event);
+        .with_causality(CausalityContext::with_parent(
+            parent_envelope.envelope.provenance.event.id,
+        ))
+        .with_correlation_from(&parent_envelope.authored())
+        .with_cycle_state_from(&parent_envelope.authored());
     let evt = evt
-        .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())
+        .try_with_composite_activations(parent_envelope.composite_activations().to_vec())
         .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
     let data_journal = ctx.data_journal.clone();
@@ -1000,9 +1002,9 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     let settlement = crate::supervised_base::publication::commit(async move {
         let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
         let written = data_journal.append(event, Some(&parent)).await?;
-        instrumentation.record_output_event(&written.event);
+        instrumentation.record_output_event(&written.authored());
         if let Some(settlement) = &mut settlement {
-            if let Some((seq, event_id, vector_clock)) = settlement.record(&written.event) {
+            if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {
                 instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
             }
         }
@@ -1024,8 +1026,9 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_terminal_eof_audit_gate;
-    use super::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
+    use super::{
+        apply_terminal_eof_audit_gate, JournalSinkContext, JournalSinkEvent, JournalSinkState,
+    };
     use crate::stages::common::handlers::{CommitReceipt, SinkLifecycleReport};
     use crate::stages::sink::journal_sink::supervisor::JournalSinkSupervisor;
     use crate::stages::source::finite::fsm::tests::TestJournal;
@@ -1131,8 +1134,10 @@ mod tests {
         }
         let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
         let flush = rows.iter().find(|env| {
-            env.event
-                .runtime_context
+            env.envelope
+                .provenance
+                .event
+                .runtime
                 .as_ref()
                 .is_some_and(|runtime| runtime.fsm_state == "Flushing")
         });
@@ -1144,32 +1149,25 @@ mod tests {
         // EOF transitions directly to Drained, before flushing has happened.
         ctx.instrumentation.transition_to_state("Running");
         let mut fsm = supervisor.build_state_machine(JournalSinkState::Running);
-        let before = ctx
-            .data_journal
-            .read_causally_ordered()
-            .await
-            .unwrap()
-            .len();
+        // This assertion concerns the newly appended suffix. Independent
+        // fixture records may change position under causal sorting.
+        let before = ctx.data_journal.read_all_unordered().await.unwrap().len();
         let actions = fsm
             .handle(JournalSinkEvent::ReceivedEOF, &mut ctx)
             .await
             .unwrap();
         assert_eq!(ctx.instrumentation.snapshot().fsm_state, "Drained");
         assert_eq!(
-            ctx.data_journal
-                .read_causally_ordered()
-                .await
-                .unwrap()
-                .len(),
+            ctx.data_journal.read_all_unordered().await.unwrap().len(),
             before
         );
         for action in actions {
             action.execute(&mut ctx).await.unwrap();
         }
-        let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+        let rows = ctx.data_journal.read_all_unordered().await.unwrap();
         let snapshots: Vec<_> = rows[before..]
             .iter()
-            .filter_map(|env| env.event.runtime_context.as_ref())
+            .filter_map(|env| env.envelope.provenance.event.runtime.as_ref())
             .collect();
         assert!(!snapshots.is_empty());
         assert!(snapshots
@@ -1195,7 +1193,15 @@ mod tests {
                 *ctx.instrumentation.state_entered_at.read().unwrap(),
                 entered
             );
-            assert!(ctx.instrumentation.snapshot().time_in_state_ms >= 60_000);
+            assert!(
+                ctx.instrumentation
+                    .state_entered_at
+                    .read()
+                    .unwrap()
+                    .elapsed()
+                    .as_millis()
+                    >= 60_000
+            );
         }
         for initial in [
             JournalSinkState::Created,

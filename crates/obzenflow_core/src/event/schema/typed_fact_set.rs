@@ -4,10 +4,12 @@
 
 //! Typed fact-set authoring support.
 
-use crate::event::chain_event::{ChainEvent, ChainEventContent};
+use crate::config::LineagePolicy;
+use crate::event::chain_event::{ChainEvent, ChainPayload};
 use crate::event::schema::typed_payload::TypedPayload;
 use crate::event::types::EventType;
-use serde_json::Value;
+use crate::event::ChainEventFactory;
+use crate::WriterId;
 use std::any::{type_name, TypeId};
 
 /// Type metadata for one member of a typed fact set.
@@ -34,10 +36,10 @@ impl TypedFactType {
 }
 
 /// Serialized fact ready for conversion into a `ChainEvent::Data` value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TypedFact {
     pub event_type: EventType,
-    pub payload: Value,
+    pub payload: ChainPayload,
 }
 
 impl TypedFact {
@@ -47,22 +49,34 @@ impl TypedFact {
     {
         Ok(Self {
             event_type: EventType::from(T::versioned_event_type()),
-            payload: serde_json::to_value(payload)
+            payload: payload
+                .into_chain_payload()
                 .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
         })
     }
 
     pub fn from_event(event: &ChainEvent) -> Option<Self> {
-        match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => Some(Self {
-                event_type: EventType::from(event_type.clone()),
-                payload: payload.clone(),
-            }),
-            _ => None,
-        }
+        event.is_typed_input().then(|| Self {
+            event_type: EventType::from(event.event_type()),
+            payload: event.payload.clone(),
+        })
+    }
+
+    pub fn into_derived_event(
+        self,
+        writer_id: WriterId,
+        parent: &ChainEvent,
+        lineage: LineagePolicy,
+    ) -> ChainEvent {
+        let mut event = ChainEventFactory::derived_event(writer_id, parent, self.payload, lineage);
+        event.envelope.provenance.event.event_type = self.event_type.to_string();
+        event
+    }
+
+    pub fn into_event(self, writer_id: WriterId) -> ChainEvent {
+        let mut event = ChainEventFactory::create_event(writer_id, self.payload);
+        event.envelope.provenance.event.event_type = self.event_type.to_string();
+        event
     }
 }
 
@@ -212,17 +226,21 @@ where
             event_type: EventType::from(T::versioned_event_type()),
         });
     }
-    serde_json::from_value(fact.payload.clone()).map_err(|e| {
-        TypedFactSetError::DeserializationFailed {
-            event_type: fact.event_type.clone(),
-            error: e.to_string(),
-        }
+    serde_json::from_value(
+        fact.payload
+            .contract_body()
+            .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
+    )
+    .map_err(|e| TypedFactSetError::DeserializationFailed {
+        event_type: fact.event_type.clone(),
+        error: e.to_string(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::ChainPayload;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +260,10 @@ mod tests {
 
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].event_type, "fact.first.v1");
-        assert_eq!(facts[0].payload, serde_json::json!({ "value": 7 }));
+        assert_eq!(
+            serde_json::to_value(&facts[0].payload).unwrap(),
+            serde_json::json!({ "value": 7 })
+        );
     }
 
     #[test]
@@ -403,7 +424,7 @@ mod tests {
 
         let unknown = vec![TypedFact {
             event_type: EventType::from("fact.unknown.v1"),
-            payload: serde_json::json!({}),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         }];
         assert!(matches!(
             HandWrittenSum::try_from_facts(&unknown),
@@ -483,7 +504,7 @@ mod tests {
         let mut with_unknown = carrier.into_facts().expect("product serializes");
         with_unknown.push(TypedFact {
             event_type: EventType::from("fact.unknown.v1"),
-            payload: serde_json::json!({}),
+            payload: ChainPayload::Fact(serde_json::json!({})),
         });
         assert!(matches!(
             HandWrittenProduct::try_from_facts(&with_unknown),

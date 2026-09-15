@@ -12,8 +12,7 @@ use crate::messaging::system_subscription::SystemSubscription;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::event::WriterId;
+use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
 use std::sync::Arc;
@@ -78,7 +77,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = obzenflow_core::event::SystemEvent::new(
             self.writer_id(),
-            obzenflow_core::event::SystemEventType::MetricsCoordination(
+            SystemPayload::MetricsCoordination(
                 obzenflow_core::event::MetricsCoordinationEvent::Shutdown,
             ),
         );
@@ -112,7 +111,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 // Metrics aggregator creates SystemEvent directly
                 let event = obzenflow_core::event::SystemEvent::new(
                     WriterId::from(self.system_id),
-                    obzenflow_core::event::SystemEventType::MetricsCoordination(
+                    SystemPayload::MetricsCoordination(
                         obzenflow_core::event::MetricsCoordinationEvent::Ready,
                     ),
                 );
@@ -290,7 +289,7 @@ mod tests {
     use obzenflow_core::event::types::EventId;
     use obzenflow_core::id::{JournalId, SystemId};
     use obzenflow_core::journal::{JournalError, JournalReader};
-    use obzenflow_core::{EventEnvelope, Journal, JournalOwner};
+    use obzenflow_core::{Journal, JournalOwner, JournalRecord};
     use std::collections::HashMap;
     use std::marker::PhantomData;
 
@@ -304,7 +303,7 @@ mod tests {
     where
         T: obzenflow_core::event::JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
@@ -343,22 +342,22 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "append failed".to_string(),
                 source: Box::new(std::io::Error::other("append failed")),
             })
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
 
         async fn read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
@@ -372,7 +371,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            _count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
     }

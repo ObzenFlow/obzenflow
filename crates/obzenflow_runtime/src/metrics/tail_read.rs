@@ -8,11 +8,11 @@
 //! through these helpers. The collector's cached refresh shares their search
 //! windows and stage qualification, retaining its own observation state.
 
-use obzenflow_core::event::context::{RuntimeContext, StageType};
+use obzenflow_core::event::context::{RuntimeProvenance, StageType};
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::id::StageId;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetadata, StageMetricsSnapshot};
-use obzenflow_core::Journal;
+use obzenflow_core::{Journal, WriterId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ type StageJournalEntry = (
     Option<Arc<dyn Journal<ChainEvent>>>,
 );
 
-/// Read the most recent `RuntimeContext` from a journal's tail.
+/// Read the most recent `RuntimeProvenance` from a journal's tail.
 ///
 /// Uses a graduated search to handle cases where the very last events may not
 /// carry `runtime_context` (e.g., control/forwarded events, partial writes).
@@ -34,7 +34,7 @@ type StageJournalEntry = (
 /// most-recent-first order.
 pub async fn read_latest_runtime_context(
     journal: &Arc<dyn Journal<ChainEvent>>,
-) -> Option<RuntimeContext> {
+) -> Option<RuntimeProvenance> {
     // In most flows, the last few events contain a runtime_context snapshot.
     // However, some stages can end with a large number of control or forwarded
     // events that omit runtime_context, so we expand the search window.
@@ -44,7 +44,7 @@ pub async fn read_latest_runtime_context(
                 let reached_beginning = events.len() < n;
                 // IMPORTANT: read_last_n returns most recent first (API contract).
                 for env in events.into_iter() {
-                    if let Some(ctx) = env.event.runtime_context {
+                    if let Some(ctx) = env.envelope.provenance.event.runtime {
                         return Some(ctx);
                     }
                 }
@@ -61,7 +61,7 @@ pub async fn read_latest_runtime_context(
     None
 }
 
-/// Read the most recent `RuntimeContext` from a journal's tail for a specific
+/// Read the most recent `RuntimeProvenance` from a journal's tail for a specific
 /// stage, filtering by `flow_context.stage_id`.
 ///
 /// This stricter variant is used by metrics code to ensure that only runtime
@@ -71,7 +71,7 @@ pub async fn read_latest_runtime_context(
 pub async fn read_latest_runtime_context_for_stage(
     journal: &Arc<dyn Journal<ChainEvent>>,
     stage_id: StageId,
-) -> Option<RuntimeContext> {
+) -> Option<RuntimeProvenance> {
     // See read_latest_runtime_context. The stage-filtered variant can be more
     // sensitive to "tail noise" because forwarded events often re-stamp
     // flow_context but omit runtime_context.
@@ -80,8 +80,8 @@ pub async fn read_latest_runtime_context_for_stage(
             Ok(events) => {
                 let reached_beginning = events.len() < n;
                 for env in events.into_iter() {
-                    if let Some(ctx) = env.event.runtime_context.clone() {
-                        if env.event.flow_context.stage_id == stage_id {
+                    if let Some(ctx) = env.envelope.provenance.event.runtime.clone() {
+                        if env.envelope.provenance.event.flow_context.stage_id == stage_id {
                             return Some(ctx);
                         }
                     }
@@ -107,125 +107,60 @@ pub async fn read_latest_runtime_context_for_stage(
 /// Read stage metrics from journal tails.
 ///
 /// Checks both data and error journals (if provided):
-/// - Counters (events_processed_total, errors_total, event_loops_*) use
-///   monotonic max semantics.
-/// - Gauges/percentiles (in_flight, p50-p999) treat the error journal as
-///   potentially more recent: data journal is consulted first, then error
-///   journal overrides gauge fields when present.
+/// Protected counters retain their physical populations and max semantics.
+/// Measurement families are selected independently by capture scope and sequence
+/// across both journals; a later error-rail read has no special precedence.
 pub async fn read_stage_metrics_from_tail(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     stage_id: StageId,
 ) -> Option<StageMetricsSnapshot> {
-    let mut events_processed_total: Option<u64> = None;
-    let mut events_accumulated_total: Option<u64> = None;
-    let mut events_emitted_total: Option<u64> = None;
-    let mut errors_total: Option<u64> = None;
-    let mut in_flight: Option<u32> = None;
-    let mut p50_ms: Option<u64> = None;
-    let mut p90_ms: Option<u64> = None;
-    let mut p95_ms: Option<u64> = None;
-    let mut p99_ms: Option<u64> = None;
-    let mut p999_ms: Option<u64> = None;
-    let mut processing_time_sum_nanos: Option<u64> = None;
-    let mut event_loops_total: Option<u64> = None;
-    let mut event_loops_with_work_total: Option<u64> = None;
-    let mut errors_by_kind: std::collections::HashMap<
-        obzenflow_core::event::status::processing_status::ErrorKind,
-        u64,
-    > = std::collections::HashMap::new();
-
-    fn update_max<T: Ord + Copy>(current: &mut Option<T>, new: T) {
-        *current = Some(current.map_or(new, |c| c.max(new)));
-    }
-
-    fn update_kind_max(
-        map: &mut std::collections::HashMap<
-            obzenflow_core::event::status::processing_status::ErrorKind,
-            u64,
-        >,
-        kind: &obzenflow_core::event::status::processing_status::ErrorKind,
-        new: u64,
-    ) {
-        map.entry(kind.clone())
-            .and_modify(|current| *current = (*current).max(new))
-            .or_insert(new);
-    }
-
-    // Read from data journal first.
-    if let Some(ctx) = read_latest_runtime_context_for_stage(data_journal, stage_id).await {
-        update_max(&mut events_processed_total, ctx.events_processed_total);
-        update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
-        update_max(&mut events_emitted_total, ctx.events_emitted_total);
-        update_max(&mut errors_total, ctx.errors_total);
-        in_flight = Some(ctx.in_flight);
-        p50_ms = Some(ctx.recent_p50_ms);
-        p90_ms = Some(ctx.recent_p90_ms);
-        p95_ms = Some(ctx.recent_p95_ms);
-        p99_ms = Some(ctx.recent_p99_ms);
-        p999_ms = Some(ctx.recent_p999_ms);
-        update_max(
-            &mut processing_time_sum_nanos,
-            ctx.processing_time_sum_nanos,
-        );
-        update_max(&mut event_loops_total, ctx.event_loops_total);
-        update_max(
-            &mut event_loops_with_work_total,
-            ctx.event_loops_with_work_total,
-        );
-
-        for (kind, count) in ctx.errors_by_kind.iter() {
-            update_kind_max(&mut errors_by_kind, kind, *count);
+    use obzenflow_core::event::observation::ObservationSource;
+    let mut metrics = super::fsm::StageMetrics::default();
+    let observations = super::observations::ObservationHub::default();
+    for journal in std::iter::once(data_journal).chain(error_journal) {
+        if let Some(provenance) = read_latest_runtime_context_for_stage(journal, stage_id).await {
+            metrics.merge_runtime_context(&provenance);
         }
-    }
-
-    // Then consult error journal if provided: counters via max, gauges override.
-    if let Some(error_journal) = error_journal {
-        if let Some(ctx) = read_latest_runtime_context_for_stage(error_journal, stage_id).await {
-            update_max(&mut events_processed_total, ctx.events_processed_total);
-            update_max(&mut events_accumulated_total, ctx.events_accumulated_total);
-            update_max(&mut events_emitted_total, ctx.events_emitted_total);
-            update_max(&mut errors_total, ctx.errors_total);
-            update_max(
-                &mut processing_time_sum_nanos,
-                ctx.processing_time_sum_nanos,
-            );
-            update_max(&mut event_loops_total, ctx.event_loops_total);
-            update_max(
-                &mut event_loops_with_work_total,
-                ctx.event_loops_with_work_total,
-            );
-
-            in_flight = Some(ctx.in_flight);
-            p50_ms = Some(ctx.recent_p50_ms);
-            p90_ms = Some(ctx.recent_p90_ms);
-            p95_ms = Some(ctx.recent_p95_ms);
-            p99_ms = Some(ctx.recent_p99_ms);
-            p999_ms = Some(ctx.recent_p999_ms);
-
-            for (kind, count) in ctx.errors_by_kind.iter() {
-                update_kind_max(&mut errors_by_kind, kind, *count);
+        // Existing bounded tail-search budget; 145b owns attachment indexing.
+        if let Ok(rows) = journal
+            .read_last_n(*super::snapshot::SEARCH_WINDOWS.last().unwrap())
+            .await
+        {
+            for row in rows.into_iter().rev() {
+                if let Some(observation) = row.envelope.observability {
+                    if observation.capture.observer == WriterId::from(stage_id) {
+                        observations.offer_recorded(observation);
+                    }
+                }
             }
         }
     }
-
-    // Only return Some if we observed at least one runtime context.
-    events_processed_total.map(|events| StageMetricsSnapshot {
-        events_processed_total: events,
-        events_accumulated_total: events_accumulated_total.unwrap_or(0),
-        events_emitted_total: events_emitted_total.unwrap_or(0),
-        errors_total: errors_total.unwrap_or(0),
-        errors_by_kind,
-        in_flight: in_flight.unwrap_or(0),
-        recent_p50_ms: p50_ms.unwrap_or(0),
-        recent_p90_ms: p90_ms.unwrap_or(0),
-        recent_p95_ms: p95_ms.unwrap_or(0),
-        recent_p99_ms: p99_ms.unwrap_or(0),
-        recent_p999_ms: p999_ms.unwrap_or(0),
-        processing_time_sum_nanos: processing_time_sum_nanos.unwrap_or(0),
-        event_loops_total: event_loops_total.unwrap_or(0),
-        event_loops_with_work_total: event_loops_with_work_total.unwrap_or(0),
-    })
+    for packet in observations.snapshot() {
+        if let Some(runtime) = packet.runtime {
+            metrics.merge_runtime_measurements(&runtime);
+        }
+    }
+    metrics
+        .latest_events_processed_total
+        .map(|events| StageMetricsSnapshot {
+            events_processed_total: events,
+            events_accumulated_total: metrics.latest_events_accumulated_total.unwrap_or(0),
+            events_emitted_total: metrics.latest_events_emitted_total.unwrap_or(0),
+            errors_total: metrics.latest_errors_total.unwrap_or(0),
+            errors_by_kind: metrics.errors_by_kind,
+            in_flight: metrics.last_in_flight,
+            recent_p50_ms: metrics.snapshot_p50_ms,
+            recent_p90_ms: metrics.snapshot_p90_ms,
+            recent_p95_ms: metrics.snapshot_p95_ms,
+            recent_p99_ms: metrics.snapshot_p99_ms,
+            recent_p999_ms: metrics.snapshot_p999_ms,
+            processing_time_count: metrics.processing_time_count,
+            processing_time_sum_nanos: metrics.processing_time_sum_nanos,
+            timing_window: metrics.timing_window,
+            event_loops_total: metrics.event_loops_total,
+            event_loops_with_work_total: metrics.event_loops_with_work_total,
+        })
 }
 
 /// Read flow-level metrics by aggregating all stage journal tails.
@@ -273,15 +208,18 @@ pub async fn read_flow_metrics_from_tails(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::context::{
+        ExecutionAccounting, ExecutionProgress, RuntimeProvenance,
+    };
     use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
+    use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::status::processing_status::ErrorKind;
+    use obzenflow_core::event::ChainPayload;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::ChainEvent;
-    use obzenflow_core::WriterId;
+    use obzenflow_core::{ChainEvent, WriterId};
     use std::sync::{Arc, Mutex};
 
     /// Minimal in-memory journal for ChainEvent used in tail-read tests.
@@ -291,7 +229,7 @@ mod tests {
     struct InMemoryChainJournal {
         id: JournalId,
         owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<EventEnvelope<ChainEvent>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
     }
 
     impl InMemoryChainJournal {
@@ -304,14 +242,14 @@ mod tests {
         }
 
         fn append_raw(&self, event: ChainEvent) {
-            let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(envelope);
         }
     }
 
     struct InMemoryReader {
-        events: Vec<EventEnvelope<ChainEvent>>,
+        events: Vec<JournalRecord<ChainPayload>>,
         pos: usize,
     }
 
@@ -328,15 +266,17 @@ mod tests {
         async fn append(
             &self,
             event: ChainEvent,
-            _parent: Option<&EventEnvelope<ChainEvent>>,
-        ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
-            let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+            _parent: Option<&JournalRecord<ChainPayload>>,
+        ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(envelope.clone());
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        async fn read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
         }
@@ -344,7 +284,7 @@ mod tests {
         async fn read_event(
             &self,
             _event_id: &obzenflow_core::EventId,
-        ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             Ok(None)
         }
 
@@ -362,7 +302,7 @@ mod tests {
         async fn read_last_n(
             &self,
             count: usize,
-        ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -373,7 +313,7 @@ mod tests {
 
     #[async_trait]
     impl JournalReader<ChainEvent> for InMemoryReader {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -396,58 +336,33 @@ mod tests {
         events_processed_total: u64,
         errors_total: u64,
         by_kind: &[(ErrorKind, u64)],
-    ) -> obzenflow_core::event::context::RuntimeContext {
-        obzenflow_core::event::context::RuntimeContext {
-            in_flight: 0,
-            recent_p50_ms: 0,
-            recent_p90_ms: 0,
-            recent_p95_ms: 0,
-            recent_p99_ms: 0,
-            recent_p999_ms: 0,
-            processing_time_sum_nanos: 0,
-            events_processed_total,
-            events_accumulated_total: 0,
-            events_emitted_total: 0,
-            terminal_groups_committed_total: 0,
-            terminal_group_commit_failures_total: 0,
-            data_outputs_by_event_type: Vec::new(),
-            data_inputs_by_upstream_event_type: Vec::new(),
-            join_reference_since_last_stream: 0,
-            errors_total,
-            failures_total: 0,
-            event_loops_total: 0,
-            event_loops_with_work_total: 0,
-            errors_by_kind: by_kind.iter().cloned().collect(),
+    ) -> RuntimeProvenance {
+        RuntimeProvenance {
+            progress: ExecutionProgress {
+                reader_seq: 0,
+                receipted_seq: 0,
+                writer_seq: 0,
+                last_consumed_event_id: None,
+                last_consumed_writer: None,
+                last_consumed_vector_clock: None,
+                last_receipted_event_id: None,
+                last_receipted_vector_clock: None,
+                last_emitted_event_id: None,
+                last_emitted_writer: None,
+            },
+            accounting: ExecutionAccounting {
+                events_processed_total,
+                events_accumulated_total: 0,
+                events_emitted_total: 0,
+                terminal_groups_committed_total: 0,
+                terminal_group_commit_failures_total: 0,
+                data_outputs_by_event_type: Vec::new(),
+                data_inputs_by_upstream_event_type: Vec::new(),
+                errors_total,
+                failures_total: 0,
+                errors_by_kind: by_kind.iter().cloned().collect(),
+            },
             fsm_state: "Running".to_string(),
-            time_in_state_ms: 0,
-            reader_seq: 0,
-            receipted_seq: 0,
-            writer_seq: 0,
-            last_consumed_event_id: None,
-            last_consumed_writer: None,
-            last_consumed_vector_clock: None,
-            last_receipted_event_id: None,
-            last_receipted_vector_clock: None,
-            last_emitted_event_id: None,
-            last_emitted_writer: None,
-            cb_requests_total: 0,
-            cb_successes_total: 0,
-            cb_failures_total: 0,
-            cb_slow_total: 0,
-            cb_rejections_total: 0,
-            cb_opened_total: 0,
-            cb_time_closed_seconds: 0.0,
-            cb_time_open_seconds: 0.0,
-            cb_time_half_open_seconds: 0.0,
-            cb_state: 0.0,
-            rl_events_total: 0,
-            rl_delayed_total: 0,
-            rl_tokens_consumed_total: 0.0,
-            rl_delay_seconds_total: 0.0,
-            rl_bucket_tokens: 0.0,
-            rl_bucket_capacity: 0.0,
-            effect_circuit_breakers: Vec::new(),
-            effect_rate_limiters: Vec::new(),
         }
     }
 
@@ -472,7 +387,7 @@ mod tests {
             serde_json::json!({"k": "v"}),
         );
         data_event.flow_context.stage_id = stage_id;
-        data_event = data_event.with_runtime_context(data_ctx);
+        data_event = data_event.with_runtime_provenance(data_ctx);
         data_journal_raw.append_raw(data_event);
 
         // Error journal snapshot: later snapshot with 5 total errors, including the same
@@ -485,7 +400,7 @@ mod tests {
             serde_json::json!({"k": "v2"}),
         );
         error_event.flow_context.stage_id = stage_id;
-        error_event = error_event.with_runtime_context(error_ctx);
+        error_event = error_event.with_runtime_provenance(error_ctx);
         error_journal_raw.append_raw(error_event);
 
         let snapshot = read_stage_metrics_from_tail(&data_journal, Some(&error_journal), stage_id)
@@ -521,7 +436,7 @@ mod tests {
             serde_json::json!({"k": "v_upstream"}),
         );
         upstream_event.flow_context.stage_id = upstream_stage_id;
-        upstream_event = upstream_event.with_runtime_context(upstream_ctx);
+        upstream_event = upstream_event.with_runtime_provenance(upstream_ctx);
         journal_raw.append_raw(upstream_event);
 
         // Local event with zero errors_total and matching stage_id.
@@ -532,18 +447,18 @@ mod tests {
             serde_json::json!({"k": "v_local"}),
         );
         local_event.flow_context.stage_id = local_stage_id;
-        local_event = local_event.with_runtime_context(local_ctx);
+        local_event = local_event.with_runtime_provenance(local_ctx);
         journal_raw.append_raw(local_event);
 
         // Generic helper may see either; the stage-aware helper must only see the local snapshot.
         let generic_ctx = read_latest_runtime_context(&journal).await.expect("ctx");
-        assert_eq!(generic_ctx.events_processed_total, 50);
+        assert_eq!(generic_ctx.accounting.events_processed_total, 50);
 
         let filtered_ctx = read_latest_runtime_context_for_stage(&journal, local_stage_id)
             .await
             .expect("ctx");
-        assert_eq!(filtered_ctx.events_processed_total, 50);
-        assert_eq!(filtered_ctx.errors_total, 0);
+        assert_eq!(filtered_ctx.accounting.events_processed_total, 50);
+        assert_eq!(filtered_ctx.accounting.errors_total, 0);
     }
 
     #[tokio::test]
@@ -566,7 +481,7 @@ mod tests {
             json!({"k": "v"}),
         );
         seeded_event.flow_context.stage_id = stage_id;
-        seeded_event = seeded_event.with_runtime_context(seeded_ctx);
+        seeded_event = seeded_event.with_runtime_provenance(seeded_ctx);
         journal_raw.append_raw(seeded_event);
 
         // Append many forwarded/control-like events without runtime_context.
@@ -584,6 +499,6 @@ mod tests {
         let ctx = read_latest_runtime_context_for_stage(&journal, stage_id)
             .await
             .expect("ctx");
-        assert_eq!(ctx.events_processed_total, 42);
+        assert_eq!(ctx.accounting.events_processed_total, 42);
     }
 }

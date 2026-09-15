@@ -5,7 +5,7 @@
 //! Cursor-based reader for `MemoryJournal`.
 
 use async_trait::async_trait;
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
@@ -36,7 +36,7 @@ impl<T: JournalEvent> MemoryJournalReader<T> {
 
 #[async_trait]
 impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let env = {
             let state = self.state.lock().unwrap();
             state.events.get(self.position as usize).cloned()

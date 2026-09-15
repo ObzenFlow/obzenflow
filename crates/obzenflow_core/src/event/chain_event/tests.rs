@@ -4,11 +4,12 @@
 
 use super::*;
 use crate::event::payloads::effect_payload::{
-    EffectCursor, EffectDescriptor, EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
+    EffectCursor, EffectDescriptor, EFFECT_RECORD_EVENT_TYPE,
 };
+use crate::event::payloads::execution_payload::ExecutionPayload;
 use crate::event::types::CorrelationId;
 use crate::id::StageId;
-use crate::ingress::IngressContext;
+use crate::ingress::{IngressAttemptSeq, IngressContext};
 use crate::WriterId;
 use serde_json::json;
 
@@ -18,27 +19,22 @@ fn test_factory_creation() {
     let event = ChainEventFactory::data_event(writer_id, "test.event", json!({"key": "value"}));
 
     assert_eq!(event.writer_id, writer_id);
-    assert!(event.is_data());
+    assert!(event.consumes_data_credit());
     assert_eq!(event.event_type(), "test.event");
 }
 
 #[test]
 fn test_derived_event() {
     let writer_id = WriterId::from(StageId::new());
-    let parent = ChainEventFactory::source_event(
-        writer_id,
-        "test_stage",
-        ChainEventContent::Data {
-            event_type: "parent.event".to_string(),
-            payload: json!({"data": "parent"}),
-        },
-    )
-    .with_ingress_context(IngressContext {
-        accepted_at_ns: 42,
-        ingress_key: "test".into(),
-        batch_index: Some(1),
-        attempt_seq: crate::ingress::IngressAttemptSeq(0),
-    });
+    let parent =
+        ChainEventFactory::data_event(writer_id, "parent.event", json!({"data": "parent"}))
+            .with_new_correlation("test_stage")
+            .with_ingress_context(IngressContext {
+                accepted_at_ns: 42,
+                ingress_key: "test".into(),
+                batch_index: Some(1),
+                attempt_seq: IngressAttemptSeq(0),
+            });
 
     let child = ChainEventFactory::derived_data_event(
         writer_id,
@@ -56,19 +52,21 @@ fn test_derived_event() {
 #[test]
 fn framework_effect_data_is_not_source_replayable() {
     let writer_id = WriterId::from(StageId::new());
-    let mut event = ChainEventFactory::data_event(writer_id, EFFECT_RECORD_EVENT_TYPE, json!({}));
-    event.effect_provenance = Some(EffectProvenance {
+    use crate::event::payloads::effect_payload::{EffectOutcomePayload, EffectRecord};
+    let record = EffectRecord {
         cursor: EffectCursor::new("flow", "stage", 1, 0),
         descriptor_hash: "hash".into(),
         descriptor: EffectDescriptor::new("test.effect", "test", 1, "v1", "input"),
-        outcome_fact_ordinal: None,
-        outcome_fact_count: None,
-        group_id: None,
-        fact_owner: EffectFactOwner::Framework,
+        outcome: EffectOutcomePayload::Succeeded { output: json!({}) },
         origin: None,
-        attempt: None,
-    });
-
+    };
+    let event = ChainEventFactory::create_event(
+        writer_id,
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)),
+    );
+    // Application descriptors cannot impersonate execution records.
+    let fact = ChainEventFactory::data_event(writer_id, EFFECT_RECORD_EVENT_TYPE, json!({}));
+    assert!(fact.is_source_replayable());
     assert!(!event.is_source_replayable());
 }
 
@@ -81,7 +79,8 @@ fn correlation_serializes_as_single_context_field() {
     event.set_single_correlation(correlation_id, None);
 
     let serialized = serde_json::to_value(event).expect("event should serialize");
-    let object = serialized
+    let protected = &serialized["envelope"]["provenance"]["event"];
+    let object = protected
         .as_object()
         .expect("event should serialize as object");
 
@@ -89,11 +88,8 @@ fn correlation_serializes_as_single_context_field() {
     assert!(!object.contains_key("correlation_id"));
     assert!(!object.contains_key("correlation_ids"));
     assert!(!object.contains_key("correlation_payload"));
-    assert_eq!(
-        serialized["correlation"]["ids"].as_array().unwrap().len(),
-        1
-    );
-    assert!(serialized["correlation"].get("truncated").is_none());
+    assert_eq!(protected["correlation"]["ids"].as_array().unwrap().len(), 1);
+    assert!(protected["correlation"].get("truncated").is_none());
 }
 
 #[test]
@@ -127,7 +123,7 @@ fn catch_up_complete_round_trips_and_classifies_re_admit() {
     let event = ChainEventFactory::source_event(
         writer_id,
         "tx_source",
-        ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+        ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
             generation: ReaderGeneration(1),
             stage_key: StageKey("tx_source".into()),
         }),

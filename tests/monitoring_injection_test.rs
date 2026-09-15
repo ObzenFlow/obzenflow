@@ -5,7 +5,7 @@
 //! The same explicit exporter presence governs preflight and Runtime collection.
 use obzenflow::{sinks, sources};
 use obzenflow_adapters::monitoring::MetricsReadModel;
-use obzenflow_core::event::{ChainEvent, PipelineLifecycleEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::{ChainEvent, PipelineLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::journal::{
     journal_name::JournalName, journal_owner::JournalOwner, Journal, JournalError,
 };
@@ -99,10 +99,10 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
             let mut coordination_seen = false;
             let mut terminal_totals = None;
             while let Some(envelope) = reader.next().await.unwrap() {
-                if let SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+                if let SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
                     metrics,
                     ..
-                }) = &envelope.event.event
+                }) = &envelope.payload
                 {
                     terminal_totals = Some((
                         metrics.events_in_total,
@@ -110,10 +110,8 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
                         metrics.errors_total,
                     ));
                 }
-                coordination_seen |= matches!(
-                    envelope.event.event,
-                    SystemEventType::MetricsCoordination(_)
-                );
+                coordination_seen |=
+                    matches!(envelope.payload, SystemPayload::MetricsCoordination(_));
             }
             assert_eq!(
                 coordination_seen, enabled,
@@ -278,7 +276,7 @@ async fn concurrent_scrapes_allow_publication_and_flow_settlement() {
     let mut totals = None;
     let mut drained = false;
     while let Some(row) = journal.next().await.unwrap() {
-        if let SystemEventType::PipelineLifecycle(event) = &row.event.event {
+        if let SystemPayload::PipelineLifecycle(event) = &row.payload {
             match event {
                 PipelineLifecycleEvent::Completed { metrics, .. } => {
                     totals = Some((

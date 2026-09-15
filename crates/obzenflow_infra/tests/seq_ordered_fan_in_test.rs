@@ -20,7 +20,6 @@ mod replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -322,7 +321,7 @@ async fn posted_rows(run_dir: &Path) -> Vec<PostedRow> {
     replay_testkit::read_stage_envelopes_appended(run_dir, "posted")
         .await
         .iter()
-        .filter_map(|envelope| PostedRow::from_event(&envelope.event))
+        .filter_map(|envelope| PostedRow::from_event(&envelope.authored()))
         .collect()
 }
 
@@ -356,7 +355,7 @@ async fn seq_fan_in_delivers_stream_while_reference_is_quiet_and_replays_exactly
     let account_rows = replay_testkit::read_stage_envelopes_appended(&recorded_run, "accounts")
         .await
         .iter()
-        .filter(|envelope| matches!(envelope.event.content, ChainEventContent::Data { .. }))
+        .filter(|envelope| envelope.consumes_data_credit())
         .count();
     assert_eq!(
         account_rows, 1,

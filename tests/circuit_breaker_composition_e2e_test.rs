@@ -26,11 +26,10 @@ use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, Middlewar
 use obzenflow_core::{
     event::chain_event::ChainEvent,
     event::payloads::delivery_payload::DeliveryMethod,
-    event::payloads::observability_payload::{
-        CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
-        ObservabilityPayload,
+    event::payloads::execution_payload::{
+        CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
     },
-    event::ChainEventContent,
+    event::ChainPayload,
     id::StageId,
     journal::{journal_owner::JournalOwner, Journal},
     StageOutputs, TypedPayload,
@@ -348,7 +347,7 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .await
         .expect("stage journal should read")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -359,10 +358,8 @@ async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usi
         .into_iter()
         .filter(|event| {
             matches!(
-                event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(_)
-                ))
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
             )
         })
         .count()
@@ -373,10 +370,8 @@ fn circuit_breaker_event_ids(events: &[ChainEvent]) -> Vec<obzenflow_core::Event
         .iter()
         .filter(|event| {
             matches!(
-                event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(_)
-                ))
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(_))
             )
         })
         .map(|event| event.id)
@@ -388,15 +383,7 @@ fn circuit_breaker_event_ids(events: &[ChainEvent]) -> Vec<obzenflow_core::Event
 fn data_event_count(events: &[ChainEvent], event_type: &str) -> usize {
     events
         .iter()
-        .filter(|event| {
-            matches!(
-                &event.content,
-                ChainEventContent::Data {
-                    event_type: actual,
-                    ..
-                } if actual == event_type
-            )
-        })
+        .filter(|event| event.consumes_data_credit() && event.event_type() == event_type)
         .count()
 }
 
@@ -472,14 +459,12 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
     let mut retry_rows = 0;
 
     for event in events {
-        let ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(retry_event),
-        )) = &event.content
+        let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(retry_event)) = &event.payload
         else {
             continue;
         };
         match retry_event {
-            CircuitBreakerEvent::RetryScheduled {
+            CircuitBreakerFact::RetryScheduled {
                 cursor,
                 next_attempt,
                 delay_ms,
@@ -489,7 +474,7 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
                 assert_eq!(*delay_ms, 1);
                 cursors.entry(cursor.clone()).or_default().0 += 1;
             }
-            CircuitBreakerEvent::RetrySucceeded {
+            CircuitBreakerFact::RetrySucceeded {
                 cursor,
                 total_attempts,
                 terminal_classification,
@@ -502,8 +487,8 @@ fn assert_retry_evidence_per_cursor(events: &[ChainEvent]) {
                 ));
                 cursors.entry(cursor.clone()).or_default().1 += 1;
             }
-            CircuitBreakerEvent::RetryExhausted { .. }
-            | CircuitBreakerEvent::RetryStoppedNonRetryable { .. } => {
+            CircuitBreakerFact::RetryExhausted { .. }
+            | CircuitBreakerFact::RetryStoppedNonRetryable { .. } => {
                 panic!("every derived cursor should recover on attempt two")
             }
             _ => {}

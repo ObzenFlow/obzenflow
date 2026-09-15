@@ -2,10 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::event::event_envelope::EventEnvelope;
+use crate::event::journal_record::JournalRecord;
 use crate::event::types::EventId;
-use crate::event::ChainEvent;
-use crate::event::JournalWriterId;
+use crate::event::{ChainPayload, JournalWriterId};
 
 /// Filter for creating subscriptions - pure data filtering
 #[derive(Clone, Debug)]
@@ -41,7 +40,7 @@ impl EventFilter {
     }
 
     /// Check if an event matches this filter
-    pub fn matches(&self, envelope: &EventEnvelope<ChainEvent>) -> bool {
+    pub fn matches(&self, envelope: &JournalRecord<ChainPayload>) -> bool {
         // If no filters specified, match all
         if self.event_types.is_empty() && self.journal_writer_ids.is_empty() {
             return true;
@@ -51,7 +50,7 @@ impl EventFilter {
         if !self.event_types.is_empty() {
             let matches_type = self.event_types.iter().any(|pattern| {
                 // Simple prefix matching for now
-                envelope.event.event_type().starts_with(pattern)
+                envelope.event_type_name().starts_with(pattern)
             });
             if !matches_type {
                 return false;
@@ -62,7 +61,7 @@ impl EventFilter {
         if !self.journal_writer_ids.is_empty()
             && !self
                 .journal_writer_ids
-                .contains(&envelope.journal_writer_id)
+                .contains(&envelope.envelope.provenance.journal.journal_writer_id)
         {
             return false;
         }

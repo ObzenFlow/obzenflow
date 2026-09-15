@@ -1,0 +1,293 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! The manifest-4 record contract. Payload interpretation follows the descriptor;
+//! arbitrary application JSON is never used as an untagged decoder fallback.
+
+use super::journal_event::JournalEvent;
+use super::payloads::chain_payload::{ChainPayload, EventKind};
+use super::provenance::{
+    AuthoredEnvelope, AuthoredProvenance, ChainEventProvenance, EventEnvelope, JournalProvenance,
+    Provenance, RecordProvenance, SystemEventProvenance,
+};
+use super::system_event::SystemPayload;
+use crate::event::CorrelationId;
+use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Only Core's closed chain/system families can define journal decoding.
+pub trait JournalPayload:
+    sealed::Sealed + 'static + Clone + std::fmt::Debug + Serialize + Send + Sync
+{
+    type Event: JournalEvent<Payload = Self>;
+    type Provenance: 'static
+        + RecordProvenance
+        + Clone
+        + std::fmt::Debug
+        + Serialize
+        + DeserializeOwned
+        + Send
+        + Sync;
+    fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error>;
+    fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct JournalRecord<P: JournalPayload> {
+    pub envelope: EventEnvelope<P::Provenance>,
+    pub payload: P,
+}
+
+impl<P: JournalPayload> JournalRecord<P> {
+    pub fn new<E: JournalEvent<Payload = P>>(journal_writer_id: JournalWriterId, event: E) -> Self {
+        let (authored, payload) = event.into_parts();
+        Self {
+            envelope: EventEnvelope {
+                provenance: Provenance {
+                    event: authored.provenance.event,
+                    journal: JournalProvenance {
+                        journal_writer_id,
+                        vector_clock: super::vector_clock::VectorClock::new(),
+                        timestamp: chrono::Utc::now(),
+                        journal_group_id: None,
+                        journal_group_member: None,
+                    },
+                },
+                observability: authored.observability.and_then(|packet| packet.validated()),
+            },
+            payload,
+        }
+    }
+
+    /// Commit an authored event with the metadata assigned by its journal.
+    pub fn commit_event<E: JournalEvent<Payload = P>>(
+        event: E,
+        journal: JournalProvenance,
+    ) -> Result<Self, serde_json::Error> {
+        let (authored, payload) = event.into_parts();
+        Self::commit(authored, payload, journal)
+    }
+
+    pub fn id(&self) -> &EventId {
+        self.envelope.provenance.event.id()
+    }
+    pub fn writer_id(&self) -> &WriterId {
+        self.envelope.provenance.event.writer_id()
+    }
+    pub fn event_type_name(&self) -> &str {
+        self.envelope.provenance.event.event_type()
+    }
+    pub fn admission_seq(&self) -> Option<AdmissionSeq> {
+        self.envelope.provenance.event.admission_seq()
+    }
+    pub fn into_authored(self) -> P::Event {
+        P::Event::from_parts(
+            AuthoredEnvelope {
+                provenance: AuthoredProvenance {
+                    event: self.envelope.provenance.event,
+                },
+                observability: self.envelope.observability,
+            },
+            self.payload,
+        )
+    }
+    pub fn authored(&self) -> P::Event {
+        self.clone().into_authored()
+    }
+
+    pub fn commit(
+        authored: AuthoredEnvelope<P::Provenance>,
+        payload: P,
+        journal: JournalProvenance,
+    ) -> Result<Self, serde_json::Error> {
+        payload.validate(&authored.provenance.event)?;
+        Ok(Self {
+            envelope: EventEnvelope {
+                provenance: Provenance {
+                    event: authored.provenance.event,
+                    journal,
+                },
+                observability: authored.observability.and_then(|packet| packet.validated()),
+            },
+            payload,
+        })
+    }
+}
+
+impl<P: JournalPayload> Serialize for JournalRecord<P> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeStruct};
+        self.payload
+            .validate(&self.envelope.provenance.event)
+            .map_err(S::Error::custom)?;
+        let mut record = serializer.serialize_struct("JournalRecord", 2)?;
+        record.serialize_field("envelope", &self.envelope)?;
+        record.serialize_field("payload", &self.payload)?;
+        record.end()
+    }
+}
+
+impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let record = super::record_serde::deserialize::<_, EventEnvelope<P::Provenance>, Value>(
+            deserializer,
+        )?;
+        let payload = P::decode(&record.envelope.provenance.event, record.payload)
+            .map_err(D::Error::custom)?;
+        payload
+            .validate(&record.envelope.provenance.event)
+            .map_err(D::Error::custom)?;
+        Ok(Self {
+            envelope: record.envelope,
+            payload,
+        })
+    }
+}
+
+impl sealed::Sealed for ChainPayload {}
+impl JournalPayload for ChainPayload {
+    type Event = super::ChainEvent;
+    type Provenance = ChainEventProvenance;
+
+    fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error> {
+        ChainPayload::decode(provenance.event_kind, &provenance.event_type, payload)
+    }
+
+    fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
+        if self.kind() != provenance.event_kind
+            || self
+                .framework_event_type()
+                .is_some_and(|expected| expected != provenance.event_type)
+        {
+            return Err(descriptor_mismatch());
+        }
+        if let ChainPayload::Execution(
+            super::payloads::execution_payload::ExecutionPayload::SourcePollError(failure),
+        ) = self
+        {
+            use super::status::processing_status::ProcessingStatus;
+            match &provenance.processing.status {
+                ProcessingStatus::Error { kind, .. }
+                    if *kind == Some(failure.error_type.processing_error_kind()) => {}
+                _ => return Err(descriptor_mismatch()),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl sealed::Sealed for SystemPayload {}
+impl JournalPayload for SystemPayload {
+    type Event = super::SystemEvent;
+    type Provenance = SystemEventProvenance;
+
+    fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error> {
+        if provenance.event_kind != EventKind::System {
+            return Err(descriptor_mismatch());
+        }
+        serde_json::from_value(payload)
+    }
+
+    fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
+        if provenance.event_kind != EventKind::System || self.event_type() != provenance.event_type
+        {
+            return Err(descriptor_mismatch());
+        }
+        Ok(())
+    }
+}
+
+fn descriptor_mismatch() -> serde_json::Error {
+    <serde_json::Error as serde::de::Error>::custom("event descriptor does not match payload")
+}
+
+#[cfg(test)]
+mod tests;
+
+pub type ChainJournalRecord = JournalRecord<ChainPayload>;
+pub type SystemJournalRecord = JournalRecord<SystemPayload>;
+
+impl JournalRecord<ChainPayload> {
+    pub fn event_type(&self) -> String {
+        self.envelope.provenance.event.event_type.clone()
+    }
+    pub fn payload(&self) -> Value {
+        serde_json::to_value(&self.payload).expect("closed payload serialization")
+    }
+    pub fn is_fact(&self) -> bool {
+        matches!(self.payload, ChainPayload::Fact(_))
+    }
+    pub fn consumes_data_credit(&self) -> bool {
+        self.payload.consumes_data_credit()
+    }
+    pub fn is_eof(&self) -> bool {
+        matches!(
+            self.payload,
+            ChainPayload::FlowControl(
+                super::payloads::flow_control_payload::FlowControlPayload::Eof { .. }
+            )
+        )
+    }
+    pub fn is_control(&self) -> bool {
+        matches!(self.payload, ChainPayload::FlowControl(_))
+    }
+    pub fn is_delivery(&self) -> bool {
+        matches!(self.payload, ChainPayload::Delivery(_))
+    }
+    pub fn is_system(&self) -> bool {
+        false
+    }
+    pub fn is_lifecycle(&self) -> bool {
+        matches!(&self.payload, ChainPayload::Execution(execution) if !execution.consumes_data_credit())
+    }
+    pub fn composite_activations(&self) -> &[super::context::CompositeActivationContext] {
+        &self.envelope.provenance.event.composite_activations
+    }
+    pub fn correlation_ids(&self) -> Option<&[CorrelationId]> {
+        self.envelope
+            .provenance
+            .event
+            .correlation
+            .as_ref()
+            .map(|c| c.ids.as_slice())
+    }
+    pub fn correlation_id(&self) -> Option<CorrelationId> {
+        self.envelope
+            .provenance
+            .event
+            .correlation
+            .as_ref()
+            .and_then(|c| c.single_id())
+    }
+    pub fn correlation_payload(
+        &self,
+    ) -> Option<&super::payloads::correlation_payload::CorrelationPayload> {
+        self.envelope
+            .provenance
+            .event
+            .correlation
+            .as_ref()
+            .and_then(|c| c.payload.as_ref())
+    }
+    pub fn correlation_ids_truncated(&self) -> bool {
+        self.envelope
+            .provenance
+            .event
+            .correlation
+            .as_ref()
+            .is_some_and(|c| c.truncated)
+    }
+    pub fn replay_disposition(&self) -> super::chain_event::ReplayDisposition {
+        self.payload.replay_disposition()
+    }
+    pub fn is_source_replayable(&self) -> bool {
+        self.replay_disposition() == super::chain_event::ReplayDisposition::ReAdmit
+    }
+}

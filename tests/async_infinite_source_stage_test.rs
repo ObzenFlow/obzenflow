@@ -161,7 +161,10 @@ struct CountSourcePollObserver {
 impl SourcePollObserver for CountSourcePollObserver {
     fn after_source_poll(&self, _ctx: &SourcePollObserverContext<'_>, outputs: &[ChainEvent]) {
         self.calls.fetch_add(
-            outputs.iter().filter(|event| event.is_data()).count() as u64,
+            outputs
+                .iter()
+                .filter(|event| event.consumes_data_credit())
+                .count() as u64,
             Ordering::Relaxed,
         );
     }
@@ -178,7 +181,7 @@ async fn wait_for_data_event_count(
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|event| event.is_data())
+                .filter(|event| event.consumes_data_credit())
                 .count();
             if observed >= expected {
                 return Ok(());
@@ -247,7 +250,7 @@ async fn async_infinite_source_graceful_stop_interrupts_blocked_next_and_calls_d
         .lock()
         .unwrap()
         .iter()
-        .filter(|event| event.is_data())
+        .filter(|event| event.consumes_data_credit())
         .cloned()
         .collect();
     assert!(
@@ -318,7 +321,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         .lock()
         .unwrap()
         .iter()
-        .filter(|event| event.is_data())
+        .filter(|event| event.consumes_data_credit())
         .cloned()
         .collect();
     assert!(

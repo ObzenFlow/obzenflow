@@ -7,14 +7,14 @@ use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::JournalWriterId;
-use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
+use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
 };
-use obzenflow_core::EventEnvelope;
+use obzenflow_core::JournalRecord;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::metrics::fsm::{build_metrics_aggregator_fsm, MetricsJournalKind};
@@ -97,8 +97,8 @@ async fn export_snapshot_sanity_from_metrics_store() {
     let stage_metrics = StageMetrics {
         latest_events_processed_total: Some(10),
         latest_errors_total: Some(2),
-        event_loops_total: 5,
-        event_loops_with_work_total: 5,
+        event_loops_total: Some(5),
+        event_loops_with_work_total: Some(5),
         ..Default::default()
     };
     ctx.metrics_store
@@ -159,8 +159,8 @@ async fn publish_drain_complete_requires_physical_coverage() {
 
     let drained = events.iter().any(|envelope| {
         matches!(
-            envelope.event.event,
-            SystemEventType::MetricsCoordination(
+            envelope.payload,
+            SystemPayload::MetricsCoordination(
                 obzenflow_core::event::MetricsCoordinationEvent::Drained
             )
         )
@@ -196,7 +196,7 @@ async fn running_state_process_batch_transitions() {
     let writer = WriterId::from(stage_id);
     let event =
         ChainEventFactory::data_event(writer, "test.event", serde_json::json!({"value": 1}));
-    let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+    let envelope = JournalRecord::new(JournalWriterId::new(), event);
 
     let actions = fsm
         .handle(
@@ -238,7 +238,7 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
     let refusal = |reason, event_count, seq| {
         SystemEvent::new(
             writer,
-            SystemEventType::IngressRefusal {
+            SystemPayload::IngressRefusal {
                 ingress_key: "orders".into(),
                 stage_id,
                 stage_key: "orders".into(),
@@ -259,7 +259,7 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
         refusal(IngressRefusalReason::RateLimited, 1, 1),
         refusal(IngressRefusalReason::Validation, 3, 2),
     ] {
-        let envelope = Box::new(EventEnvelope::new(JournalWriterId::new(), event));
+        let envelope = Box::new(JournalRecord::new(JournalWriterId::new(), event));
         MetricsAggregatorAction::ProcessSystemEvent { envelope }
             .execute(&mut ctx)
             .await

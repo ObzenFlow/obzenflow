@@ -134,7 +134,7 @@ fn studio_projection_and_reader_stay_outside_transport() {
             "crates/obzenflow_infra/src/web/warp",
             &[
                 "SystemEvent",
-                "SystemEventEnvelope",
+                "SystemJournalRecord",
                 "Journal",
                 "JournalReader",
                 "CompositeLifecycleProjection",

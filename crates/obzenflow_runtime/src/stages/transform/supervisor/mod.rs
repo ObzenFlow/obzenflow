@@ -9,6 +9,7 @@
 //! - `draining.rs` — Draining state event loop
 //! - `tests.rs`    — All unit tests
 
+use obzenflow_core::event::ChainPayload;
 mod direct_fact_continuation;
 mod draining;
 mod running;
@@ -25,8 +26,7 @@ use crate::supervised_base::{
 };
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::EventEnvelope;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 
@@ -415,7 +415,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     pub(super) async fn check_cycle_guard_data_event(
         &mut self,
         ctx: &mut TransformContext<H>,
-        envelope: &mut EventEnvelope<ChainEvent>,
+        envelope: &mut JournalRecord<ChainPayload>,
         upstream: Option<StageId>,
         write_error_context: &'static str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
@@ -423,8 +423,13 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             return Ok(false);
         };
 
-        if let obzenflow_core::event::ChainEventContent::Data { .. } = &envelope.event.content {
-            if let Err(error_event) = guard.check_data(&mut envelope.event) {
+        if envelope.consumes_data_credit() {
+            let mut authored = envelope.authored();
+            let checked = guard.check_data(&mut authored);
+            envelope.envelope.provenance.event = authored.envelope.provenance.event;
+            envelope.envelope.observability = authored.envelope.observability;
+            envelope.payload = authored.payload;
+            if let Err(error_event) = checked {
                 let flow_context = FlowContext {
                     flow_name: ctx.flow_name.clone(),
                     flow_id: ctx.flow_id.to_string(),
@@ -435,7 +440,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
                 let error_event = (*error_event)
                     .with_flow_context(flow_context)
-                    .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                    .with_runtime_provenance(ctx.instrumentation.snapshot());
 
                 let journal = ctx.error_journal.clone();
                 let parent = envelope.clone();
@@ -465,13 +470,13 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
     pub(super) async fn forward_control_event_guarded(
         &mut self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let should_forward = self
             .cycle_guard
             .as_mut()
-            .map(|guard| guard.should_forward_signal(&envelope.event))
+            .map(|guard| guard.should_forward_signal(&envelope.authored()))
             .unwrap_or(true);
 
         if should_forward {
@@ -558,7 +563,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     /// Helper to forward control events
     pub(super) async fn forward_control_event(
         &self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = forward_control_event_helper(

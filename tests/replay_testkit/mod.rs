@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::id::StageId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
@@ -69,7 +69,7 @@ pub fn archive_manifest(run_dir: &Path) -> serde_json::Value {
 pub async fn read_stage_envelopes(
     run_dir: &Path,
     stage_key: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
@@ -97,7 +97,7 @@ pub async fn read_stage_envelopes(
 pub async fn read_stage_envelopes_appended(
     run_dir: &Path,
     stage_key: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
@@ -119,17 +119,17 @@ pub async fn read_stage_envelopes_appended(
 
 /// The per-run `StageId` an upstream's authored EOF names, resolved from the
 /// EOF payload's `writer_id` (falling back to the chain event's writer).
-fn authored_eof_stage_id(envelopes: &[EventEnvelope<ChainEvent>]) -> Option<StageId> {
+fn authored_eof_stage_id(envelopes: &[JournalRecord<ChainPayload>]) -> Option<StageId> {
     envelopes.iter().find_map(|envelope| {
-        let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
-            &envelope.event.content
+        let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
+            &envelope.payload
         else {
             return None;
         };
         match writer_id {
             Some(WriterId::Stage(id)) => Some(*id),
             Some(_) => None,
-            None => match &envelope.event.writer_id {
+            None => match &envelope.envelope.provenance.event.writer_id {
                 WriterId::Stage(id) => Some(*id),
                 _ => None,
             },
@@ -169,13 +169,15 @@ pub async fn transport_row_signature(
     read_stage_envelopes_appended(run_dir, stage_key)
         .await
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => Some(format!("data:{}", envelope.event.event_type())),
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some(format!("data:{}", envelope.event_type()))
+            }
+            ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
                 let author = match writer_id {
                     Some(WriterId::Stage(id)) => Some(*id),
                     Some(_) => None,
-                    None => match &envelope.event.writer_id {
+                    None => match &envelope.envelope.provenance.event.writer_id {
                         WriterId::Stage(id) => Some(*id),
                         _ => None,
                     },
@@ -200,8 +202,8 @@ pub async fn count_reader_telemetry_rows(run_dir: &Path, stage_key: &str) -> usi
         .iter()
         .filter(|envelope| {
             matches!(
-                &envelope.event.content,
-                obzenflow_core::event::ChainEventContent::FlowControl(payload)
+                &envelope.payload,
+                ChainPayload::FlowControl(payload)
                     if payload.is_reader_telemetry()
             )
         })

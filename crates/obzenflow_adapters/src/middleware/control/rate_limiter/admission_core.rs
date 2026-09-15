@@ -15,6 +15,7 @@
 //! (FLOWIP-115d AC20). It returns plain data; the adapters turn that data into
 //! lifecycle/control facts.
 
+use obzenflow_core::event::payloads::execution_payload::RateLimiterMode as RecordedRateLimiterMode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -114,27 +115,12 @@ impl TokenBucket {
             );
         }
     }
-
-    /// Get current token count (for monitoring).
-    fn available_tokens(&mut self, now: Instant) -> f64 {
-        self.refill(now);
-        self.tokens
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RateLimiterMode {
     Normal,
     Limiting,
-}
-
-impl RateLimiterMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RateLimiterMode::Normal => "normal",
-            RateLimiterMode::Limiting => "limiting",
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -239,7 +225,7 @@ pub(crate) struct RateLimitSummary {
     pub(crate) events_in_window: u64,
     pub(crate) window_size_ms: u64,
     /// `Some((from, to))` stable-label mode transition when hysteresis tripped.
-    pub(crate) mode_change: Option<(&'static str, &'static str)>,
+    pub(crate) mode_change: Option<(RateLimiterMode, RateLimiterMode)>,
 }
 
 /// Plain-data activity pulse returned by [`RateLimiterCore::take_due_pulse`].
@@ -368,33 +354,29 @@ impl RateLimiterCore {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> RateLimiterCoreSnapshot {
-        let (events_total, delayed_total, tokens_consumed_total, delay_seconds_total) =
-            if let Ok(stats) = self.stats.lock() {
-                (
-                    stats.events_total,
-                    stats.delayed_total,
-                    stats.tokens_consumed_total,
-                    stats.delay_seconds_total,
-                )
-            } else {
-                (0, 0, 0.0, 0.0)
-            };
-
-        let (bucket_tokens, bucket_capacity) = if let Ok(mut bucket) = self.bucket.lock() {
-            (bucket.available_tokens(Instant::now()), bucket.capacity)
-        } else {
-            (0.0, 0.0)
+    pub(crate) fn snapshot(&self) -> Option<RateLimiterCoreSnapshot> {
+        // Skip this optional snapshot if a lock is busy or poisoned.
+        let stats = match self.stats.try_lock() {
+            Ok(stats) => stats,
+            Err(_) => return None,
         };
-
-        RateLimiterCoreSnapshot {
-            events_total,
-            delayed_total,
-            tokens_consumed_total,
-            delay_seconds_total,
-            bucket_tokens,
-            bucket_capacity,
-        }
+        let bucket = match self.bucket.try_lock() {
+            Ok(bucket) => bucket,
+            Err(_) => return None,
+        };
+        Some(RateLimiterCoreSnapshot {
+            events_total: stats.events_total,
+            delayed_total: stats.delayed_total,
+            tokens_consumed_total: stats.tokens_consumed_total,
+            delay_seconds_total: stats.delay_seconds_total,
+            bucket_tokens: (bucket.tokens
+                + Instant::now()
+                    .duration_since(bucket.last_refill)
+                    .as_secs_f64()
+                    * bucket.refill_rate)
+                .min(bucket.capacity),
+            bucket_capacity: bucket.capacity,
+        })
     }
 
     /// Emit an activity pulse if the pulse window has elapsed, resetting the
@@ -467,14 +449,14 @@ impl RateLimiterCore {
 
         let events_in_window = stats.events_window;
 
-        let mut mode_change: Option<(&'static str, &'static str)> = None;
+        let mut mode_change: Option<(RateLimiterMode, RateLimiterMode)> = None;
         match stats.mode {
             RateLimiterMode::Normal => {
                 if utilization_pct >= MODE_ENTER_THRESHOLD_PCT {
                     let from = stats.mode;
                     stats.mode = RateLimiterMode::Limiting;
                     stats.exit_hold_count = 0;
-                    mode_change = Some((from.as_str(), stats.mode.as_str()));
+                    mode_change = Some((from, stats.mode));
                 }
             }
             RateLimiterMode::Limiting => {
@@ -486,7 +468,7 @@ impl RateLimiterCore {
                         let from = stats.mode;
                         stats.mode = RateLimiterMode::Normal;
                         stats.exit_hold_count = 0;
-                        mode_change = Some((from.as_str(), stats.mode.as_str()));
+                        mode_change = Some((from, stats.mode));
                     }
                 } else {
                     stats.exit_hold_count = 0;
@@ -601,6 +583,15 @@ where
     }
 }
 
+impl From<RateLimiterMode> for RecordedRateLimiterMode {
+    fn from(mode: RateLimiterMode) -> Self {
+        match mode {
+            RateLimiterMode::Normal => Self::Normal,
+            RateLimiterMode::Limiting => Self::Limiting,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,11 +631,14 @@ mod tests {
         let reservation = core.try_reserve_at(1.0, Instant::now()).unwrap();
 
         assert_eq!(core.bucket.lock().unwrap().tokens, 0.0);
-        assert_eq!(core.snapshot().events_total, 0);
+        assert_eq!(
+            core.snapshot().expect("measurement captured").events_total,
+            0
+        );
         drop(reservation);
 
         assert_eq!(core.bucket.lock().unwrap().tokens, 1.0);
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot().expect("measurement captured");
         assert_eq!(snapshot.events_total, 0);
         assert_eq!(snapshot.tokens_consumed_total, 0.0);
     }
@@ -656,7 +650,7 @@ mod tests {
         core.try_reserve_at(1.0, Instant::now()).unwrap().commit();
 
         assert!(core.bucket.lock().unwrap().tokens < 0.001);
-        let snapshot = core.snapshot();
+        let snapshot = core.snapshot().expect("measurement captured");
         assert_eq!(snapshot.events_total, 1);
         assert_eq!(snapshot.tokens_consumed_total, 1.0);
     }

@@ -6,7 +6,8 @@
 
 use super::PipelineContext;
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::SystemPayload;
+use obzenflow_core::JournalRecord;
 use obzenflow_fsm::{EventVariant, StateVariant};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,7 +44,7 @@ pub(crate) enum PipelineFsmEvent {
     GracefulStop { timeout: std::time::Duration },
     Cancel,
     Abort { reason: String },
-    Journal(Box<obzenflow_core::EventEnvelope<SystemEvent>>),
+    Journal(Box<JournalRecord<SystemPayload>>),
     GracefulStopExpired,
     StageCleanupExpired,
     MetricsExpired,

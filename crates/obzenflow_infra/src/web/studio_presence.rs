@@ -99,7 +99,7 @@ impl RuntimePresenceProjection {
 mod tests {
     use super::*;
     use crate::journal::MemoryJournal;
-    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemPayload};
     use obzenflow_core::id::SystemId;
     use obzenflow_core::metrics::FlowLifecycleMetricsSnapshot;
     use obzenflow_core::JournalOwner;
@@ -125,7 +125,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     other_writer,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running {
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
                         stage_count: Some(99),
                     }),
                 ),
@@ -137,7 +137,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     current_writer,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Starting),
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
                 ),
                 None,
             )
@@ -147,7 +147,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     current_writer,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::ReadyForRun {
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::ReadyForRun {
                         stage_count: Some(3),
                     }),
                 ),
@@ -159,7 +159,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     current_writer,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Running {
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
                         stage_count: Some(3),
                     }),
                 ),
@@ -171,7 +171,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     current_writer,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
                         duration_ms: obzenflow_core::event::types::DurationMs(5),
                         metrics: completed_metrics(),
                     }),
@@ -184,7 +184,7 @@ mod tests {
             .append(
                 SystemEvent::new(
                     current_writer,
-                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
                 ),
                 None,
             )

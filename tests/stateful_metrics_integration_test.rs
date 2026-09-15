@@ -486,7 +486,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
                     )
                 })?;
 
-            if AggregateMetricEvent::from_event(&record.event).is_some() {
+            if AggregateMetricEvent::from_event(&record.authored()).is_some() {
                 aggregate_record = Some(record);
                 break;
             }
@@ -498,7 +498,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 
     let aggregate_record = aggregate_record
         .ok_or_else(|| anyhow!("missing aggregate event in {}", stage_log.display()))?;
-    let event = &aggregate_record.event;
+    let event = &aggregate_record.authored();
     assert_eq!(
         event.writer_id,
         WriterId::from(event.flow_context.stage_id),
@@ -508,13 +508,18 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     // Ensure happened-before is preserved: the persisted aggregate event should
     // carry the upstream vector-clock entries via a parented append.
     let parent_vc = event
-        .runtime_context
+        .runtime
         .as_ref()
-        .and_then(|ctx| ctx.last_consumed_vector_clock.clone())
+        .and_then(|ctx| ctx.progress.last_consumed_vector_clock.clone())
         .ok_or_else(|| anyhow!("aggregate event missing last_consumed_vector_clock"))?;
 
     for (writer_key, parent_seq) in parent_vc.clocks.iter() {
-        let seq = aggregate_record.vector_clock.get(writer_key);
+        let seq = aggregate_record
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(writer_key);
         assert!(
             seq >= *parent_seq,
             "expected aggregate vector clock to include parent key {writer_key} at >= {parent_seq}, got {seq}"
@@ -523,7 +528,13 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 
     let stage_writer_key = WriterId::from(event.flow_context.stage_id).to_string();
     assert!(
-        aggregate_record.vector_clock.get(&stage_writer_key) > 0,
+        aggregate_record
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&stage_writer_key)
+            > 0,
         "expected aggregate vector clock to advance stage writer key {stage_writer_key}"
     );
 

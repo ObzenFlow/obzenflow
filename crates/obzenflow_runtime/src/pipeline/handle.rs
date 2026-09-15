@@ -9,6 +9,7 @@ use crate::errors::FlowError;
 use crate::journal::RunSubstrateState;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{StandardHandle, SupervisorHandle};
+use obzenflow_core::event::observation::{ObservationRecorder, ObservationSource};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -30,6 +31,8 @@ pub(crate) struct FlowHandleExtras {
     pub contract_attachments: Option<ContractAttachments>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub pipeline_writer_id: WriterId,
+    pub observations: Arc<dyn ObservationSource>,
+    pub host_observations: Arc<dyn ObservationRecorder>,
     pub liveness_snapshots: Option<LivenessSnapshots>,
     /// The selected run substrate (FLOWIP-120u): durable with its locator, or ephemeral.
     pub run_substrate: RunSubstrateState,
@@ -74,6 +77,8 @@ pub struct FlowHandle {
 
     /// Writer identity for this pipeline's lifecycle facts in the system journal.
     pipeline_writer_id: WriterId,
+    observations: Arc<dyn ObservationSource>,
+    host_observations: Arc<dyn ObservationRecorder>,
 
     /// Flow-scoped stage liveness snapshots (FLOWIP-063e).
     liveness_snapshots: Option<LivenessSnapshots>,
@@ -101,6 +106,8 @@ impl FlowHandle {
             contract_attachments,
             system_journal,
             pipeline_writer_id,
+            observations,
+            host_observations,
             liveness_snapshots,
             run_substrate,
             flow_effective_config,
@@ -117,6 +124,8 @@ impl FlowHandle {
             contract_attachments,
             system_journal,
             pipeline_writer_id,
+            observations,
+            host_observations,
             liveness_snapshots,
             run_substrate,
             flow_effective_config,
@@ -413,6 +422,14 @@ impl FlowHandle {
 
     pub fn pipeline_writer_id(&self) -> WriterId {
         self.pipeline_writer_id
+    }
+
+    pub fn observations(&self) -> Arc<dyn ObservationSource> {
+        self.observations.clone()
+    }
+
+    pub fn host_observations(&self) -> Arc<dyn ObservationRecorder> {
+        self.host_observations.clone()
     }
 
     pub fn liveness_snapshots(&self) -> Option<LivenessSnapshots> {

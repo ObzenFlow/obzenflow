@@ -5,27 +5,30 @@
 //! FSM instrumentation for HandlerSupervised stages
 
 use crate::control_plane::{
-    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider, NoControlPlane,
-    RateLimiterSnapshotter,
+    CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView, ControlPlaneProvider,
+    NoControlPlane, RateLimiterSnapshotter,
 };
+use crate::execution::RuntimeExecution;
 use hdrhistogram::Histogram;
-use obzenflow_core::event::context::{EventTypeCountContext, UpstreamEventTypeCountContext};
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::context::{
+    EffectCircuitBreakerContext, EffectRateLimiterContext, EventTypeCountContext,
+    UpstreamEventTypeCountContext,
+};
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::execution_payload::CircuitState;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
-use obzenflow_core::metrics::StageMetricsSnapshot;
-use obzenflow_core::EventId;
-use obzenflow_core::EventType;
-use obzenflow_core::StageId;
-use obzenflow_core::WriterId;
+use obzenflow_core::event::{ChainEvent, JournalEvent};
+use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::{
+    EventId, EventType, FlowId, JournalPayload, MiddlewareExecutionScope, StageId, WriterId,
+};
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::constants::{
     HISTOGRAM_MAX_MS, HISTOGRAM_MIN_MS, HISTOGRAM_SIGFIGS, QUANTILE_P50, QUANTILE_P90,
@@ -69,6 +72,10 @@ struct AuthoredDataFrontier {
 
 /// Stage instrumentation that tracks metrics alongside FSM state
 pub struct StageInstrumentation {
+    observation_owner: OnceLock<super::observations::ObservationOwner>,
+    measurement_started_at_ms: u64,
+    processing_time_count: AtomicU64,
+    last_processing_time_available: AtomicBool,
     // Gauge metrics - current values
     pub in_flight_count: AtomicU32,
     /// Join-only gauge (Live join): number of reference events processed since the last stream event.
@@ -171,6 +178,13 @@ impl StageInstrumentation {
 
     pub fn new_with_config(config: InstrumentationConfig) -> Self {
         Self {
+            observation_owner: OnceLock::new(),
+            measurement_started_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            processing_time_count: AtomicU64::new(0),
+            last_processing_time_available: AtomicBool::new(false),
             // Gauges
             in_flight_count: AtomicU32::new(0),
             join_reference_since_last_stream: AtomicU64::new(0),
@@ -267,194 +281,186 @@ impl StageInstrumentation {
         Ok(())
     }
 
-    /// Create a snapshot for event injection
-    pub fn snapshot(&self) -> RuntimeContext {
-        // State and its age describe one transition. Use the same lock order as
-        // transition_to_state, then release both before reading other metrics.
-        let (fsm_state, time_in_state_ms) = {
-            let state = self.current_state.read().unwrap();
-            let entered_at = self.state_entered_at.read().unwrap();
-            (state.clone(), entered_at.elapsed().as_millis() as u64)
-        };
-        let histogram = self.processing_time_histogram.read().unwrap();
-
-        RuntimeContext {
-            // Gauge snapshots
-            in_flight: self.in_flight_count.load(Ordering::Relaxed),
-
-            // Histogram percentiles
-            recent_p50_ms: if self.config.enable_histograms {
-                histogram.value_at_quantile(QUANTILE_P50)
-            } else {
-                0
-            },
-            recent_p90_ms: if self.config.enable_histograms {
-                histogram.value_at_quantile(QUANTILE_P90)
-            } else {
-                0
-            },
-            recent_p95_ms: if self.config.enable_histograms {
-                histogram.value_at_quantile(QUANTILE_P95)
-            } else {
-                0
-            },
-            recent_p99_ms: if self.config.enable_histograms {
-                histogram.value_at_quantile(QUANTILE_P99)
-            } else {
-                0
-            },
-            recent_p999_ms: if self.config.enable_histograms {
-                histogram.value_at_quantile(QUANTILE_P999)
-            } else {
-                0
-            },
-
-            // Actual sum - always tracked, never reconstructed from percentiles
-            processing_time_sum_nanos: self.processing_time_sum_nanos.load(Ordering::Relaxed),
-
-            // Counter snapshots (totals, not rates!)
-            events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
-            events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
-            events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
-            terminal_groups_committed_total: self
-                .terminal_groups_committed_total
-                .load(Ordering::Relaxed),
-            terminal_group_commit_failures_total: self
-                .terminal_group_commit_failures_total
-                .load(Ordering::Relaxed),
-            data_outputs_by_event_type: {
-                let mut counts: Vec<_> = self
-                    .authored_data_frontier
+    /// Capture protected positions and accounting without touching measurement
+    /// locks, control snapshotters, or the observation handoff.
+    pub fn snapshot(&self) -> RuntimeProvenance {
+        RuntimeProvenance {
+            progress: ExecutionProgress {
+                reader_seq: self.reader_seq.load(Ordering::Relaxed),
+                receipted_seq: self.receipted_seq.load(Ordering::Relaxed),
+                writer_seq: self.writer_seq.load(Ordering::Relaxed),
+                last_consumed_event_id: *self.last_consumed_event_id.read().unwrap(),
+                last_consumed_writer: *self.last_consumed_writer.read().unwrap(),
+                last_consumed_vector_clock: self.last_consumed_vector_clock.read().unwrap().clone(),
+                last_receipted_event_id: *self.last_receipted_event_id.read().unwrap(),
+                last_receipted_vector_clock: self
+                    .last_receipted_vector_clock
                     .read()
                     .unwrap()
-                    .writer_seq_by_event_type
-                    .iter()
-                    .map(|(event_type, total)| EventTypeCountContext {
-                        event_type: event_type.clone(),
-                        total: *total,
-                    })
-                    .collect();
-                counts.sort_by(|left, right| left.event_type.cmp(&right.event_type));
-                counts
+                    .clone(),
+                last_emitted_event_id: *self.last_emitted_event_id.read().unwrap(),
+                last_emitted_writer: *self.last_emitted_writer.read().unwrap(),
             },
-            data_inputs_by_upstream_event_type: {
-                let mut counts: Vec<_> = self
-                    .data_reader_seq_by_upstream_event_type
+            accounting: ExecutionAccounting {
+                events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
+                events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
+                events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
+                terminal_groups_committed_total: self
+                    .terminal_groups_committed_total
+                    .load(Ordering::Relaxed),
+                terminal_group_commit_failures_total: self
+                    .terminal_group_commit_failures_total
+                    .load(Ordering::Relaxed),
+                errors_total: self.errors_total.load(Ordering::Relaxed),
+                failures_total: self.failures_total.load(Ordering::Relaxed),
+                errors_by_kind: self
+                    .errors_by_kind
                     .read()
                     .unwrap()
                     .iter()
-                    .map(
-                        |((upstream, event_type), total)| UpstreamEventTypeCountContext {
-                            upstream: *upstream,
+                    .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+                    .collect(),
+                data_outputs_by_event_type: {
+                    let mut counts: Vec<_> = self
+                        .authored_data_frontier
+                        .read()
+                        .unwrap()
+                        .writer_seq_by_event_type
+                        .iter()
+                        .map(|(event_type, total)| EventTypeCountContext {
                             event_type: event_type.clone(),
                             total: *total,
-                        },
-                    )
-                    .collect();
-                counts.sort_by(|left, right| {
-                    (left.upstream, left.event_type.as_str())
-                        .cmp(&(right.upstream, right.event_type.as_str()))
-                });
-                counts
+                        })
+                        .collect();
+                    counts.sort_by(|left, right| left.event_type.cmp(&right.event_type));
+                    counts
+                },
+                data_inputs_by_upstream_event_type: {
+                    let mut counts: Vec<_> = self
+                        .data_reader_seq_by_upstream_event_type
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .map(
+                            |((upstream, event_type), total)| UpstreamEventTypeCountContext {
+                                upstream: *upstream,
+                                event_type: event_type.clone(),
+                                total: *total,
+                            },
+                        )
+                        .collect();
+                    counts.sort_by(|left, right| {
+                        (left.upstream, left.event_type.as_str())
+                            .cmp(&(right.upstream, right.event_type.as_str()))
+                    });
+                    counts
+                },
             },
-            join_reference_since_last_stream: self
-                .join_reference_since_last_stream
-                .load(Ordering::Relaxed),
-            errors_total: self.errors_total.load(Ordering::Relaxed),
-            failures_total: self.failures_total.load(Ordering::Relaxed),
-
-            // FSM state
-            fsm_state,
-            time_in_state_ms,
-
-            // Event loop metrics
-            event_loops_total: self.event_loops_total.load(Ordering::Relaxed),
-            event_loops_with_work_total: self.event_loops_with_work_total.load(Ordering::Relaxed),
-
-            // Observability positions
-            reader_seq: self.reader_seq.load(Ordering::Relaxed),
-            receipted_seq: self.receipted_seq.load(Ordering::Relaxed),
-            writer_seq: self.writer_seq.load(Ordering::Relaxed),
-            last_consumed_event_id: *self.last_consumed_event_id.read().unwrap(),
-            last_consumed_writer: *self.last_consumed_writer.read().unwrap(),
-            last_consumed_vector_clock: self.last_consumed_vector_clock.read().unwrap().clone(),
-            last_receipted_event_id: *self.last_receipted_event_id.read().unwrap(),
-            last_receipted_vector_clock: self.last_receipted_vector_clock.read().unwrap().clone(),
-            last_emitted_event_id: *self.last_emitted_event_id.read().unwrap(),
-            last_emitted_writer: *self.last_emitted_writer.read().unwrap(),
-            errors_by_kind: self
-                .errors_by_kind
-                .read()
-                .unwrap()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
-                .collect(),
-
-            // Control middleware cumulative metrics are injected by supervisors
-            // via `snapshot_with_control()` so defaults are always present.
-            cb_requests_total: 0,
-            cb_successes_total: 0,
-            cb_failures_total: 0,
-            cb_slow_total: 0,
-            cb_rejections_total: 0,
-            cb_opened_total: 0,
-            cb_time_closed_seconds: 0.0,
-            cb_time_open_seconds: 0.0,
-            cb_time_half_open_seconds: 0.0,
-            cb_state: 0.0,
-            rl_events_total: 0,
-            rl_delayed_total: 0,
-            rl_tokens_consumed_total: 0.0,
-            rl_delay_seconds_total: 0.0,
-            rl_bucket_tokens: 0.0,
-            rl_bucket_capacity: 0.0,
-            effect_circuit_breakers: Vec::new(),
-            effect_rate_limiters: Vec::new(),
+            fsm_state: self.current_state.read().unwrap().clone(),
         }
     }
 
-    /// Create a wide-event snapshot that also includes cumulative control middleware metrics.
-    ///
-    /// This follows the wide-events philosophy: every event carries the current cumulative
-    /// circuit breaker and rate limiter state so tail-start observers can still export
-    /// accurate totals by reading the journal tail.
-    pub fn snapshot_with_control(&self) -> RuntimeContext {
-        let mut ctx = self.snapshot();
+    /// Optional capture: contention omits the affected family. Timing count,
+    /// sum, percentiles and window are read under the same histogram lock.
+    pub fn capture_observability(&self, reason: CaptureReason) -> Option<ObservabilityContext> {
+        let owner = self.observation_owner.get()?;
+        self.capture_measurements(owner.capture(reason)?)
+    }
 
-        if let Some(cb_snapshotter) = &self.cb_snapshotter {
-            let cb = cb_snapshotter();
-            ctx.cb_requests_total = cb.requests_total;
-            ctx.cb_successes_total = cb.successes_total;
-            ctx.cb_failures_total = cb.failures_total;
-            ctx.cb_slow_total = cb.slow_total;
-            ctx.cb_rejections_total = cb.rejections_total;
-            ctx.cb_opened_total = cb.opened_total;
-            ctx.cb_time_closed_seconds = cb.time_closed_seconds;
-            ctx.cb_time_open_seconds = cb.time_open_seconds;
-            ctx.cb_time_half_open_seconds = cb.time_half_open_seconds;
-            // Serialized wide-event context is a compatibility edge: project the
-            // typed state to the stable 0/0.5/1 gauge here (FLOWIP-115b AC28/AC57).
-            ctx.cb_state = cb.state.stable_gauge();
+    fn capture_measurements(
+        &self,
+        mut packet: ObservabilityContext,
+    ) -> Option<ObservabilityContext> {
+        let timing = self
+            .processing_time_histogram
+            .try_read()
+            .ok()
+            .map(|histogram| {
+                let count = self.processing_time_count.load(Ordering::Relaxed);
+                let percentile = |quantile| {
+                    (self.config.enable_histograms && count > 0 && !histogram.is_empty())
+                        .then(|| histogram.value_at_quantile(quantile))
+                };
+                TimingMeasurements {
+                    processing_time_count: count,
+                    processing_time_sum_nanos: self
+                        .processing_time_sum_nanos
+                        .load(Ordering::Relaxed),
+                    recent_p50_ms: percentile(QUANTILE_P50),
+                    recent_p90_ms: percentile(QUANTILE_P90),
+                    recent_p95_ms: percentile(QUANTILE_P95),
+                    recent_p99_ms: percentile(QUANTILE_P99),
+                    recent_p999_ms: percentile(QUANTILE_P999),
+                    window: MeasurementWindow {
+                        started_at_ms: self.measurement_started_at_ms,
+                        ended_at_ms: packet.capture.observed_at_ms,
+                    },
+                }
+            });
+        let mut runtime = RuntimeObservability {
+            in_flight: Some(self.in_flight_count.load(Ordering::Relaxed)),
+            join_reference_since_last_stream: Some(
+                self.join_reference_since_last_stream
+                    .load(Ordering::Relaxed),
+            ),
+            time_in_state_ms: self
+                .state_entered_at
+                .try_read()
+                .ok()
+                .map(|at| at.elapsed().as_millis() as u64),
+            event_loops_total: self
+                .config
+                .enable_utilization
+                .then(|| self.event_loops_total.load(Ordering::Relaxed)),
+            event_loops_with_work_total: self
+                .config
+                .enable_utilization
+                .then(|| self.event_loops_with_work_total.load(Ordering::Relaxed)),
+            timing,
+            ..Default::default()
+        };
+        if let Some(cb) = self
+            .cb_snapshotter
+            .as_ref()
+            .and_then(|snapshotter| snapshotter())
+        {
+            runtime.circuit_breaker = Some(CircuitBreakerMeasurements {
+                requests_total: cb.requests_total,
+                successes_total: cb.successes_total,
+                failures_total: cb.failures_total,
+                slow_total: cb.slow_total,
+                rejections_total: cb.rejections_total,
+                opened_total: cb.opened_total,
+                time_closed_seconds: cb.time_closed_seconds,
+                time_open_seconds: cb.time_open_seconds,
+                time_half_open_seconds: cb.time_half_open_seconds,
+                observed_state: match cb.state {
+                    CircuitBreakerState::Closed => CircuitState::Closed,
+                    CircuitBreakerState::Open => CircuitState::Open,
+                    CircuitBreakerState::HalfOpen => CircuitState::HalfOpen,
+                },
+            });
         }
-
-        if let Some(rl_snapshotter) = &self.rl_snapshotter {
-            let rl = rl_snapshotter();
-            ctx.rl_events_total = rl.events_total;
-            ctx.rl_delayed_total = rl.delayed_total;
-            ctx.rl_tokens_consumed_total = rl.tokens_consumed_total;
-            ctx.rl_delay_seconds_total = rl.delay_seconds_total;
-            ctx.rl_bucket_tokens = rl.bucket_tokens;
-            ctx.rl_bucket_capacity = rl.bucket_capacity;
+        if let Some(rl) = self
+            .rl_snapshotter
+            .as_ref()
+            .and_then(|snapshotter| snapshotter())
+        {
+            runtime.rate_limiter = Some(RateLimiterMeasurements {
+                events_total: rl.events_total,
+                delayed_total: rl.delayed_total,
+                tokens_consumed_total: rl.tokens_consumed_total,
+                delay_seconds_total: rl.delay_seconds_total,
+                bucket_tokens: rl.bucket_tokens,
+                bucket_capacity: rl.bucket_capacity,
+            });
         }
-
-        // Per-effect policy instances (FLOWIP-120c G9), keyed by declared
-        // effect type; cardinality is bounded by the stage's declared effect set.
-        ctx.effect_circuit_breakers = self
+        runtime.effect_circuit_breakers = self
             .effect_cb_snapshotters
             .iter()
-            .map(|(effect_type, snapshotter)| {
-                let cb = snapshotter();
-                obzenflow_core::event::context::EffectCircuitBreakerContext {
+            .filter_map(|(effect_type, snapshotter)| {
+                let cb = snapshotter()?;
+                Some(EffectCircuitBreakerContext {
                     effect_type: effect_type.clone(),
                     cb_requests_total: cb.requests_total,
                     cb_successes_total: cb.successes_total,
@@ -466,15 +472,15 @@ impl StageInstrumentation {
                     cb_time_open_seconds: cb.time_open_seconds,
                     cb_time_half_open_seconds: cb.time_half_open_seconds,
                     cb_state: cb.state.stable_gauge(),
-                }
+                })
             })
             .collect();
-        ctx.effect_rate_limiters = self
+        runtime.effect_rate_limiters = self
             .effect_rl_snapshotters
             .iter()
-            .map(|(effect_type, snapshotter)| {
-                let rl = snapshotter();
-                obzenflow_core::event::context::EffectRateLimiterContext {
+            .filter_map(|(effect_type, snapshotter)| {
+                let rl = snapshotter()?;
+                Some(EffectRateLimiterContext {
                     effect_type: effect_type.clone(),
                     rl_events_total: rl.events_total,
                     rl_delayed_total: rl.delayed_total,
@@ -482,11 +488,73 @@ impl StageInstrumentation {
                     rl_delay_seconds_total: rl.delay_seconds_total,
                     rl_bucket_tokens: rl.bucket_tokens,
                     rl_bucket_capacity: rl.bucket_capacity,
-                }
+                })
             })
             .collect();
 
-        ctx
+        packet.runtime = Some(runtime);
+        packet.processing_time = self.last_processing_time();
+        packet.validated()
+    }
+
+    pub fn bind_observations(
+        self: &Arc<Self>,
+        flow_id: FlowId,
+        writer: WriterId,
+        execution: &RuntimeExecution,
+    ) {
+        let scope = super::observations::scope(execution, flow_id);
+        execution.observations().activate_scope(scope);
+        let owner = execution
+            .observations()
+            .capture_owner(scope, writer, execution.clone());
+        let _ = self.observation_owner.set(owner);
+        execution.observations().register_stage(writer, self);
+        self.offer_capture(CaptureReason::Initial);
+    }
+
+    pub fn observation_recorder(&self) -> Arc<dyn ObservationRecorder> {
+        self.observation_owner
+            .get()
+            .map(|owner| Arc::new(owner.clone()) as Arc<dyn ObservationRecorder>)
+            .unwrap_or_else(|| Arc::new(NoObservations))
+    }
+
+    pub fn observe(&self, record: ObservationRecord) {
+        self.observation_recorder().observe(record);
+    }
+
+    /// Offer and attach the same capture. The handoff is optional and cannot
+    /// affect the journal append, including when the retained view is full.
+    pub fn capture_for_record(&self) -> Option<ObservabilityContext> {
+        let packet = self.capture_observability(CaptureReason::Record)?;
+        if let Some(owner) = self.observation_owner.get() {
+            owner.offer(packet.clone());
+        }
+        Some(packet)
+    }
+
+    /// Incomplete replay may execute missing effects live while its handler
+    /// remains in reconstruction. Use the existing boundary execution scope
+    /// for that capture, without enabling historical handler measurements.
+    pub(crate) fn capture_for_record_in_scope(
+        &self,
+        scope: MiddlewareExecutionScope,
+    ) -> Option<ObservabilityContext> {
+        let owner = self.observation_owner.get()?;
+        let packet =
+            self.capture_measurements(owner.capture_in_scope(CaptureReason::Record, scope)?)?;
+        owner.offer(packet.clone());
+        Some(packet)
+    }
+
+    pub fn offer_capture(&self, reason: CaptureReason) {
+        if let (Some(owner), Some(packet)) = (
+            self.observation_owner.get(),
+            self.capture_observability(reason),
+        ) {
+            owner.offer(packet);
+        }
     }
 
     /// Access the flow-scoped control-plane provider.
@@ -500,17 +568,20 @@ impl StageInstrumentation {
     }
 
     /// Note a consumed envelope so downstream events capture reader position and origin.
-    pub fn record_consumed<T: JournalEvent + 'static>(
+    pub fn record_consumed<P: JournalPayload>(
         &self,
-        envelope: &EventEnvelope<T>,
+        envelope: &JournalRecord<P>,
         upstream_stage: StageId,
     ) {
         self.reader_seq.fetch_add(1, Ordering::Relaxed);
-        *self.last_consumed_event_id.write().unwrap() = Some(*envelope.event.id());
-        *self.last_consumed_writer.write().unwrap() = Some(envelope.journal_writer_id);
-        *self.last_consumed_vector_clock.write().unwrap() = Some(envelope.vector_clock.clone());
-        if let Some(event) = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>() {
-            if let ChainEventContent::Data { event_type, .. } = &event.content {
+        *self.last_consumed_event_id.write().unwrap() = Some(*envelope.id());
+        *self.last_consumed_writer.write().unwrap() =
+            Some(envelope.envelope.provenance.journal.journal_writer_id);
+        *self.last_consumed_vector_clock.write().unwrap() =
+            Some(envelope.envelope.provenance.journal.vector_clock.clone());
+        if let Some(event) = (&envelope.authored() as &dyn Any).downcast_ref::<ChainEvent>() {
+            if event.consumes_data_credit() {
+                let event_type = &event.envelope.provenance.event.event_type;
                 let mut counts = self.data_reader_seq_by_upstream_event_type.write().unwrap();
                 *counts
                     .entry((upstream_stage, EventType::from(event_type.clone())))
@@ -544,7 +615,8 @@ impl StageInstrumentation {
     /// use it for observability-only events (e.g. metrics heartbeats).
     pub fn record_output_event(&self, event: &ChainEvent) {
         self.record_emitted(event);
-        if let ChainEventContent::Data { event_type, .. } = &event.content {
+        if event.consumes_data_credit() {
+            let event_type = &event.envelope.provenance.event.event_type;
             let mut frontier = self.authored_data_frontier.write().unwrap();
             frontier.writer_seq = frontier.writer_seq.saturating_add(1);
             *frontier
@@ -612,35 +684,44 @@ impl StageInstrumentation {
     /// The sum is always tracked (for accurate Prometheus histogram export).
     /// The histogram is only updated if enable_histograms is true.
     pub fn record_processing_time(&self, duration: Duration) {
-        // Always track the actual sum - this is never reconstructed from percentiles
-        let duration_nanos = duration.as_nanos() as u64;
-        self.processing_time_sum_nanos
-            .fetch_add(duration_nanos, Ordering::Relaxed);
-        self.last_processing_time_nanos
-            .store(duration_nanos, Ordering::Relaxed);
-
-        // Histogram recording is optional (for percentiles)
-        if !self.config.enable_histograms {
+        self.last_processing_time_available
+            .store(false, Ordering::Relaxed);
+        if self
+            .observation_owner
+            .get()
+            .is_some_and(|owner| !owner.measurements_allowed())
+        {
             return;
         }
-
-        let duration_ms = duration.as_millis() as u64;
-        let clamped = duration_ms.clamp(HISTOGRAM_MIN_MS, HISTOGRAM_MAX_MS);
-
-        if let Ok(mut histogram) = self.processing_time_histogram.write() {
-            histogram
-                .record(clamped)
-                .unwrap_or_else(|e| tracing::warn!("Failed to record duration: {:?}", e));
+        let Ok(mut histogram) = self.processing_time_histogram.try_write() else {
+            return;
+        };
+        let nanos = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        if self.config.enable_histograms {
+            let millis =
+                (duration.as_millis().min(u128::from(u64::MAX)) as u64).min(HISTOGRAM_MAX_MS);
+            if histogram.record(millis).is_err() {
+                return;
+            }
         }
+        self.processing_time_count.fetch_add(1, Ordering::Relaxed);
+        self.processing_time_sum_nanos
+            .fetch_add(nanos, Ordering::Relaxed);
+        self.last_processing_time_nanos
+            .store(nanos, Ordering::Relaxed);
+        self.last_processing_time_available
+            .store(true, Ordering::Relaxed);
     }
 
     /// The most-recent per-invocation processing duration. The output committer
     /// reads this to stamp `processing_info.processing_time` on stage outputs
     /// (FLOWIP-115f), replacing the deleted `TimingMiddleware` observer.
-    pub fn last_processing_time(&self) -> obzenflow_core::time::MetricsDuration {
-        obzenflow_core::time::MetricsDuration::from_nanos(
-            self.last_processing_time_nanos.load(Ordering::Relaxed),
-        )
+    pub fn last_processing_time(&self) -> Option<MetricsDuration> {
+        self.last_processing_time_available
+            .load(Ordering::Relaxed)
+            .then(|| {
+                MetricsDuration::from_nanos(self.last_processing_time_nanos.load(Ordering::Relaxed))
+            })
     }
 
     /// Update the state label used in runtime snapshots, without driving the FSM.
@@ -648,9 +729,20 @@ impl StageInstrumentation {
     pub fn transition_to_state(&self, new_state: &str) {
         let mut state = self.current_state.write().unwrap();
         let mut entered_at = self.state_entered_at.write().unwrap();
-        if state.as_str() != new_state {
+        let changed = state.as_str() != new_state;
+        if changed {
             *state = new_state.to_string();
             *entered_at = Instant::now();
+        }
+        drop(entered_at);
+        drop(state);
+        if changed
+            && matches!(
+                new_state,
+                "Completed" | "Drained" | "Failed" | "Cancelled" | "Terminated"
+            )
+        {
+            self.offer_capture(CaptureReason::Final);
         }
     }
 
@@ -695,7 +787,13 @@ impl StageInstrumentation {
     }
 }
 
-use obzenflow_core::runtime_context::RuntimeContext;
+use obzenflow_core::event::context::{
+    CircuitBreakerMeasurements, ExecutionAccounting, ExecutionProgress, MeasurementWindow,
+    RateLimiterMeasurements, RuntimeObservability, RuntimeProvenance, TimingMeasurements,
+};
+use obzenflow_core::event::observation::{
+    CaptureReason, NoObservations, ObservabilityContext, ObservationRecord, ObservationRecorder,
+};
 use std::error::Error;
 /// Higher-order function for instrumented event processing
 use std::future::Future;
@@ -785,25 +883,9 @@ where
     result
 }
 
-/// Create a UI-oriented stage metrics snapshot for lifecycle events
-pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMetricsSnapshot {
-    let ctx = instrumentation.snapshot();
-    StageMetricsSnapshot {
-        events_processed_total: ctx.events_processed_total,
-        events_accumulated_total: ctx.events_accumulated_total,
-        events_emitted_total: ctx.events_emitted_total,
-        errors_total: ctx.errors_total,
-        errors_by_kind: ctx.errors_by_kind,
-        in_flight: ctx.in_flight,
-        recent_p50_ms: ctx.recent_p50_ms,
-        recent_p90_ms: ctx.recent_p90_ms,
-        recent_p95_ms: ctx.recent_p95_ms,
-        recent_p99_ms: ctx.recent_p99_ms,
-        recent_p999_ms: ctx.recent_p999_ms,
-        processing_time_sum_nanos: ctx.processing_time_sum_nanos,
-        event_loops_total: ctx.event_loops_total,
-        event_loops_with_work_total: ctx.event_loops_with_work_total,
-    }
+/// Terminal accounting comes from the stage owner at the terminal boundary.
+pub fn snapshot_stage_accounting(instrumentation: &StageInstrumentation) -> ExecutionAccounting {
+    instrumentation.snapshot().accounting
 }
 
 #[cfg(test)]
@@ -812,8 +894,8 @@ mod tests {
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::ChainEventFactory;
-    use obzenflow_core::{EventEnvelope, EventId, EventType, JournalId, StageId, WriterId};
+    use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+    use obzenflow_core::{EventId, EventType, JournalId, JournalRecord, StageId, WriterId};
 
     #[test]
     fn repeated_state_observation_preserves_state_age() {
@@ -826,7 +908,15 @@ mod tests {
         assert_eq!(*instrumentation.state_entered_at.read().unwrap(), entered);
         let snapshot = instrumentation.snapshot();
         assert_eq!(snapshot.fsm_state, "Created");
-        assert!(snapshot.time_in_state_ms >= 60_000);
+        assert!(
+            instrumentation
+                .state_entered_at
+                .read()
+                .unwrap()
+                .elapsed()
+                .as_millis()
+                >= 60_000
+        );
 
         let before_transition = Instant::now();
         instrumentation.transition_to_state("Running");
@@ -840,8 +930,8 @@ mod tests {
 
         // No errors initially
         let initial = instrumentation.snapshot();
-        assert_eq!(initial.errors_total, 0);
-        assert!(initial.errors_by_kind.is_empty());
+        assert_eq!(initial.accounting.errors_total, 0);
+        assert!(initial.accounting.errors_by_kind.is_empty());
 
         // Record one Domain error and two Timeout errors
         instrumentation.record_error(ErrorKind::Domain);
@@ -849,9 +939,15 @@ mod tests {
         instrumentation.record_error(ErrorKind::Timeout);
 
         let snapshot = instrumentation.snapshot();
-        assert_eq!(snapshot.errors_total, 3);
-        assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Domain), Some(&1));
-        assert_eq!(snapshot.errors_by_kind.get(&ErrorKind::Timeout), Some(&2));
+        assert_eq!(snapshot.accounting.errors_total, 3);
+        assert_eq!(
+            snapshot.accounting.errors_by_kind.get(&ErrorKind::Domain),
+            Some(&1)
+        );
+        assert_eq!(
+            snapshot.accounting.errors_by_kind.get(&ErrorKind::Timeout),
+            Some(&2)
+        );
     }
 
     #[test]
@@ -864,9 +960,12 @@ mod tests {
         instrumentation.record_receipted_position(7, event_id, vector_clock.clone());
 
         let snapshot = instrumentation.snapshot();
-        assert_eq!(snapshot.receipted_seq, 7);
-        assert_eq!(snapshot.last_receipted_event_id, Some(event_id));
-        assert_eq!(snapshot.last_receipted_vector_clock, Some(vector_clock));
+        assert_eq!(snapshot.progress.receipted_seq, 7);
+        assert_eq!(snapshot.progress.last_receipted_event_id, Some(event_id));
+        assert_eq!(
+            snapshot.progress.last_receipted_vector_clock,
+            Some(vector_clock)
+        );
     }
 
     #[test]
@@ -879,13 +978,15 @@ mod tests {
             "checkout.command.v1",
             serde_json::json!({}),
         );
-        let envelope = EventEnvelope::new(JournalWriterId::from(JournalId::new()), event);
+        let envelope =
+            JournalRecord::<ChainPayload>::new(JournalWriterId::from(JournalId::new()), event);
 
         instrumentation.record_consumed(&envelope, physical_upstream);
 
         assert_eq!(
             instrumentation
                 .snapshot()
+                .accounting
                 .data_inputs_by_upstream_event_type,
             vec![
                 obzenflow_core::event::context::UpstreamEventTypeCountContext {
@@ -909,7 +1010,7 @@ mod tests {
         instrumentation.record_error_journal_output_event(&event);
 
         let snapshot = instrumentation.snapshot();
-        assert_eq!(snapshot.events_emitted_total, 1);
-        assert!(snapshot.data_outputs_by_event_type.is_empty());
+        assert_eq!(snapshot.accounting.events_emitted_total, 1);
+        assert!(snapshot.accounting.data_outputs_by_event_type.is_empty());
     }
 }

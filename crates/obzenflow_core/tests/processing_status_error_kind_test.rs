@@ -71,7 +71,7 @@ fn chain_event_mark_as_error_sets_status_and_hop_budget() {
     let err = base
         .clone()
         .mark_as_error("deser failed", ErrorKind::Deserialization);
-    match err.processing_info.status {
+    match err.processing.status {
         ProcessingStatus::Error {
             ref message,
             ref kind,
@@ -81,7 +81,7 @@ fn chain_event_mark_as_error_sets_status_and_hop_budget() {
         }
         ref other => panic!("expected Error status, got {other:?}"),
     }
-    assert_eq!(err.processing_info.error_hops_remaining, Some(1));
+    assert_eq!(err.processing.error_hops_remaining, Some(1));
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
     let base: ChainEvent = ChainEventFactory::data_event(writer_id, "flight", json!({ "id": 1 }));
 
     let validation = base.clone().mark_as_validation_error("bad input");
-    match validation.processing_info.status {
+    match validation.processing.status {
         ProcessingStatus::Error {
             ref message,
             ref kind,
@@ -100,10 +100,10 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
         }
         ref other => panic!("expected Error status, got {other:?}"),
     }
-    assert_eq!(validation.processing_info.error_hops_remaining, Some(1));
+    assert_eq!(validation.processing.error_hops_remaining, Some(1));
 
     let infra = base.mark_as_infra_error("remote timeout");
-    match infra.processing_info.status {
+    match infra.processing.status {
         ProcessingStatus::Error {
             ref message,
             ref kind,
@@ -113,5 +113,5 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
         }
         ref other => panic!("expected Error status, got {other:?}"),
     }
-    assert_eq!(infra.processing_info.error_hops_remaining, Some(1));
+    assert_eq!(infra.processing.error_hops_remaining, Some(1));
 }

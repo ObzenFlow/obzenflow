@@ -12,9 +12,11 @@ use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::source::{
     ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome, SourceError,
 };
+use obzenflow_core::event::observation::ObservationRecorder;
 use obzenflow_core::ChainEvent;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// One live source-poll future handed to the boundary.
@@ -106,5 +108,6 @@ pub struct SourceBoundaryReport {
 /// from the returned report. It does not know which, if any, middleware policies
 /// are composed behind the boundary.
 pub trait SourceBoundary: Send + Sync {
+    fn install_observation_recorder(&self, _recorder: Arc<dyn ObservationRecorder>) {}
     fn around_poll<'a>(&'a self, execute: SourcePollExecution<'a>) -> SourceBoundaryFuture<'a>;
 }

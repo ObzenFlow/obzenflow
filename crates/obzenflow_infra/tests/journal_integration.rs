@@ -83,17 +83,17 @@ async fn test_journal_causal_ordering() {
     assert_eq!(all_events.len(), 3);
 
     // Verify event types in order
-    assert_eq!(all_events[0].event.event_type(), "data.received");
-    assert_eq!(all_events[1].event.event_type(), "data.transformed");
-    assert_eq!(all_events[2].event.event_type(), "data.stored");
+    assert_eq!(all_events[0].event_type(), "data.received");
+    assert_eq!(all_events[1].event_type(), "data.transformed");
+    assert_eq!(all_events[2].event_type(), "data.stored");
 
     // Read events after the source event
     let after_source = journal
-        .read_causally_after(&source_envelope.event.id)
+        .read_causally_after(&source_envelope.envelope.provenance.event.id)
         .await
         .expect("Failed to read after source");
     assert_eq!(after_source.len(), 2);
-    assert_eq!(after_source[0].event.event_type(), "data.transformed");
+    assert_eq!(after_source[0].event_type(), "data.transformed");
 }
 
 #[tokio::test]
@@ -148,11 +148,11 @@ async fn test_journal_parallel_writers() {
     // Count events by type
     let start_count = all_events
         .iter()
-        .filter(|e| e.event.event_type() == "work.started")
+        .filter(|e| e.event_type() == "work.started")
         .count();
     let complete_count = all_events
         .iter()
-        .filter(|e| e.event.event_type() == "work.completed")
+        .filter(|e| e.event_type() == "work.completed")
         .count();
 
     assert_eq!(start_count, 3);
@@ -191,19 +191,19 @@ async fn test_journal_event_chain() {
 
     // Verify sequence
     for (i, envelope) in chain.iter().enumerate() {
-        let payload = envelope.event.payload();
+        let payload = envelope.payload();
         let sequence = payload["sequence"].as_u64().unwrap();
         assert_eq!(sequence, i as u64);
     }
 
     // Read from middle of chain
     let mid_chain = journal
-        .read_causally_after(&chain[2].event.id)
+        .read_causally_after(&chain[2].envelope.provenance.event.id)
         .await
         .unwrap();
     assert_eq!(mid_chain.len(), 2);
-    let payload0 = mid_chain[0].event.payload();
-    let payload1 = mid_chain[1].event.payload();
+    let payload0 = mid_chain[0].payload();
+    let payload1 = mid_chain[1].payload();
     assert_eq!(payload0["sequence"], 3);
     assert_eq!(payload1["sequence"], 4);
 }

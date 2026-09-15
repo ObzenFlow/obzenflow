@@ -355,30 +355,41 @@ impl CircuitBreakerFactory {
         let last_state_change = middleware.last_state_change.clone();
         let snapshotter: Arc<CircuitBreakerSnapshotter> = Arc::new(move || {
             let state = state_view_for_snapshot.snapshot().state;
-            let mut closed = time_in_closed.lock().map(|d| *d).unwrap_or_default();
-            let mut open = time_in_open.lock().map(|d| *d).unwrap_or_default();
-            let mut half_open = time_in_half_open.lock().map(|d| *d).unwrap_or_default();
-            let elapsed_current = last_state_change
-                .lock()
-                .map(|last| last.elapsed())
-                .unwrap_or_default();
+            // Skip this optional snapshot if a lock is busy or poisoned.
+            // Copy each duration and release its lock before reading the next.
+            let mut closed_duration = match time_in_closed.try_lock() {
+                Ok(duration) => *duration,
+                Err(_) => return None,
+            };
+            let mut open_duration = match time_in_open.try_lock() {
+                Ok(duration) => *duration,
+                Err(_) => return None,
+            };
+            let mut half_open_duration = match time_in_half_open.try_lock() {
+                Ok(duration) => *duration,
+                Err(_) => return None,
+            };
+            let elapsed_current = match last_state_change.try_lock() {
+                Ok(last_change) => last_change.elapsed(),
+                Err(_) => return None,
+            };
             match state {
-                CircuitBreakerState::Closed => closed += elapsed_current,
-                CircuitBreakerState::Open => open += elapsed_current,
-                CircuitBreakerState::HalfOpen => half_open += elapsed_current,
+                CircuitBreakerState::Closed => closed_duration += elapsed_current,
+                CircuitBreakerState::Open => open_duration += elapsed_current,
+                CircuitBreakerState::HalfOpen => half_open_duration += elapsed_current,
             }
-            CircuitBreakerMetrics {
+            Some(CircuitBreakerMetrics {
                 requests_total: requests_total.load(Ordering::Relaxed),
                 successes_total: successes_total.load(Ordering::Relaxed),
                 failures_total: failures_total.load(Ordering::Relaxed),
                 slow_total: slow_total.load(Ordering::Relaxed),
                 rejections_total: rejections_total.load(Ordering::Relaxed),
                 opened_total: opened_total.load(Ordering::Relaxed),
-                time_closed_seconds: closed.as_secs_f64(),
-                time_open_seconds: open.as_secs_f64(),
-                time_half_open_seconds: half_open.as_secs_f64(),
+                time_closed_seconds: closed_duration.as_secs_f64(),
+                time_open_seconds: open_duration.as_secs_f64(),
+                time_half_open_seconds: half_open_duration.as_secs_f64(),
                 state,
-            }
+            })
         });
 
         context

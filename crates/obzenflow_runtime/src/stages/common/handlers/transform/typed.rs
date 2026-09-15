@@ -8,12 +8,12 @@ use super::traits::TransformHandler;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::observability_payload::ObservabilityPayload;
+use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
-use obzenflow_core::event::{
-    ChainEventContent, ChainEventFactory, StageFatalCode, StageFatalReason,
-};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, WriterId};
+use std::sync::Arc;
 
 /// One typed transform invocation before runtime-owned envelope lowering.
 ///
@@ -23,29 +23,33 @@ use obzenflow_core::{ChainEvent, WriterId};
 #[doc(hidden)]
 pub struct TypedTransformInvocation<O> {
     output: O,
-    framework_observability: Option<ObservabilityPayload>,
+    framework_execution: Option<ExecutionPayload>,
+    measurements: Vec<ObservationRecord>,
 }
 
 impl<O> TypedTransformInvocation<O> {
     fn facts_only(output: O) -> Self {
         Self {
             output,
-            framework_observability: None,
+            framework_execution: None,
+            measurements: Vec::new(),
         }
     }
 
-    pub(crate) fn with_framework_observability(
+    pub(crate) fn with_framework_execution(
         output: O,
-        observability: ObservabilityPayload,
+        observability: ExecutionPayload,
+        measurements: Vec<ObservationRecord>,
     ) -> Self {
         Self {
             output,
-            framework_observability: Some(observability),
+            framework_execution: Some(observability),
+            measurements,
         }
     }
 
-    fn into_parts(self) -> (O, Option<ObservabilityPayload>) {
-        (self.output, self.framework_observability)
+    fn into_parts(self) -> (O, Option<ExecutionPayload>, Vec<ObservationRecord>) {
+        (self.output, self.framework_execution, self.measurements)
     }
 }
 
@@ -84,6 +88,7 @@ pub struct TypedTransformHandlerAdapter<H> {
     handler: H,
     lineage: obzenflow_core::config::LineagePolicy,
     writer_id: Option<WriterId>,
+    observations: Arc<dyn ObservationRecorder>,
 }
 
 impl<H> TypedTransformHandlerAdapter<H> {
@@ -92,6 +97,7 @@ impl<H> TypedTransformHandlerAdapter<H> {
             handler,
             lineage: obzenflow_core::config::LineagePolicy::default(),
             writer_id: None,
+            observations: Arc::new(NoObservations),
         }
     }
 }
@@ -109,6 +115,10 @@ impl<H> TransformHandler for TypedTransformHandlerAdapter<H>
 where
     H: TypedTransformHandler + Send + Sync,
 {
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
+        self.observations = recorder;
+    }
+
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         let writer_id = self.writer_id.ok_or_else(|| {
             HandlerError::Fatal(StageFatal::new(
@@ -120,7 +130,10 @@ where
         let input = H::Input::try_from_event(&event)
             .map_err(|error| HandlerError::Deserialization(error.to_string()))?;
         let invocation = self.handler.process_invocation(input)?;
-        let (output, framework_observability) = invocation.into_parts();
+        let (output, framework_execution, measurements) = invocation.into_parts();
+        for measurement in measurements {
+            self.observations.observe(measurement);
+        }
         let facts = output.into_facts().map_err(|error| {
             HandlerError::Other(format!(
                 "typed transform output serialization failed: {error}"
@@ -128,24 +141,20 @@ where
         })?;
 
         let mut events =
-            Vec::with_capacity(facts.len() + usize::from(framework_observability.is_some()));
-        if let Some(observability) = framework_observability {
+            Vec::with_capacity(facts.len() + usize::from(framework_execution.is_some()));
+        if let Some(observability) = framework_execution {
             events.push(ChainEventFactory::derived_event(
                 writer_id,
                 &event,
-                ChainEventContent::Observability(observability),
+                ChainPayload::Execution(observability),
                 self.lineage,
             ));
         }
-        events.extend(facts.into_iter().map(|fact| {
-            ChainEventFactory::derived_data_event(
-                writer_id,
-                &event,
-                fact.event_type,
-                fact.payload,
-                self.lineage,
-            )
-        }));
+        events.extend(
+            facts
+                .into_iter()
+                .map(|fact| fact.into_derived_event(writer_id, &event, self.lineage)),
+        );
         Ok(events)
     }
 

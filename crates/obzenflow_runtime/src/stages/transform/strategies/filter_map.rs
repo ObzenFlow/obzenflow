@@ -90,7 +90,10 @@ mod tests {
             .into_facts()
             .expect("lowers");
         assert_eq!(emitted.len(), 1);
-        assert_eq!(emitted[0].payload, serde_json::json!(8));
+        assert_eq!(
+            emitted[0].payload.contract_body().unwrap(),
+            serde_json::json!(8)
+        );
         assert!(mapper
             .process(Input(2))
             .expect("filters")

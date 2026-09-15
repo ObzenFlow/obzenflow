@@ -189,22 +189,18 @@ where
     Out: TypedPayload,
 {
     let output_ordinal = output_ordinal.into();
-    let payload =
-        serde_json::to_value(output).map_err(|e| EffectError::Serialization(e.to_string()))?;
-    let mut event = ChainEventFactory::derived_data_event(
-        writer_id,
-        parent,
-        Out::versioned_event_type(),
-        payload,
-        lineage,
-    );
+    let payload = output
+        .into_chain_payload()
+        .map_err(|e| EffectError::Serialization(e.to_string()))?;
+    let mut event = ChainEventFactory::derived_event(writer_id, parent, payload, lineage);
+    event.envelope.provenance.event.event_type = Out::versioned_event_type();
     event.id = deterministic_event_id(recorded_flow_id, stage_key, input_seq, output_ordinal);
     let deterministic = deterministic_event_time(input_seq, output_ordinal);
-    event.processing_info.event_time = if parent.composite_activations().is_empty() {
+    event.processing.event_time = if parent.composite_activations().is_empty() {
         deterministic
     } else {
         parent.composite_activations().iter().fold(
-            parent.processing_info.event_time.max(deterministic),
+            parent.processing.event_time.max(deterministic),
             |time, activation| time.max(activation.entered_at_ms),
         )
     };

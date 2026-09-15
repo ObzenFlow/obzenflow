@@ -29,7 +29,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::StageId;
 use obzenflow_fsm::StateVariant;
 use std::collections::HashMap;
@@ -61,12 +61,12 @@ where
     match ctx
         .terminal_envelope
         .as_ref()
-        .map(|envelope| &envelope.event.content)
+        .map(|envelope| &envelope.payload)
     {
-        Some(ChainEventContent::FlowControl(FlowControlPayload::Drain)) => {
+        Some(ChainPayload::FlowControl(FlowControlPayload::Drain)) => {
             StatefulTerminationKind::Drain
         }
-        Some(ChainEventContent::FlowControl(FlowControlPayload::PipelineAbort { .. })) => {
+        Some(ChainPayload::FlowControl(FlowControlPayload::PipelineAbort { .. })) => {
             StatefulTerminationKind::PipelineAbort
         }
         _ => match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
@@ -82,12 +82,12 @@ where
     H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     let envelope = ctx.terminal_envelope.as_ref()?;
-    match &envelope.event.content {
-        ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    match &envelope.payload {
+        ChainPayload::FlowControl(FlowControlPayload::Eof {
             last_event_id: Some(event_id),
             ..
         }) => Some(*event_id),
-        _ => Some(envelope.event.id),
+        _ => Some(envelope.envelope.provenance.event.id),
     }
 }
 
@@ -179,7 +179,7 @@ pub(super) async fn dispatch_draining<
                 let delivered_upstream_stage = subscription
                     .last_delivered_upstream_stage()
                     .expect("delivered event must identify its upstream stage");
-                if envelope.event.is_data() {
+                if envelope.consumes_data_credit() {
                     ctx.last_input_position = stage_input_position;
                 }
                 // Retain the last consumed upstream envelope (with a merged vector-clock) so that any
@@ -187,26 +187,31 @@ pub(super) async fn dispatch_draining<
                 match ctx.last_consumed_envelope.as_mut() {
                     Some(merged) => {
                         CausalOrderingService::update_with_parent(
-                            &mut merged.vector_clock,
-                            &envelope.vector_clock,
+                            &mut merged.envelope.provenance.journal.vector_clock,
+                            &envelope.envelope.provenance.journal.vector_clock,
                         );
-                        merged.journal_writer_id = envelope.journal_writer_id;
-                        merged.timestamp = envelope.timestamp;
-                        merged.event = envelope.event.clone();
+                        merged.envelope.provenance.journal.journal_writer_id =
+                            envelope.envelope.provenance.journal.journal_writer_id;
+                        merged.envelope.provenance.journal.timestamp =
+                            envelope.envelope.provenance.journal.timestamp;
+                        merged.envelope.provenance.event =
+                            envelope.envelope.provenance.event.clone();
+                        merged.envelope.observability = envelope.envelope.observability.clone();
+                        merged.payload = envelope.payload.clone();
                     }
                     None => ctx.last_consumed_envelope = Some(envelope.clone()),
                 }
                 ctx.instrumentation
                     .record_consumed(&envelope, delivered_upstream_stage);
 
-                if envelope.event.is_data() {
+                if envelope.consumes_data_credit() {
                     // Accumulate data events during draining, synchronously.
-                    let event = envelope.event.clone();
+                    let event = envelope.authored();
                     let event_id = event.id;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
-                        if event.is_data() {
+                        if event.consumes_data_credit() {
                             heartbeat.state.record_data_read(upstream, event_id);
                         }
                     }
@@ -229,13 +234,17 @@ pub(super) async fn dispatch_draining<
                         stage_input_position,
                         None,
                     );
+                    let _observer_parent = ctx
+                        .last_consumed_envelope
+                        .as_ref()
+                        .map(|envelope| envelope.authored());
                     let observer_ctx = StatefulObserverContext::new(
                         ctx.flow_id,
                         &flow_context,
                         Some(&event),
                         stage_input_position,
                     );
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -393,7 +402,7 @@ pub(super) async fn dispatch_draining<
                         } else {
                             let enriched_error = error_event
                                 .with_flow_context(flow_context.clone())
-                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                                .with_runtime_provenance(ctx.instrumentation.snapshot());
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,
@@ -448,6 +457,10 @@ pub(super) async fn dispatch_draining<
                                 if !events_to_emit.is_empty() {
                                     let stage_writer_id =
                                         ctx.writer_id.ok_or("No writer ID available")?;
+                                    let _observer_parent = ctx
+                                        .last_consumed_envelope
+                                        .as_ref()
+                                        .map(|envelope| envelope.authored());
                                     let observer_ctx = StatefulObserverContext::new(
                                         ctx.flow_id,
                                         &flow_context,
@@ -496,7 +509,7 @@ pub(super) async fn dispatch_draining<
                                                 "Writing stateful drain emitted error event to error journal (FLOWIP-082h)"
                                             );
 
-                                            if out.is_data() {
+                                            if out.consumes_data_credit() {
                                                 if let Some(subscription) =
                                                     sup.subscription.as_mut()
                                                 {
@@ -567,7 +580,7 @@ pub(super) async fn dispatch_draining<
                                 let reason =
                                     format!("Stateful handler emit error during drain: {err:?}");
                                 let error_event =
-                                    envelope.event.clone().mark_as_error(reason, err.kind());
+                                    envelope.authored().mark_as_error(reason, err.kind());
 
                                 // Count all error-marked events for lifecycle / flow rollups, even
                                 // when they are not stage-fatal.
@@ -582,7 +595,7 @@ pub(super) async fn dispatch_draining<
 
                                     // Error events are still data, so record them for transport
                                     // contracts and metrics.
-                                    if error_event.is_data() {
+                                    if error_event.consumes_data_credit() {
                                         if let Some(subscription) = sup.subscription.as_mut() {
                                             subscription.track_output_event();
                                         }
@@ -617,7 +630,7 @@ pub(super) async fn dispatch_draining<
                     }
 
                     // Backpressure ack: upstream input was consumed into state.
-                    if envelope.event.is_data() && ctx.pending_outputs.is_empty() {
+                    if envelope.consumes_data_credit() && ctx.pending_outputs.is_empty() {
                         if let Some(upstream) = upstream_stage {
                             if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                                 reader.ack_consumed(1);
@@ -628,12 +641,12 @@ pub(super) async fn dispatch_draining<
                     // Forward control events during draining so contract events are not lost.
                     tracing::debug!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Forwarding control event during stateful draining"
                     );
 
                     // Do not forward EOF again during draining: it will be sent after drain completes.
-                    if !envelope.event.is_eof() {
+                    if !envelope.is_eof() {
                         sup.forward_control_event(ctx, &envelope).await?;
                     }
                 }
@@ -826,12 +839,14 @@ pub(super) async fn dispatch_draining<
         Ok(drain_events) => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             if !drain_events.is_empty() {
+                let observer_parent = ctx
+                    .last_consumed_envelope
+                    .as_ref()
+                    .map(|envelope| envelope.authored());
                 let observer_ctx = StatefulObserverContext::new(
                     ctx.flow_id,
                     &flow_context,
-                    ctx.last_consumed_envelope
-                        .as_ref()
-                        .map(|envelope| &envelope.event),
+                    observer_parent.as_ref(),
                     ctx.last_input_position,
                 );
                 run_stateful_after_emit_observers(
@@ -873,7 +888,7 @@ pub(super) async fn dispatch_draining<
                         "Writing stateful drain() error event to error journal (FLOWIP-082h)"
                     );
 
-                    if event.is_data() {
+                    if event.consumes_data_credit() {
                         if let Some(subscription) = sup.subscription.as_mut() {
                             subscription.track_output_event();
                         }

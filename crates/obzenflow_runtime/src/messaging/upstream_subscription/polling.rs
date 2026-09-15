@@ -10,12 +10,13 @@ use super::{
     StageInputPosition, UpstreamSubscription,
 };
 use obzenflow_core::event::context::CompositeActivationContext;
-use obzenflow_core::event::payloads::effect_payload::is_framework_effect_event_type;
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::chain_payload::EventKind;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::provenance::ChainEventProvenance;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope, JournalEvent};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::{StageId, WriterId};
 use std::any::Any;
@@ -27,6 +28,8 @@ use tokio::time::Instant;
 /// Both reader-selection policies consume journals through exactly this step,
 /// so a read-side rule (baseline clearing, transport filtering, EOF/drain
 /// classification) can never drift between them.
+// Transfer the inline journal head without allocating for every delivery.
+#[allow(clippy::large_enum_variant)]
 enum ReadStep<T: JournalEvent> {
     /// A deliverable transport head, classified at read time.
     Head { head: HeldHead<T>, is_data: bool },
@@ -99,8 +102,11 @@ where
         // logically at EOF due to a tail-start baseline.
         self.state.clear_reader_baseline_at_tail(index);
 
-        let chain_event = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>();
-        let is_data = chain_event.map(ChainEvent::is_data).unwrap_or(false);
+        let authored = envelope.authored();
+        let chain_event = (&authored as &dyn Any).downcast_ref::<ChainEvent>();
+        let is_data = chain_event
+            .map(ChainEvent::consumes_data_credit)
+            .unwrap_or(false);
         if let Some(chain_event) = chain_event {
             if self.transport_filter_skips(chain_event, stage_id) {
                 return Ok(ReadStep::Filtered {
@@ -113,8 +119,8 @@ where
         let (is_authored_eof, is_drain) = chain_event
             .map(|chain_event| self.classify_eof_drain(chain_event, stage_id))
             .unwrap_or((false, false));
-        let catch_up = match chain_event.map(|chain_event| &chain_event.content) {
-            Some(ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+        let catch_up = match chain_event.map(|chain_event| &chain_event.payload) {
+            Some(ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
             })) => {
@@ -182,7 +188,7 @@ where
         chain_event: &ChainEvent,
         stage_id: StageId,
     ) -> bool {
-        if !chain_event.is_data() {
+        if !chain_event.consumes_data_credit() {
             return false;
         }
         let Some(archived_stage_id) = self.archived_stage_ids_by_current.get(&stage_id) else {
@@ -195,8 +201,8 @@ where
     }
 
     fn eof_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
-        let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
-            &chain_event.content
+        let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
+            &chain_event.payload
         else {
             return false;
         };
@@ -211,8 +217,8 @@ where
     /// intermediate stage's output frontier.
     fn event_authored_by_upstream(&self, chain_event: &ChainEvent, stage_id: StageId) -> bool {
         if matches!(
-            &chain_event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+            &chain_event.payload,
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
         ) {
             return self.eof_authored_by_upstream(chain_event, stage_id);
         }
@@ -222,11 +228,11 @@ where
 
     /// Detect terminal EOF and drain signals for one upstream reader.
     fn classify_eof_drain(&self, chain_event: &ChainEvent, stage_id: StageId) -> (bool, bool) {
-        match &chain_event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {
+        match &chain_event.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {
                 (self.eof_authored_by_upstream(chain_event, stage_id), false)
             }
-            ChainEventContent::FlowControl(FlowControlPayload::Drain) => (false, true),
+            ChainPayload::FlowControl(FlowControlPayload::Drain) => (false, true),
             _ => (false, false),
         }
     }
@@ -250,27 +256,29 @@ where
         if !matches!(self.delivery_filter, DeliveryFilter::TransportOnly) {
             return false;
         }
-        if matches!(chain_event.content, ChainEventContent::Observability(_)) {
+        if chain_event.is_transport_excluded_execution() {
             return true;
         }
-        if let ChainEventContent::FlowControl(payload) = &chain_event.content {
+        if let ChainPayload::FlowControl(payload) = &chain_event.payload {
             if payload.is_reader_telemetry() {
                 return true;
             }
         }
-        if let ChainEventContent::Data { event_type, .. } = &chain_event.content {
-            if chain_event
-                .effect_provenance
-                .as_ref()
-                .is_some_and(|provenance| provenance.fact_owner.is_framework())
-                && is_framework_effect_event_type(event_type)
-            {
-                return true;
-            }
-            if !self.data_event_selected_for_stage(stage_id, event_type) {
-                return true;
-            }
+        if matches!(
+            chain_event.payload,
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+        ) {
+            return true;
         }
+        if chain_event.consumes_data_credit()
+            && !self.data_event_selected_for_stage(
+                stage_id,
+                &chain_event.envelope.provenance.event.event_type,
+            )
+        {
+            return true;
+        }
+
         false
     }
 
@@ -420,7 +428,7 @@ where
         // FLOWIP-120n F18: a delivered positional row advances the inherited
         // key for this reader's later re-authored control heads.
         if orders_by_own_seq {
-            if let Some(seq) = envelope.event.admission_seq() {
+            if let Some(seq) = envelope.admission_seq() {
                 if let Some(last) = self.last_positional_seq.get_mut(reader_index) {
                     *last = seq;
                 }
@@ -452,7 +460,8 @@ where
             self.generation_by_reader[reader_index] = announced;
         }
         self.last_delivered_generation = Some(reader_generation);
-        let original_chain_event = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>();
+        let original_authored = envelope.authored();
+        let original_chain_event = (&original_authored as &dyn Any).downcast_ref::<ChainEvent>();
 
         let normalized_contract_event =
             self.normalized_eof_for_contracts(reader_index, stage_id, original_chain_event, is_eof);
@@ -493,15 +502,15 @@ where
             stage_key = %stage_key,
             reader_index = reader_index,
             fsm_state = fsm_state,
-            event_type = %envelope.event.event_type_name(),
+            event_type = %envelope.event_type_name(),
             is_eof = is_eof,
             "subscription: received event"
         );
 
         if is_eof {
             // FLOWIP-095k: the authored EOF's kind feeds the worst-wins fold.
-            let eof_kind = original_chain_event.and_then(|event| match &event.content {
-                ChainEventContent::FlowControl(fc) => fc.eof_kind(),
+            let eof_kind = original_chain_event.and_then(|event| match &event.payload {
+                ChainPayload::FlowControl(fc) => fc.eof_kind(),
                 _ => None,
             });
             self.record_eof_exhaustion(reader_index, stage_id, &stage_key, eof_kind);
@@ -517,7 +526,7 @@ where
         }
 
         let delivered_stage_input_position = match original_chain_event {
-            Some(chain_event) if chain_event.is_data() => {
+            Some(chain_event) if chain_event.consumes_data_credit() => {
                 let position = StageInputPosition(self.next_stage_input_position);
                 self.next_stage_input_position = self.next_stage_input_position.saturating_add(1);
                 Some(position)
@@ -539,25 +548,26 @@ where
 
         let mut envelope = envelope;
         if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
-            if let Some(chain_event) =
-                (&mut envelope.event as &mut dyn Any).downcast_mut::<ChainEvent>()
+            if let Some(provenance) = (&mut envelope.envelope.provenance.event as &mut dyn Any)
+                .downcast_mut::<ChainEventProvenance>()
             {
-                if let ChainEventContent::Data { event_type, .. } = &chain_event.content {
-                    let matching: Vec<_> = specs
+                if matches!(
+                    provenance.event_kind,
+                    EventKind::Fact | EventKind::CompositeData
+                ) {
+                    for spec in specs
                         .iter()
-                        .filter(|spec| spec.matches(event_type))
-                        .cloned()
-                        .collect();
-                    for spec in matching {
-                        if let Err(error) = chain_event.try_insert_composite_activation(
-                            CompositeActivationContext::new(
-                                spec.composite_id,
-                                chain_event.id,
-                                spec.port_name,
-                                chain_event.processing_info.event_time,
-                            ),
-                        ) {
-                            return PollResult::Error(Box::new(error));
+                        .filter(|spec| spec.matches(&provenance.event_type))
+                    {
+                        let activation = CompositeActivationContext::new(
+                            spec.composite_id.clone(),
+                            provenance.id,
+                            spec.port_name.clone(),
+                            provenance.processing.event_time,
+                        );
+                        match obzenflow_core::event::context::composite_activation_context::union_composite_activations(&provenance.composite_activations, &[activation]) {
+                            Ok(merged) => provenance.composite_activations = merged,
+                            Err(error) => return PollResult::Error(Box::new(error)),
                         }
                     }
                 }
@@ -583,11 +593,11 @@ where
         let chain_event = original?;
         let selected_writer_seq = self.selected_writer_seq_for_reader(reader_index, stage_id);
         let mut normalized = chain_event.clone();
-        if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        if let ChainPayload::FlowControl(FlowControlPayload::Eof {
             writer_seq,
             writer_seq_by_event_type,
             ..
-        }) = &mut normalized.content
+        }) = &mut normalized.payload
         {
             *writer_seq = self
                 .selected_writer_seq_from_eof_map(stage_id, writer_seq_by_event_type)
@@ -609,9 +619,10 @@ where
         if !self.event_authored_by_upstream(chain_event, stage_id) {
             return;
         }
-        let ChainEventContent::Data { event_type, .. } = &chain_event.content else {
+        if !chain_event.consumes_data_credit() {
             return;
-        };
+        }
+        let event_type = &chain_event.envelope.provenance.event.event_type;
         if let Some(selected_seq) = self.selected_data_seq_by_reader.get_mut(reader_index) {
             selected_seq.0 = selected_seq.0.saturating_add(1);
         }
@@ -633,40 +644,49 @@ where
         stage_id: StageId,
         progress: &mut ReaderProgress,
         contract_chain_event: Option<&ChainEvent>,
-        envelope: &EventEnvelope<T>,
+        envelope: &JournalRecord<T::Payload>,
         set_read_instant: bool,
     ) -> SeqNo {
         if let Some(chain_event) = contract_chain_event {
-            if chain_event.is_data() && self.uses_receipt_watermark() {
-                progress.track_pending_delivery_input(
-                    chain_event.clone(),
-                    envelope.vector_clock.clone(),
-                );
+            if chain_event.consumes_data_credit() && self.uses_receipt_watermark() {
+                let (authored, payload) = chain_event.clone().into_parts();
+                let record = JournalRecord::commit(
+                    authored,
+                    payload,
+                    envelope.envelope.provenance.journal.clone(),
+                )
+                .expect("delivered record remains valid");
+                progress.track_pending_delivery_input(record);
             }
 
-            if chain_event.is_data() && self.event_authored_by_upstream(chain_event, stage_id) {
+            if chain_event.consumes_data_credit()
+                && self.event_authored_by_upstream(chain_event, stage_id)
+            {
                 progress.reader_seq.0 += 1;
                 if set_read_instant {
                     progress.last_read_instant = Some(Instant::now());
                 }
                 if self.uses_receipt_watermark() {
-                    progress
-                        .track_pending_receipt(*envelope.event.id(), envelope.vector_clock.clone());
+                    progress.track_pending_receipt(
+                        *envelope.id(),
+                        envelope.envelope.provenance.journal.vector_clock.clone(),
+                    );
                 } else {
                     progress.receipted_seq = progress.reader_seq;
-                    progress.last_receipted_event_id = Some(*envelope.event.id());
-                    progress.last_receipted_vector_clock = Some(envelope.vector_clock.clone());
+                    progress.last_receipted_event_id = Some(*envelope.id());
+                    progress.last_receipted_vector_clock =
+                        Some(envelope.envelope.provenance.journal.vector_clock.clone());
                 }
             }
 
             // Capture advertised positions from an EOF authored by this
             // upstream (forwarded EOFs advertise nothing here).
-            if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq,
                 writer_seq_by_event_type,
                 vector_clock,
                 ..
-            }) = &chain_event.content
+            }) = &chain_event.payload
             {
                 if self.eof_authored_by_upstream(chain_event, stage_id) {
                     progress.advertised_writer_seq = *writer_seq;
@@ -681,12 +701,13 @@ where
             }
         }
 
-        progress.last_event_id = Some(*envelope.event.id());
-        if (&envelope.event as &dyn Any)
+        progress.last_event_id = Some(*envelope.id());
+        if (&envelope.authored() as &dyn Any)
             .downcast_ref::<ChainEvent>()
             .is_some()
         {
-            progress.last_vector_clock = Some(envelope.vector_clock.clone());
+            progress.last_vector_clock =
+                Some(envelope.envelope.provenance.journal.vector_clock.clone());
         }
 
         progress.reader_seq
@@ -753,8 +774,9 @@ where
             return;
         }
 
-        match &event.content {
-            ChainEventContent::Data { event_type, .. } => {
+        match &event.payload {
+            payload if payload.consumes_data_credit() => {
+                let event_type = &event.envelope.provenance.event.event_type;
                 let feed_reads: Vec<(usize, SeqNo)> = self
                     .contract_feed_chains
                     .get(reader_index)
@@ -784,7 +806,7 @@ where
                     }
                 }
             }
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq_by_event_type,
                 ..
             }) if !writer_seq_by_event_type.is_empty() => {
@@ -816,10 +838,10 @@ where
                     for (feed_index, writer_seq) in feed_writes {
                         if let Some(feed_chain) = chains.get_mut(feed_index) {
                             let mut feed_event = event.clone();
-                            if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                            if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                                 writer_seq: eof_writer_seq,
                                 ..
-                            }) = &mut feed_event.content
+                            }) = &mut feed_event.payload
                             {
                                 *eof_writer_seq = Some(writer_seq);
                             }
@@ -1075,7 +1097,7 @@ where
         if !head.orders_by_own_seq {
             return Ok(self.last_positional_seq[index]);
         }
-        head.envelope.event.admission_seq().ok_or_else(|| {
+        head.envelope.admission_seq().ok_or_else(|| {
             Box::new(JournalError::Implementation {
                 message: format!(
                     "seq-ordered merge on '{}' found a head from reader '{}' without \
@@ -1121,8 +1143,18 @@ where
                     other != index
                         && !head(other).is_authored_eof
                         && CausalOrderingService::happened_before(
-                            &head(other).envelope.vector_clock,
-                            &head(index).envelope.vector_clock,
+                            &head(other)
+                                .envelope
+                                .envelope
+                                .provenance
+                                .journal
+                                .vector_clock,
+                            &head(index)
+                                .envelope
+                                .envelope
+                                .provenance
+                                .journal
+                                .vector_clock,
                         )
                 })
         };
@@ -1177,7 +1209,7 @@ where
                     owner = %self.owner_label,
                     reader_index = index,
                     fsm_state = fsm_state,
-                    event_type = %head.envelope.event.event_type_name(),
+                    event_type = %head.envelope.event_type_name(),
                     is_authored_eof = head.is_authored_eof,
                     "canonical merge: acquired head"
                 );
@@ -1216,8 +1248,18 @@ where
                     other != index
                         && !head(other).is_authored_eof
                         && CausalOrderingService::happened_before(
-                            &head(other).envelope.vector_clock,
-                            &head(index).envelope.vector_clock,
+                            &head(other)
+                                .envelope
+                                .envelope
+                                .provenance
+                                .journal
+                                .vector_clock,
+                            &head(index)
+                                .envelope
+                                .envelope
+                                .provenance
+                                .journal
+                                .vector_clock,
                         )
                 })
         };
@@ -1262,7 +1304,7 @@ where
             generation: self.generation_by_reader[index],
             ordinal: self.delivered_count_by_reader[index].next_ordinal(),
             key,
-            vector_clock: &head.envelope.vector_clock,
+            vector_clock: &head.envelope.envelope.provenance.journal.vector_clock,
             is_authored_eof: head.is_authored_eof,
             admission_seq,
         })

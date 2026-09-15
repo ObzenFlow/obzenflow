@@ -11,10 +11,11 @@
 
 use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use std::sync::OnceLock;
+
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::stages::common::handlers::SinkConsumeReport;
 use obzenflow_runtime::stages::sink::journal_sink::{
@@ -87,13 +88,13 @@ impl SinkPolicyCtx {
 
     fn capture_internal_events(&mut self) {
         for event in self.middleware_ctx.take_control_events() {
-            let evidence = match event.content {
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(event),
-                )) => SinkPolicyEvidence::circuit_breaker(event),
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::RateLimiter(event),
-                )) => SinkPolicyEvidence::rate_limiter(event),
+            let evidence = match event.payload {
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(event)) => {
+                    SinkPolicyEvidence::circuit_breaker(event)
+                }
+                ChainPayload::Execution(ExecutionPayload::RateLimiter(event)) => {
+                    SinkPolicyEvidence::rate_limiter(event)
+                }
                 _ => {
                     tracing::warn!(
                         "discarding event outside the closed sink-policy evidence vocabulary"
@@ -133,12 +134,21 @@ pub trait SinkPolicy: Send + Sync {
 
 /// Sink-delivery boundary backed by a declared-order policy chain.
 pub struct PerSinkDeliveryPolicyBoundary {
+    recorder: OnceLock<Arc<dyn ObservationRecorder>>,
     policies: Arc<Vec<Arc<dyn SinkPolicy>>>,
 }
 
 impl PerSinkDeliveryPolicyBoundary {
+    fn observation_recorder(&self) -> Arc<dyn ObservationRecorder> {
+        self.recorder
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(NoObservations))
+    }
+
     pub fn new(policies: Vec<Arc<dyn SinkPolicy>>) -> Self {
         Self {
+            recorder: OnceLock::new(),
             policies: Arc::new(policies),
         }
     }
@@ -177,8 +187,15 @@ impl SinkDeliveryPermit for PerSinkDeliveryPermit {
 
 #[async_trait]
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
+    fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
+        let _ = self.recorder.set(recorder);
+    }
+
     async fn admit_sink_delivery(&self) -> SinkDeliveryAdmission {
         let mut ctx = SinkPolicyCtx::new();
+        ctx.middleware_ctx = ctx
+            .middleware_ctx
+            .with_observation_recorder(self.observation_recorder());
         let mut admitted: Vec<(Arc<dyn SinkPolicy>, SinkAdmitGuard)> = Vec::new();
 
         for policy in self.policies.iter() {
@@ -219,6 +236,7 @@ mod tests {
     };
     use obzenflow_core::StageId;
     use obzenflow_runtime::pipeline::config::StageConfig;
+    use std::sync::Arc;
 
     /// A third-party (non-breaker) sink policy that always rejects.
     struct AlwaysRejectPolicy;
@@ -295,7 +313,7 @@ mod tests {
             flow_name: "test".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            effective_config: std::sync::Arc::new(
+            effective_config: Arc::new(
                 obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
             ),
         };

@@ -7,6 +7,7 @@
 use crate::id_conversions::StageIdExt;
 use crate::journal::FlowJournalFactory;
 use crate::messaging::SystemSubscription;
+use crate::metrics::observations::ObservationHub;
 use crate::pipeline::fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
@@ -22,7 +23,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsSnapshotExporter;
-use obzenflow_core::{EventEnvelope, StageId};
+use obzenflow_core::{JournalRecord, StageId};
 use obzenflow_topology::TopologyBuilder;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -76,8 +77,8 @@ where
     async fn append(
         &self,
         event: T,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if event.event_type_name() == "system.metrics.ready" {
             if let Some(gate) = &self.metrics_ready_append {
                 gate.entered.notify_one();
@@ -103,19 +104,19 @@ where
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(group_id, events, parent).await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
     async fn read_event(
         &self,
         event_id: &obzenflow_core::EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
@@ -126,7 +127,10 @@ where
         self.inner.reader_from(position).await
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }
@@ -205,6 +209,7 @@ pub(in crate::pipeline) fn test_context(
     completion_subscription: Option<SystemSubscription<SystemEvent>>,
 ) -> PipelineContext {
     PipelineContext {
+        observations: Arc::new(ObservationHub::default()),
         system_id,
         topology,
         flow_name: "test_flow".to_string(),
@@ -579,6 +584,7 @@ pub(in crate::pipeline) fn make_context(
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
 ) -> PipelineContext {
     PipelineContext {
+        observations: Arc::new(ObservationHub::default()),
         system_id,
         topology: make_topology(),
         flow_name: "test_flow".to_string(),

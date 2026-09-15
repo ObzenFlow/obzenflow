@@ -15,7 +15,7 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow_core::{event::ChainEventContent, TypedPayload};
+use obzenflow_core::{event::ChainPayload, TypedPayload};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -245,15 +245,13 @@ async fn effect_cursor_projection(
         .await
         .into_iter()
         .filter_map(|envelope| {
-            let event = envelope.event;
-            if !matches!(event.content, ChainEventContent::Data { .. }) {
+            let event = envelope.authored();
+            if !event.consumes_data_credit() {
                 return None;
             }
             let provenance = event.effect_provenance.as_ref()?;
-            let payload = match &event.content {
-                ChainEventContent::Data { payload, .. } => {
-                    serde_json::to_string(payload).unwrap_or_default()
-                }
+            let payload = match &event.payload {
+                ChainPayload::Fact(payload) => serde_json::to_string(payload).unwrap_or_default(),
                 _ => String::new(),
             };
             Some((

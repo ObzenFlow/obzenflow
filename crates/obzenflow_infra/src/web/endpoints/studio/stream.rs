@@ -38,6 +38,7 @@ struct Connection {
     closing: watch::Receiver<bool>,
     checkpoint: Option<EventId>,
     pending: VecDeque<SseFrame>,
+    caught_up: bool,
 }
 
 pub(super) fn connection(
@@ -64,6 +65,7 @@ pub(super) fn connection(
         closing,
         checkpoint: None,
         pending,
+        caught_up: false,
     };
     futures::stream::unfold(state, |mut state| async move {
         state.next_frame().await.map(|frame| (frame, state))
@@ -82,9 +84,14 @@ impl Connection {
                 return None;
             }
             if matches!(self.phase, Phase::Live)
+                && self.caught_up
                 && *self.closing.borrow()
                 && self.projection.terminal_observed()
             {
+                self.pending.extend(self.projection.current_measurements());
+                if let Some(frame) = self.pending.pop_front() {
+                    return Some(frame);
+                }
                 self.phase = Phase::Closed;
                 return Some(server_shutdown(
                     self.runtime_instance_id
@@ -111,13 +118,14 @@ impl Connection {
             };
             match reader.next().await {
                 Ok(Some(envelope)) => {
+                    self.caught_up = false;
                     scanned += 1;
-                    self.checkpoint = Some(envelope.event.id);
+                    self.checkpoint = Some(envelope.envelope.provenance.event.id);
                     match self.phase {
                         Phase::Fresh => self.projection.rebuild(&envelope),
                         Phase::Resume(id) => {
                             self.projection.rebuild(&envelope);
-                            if envelope.event.id == id {
+                            if envelope.envelope.provenance.event.id == id {
                                 self.phase = Phase::Live;
                                 self.pending.extend(self.projection.resume_snapshots());
                             }
@@ -129,29 +137,38 @@ impl Connection {
                     }
                 }
                 // None means caught up for now; further entries may arrive later.
-                Ok(None) => match self.phase {
-                    Phase::Fresh | Phase::Resume(_) => {
-                        let fresh = matches!(self.phase, Phase::Fresh);
-                        if !fresh {
-                            self.pending
-                                .push_back(StudioStreamError::UnknownCursor.frame());
+                Ok(None) => {
+                    self.caught_up = true;
+                    match self.phase {
+                        Phase::Fresh | Phase::Resume(_) => {
+                            let fresh = matches!(self.phase, Phase::Fresh);
+                            if !fresh {
+                                self.pending
+                                    .push_back(StudioStreamError::UnknownCursor.frame());
+                            }
+                            self.pending.extend(self.projection.snapshots());
+                            self.pending.push_back(bootstrap(
+                                self.checkpoint,
+                                self.runtime_instance_id
+                                    .as_ref()
+                                    .map(RuntimeInstanceId::as_str),
+                            ));
+                            if fresh {
+                                self.pending
+                                    .extend(self.projection.middleware_snapshot(timestamp_ms()));
+                            }
+                            self.phase = Phase::Live;
+                            self.pending.extend(self.projection.current_measurements());
                         }
-                        self.pending.extend(self.projection.snapshots());
-                        self.pending.push_back(bootstrap(
-                            self.checkpoint,
-                            self.runtime_instance_id
-                                .as_ref()
-                                .map(RuntimeInstanceId::as_str),
-                        ));
-                        if fresh && self.projection.active_observed() {
-                            self.pending
-                                .extend(self.projection.middleware_snapshot(timestamp_ms()));
+                        Phase::Live => {
+                            self.pending.extend(self.projection.current_measurements());
+                            if self.pending.is_empty() {
+                                tokio::time::sleep(TAIL_INTERVAL).await;
+                            }
                         }
-                        self.phase = Phase::Live;
+                        Phase::Closed => unreachable!("closed connections do not read"),
                     }
-                    Phase::Live => tokio::time::sleep(TAIL_INTERVAL).await,
-                    Phase::Closed => unreachable!("closed connections do not read"),
-                },
+                }
                 Err(error) => {
                     self.phase = Phase::Closed;
                     return Some(StudioStreamError::JournalRead(error.to_string()).frame());

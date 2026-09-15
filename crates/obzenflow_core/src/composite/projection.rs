@@ -397,13 +397,13 @@ mod tests {
     }
 
     fn completed() -> StageLifecycleEvent {
-        StageLifecycleEvent::Completed { metrics: None }
+        StageLifecycleEvent::Completed { accounting: None }
     }
 
     fn cancelled(reason: &str) -> StageLifecycleEvent {
         StageLifecycleEvent::Cancelled {
             reason: reason.to_string(),
-            metrics: None,
+            accounting: None,
         }
     }
 
@@ -411,7 +411,7 @@ mod tests {
         StageLifecycleEvent::Failed {
             error: error.to_string(),
             recoverable: None,
-            metrics: None,
+            accounting: None,
             causal_event_id: None,
         }
     }

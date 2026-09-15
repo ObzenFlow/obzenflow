@@ -143,18 +143,24 @@ impl EffectHistory {
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
-            if let Some(group_id) = envelope.journal_group_id.as_ref() {
+            if let Some(group_id) = envelope
+                .envelope
+                .provenance
+                .journal
+                .journal_group_id
+                .as_ref()
+            {
                 grouped_events.entry(group_id.clone()).or_default().push((
                     position,
-                    envelope.journal_group_member,
-                    envelope.event.clone(),
+                    envelope.envelope.provenance.journal.journal_group_member,
+                    envelope.authored(),
                 ));
             }
             position = position.saturating_add(1);
-            if EffectAttemptStarted::event_type_matches(&envelope.event.event_type()) {
-                let started = EffectAttemptStarted::try_from_event(&envelope.event)
+            if EffectAttemptStarted::event_type_matches(&envelope.event_type()) {
+                let started = EffectAttemptStarted::try_from_event(&envelope.authored())
                     .map_err(|error| EffectError::Serialization(error.to_string()))?;
-                validate_attempt_event(&envelope.event, &started)?;
+                validate_attempt_event(&envelope.authored(), &started)?;
                 if attempt_positions
                     .insert(
                         (started.cursor.clone(), started.attempt),
@@ -169,7 +175,7 @@ impl EffectHistory {
                 }
                 attempt_events.insert(
                     (started.cursor.clone(), started.attempt),
-                    envelope.event.clone(),
+                    envelope.authored(),
                 );
                 attempts
                     .entry(started.cursor.clone())
@@ -177,10 +183,10 @@ impl EffectHistory {
                     .push(started);
                 continue;
             }
-            if EffectRecoveryAbandoned::event_type_matches(&envelope.event.event_type()) {
-                let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.event)
+            if EffectRecoveryAbandoned::event_type_matches(&envelope.event_type()) {
+                let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.authored())
                     .map_err(|error| EffectError::Serialization(error.to_string()))?;
-                validate_abandonment_event(&envelope.event, &abandoned)?;
+                validate_abandonment_event(&envelope.authored(), &abandoned)?;
                 if abandonments
                     .insert(abandoned.cursor.clone(), abandoned)
                     .is_some()
@@ -191,8 +197,10 @@ impl EffectHistory {
                 }
                 continue;
             }
-            if let Some(record) = effect_record_from_event(&envelope.event)? {
+            if let Some(record) = effect_record_from_event(&envelope.authored())? {
                 let attempt = envelope
+                    .envelope
+                    .provenance
                     .event
                     .effect_provenance
                     .as_ref()
@@ -512,17 +520,23 @@ pub(crate) async fn current_cursor_history(
     let mut all_attempt_positions = HashMap::new();
 
     for (position, envelope) in envelopes.into_iter().enumerate() {
-        if let Some(group_id) = envelope.journal_group_id.as_ref() {
+        if let Some(group_id) = envelope
+            .envelope
+            .provenance
+            .journal
+            .journal_group_id
+            .as_ref()
+        {
             groups.entry(group_id.clone()).or_default().push((
                 position,
-                envelope.journal_group_member,
-                envelope.event.clone(),
+                envelope.envelope.provenance.journal.journal_group_member,
+                envelope.authored(),
             ));
         }
-        if EffectAttemptStarted::event_type_matches(&envelope.event.event_type()) {
-            let started = EffectAttemptStarted::try_from_event(&envelope.event)
+        if EffectAttemptStarted::event_type_matches(&envelope.event_type()) {
+            let started = EffectAttemptStarted::try_from_event(&envelope.authored())
                 .map_err(|error| EffectError::Serialization(error.to_string()))?;
-            validate_attempt_event(&envelope.event, &started)?;
+            validate_attempt_event(&envelope.authored(), &started)?;
             if all_attempt_positions
                 .insert((started.cursor.clone(), started.attempt), position)
                 .is_some()
@@ -535,16 +549,16 @@ pub(crate) async fn current_cursor_history(
             if &started.cursor == cursor {
                 history
                     .attempt_events
-                    .insert(started.attempt, envelope.event.clone());
+                    .insert(started.attempt, envelope.authored());
                 history.attempts.push(started);
             }
             continue;
         }
-        if EffectRecoveryAbandoned::event_type_matches(&envelope.event.event_type()) {
-            let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.event)
+        if EffectRecoveryAbandoned::event_type_matches(&envelope.event_type()) {
+            let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.authored())
                 .map_err(|error| EffectError::Serialization(error.to_string()))?;
             if &abandoned.cursor == cursor {
-                validate_abandonment_event(&envelope.event, &abandoned)?;
+                validate_abandonment_event(&envelope.authored(), &abandoned)?;
                 if history.abandonment.replace(abandoned).is_some() {
                     return Err(EffectError::EffectProvenanceMismatch(format!(
                         "effect cursor {cursor:?} has duplicate recovery abandonment"
@@ -553,9 +567,11 @@ pub(crate) async fn current_cursor_history(
             }
             continue;
         }
-        if let Some(record) = effect_record_from_event(&envelope.event)? {
+        if let Some(record) = effect_record_from_event(&envelope.authored())? {
             if &record.cursor == cursor {
                 let attempt = envelope
+                    .envelope
+                    .provenance
                     .event
                     .effect_provenance
                     .as_ref()
@@ -726,7 +742,7 @@ pub(crate) fn validate_affine_terminal_group(
             grouped_records.push(record);
             continue;
         }
-        if event.is_data() {
+        if event.consumes_data_credit() {
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "affine effect cursor {cursor:?} terminal group contains unrecognised Data"
             )));
@@ -760,22 +776,21 @@ pub(crate) fn validate_invariant_settlement_evidence(
     attempt: EffectAttemptOrdinal,
     control_events: &[ChainEvent],
 ) -> Result<(usize, usize), EffectError> {
-    use obzenflow_core::event::payloads::observability_payload::{
-        CircuitBreakerEvent, CircuitBreakerHealthClassification, MiddlewareLifecycle,
-        ObservabilityPayload,
-    };
+    use obzenflow_core::event::payloads::execution_payload::CircuitBreakerHealthClassification;
 
+    use obzenflow_core::event::payloads::execution_payload::{
+        CircuitBreakerFact, ExecutionPayload,
+    };
     let mut settlement_index = None;
     let mut recovery_index = None;
     for (index, event) in control_events.iter().enumerate() {
-        let ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(circuit_breaker),
-        )) = &event.content
+        let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(circuit_breaker)) =
+            &event.payload
         else {
             continue;
         };
         match circuit_breaker {
-            CircuitBreakerEvent::AttemptSettled {
+            CircuitBreakerFact::AttemptSettled {
                 cursor: observed_cursor,
                 attempt: observed_attempt,
                 health_classification,
@@ -800,7 +815,7 @@ pub(crate) fn validate_invariant_settlement_evidence(
                     )));
                 }
             }
-            CircuitBreakerEvent::RecoveryCompleted {
+            CircuitBreakerFact::RecoveryCompleted {
                 cursor: observed_cursor,
                 total_attempts,
                 ..
@@ -848,12 +863,12 @@ fn events_equal(left: &[ChainEvent], right: &[ChainEvent]) -> Result<bool, Effec
 }
 
 fn effect_identity_equal(left: &ChainEvent, right: &ChainEvent) -> Result<bool, EffectError> {
-    let left_content = serde_json::to_value(&left.content)
+    let left_content = serde_json::to_value(&left.payload)
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    let right_content = serde_json::to_value(&right.content)
+    let right_content = serde_json::to_value(&right.payload)
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
     Ok(left.id == right.id
-        && left.processing_info.event_time == right.processing_info.event_time
+        && left.processing.event_time == right.processing.event_time
         && left.effect_provenance == right.effect_provenance
         && left_content == right_content)
 }
@@ -1244,7 +1259,10 @@ fn validate_group_grammar_parts(
                 "escape-control batch '{group_id}' has no matching effect Start"
             )));
         };
-        if events.iter().any(|(_, _, event)| event.is_data()) {
+        if events
+            .iter()
+            .any(|(_, _, event)| event.consumes_data_credit())
+        {
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "escape-control batch '{group_id}' contains Data"
             )));

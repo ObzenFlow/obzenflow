@@ -5,8 +5,8 @@
 //! Default Jonestown strategy - continue to the runtime's poison-pill rule.
 
 use super::super::{ProcessingContext, SignalDecision, SignalGate};
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::ChainPayload;
 
 /// The default "Jonestown Protocol" strategy.
 ///
@@ -18,7 +18,7 @@ pub struct JonestownSignalStrategy;
 impl SignalGate for JonestownSignalStrategy {
     fn handle_eof(
         &self,
-        _envelope: &EventEnvelope<ChainEvent>,
+        _envelope: &JournalRecord<ChainPayload>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         SignalDecision::Continue

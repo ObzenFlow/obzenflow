@@ -11,7 +11,8 @@ use crate::stages::observer::{
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::event_envelope::JournalGroupMember;
-use obzenflow_core::event::{EventEnvelope, JournalEvent};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::{ChainPayload, EventKind, JournalEvent, JournalRecord};
 use obzenflow_core::journal::{ArchiveStatus, JournalError, JournalReader, StatusDerivation};
 use obzenflow_core::{
     BoundedBindingEvidence, JournalId, JournalOwner, JournalWriterId, TypedPayload,
@@ -152,7 +153,7 @@ impl EffectBoundary for CountingAbortBoundary {
 struct MemoryJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
-    events: Mutex<Vec<EventEnvelope<T>>>,
+    events: Mutex<Vec<JournalRecord<T::Payload>>>,
     fail_group_prefixes: Mutex<Vec<String>>,
     fail_event_types: Mutex<Vec<String>>,
 }
@@ -188,19 +189,19 @@ impl<T: JournalEvent> MemoryJournal<T> {
         }
     }
 
-    fn events(&self) -> Vec<EventEnvelope<T>> {
+    fn events(&self) -> Vec<JournalRecord<T::Payload>> {
         self.events.lock().expect("events lock poisoned").clone()
     }
 }
 
 struct MemoryJournalReader<T: JournalEvent> {
-    events: Vec<EventEnvelope<T>>,
+    events: Vec<JournalRecord<T::Payload>>,
     position: usize,
 }
 
 #[async_trait]
 impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let next = self.events.get(self.position).cloned();
         if next.is_some() {
             self.position += 1;
@@ -226,8 +227,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
+        _parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let mut failures = self
             .fail_event_types
             .lock()
@@ -243,7 +244,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             });
         }
         drop(failures);
-        let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         self.events
             .lock()
             .expect("events lock poisoned")
@@ -255,8 +256,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        _parent: Option<&EventEnvelope<T>>,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        _parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let mut failures = self
             .fail_group_prefixes
             .lock()
@@ -280,12 +281,13 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             .into_iter()
             .enumerate()
             .map(|(index, event)| {
-                let mut envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
-                envelope.journal_group_id = Some(group_id.to_string());
-                envelope.journal_group_member = Some(JournalGroupMember {
-                    index: u32::try_from(index).expect("group size was checked"),
-                    size,
-                });
+                let mut envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
+                envelope.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
+                envelope.envelope.provenance.journal.journal_group_member =
+                    Some(JournalGroupMember {
+                        index: u32::try_from(index).expect("group size was checked"),
+                        size,
+                    });
                 envelope
             })
             .collect::<Vec<_>>();
@@ -296,18 +298,18 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(envelopes)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(self.events())
     }
 
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(self
             .events()
             .into_iter()
-            .find(|envelope| *envelope.event.id() == *event_id))
+            .find(|envelope| *envelope.id() == *event_id))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -317,7 +319,10 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         }))
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let events = self.events();
         let start = events.len().saturating_sub(count);
         Ok(events[start..].iter().rev().cloned().collect())
@@ -368,8 +373,8 @@ impl Journal<ChainEvent> for FailingStartJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         self.attempted_event_types
             .lock()
             .expect("attempted event types lock poisoned")
@@ -380,14 +385,14 @@ impl Journal<ChainEvent> for FailingStartJournal {
         })
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -404,7 +409,7 @@ impl Journal<ChainEvent> for FailingStartJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -422,9 +427,9 @@ impl Journal<ChainEvent> for InspectingFailJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
-        assert!(event.is_data());
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+        assert!(event.consumes_data_credit());
         assert_eq!(
             self.registry.edge_in_flight(self.upstream, self.downstream),
             Some(1),
@@ -436,14 +441,14 @@ impl Journal<ChainEvent> for InspectingFailJournal {
         })
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -460,7 +465,7 @@ impl Journal<ChainEvent> for InspectingFailJournal {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -1522,14 +1527,10 @@ fn deterministic_typed_output_events_preserve_ordinals() {
     let events = [first, second];
 
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[0].content,
-        ChainEventContent::Data { event_type, .. } if event_type == "test.first_output.v1"
-    ));
-    assert!(matches!(
-        &events[1].content,
-        ChainEventContent::Data { event_type, .. } if event_type == "test.second_output.v1"
-    ));
+    assert!(events[0].is_fact());
+    assert_eq!(events[0].event_type(), "test.first_output.v1");
+    assert!(events[1].is_fact());
+    assert_eq!(events[1].event_type(), "test.second_output.v1");
     assert_eq!(
         events[0].id,
         deterministic_event_id("flow-a", "stage-a", StageInputPosition(4), 2)
@@ -1538,8 +1539,8 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         events[1].id,
         deterministic_event_id("flow-a", "stage-a", StageInputPosition(4), 3)
     );
-    assert_eq!(events[0].processing_info.event_time, 4_002);
-    assert_eq!(events[1].processing_info.event_time, 4_003);
+    assert_eq!(events[0].processing.event_time, 4_002);
+    assert_eq!(events[1].processing.event_time, 4_003);
 }
 
 struct TransactionalCountingPort {
@@ -1670,14 +1671,14 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for CommittedFailureTr
     }
 }
 
-fn parent_envelope(writer_id: WriterId) -> EventEnvelope<ChainEvent> {
+fn parent_envelope(writer_id: WriterId) -> JournalRecord<ChainPayload> {
     let event = ChainEventFactory::data_event(writer_id, "test.input", json!({"id": 1}));
-    EventEnvelope::new(JournalWriterId::new(), event)
+    JournalRecord::new(JournalWriterId::new(), event)
 }
 
 fn invocation_context(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
 ) -> EffectInvocationContext {
     let effect_runtime_mode = if effect_history.is_some() {
@@ -1696,7 +1697,7 @@ fn invocation_context(
 
 fn invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -1742,7 +1743,7 @@ fn invocation_context_with_mode(
 
 fn transactional_invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -1763,7 +1764,7 @@ fn transactional_invocation_context_with_mode(
 
 fn zero_slot_named_invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -1784,7 +1785,7 @@ fn zero_slot_named_invocation_context_with_mode(
 
 fn named_affine_invocation_context_with_mode(
     journal: Arc<dyn Journal<ChainEvent>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     effect_history: Option<Arc<EffectHistory>>,
     effect_runtime_mode: EffectRuntimeMode,
     effect_ports: EffectPortRegistry,
@@ -2001,7 +2002,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
         effect_type: EffectType::new(AffineCountingEffect::EFFECT_TYPE),
         attempt: EffectAttemptOrdinal::new(1),
         outcome_group_id: effect_outcome_group_id(&cursor),
-        causal_input_id: parent.event.id,
+        causal_input_id: parent.envelope.provenance.event.id,
     };
     let start = build_effect_attempt_started_event(
         in_doubt_ctx.writer_id,
@@ -2043,7 +2044,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
 }
 
 async fn affine_scope_matrix_histories(
-    parent: &EventEnvelope<ChainEvent>,
+    parent: &JournalRecord<ChainPayload>,
 ) -> (Arc<EffectHistory>, Arc<EffectHistory>) {
     let stage_id = StageId::new();
     let completed_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
@@ -2098,7 +2099,7 @@ fn direct_fact_scope(
 async fn assert_scope_matrix_hit(
     runtime_execution: crate::execution::RuntimeExecution,
     history: Arc<EffectHistory>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     expected_scope: obzenflow_core::MiddlewareExecutionScope,
 ) {
     let stage_id = StageId::new();
@@ -2144,7 +2145,7 @@ async fn assert_scope_matrix_hit(
 async fn assert_scope_matrix_executable(
     runtime_execution: crate::execution::RuntimeExecution,
     history: Option<Arc<EffectHistory>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     expected_prefix_rows: usize,
 ) {
     let stage_id = StageId::new();
@@ -2507,11 +2508,11 @@ async fn emit_commits_declared_fact_type_immediately() {
 
     let events = journal.events();
     assert_eq!(events.len(), 1);
-    assert!(matches!(
-        &events[0].event.content,
-        ChainEventContent::Data { event_type, .. }
-            if event_type == FirstOutput::versioned_event_type().as_str()
-    ));
+    assert!(events[0].is_fact());
+    assert_eq!(
+        events[0].event_type(),
+        FirstOutput::versioned_event_type().as_str()
+    );
 }
 
 #[test]
@@ -2648,7 +2649,7 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for_many(vec![
@@ -2689,11 +2690,11 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
     let events = journal.events();
     assert_eq!(events.len(), 2);
     assert_eq!(
-        events[0].event.event_type(),
+        events[0].event_type(),
         FirstOutput::versioned_event_type().as_str()
     );
     assert_eq!(
-        events[1].event.event_type(),
+        events[1].event_type(),
         SecondOutput::versioned_event_type().as_str()
     );
 }
@@ -2712,7 +2713,7 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for::<FirstOutput>();
@@ -2764,7 +2765,7 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let repeatable_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(repeatable_stage)));
     let mut repeatable_context = invocation_context(
         repeatable_journal,
-        EventEnvelope::new(JournalWriterId::new(), repeatable_input.clone()),
+        JournalRecord::new(JournalWriterId::new(), repeatable_input.clone()),
         None,
     );
     repeatable_context.emit_enabled = true;
@@ -2806,7 +2807,7 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let ports = registry_with_binding(&binding);
     let mut transactional_context = transactional_invocation_context_with_mode(
         transactional_journal,
-        EventEnvelope::new(JournalWriterId::new(), transactional_input.clone()),
+        JournalRecord::new(JournalWriterId::new(), transactional_input.clone()),
         None,
         EffectRuntimeMode::Live,
         ports,
@@ -2844,7 +2845,7 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let affine_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(affine_stage)));
     let mut affine_context = invocation_context(
         affine_journal,
-        EventEnvelope::new(JournalWriterId::new(), affine_input.clone()),
+        JournalRecord::new(JournalWriterId::new(), affine_input.clone()),
         None,
     );
     affine_context.emit_enabled = true;
@@ -2890,7 +2891,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut live_context = invocation_context(
         live_journal.clone(),
-        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        JournalRecord::new(JournalWriterId::new(), input.clone()),
         None,
     );
     live_context.emit_enabled = true;
@@ -2924,7 +2925,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let catch_up_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut catch_up_context = invocation_context_with_mode(
         catch_up_journal,
-        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        JournalRecord::new(JournalWriterId::new(), input.clone()),
         Some(history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -2960,7 +2961,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let miss_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut miss_context = invocation_context_with_mode(
         miss_journal,
-        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        JournalRecord::new(JournalWriterId::new(), input.clone()),
         Some(miss_history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -3003,11 +3004,11 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
     );
     let failing_journal = Arc::new(MemoryJournal::failing_event(
         JournalOwner::stage(stage_id),
-        "data",
+        SecondOutput::versioned_event_type(),
     ));
     let mut live_context = invocation_context(
         failing_journal.clone(),
-        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        JournalRecord::new(JournalWriterId::new(), input.clone()),
         None,
     );
     live_context.emit_enabled = true;
@@ -3054,7 +3055,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         failing_journal
             .events()
             .iter()
-            .filter(|event| event.event.event_type() == SecondOutput::versioned_event_type())
+            .filter(|event| event.event_type() == SecondOutput::versioned_event_type())
             .count(),
         0
     );
@@ -3066,7 +3067,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
     let resume_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut resume_context = invocation_context_with_mode(
         resume_journal.clone(),
-        EventEnvelope::new(JournalWriterId::new(), input.clone()),
+        JournalRecord::new(JournalWriterId::new(), input.clone()),
         Some(history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -3103,7 +3104,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
         resume_journal
             .events()
             .iter()
-            .filter(|event| event.event.event_type() == SecondOutput::versioned_event_type())
+            .filter(|event| event.event_type() == SecondOutput::versioned_event_type())
             .count(),
         1
     );
@@ -3123,7 +3124,7 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for::<FirstOutput>();
@@ -3149,7 +3150,7 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
 
     let events = journal.events();
     assert_eq!(events.len(), 1, "the fact remains durable");
-    let committed_fact = &events[0].event;
+    let committed_fact = &events[0].authored();
     assert!(matches!(
         error,
         crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
@@ -3175,7 +3176,7 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for_many(vec![
@@ -3202,12 +3203,12 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
     let events = journal.events();
     assert_eq!(events.len(), 2, "both facts remain durable");
     assert_eq!(
-        events[0].event.event_type(),
+        events[0].event_type(),
         FirstOutput::versioned_event_type(),
         "facts remain in commit order"
     );
     assert_eq!(
-        events[1].event.event_type(),
+        events[1].event_type(),
         SecondOutput::versioned_event_type(),
         "facts remain in commit order"
     );
@@ -3215,7 +3216,7 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
         error,
         crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
             if message.contains("effectful_stateful_apply")
-                && message.contains(&events[1].event.id.to_string())
+                && message.contains(&events[1].envelope.provenance.event.id.to_string())
                 && message.contains(&SecondOutput::versioned_event_type())
                 && message.contains("Validation error: second apply failed")
     ));
@@ -3240,7 +3241,7 @@ async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for_many(vec![
@@ -3274,11 +3275,11 @@ async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
 
     let events = journal.events();
     assert_eq!(events.len(), 1, "the emitted fact was already durable");
-    assert!(matches!(
-        &events[0].event.content,
-        obzenflow_core::event::ChainEventContent::Data { event_type, .. }
-            if event_type == FirstOutput::versioned_event_type().as_str()
-    ));
+    assert!(events[0].is_fact());
+    assert_eq!(
+        events[0].event_type(),
+        FirstOutput::versioned_event_type().as_str()
+    );
 }
 
 #[tokio::test]
@@ -3385,7 +3386,7 @@ fn effect_records(journal: &MemoryJournal<ChainEvent>) -> Vec<EffectRecord> {
         .events()
         .into_iter()
         .filter_map(|envelope| {
-            effect_record_from_event(&envelope.event).expect("effect record decode")
+            effect_record_from_event(&envelope.authored()).expect("effect record decode")
         })
         .collect()
 }
@@ -3472,15 +3473,14 @@ async fn live_perform_records_effect_data_fact() {
     assert_eq!(output.value, 42);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let events = journal.events();
-    assert!(matches!(
-        events[0].event.content,
-        ChainEventContent::Data { .. }
-    ));
+    assert!(matches!(events[0].payload, ChainPayload::Fact(_)));
     let records = effect_records(&journal);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].cursor.input_seq, 1);
     assert_eq!(records[0].cursor.effect_ordinal, 0);
     let provenance = events[0]
+        .envelope
+        .provenance
         .event
         .effect_provenance
         .as_ref()
@@ -3533,17 +3533,17 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
 
     let live_events = live_journal.events();
     assert_eq!(live_events.len(), 2);
-    assert!(is_framework_effect_event_type(
-        &live_events[0].event.event_type()
-    ));
+    assert!(is_framework_effect_event_type(&live_events[0].event_type()));
     let reply_provenance = live_events[0]
+        .envelope
+        .provenance
         .event
         .effect_provenance
         .as_ref()
         .expect("recorded reply carries provenance");
     assert!(reply_provenance.fact_owner.is_framework());
     assert_eq!(
-        live_events[1].event.id,
+        live_events[1].envelope.provenance.event.id,
         deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0),
         "the recorded reply must not consume a user output ordinal"
     );
@@ -3587,21 +3587,27 @@ async fn recorded_reply_is_replay_authority_but_not_a_public_output_fact() {
     );
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 2);
-    assert_eq!(replay_events[0].event.id, live_events[0].event.id);
-    assert_eq!(replay_events[1].event.id, live_events[1].event.id);
+    assert_eq!(
+        replay_events[0].envelope.provenance.event.id,
+        live_events[0].envelope.provenance.event.id
+    );
+    assert_eq!(
+        replay_events[1].envelope.provenance.event.id,
+        live_events[1].envelope.provenance.event.id
+    );
     assert_eq!(replay.committed_fact_evidence().0, 1);
 }
 
 async fn adapter_history_fixture(
     effect_count: usize,
-) -> (EventEnvelope<ChainEvent>, Arc<EffectHistory>) {
+) -> (JournalRecord<ChainPayload>, Arc<EffectHistory>) {
     let stage_id = StageId::new();
     let input = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input);
+    let parent = JournalRecord::new(JournalWriterId::new(), input);
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_ctx = invocation_context(journal.clone(), parent.clone(), None);
     let recorded_flow_id = live_ctx.flow_id.to_string();
@@ -3632,7 +3638,7 @@ async fn adapter_history_fixture(
 }
 
 async fn run_consume_one_adapter(
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     history: Arc<EffectHistory>,
     settlement: AdapterSettlement,
     calls: Arc<AtomicUsize>,
@@ -3650,7 +3656,7 @@ async fn run_consume_one_adapter(
     );
     UnifiedTransformHandler::process(
         &adapter,
-        parent.event,
+        parent.authored(),
         Some(context),
         obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
     )
@@ -3674,7 +3680,7 @@ async fn run_caught_binding_fault_adapter(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input);
+    let parent = JournalRecord::new(JournalWriterId::new(), input);
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let declared_binding = zero_slot_named_binding(7);
     let invocation_binding = zero_slot_named_binding(7);
@@ -3699,7 +3705,7 @@ async fn run_caught_binding_fault_adapter(
     );
     let result = UnifiedTransformHandler::process(
         &adapter,
-        parent.event,
+        parent.authored(),
         Some(context),
         obzenflow_core::MiddlewareExecutionScope::LiveHandler,
     )
@@ -3749,7 +3755,7 @@ async fn run_stateful_binding_fault_adapter(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let declared_binding = zero_slot_named_binding(7);
     let invocation_binding = zero_slot_named_binding(7);
@@ -4057,16 +4063,14 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
 
     let events = live_journal.events();
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[0].event.content,
-        ChainEventContent::Data { event_type, .. } if event_type == "test.first_output.v1"
-    ));
-    assert!(matches!(
-        &events[1].event.content,
-        ChainEventContent::Data { event_type, .. } if event_type == "test.second_output.v1"
-    ));
+    assert!(events[0].is_fact());
+    assert_eq!(events[0].event_type(), "test.first_output.v1");
+    assert!(events[1].is_fact());
+    assert_eq!(events[1].event_type(), "test.second_output.v1");
     assert_eq!(
         events[0]
+            .envelope
+            .provenance
             .event
             .effect_provenance
             .as_ref()
@@ -4075,6 +4079,8 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     );
     assert_eq!(
         events[1]
+            .envelope
+            .provenance
             .event
             .effect_provenance
             .as_ref()
@@ -4083,22 +4089,26 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     );
     assert_eq!(
         events[0]
+            .envelope
+            .provenance
             .event
             .effect_provenance
             .as_ref()
             .and_then(|provenance| provenance.group_id.as_ref()),
         events[1]
+            .envelope
+            .provenance
             .event
             .effect_provenance
             .as_ref()
             .and_then(|provenance| provenance.group_id.as_ref())
     );
     assert_eq!(
-        events[0].event.id,
+        events[0].envelope.provenance.event.id,
         deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0)
     );
     assert_eq!(
-        events[1].event.id,
+        events[1].envelope.provenance.event.id,
         deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 1)
     );
 
@@ -4125,15 +4135,21 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 2);
-    assert_eq!(replay_events[0].event.id, events[0].event.id);
-    assert_eq!(replay_events[1].event.id, events[1].event.id);
     assert_eq!(
-        replay_events[0].event.effect_provenance,
-        events[0].event.effect_provenance
+        replay_events[0].envelope.provenance.event.id,
+        events[0].envelope.provenance.event.id
     );
     assert_eq!(
-        replay_events[1].event.effect_provenance,
-        events[1].event.effect_provenance
+        replay_events[1].envelope.provenance.event.id,
+        events[1].envelope.provenance.event.id
+    );
+    assert_eq!(
+        replay_events[0].envelope.provenance.event.effect_provenance,
+        events[0].envelope.provenance.event.effect_provenance
+    );
+    assert_eq!(
+        replay_events[1].envelope.provenance.event.effect_provenance,
+        events[1].envelope.provenance.event.effect_provenance
     );
 }
 
@@ -4172,11 +4188,11 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     let live_events = live_journal.events();
     assert_eq!(live_events.len(), 2);
     assert_eq!(
-        live_events[0].event.id,
+        live_events[0].envelope.provenance.event.id,
         deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0)
     );
     assert_eq!(
-        live_events[1].event.id,
+        live_events[1].envelope.provenance.event.id,
         deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 1)
     );
 
@@ -4212,9 +4228,18 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 2);
-    assert_eq!(replay_events[0].event.id, live_events[0].event.id);
-    assert_eq!(replay_events[1].event.id, live_events[1].event.id);
-    assert_ne!(replay_events[1].event.id, live_events[0].event.id);
+    assert_eq!(
+        replay_events[0].envelope.provenance.event.id,
+        live_events[0].envelope.provenance.event.id
+    );
+    assert_eq!(
+        replay_events[1].envelope.provenance.event.id,
+        live_events[1].envelope.provenance.event.id
+    );
+    assert_ne!(
+        replay_events[1].envelope.provenance.event.id,
+        live_events[0].envelope.provenance.event.id
+    );
 
     let replay_records = effect_records(&replay_journal);
     let replay_of_replay_history = Arc::new(
@@ -4257,8 +4282,14 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     assert_eq!(replay_of_replay_output, live_output);
     assert_eq!(replay_of_replay_calls.load(Ordering::SeqCst), 0);
     let replay_of_replay_events = replay_of_replay_journal.events();
-    assert_eq!(replay_of_replay_events[0].event.id, live_events[0].event.id);
-    assert_eq!(replay_of_replay_events[1].event.id, live_events[1].event.id);
+    assert_eq!(
+        replay_of_replay_events[0].envelope.provenance.event.id,
+        live_events[0].envelope.provenance.event.id
+    );
+    assert_eq!(
+        replay_of_replay_events[1].envelope.provenance.event.id,
+        live_events[1].envelope.provenance.event.id
+    );
 }
 
 #[test]
@@ -4277,6 +4308,8 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
             descriptor_hash: "hash".into(),
             descriptor: descriptor.clone(),
             outcome: EffectOutcomePayload::SucceededFact {
+                event_kind: EventKind::Fact,
+
                 event_type: FirstOutput::versioned_event_type().into(),
                 output: json!({ "value": 10 }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
@@ -4289,6 +4322,8 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
             descriptor_hash: "hash".into(),
             descriptor,
             outcome: EffectOutcomePayload::SucceededFact {
+                event_kind: EventKind::Fact,
+
                 event_type: SecondOutput::versioned_event_type().into(),
                 output: json!({ "value": "twenty" }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(2),
@@ -4316,6 +4351,8 @@ fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
+            event_kind: EventKind::Fact,
+
             event_type: "fx.out".into(),
             output: json!({ "ordinal": ordinal }),
             outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
@@ -4346,6 +4383,8 @@ fn incomplete_outcome_group_on_completed_archive_fails_loud() {
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
+            event_kind: EventKind::Fact,
+
             event_type: "fx.out".into(),
             output: json!({ "ordinal": ordinal }),
             outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
@@ -4375,6 +4414,8 @@ fn interleaved_incomplete_groups_all_drop_on_interrupted_archive() {
         descriptor_hash: "hash".into(),
         descriptor: descriptor.clone(),
         outcome: EffectOutcomePayload::SucceededFact {
+            event_kind: EventKind::Fact,
+
             event_type: "fx.out".into(),
             output: json!({ "ordinal": ordinal }),
             outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
@@ -4517,10 +4558,16 @@ async fn capture_is_exempt_from_declared_effect_list() {
     assert_eq!(captured, 7);
     let events = journal.events();
     assert!(matches!(
-        &events[0].event.content,
-        ChainEventContent::Data { event_type, .. } if event_type == CAPTURE_EVENT_TYPE
+        &events[0].payload,
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
     ));
-    assert!(events[0].event.effect_provenance.is_some());
+    assert_eq!(events[0].event_type(), CAPTURE_EVENT_TYPE);
+    assert!(events[0]
+        .envelope
+        .provenance
+        .event
+        .effect_provenance
+        .is_some());
     assert_eq!(effect_records(&journal).len(), 1);
 }
 
@@ -4629,7 +4676,7 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
         EffectOutcomePayload::Failed { .. }
     ));
     assert_eq!(
-        live_events[0].event.id,
+        live_events[0].envelope.provenance.event.id,
         deterministic_effect_record_event_id(&live_record.cursor, EFFECT_RECORD_EVENT_TYPE)
     );
 
@@ -4658,7 +4705,10 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 1);
-    assert_eq!(replay_events[0].event.id, live_events[0].event.id);
+    assert_eq!(
+        replay_events[0].envelope.provenance.event.id,
+        live_events[0].envelope.provenance.event.id
+    );
     let replay_records = effect_records(&replay_journal);
     assert_eq!(replay_records, vec![live_record.clone()]);
 
@@ -4692,8 +4742,12 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
     ));
     assert_eq!(replay_of_replay_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        replay_of_replay_journal.events()[0].event.id,
-        live_events[0].event.id
+        replay_of_replay_journal.events()[0]
+            .envelope
+            .provenance
+            .event
+            .id,
+        live_events[0].envelope.provenance.event.id
     );
 }
 
@@ -5570,7 +5624,7 @@ async fn effect_record_decode_rejects_payload_provenance_cursor_mismatch() {
     .await
     .expect("live effect should succeed");
 
-    let mut event = journal.events()[0].event.clone();
+    let mut event = journal.events()[0].authored().clone();
     event
         .effect_provenance
         .as_mut()
@@ -5603,10 +5657,17 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
         },
         origin: None,
     };
-    let event = ChainEventFactory::data_event(
+    let application_fact = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         EFFECT_RECORD_EVENT_TYPE,
-        serde_json::to_value(record).expect("record should serialize"),
+        serde_json::to_value(&record).expect("record should serialize"),
+    );
+    assert!(effect_record_from_event(&application_fact)
+        .expect("an application descriptor does not select execution semantics")
+        .is_none());
+    let event = ChainEventFactory::create_event(
+        WriterId::from(stage_id),
+        ChainPayload::Execution(ExecutionPayload::EffectRecord(record)),
     );
 
     let err = effect_record_from_event(&event)
@@ -5687,6 +5748,8 @@ async fn replayed_group_without_recorded_origin_falls_back_to_derivation() {
         .expect("replay should reconstruct the recorded outcome");
 
     let replayed_origin = replay_journal.events()[0]
+        .envelope
+        .provenance
         .event
         .effect_provenance
         .as_ref()
@@ -5741,7 +5804,7 @@ async fn capture_replays_recorded_value_without_using_live_value() {
 
     let records = effect_records(&journal);
     let live_record = records[0].clone();
-    let live_event_id = journal.events()[0].event.id;
+    let live_event_id = journal.events()[0].envelope.provenance.event.id;
     assert_eq!(
         live_event_id,
         deterministic_effect_record_event_id(&live_record.cursor, CAPTURE_EVENT_TYPE)
@@ -5765,7 +5828,7 @@ async fn capture_replays_recorded_value_without_using_live_value() {
     assert_eq!(replayed, 7);
     let replay_events = replay_journal.events();
     assert_eq!(replay_events.len(), 1);
-    assert_eq!(replay_events[0].event.id, live_event_id);
+    assert_eq!(replay_events[0].envelope.provenance.event.id, live_event_id);
     let replay_records = effect_records(&replay_journal);
     assert_eq!(replay_records, vec![live_record]);
 
@@ -5787,7 +5850,14 @@ async fn capture_replays_recorded_value_without_using_live_value() {
         .expect("capture should replay from a replay archive");
 
     assert_eq!(replayed_again, 7);
-    assert_eq!(replay_of_replay_journal.events()[0].event.id, live_event_id);
+    assert_eq!(
+        replay_of_replay_journal.events()[0]
+            .envelope
+            .provenance
+            .event
+            .id,
+        live_event_id
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -6003,7 +6073,7 @@ impl EffectBoundary for InvariantEvidenceBoundary {
         use obzenflow_core::event::chain_event::{
             CircuitBreakerAttemptSettledEventParams, CircuitBreakerRecoveryCompletedEventParams,
         };
-        use obzenflow_core::event::payloads::observability_payload::CircuitBreakerHealthClassification;
+        use obzenflow_core::event::payloads::execution_payload::CircuitBreakerHealthClassification;
 
         assert_eq!(identity.safety, EffectSafety::NonIdempotentAtLeastOnce);
         self.consults.fetch_add(1, Ordering::SeqCst);
@@ -6072,7 +6142,7 @@ fn cursor_started_in(journal: &MemoryJournal<ChainEvent>) -> EffectCursor {
     journal
         .events()
         .iter()
-        .find_map(|envelope| EffectAttemptStarted::from_event(&envelope.event))
+        .find_map(|envelope| EffectAttemptStarted::from_event(&envelope.authored()))
         .expect("fixture journal contains a Start")
         .cursor
 }
@@ -6093,12 +6163,11 @@ fn comparable_effect_journal(
         .into_iter()
         .map(|envelope| {
             (
-                envelope.event.id,
-                envelope.event.event_type(),
-                envelope.journal_group_id,
-                envelope.journal_group_member,
-                serde_json::to_value(envelope.event.content)
-                    .expect("effect journal content serialises"),
+                envelope.envelope.provenance.event.id,
+                envelope.event_type(),
+                envelope.envelope.provenance.journal.journal_group_id,
+                envelope.envelope.provenance.journal.journal_group_member,
+                serde_json::to_value(envelope.payload).expect("effect journal content serialises"),
             )
         })
         .collect()
@@ -6131,9 +6200,14 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
     let preterminal_events = preterminal_cut.events();
     assert_eq!(preterminal_events.len(), 1);
     assert!(EffectAttemptStarted::event_type_matches(
-        &preterminal_events[0].event.event_type()
+        &preterminal_events[0].event_type()
     ));
-    assert!(preterminal_events[0].journal_group_id.is_none());
+    assert!(preterminal_events[0]
+        .envelope
+        .provenance
+        .journal
+        .journal_group_id
+        .is_none());
 
     let terminal_cut = Arc::new(MemoryJournal::failing_group(
         JournalOwner::stage(stage_id),
@@ -6157,16 +6231,19 @@ async fn invariant_preterminal_and_terminal_group_cuts_are_independently_atomic(
     let terminal_events = terminal_cut.events();
     assert_eq!(terminal_events.len(), 2);
     assert!(EffectAttemptStarted::event_type_matches(
-        &terminal_events[0].event.event_type()
+        &terminal_events[0].event_type()
     ));
     assert!(terminal_events[1]
+        .envelope
+        .provenance
+        .journal
         .journal_group_id
         .as_deref()
         .is_some_and(|group| group.starts_with("effect-escape-controls:v1:")));
     assert!(
         terminal_events
             .iter()
-            .all(|envelope| envelope.event.event_type() != EFFECT_RECORD_EVENT_TYPE),
+            .all(|envelope| envelope.event_type() != EFFECT_RECORD_EVENT_TYPE),
         "a failed terminal frame exposes no typed invariant terminal"
     );
 }
@@ -6274,10 +6351,15 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
     assert_eq!(escape_attempts, vec![1, 2]);
     for attempt in [1_u32, 2] {
         let expected = effect_escape_controls_group_id(&cursor, EffectAttemptOrdinal::new(attempt));
-        assert!(terminal
-            .events()
-            .iter()
-            .any(|envelope| { envelope.journal_group_id.as_deref() == Some(expected.as_str()) }));
+        assert!(terminal.events().iter().any(|envelope| {
+            envelope
+                .envelope
+                .provenance
+                .journal
+                .journal_group_id
+                .as_deref()
+                == Some(expected.as_str())
+        }));
     }
     assert_eq!(
         selected.terminal_attempt,
@@ -6300,7 +6382,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
     for event in sequenced_history
         .terminal_group_events
         .iter_mut()
-        .filter(|event| !event.is_data())
+        .filter(|event| !event.consumes_data_credit())
     {
         event.admission_seq = Some(obzenflow_core::AdmissionSeq(archived_sequence));
         archived_sequence += 1;
@@ -6313,7 +6395,7 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
             sequenced_history
                 .terminal_group_events
                 .iter()
-                .filter(|event| !event.is_data()),
+                .filter(|event| !event.consumes_data_credit()),
         )
         .map(|event| event.id)
         .collect::<Vec<_>>();
@@ -6354,13 +6436,16 @@ async fn invariant_escape_resume_sequence_preserves_attempt_scoped_identity() {
     let replayed_controls = replay
         .events()
         .into_iter()
-        .filter(|envelope| archived_control_ids.contains(&envelope.event.id))
+        .filter(|envelope| archived_control_ids.contains(&envelope.envelope.provenance.event.id))
         .collect::<Vec<_>>();
     assert_eq!(replayed_controls.len(), archived_control_ids.len());
     assert!(
-        replayed_controls
-            .iter()
-            .all(|envelope| envelope.event.admission_seq.is_none()),
+        replayed_controls.iter().all(|envelope| envelope
+            .envelope
+            .provenance
+            .event
+            .admission_seq
+            .is_none()),
         "replayed escape and terminal controls must request a fresh current-run sequence"
     );
     assert_eq!(
@@ -6377,7 +6462,7 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     let (_, in_doubt_history) = affine_scope_matrix_histories(&parent).await;
     let recovery_parent = parent_envelope(WriterId::from(stage_id));
     assert_ne!(
-        parent.event.id, recovery_parent.event.id,
+        parent.envelope.provenance.event.id, recovery_parent.envelope.provenance.event.id,
         "the recovery invocation must not accidentally share the archived input identity"
     );
 
@@ -6435,7 +6520,7 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     let recovery_events = recovery_journal.events();
     let starts = recovery_events
         .iter()
-        .filter_map(|envelope| EffectAttemptStarted::from_event(&envelope.event))
+        .filter_map(|envelope| EffectAttemptStarted::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(
         starts
@@ -6447,11 +6532,9 @@ async fn recovery_abandonment_names_the_archived_attempt_and_replays_without_a_b
     );
     let abandonments = recovery_events
         .iter()
-        .filter(|envelope| {
-            EffectRecoveryAbandoned::event_type_matches(&envelope.event.event_type())
-        })
+        .filter(|envelope| EffectRecoveryAbandoned::event_type_matches(&envelope.event_type()))
         .map(|envelope| {
-            EffectRecoveryAbandoned::try_from_event(&envelope.event)
+            EffectRecoveryAbandoned::try_from_event(&envelope.authored())
                 .expect("abandonment payload decodes")
         })
         .collect::<Vec<_>>();
@@ -7529,7 +7612,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         journal
             .events()
             .into_iter()
-            .map(|envelope| envelope.event)
+            .map(|envelope| envelope.authored())
             .find(|event| event.event_type().starts_with("test.counting_output"))
             .expect("counting fact recorded")
             .id

@@ -6,7 +6,7 @@ use crate::event::payloads::delivery_payload::DeliveryResult;
 use crate::event::system_event::ContractName;
 use crate::event::{
     types::{Count, JournalIndex, SeqNo},
-    ChainEvent, ChainEventContent, EventId,
+    ChainEvent, ChainPayload, EventId,
 };
 use crate::id::StageId;
 use chrono::{DateTime, Utc};
@@ -283,12 +283,12 @@ impl Contract for TransportContract {
         // We therefore only update writer-side counts when we observe a
         // FlowControl::Eof with an explicit writer_seq, and treat that
         // as the final writer count for the edge.
-        if let crate::event::ChainEventContent::FlowControl(
+        if let ChainPayload::FlowControl(
             crate::event::payloads::flow_control_payload::FlowControlPayload::Eof {
                 writer_seq: Some(seq),
                 ..
             },
-        ) = &event.content
+        ) = &event.payload
         {
             let counter = ctx
                 .state
@@ -298,7 +298,7 @@ impl Contract for TransportContract {
     }
 
     fn on_read(&self, event: &ChainEvent, ctx: &mut ContractReadContext) {
-        if event.is_data() {
+        if event.consumes_data_credit() {
             let counter = ctx
                 .state
                 .get_or_insert_with::<ReaderCount, _>(ReaderCount::default);
@@ -402,7 +402,7 @@ impl Contract for SourceContract {
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext) {
         use crate::event::payloads::flow_control_payload::FlowControlPayload;
 
-        if let crate::event::ChainEventContent::FlowControl(payload) = &event.content {
+        if let ChainPayload::FlowControl(payload) = &event.payload {
             match payload {
                 FlowControlPayload::SourceContract {
                     expected_count: Some(count),
@@ -546,7 +546,7 @@ impl Contract for DeliveryContract {
     }
 
     fn on_write(&self, event: &ChainEvent, _ctx: &mut ContractWriteContext) {
-        let ChainEventContent::Delivery(payload) = &event.content else {
+        let ChainPayload::Delivery(payload) = &event.payload else {
             return;
         };
 
@@ -597,7 +597,7 @@ impl Contract for DeliveryContract {
 
     fn on_read(&self, event: &ChainEvent, _ctx: &mut ContractReadContext) {
         // Only data events require receipts.
-        if !event.is_data() {
+        if !event.consumes_data_credit() {
             return;
         }
 
@@ -849,11 +849,11 @@ impl Contract for DivergenceContract {
             st.window_start = Some(Instant::now());
         }
 
-        match &event.content {
-            ChainEventContent::Data { .. } => {
+        match &event.payload {
+            _ if event.consumes_data_credit() => {
                 st.data_events = st.data_events.saturating_add(1);
             }
-            ChainEventContent::FlowControl(_) => {
+            ChainPayload::FlowControl(_) => {
                 st.flow_control_signals = st.flow_control_signals.saturating_add(1);
             }
             _ => {}
@@ -861,7 +861,7 @@ impl Contract for DivergenceContract {
 
         // Cycle depth applies to data events only; flow control signals do not carry
         // `cycle_depth` in the current model (FLOWIP-051p).
-        if event.is_data() && event.cycle_scc_id == Some(self.scc_id) {
+        if event.consumes_data_credit() && event.cycle_scc_id == Some(self.scc_id) {
             if let Some(depth) = event.cycle_depth {
                 st.max_cycle_depth_observed = st.max_cycle_depth_observed.max(depth.as_u16());
             }
@@ -937,8 +937,7 @@ mod tests {
     use crate::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use crate::event::types::SeqNo;
     use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
-    use crate::CycleDepth;
-    use crate::WriterId;
+    use crate::{CycleDepth, WriterId};
 
     fn dummy_ctx() -> (ContractWriteContext, ContractReadContext, StageId, StageId) {
         let upstream_stage = StageId::new();

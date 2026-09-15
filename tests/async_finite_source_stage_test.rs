@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::SystemEventType;
+use obzenflow_core::event::SystemPayload;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -123,7 +123,10 @@ struct CountSourcePollObserver {
 impl SourcePollObserver for CountSourcePollObserver {
     fn after_source_poll(&self, _ctx: &SourcePollObserverContext<'_>, outputs: &[ChainEvent]) {
         self.calls.fetch_add(
-            outputs.iter().filter(|event| event.is_data()).count() as u64,
+            outputs
+                .iter()
+                .filter(|event| event.consumes_data_credit())
+                .count() as u64,
             Ordering::Relaxed,
         );
     }
@@ -165,7 +168,7 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|event| event.is_data())
+        .filter(|event| event.consumes_data_credit())
         .cloned()
         .collect();
     assert_eq!(
@@ -225,7 +228,7 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         .lock()
         .unwrap()
         .iter()
-        .filter(|event| event.is_data())
+        .filter(|event| event.consumes_data_credit())
         .cloned()
         .collect();
 
@@ -299,13 +302,13 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
         .lock()
         .expect("sink events lock")
         .iter()
-        .all(|event| !event.is_data()));
+        .all(|event| !event.consumes_data_credit()));
     let cleanup_failures = system_journal
         .read_causally_ordered()
         .await?
         .into_iter()
-        .filter_map(|envelope| match envelope.event.event {
-            SystemEventType::SourceCleanupFailed {
+        .filter_map(|envelope| match envelope.payload {
+            SystemPayload::SourceCleanupFailed {
                 stage_name, error, ..
             } => Some((stage_name, error)),
             _ => None,
@@ -381,6 +384,6 @@ async fn fatal_poll_path_attempts_cleanup_once_without_authoring_data() -> Resul
         .lock()
         .expect("sink events lock")
         .iter()
-        .all(|event| !event.is_data()));
+        .all(|event| !event.consumes_data_credit()));
     Ok(())
 }

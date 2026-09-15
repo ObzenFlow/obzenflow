@@ -11,7 +11,7 @@
 //!
 //! Despite those patches, demos like `payment_gateway_resilience_demo` and
 //! `hn_ai_digest_demo` still intermittently aborted with:
-//! `SystemEventType::ContractStatus { pass: false, reason: Other(\"reader_stalled\") }`.
+//! `SystemPayload::ContractStatus { pass: false, reason: Other(\"reader_stalled\") }`.
 //!
 //! That is fundamentally wrong: a stall is a liveness signal, not a transport
 //! contract violation. Emitting it as `ContractStatus(pass=false)` poisons the
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo};
-use obzenflow_core::event::{ChainEvent, ChainEventContent, SystemEventType};
+use obzenflow_core::event::{ChainEvent, ChainPayload, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
@@ -94,8 +94,8 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         .expect("read contract journal");
     assert!(
         contract_events.iter().any(|env| matches!(
-            &env.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::ReaderStalled { .. })
+            &env.payload,
+            ChainPayload::FlowControl(FlowControlPayload::ReaderStalled { .. })
         )),
         "expected ReaderStalled flow control evidence in contract journal"
     );
@@ -108,8 +108,8 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         .expect("read system journal");
     assert!(
         !system_events.iter().any(|env| matches!(
-            &env.event.event,
-            SystemEventType::ContractStatus { pass: false, .. }
+            &env.payload,
+            SystemPayload::ContractStatus { pass: false, .. }
         )),
         "stall detection must not emit ContractStatus(pass=false) into system journal"
     );

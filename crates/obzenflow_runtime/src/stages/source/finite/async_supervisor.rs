@@ -21,8 +21,9 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType};
+use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -568,7 +569,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                             self.replay_started_at = Some(Instant::now());
                             let started_event = SystemEvent::new(
                                 WriterId::from(self.stage_id),
-                                SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::Started {
+                                SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::Started {
                                     archive_path: replay_archive.archive_path().to_path_buf(),
                                     archive_flow_id: replay_archive.archive_flow_id().to_string(),
                                     archive_status: replay_archive.archive_status(),
@@ -622,7 +623,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            let per_data_event_duration = if event.is_data() {
+                            let per_data_event_duration = if event.consumes_data_credit() {
                                 tick_duration
                             } else {
                                 Duration::from_nanos(0)
@@ -785,7 +786,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                         SourceBoundaryOutcome::Polled(poll) => match poll.result {
                             SourcePollResult::Completed(SourcePollCompletion::Batch(
                                 mut events,
-                            )) if events.iter().any(|event| event.is_data()) => {
+                            )) if events.iter().any(|event| event.consumes_data_credit()) => {
                                 self.idle_backoff.reset();
                                 self.pending_idle_delay = None;
                                 ctx.instrumentation
@@ -886,7 +887,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                     crate::stages::source::supervision::source_error_kind(&error);
                                 let mut events = vec![normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
-                                    "async_finite",
+                                    SourcePollKind::AsyncFinite,
                                     &error,
                                 )];
                                 events.extend(poll.operational_events);

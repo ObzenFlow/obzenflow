@@ -6,7 +6,8 @@
 
 use obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported provenance schema version: {found}")]
 pub(crate) struct UnsupportedManifestVersion {
     found: String,
 }
@@ -50,14 +51,16 @@ mod tests {
         for (value, found) in [
             (serde_json::json!({}), "<missing>"),
             (serde_json::json!({"manifest_version": 3.0}), "3.0"),
+            (serde_json::json!({"manifest_version": "3.0"}), "3.0"),
             (serde_json::json!({"manifest_version": "2.0"}), "2.0"),
-            (serde_json::json!({"manifest_version": "4.0"}), "4.0"),
+            (serde_json::json!({"manifest_version": "5.0"}), "5.0"),
         ] {
+            let error =
+                require_current_manifest_version(&value).expect_err("non-exact version must fail");
+            assert_eq!(error.found(), found);
             assert_eq!(
-                require_current_manifest_version(&value)
-                    .expect_err("non-exact version must fail")
-                    .found(),
-                found
+                error.to_string(),
+                format!("unsupported provenance schema version: {found}")
             );
         }
     }

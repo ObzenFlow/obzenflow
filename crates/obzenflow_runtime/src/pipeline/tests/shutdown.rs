@@ -22,7 +22,7 @@ use crate::stages::common::stage_handle::StageHandle;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::types::ViolationCause;
-use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventFactory};
+use obzenflow_core::event::{SystemEvent, SystemEventFactory};
 use obzenflow_core::SystemId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -194,7 +194,7 @@ pub async fn terminal_publication_retains_its_outcome_while_servicing_graceful_e
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::{
-        PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission, SystemEventType,
+        PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload,
     };
     let system_id = SystemId::new();
     let gate = Arc::new(TerminalAppendGate {
@@ -268,8 +268,8 @@ pub async fn terminal_publication_retains_its_outcome_while_servicing_graceful_e
     let events = journal.read_all_unordered().await.unwrap();
     let facts: Vec<_> = events
         .iter()
-        .filter_map(|row| match &row.event.event {
-            SystemEventType::PipelineLifecycle(event) => Some(event),
+        .filter_map(|row| match &row.payload {
+            SystemPayload::PipelineLifecycle(event) => Some(event),
             _ => None,
         })
         .collect();
@@ -376,7 +376,7 @@ pub async fn supervisor_join_waits_for_terminal_publication_and_propagates_appen
                 .await
                 .unwrap()
                 .iter()
-                .any(|event| event.event.event_type_name() == event_type));
+                .any(|event| event.event_type_name() == event_type));
             gate.release.notify_one();
             let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
                 .await
@@ -392,12 +392,12 @@ pub async fn supervisor_join_waits_for_terminal_publication_and_propagates_appen
             if let Some(retained) = published.get() {
                 assert!(events
                     .iter()
-                    .any(|event| Some(event.event.id) == retained.event_id));
+                    .any(|event| Some(event.envelope.provenance.event.id) == retained.event_id));
             }
             assert_eq!(
                 events
                     .iter()
-                    .filter(|event| event.event.event_type_name() == event_type)
+                    .filter(|event| event.event_type_name() == event_type)
                     .count(),
                 usize::from(!fail)
             );
@@ -489,7 +489,7 @@ pub async fn unexpected_errors_preserve_failed_outcomes_before_and_during_stop(
         let events = journal.read_all_unordered().await.unwrap();
         let terminal: Vec<_> = events
             .iter()
-            .map(|event| event.event.event_type_name())
+            .map(|event| event.event_type_name())
             .filter(|name| {
                 matches!(
                     *name,
@@ -556,11 +556,9 @@ pub async fn pre_execution_teardown_is_explicit_and_failures_stay_selected(
         } else {
             "system.pipeline.not_started"
         };
-        assert!(facts
-            .iter()
-            .any(|fact| fact.event.event_type_name() == terminal));
+        assert!(facts.iter().any(|fact| fact.event_type_name() == terminal));
         assert_eq!(
-            facts.last().unwrap().event.event_type_name(),
+            facts.last().unwrap().event_type_name(),
             "system.pipeline.drained"
         );
     }
@@ -618,13 +616,13 @@ pub async fn cancellation_catches_up_late_producer_failure_before_selecting_term
     let rows = journal.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|row| row.event.event_type_name() == "system.pipeline.failed")
+            .filter(|row| row.event_type_name() == "system.pipeline.failed")
             .count(),
         1
     );
     assert!(!rows
         .iter()
-        .any(|row| row.event.event_type_name() == "system.pipeline.cancelled"));
+        .any(|row| row.event_type_name() == "system.pipeline.cancelled"));
 }
 
 pub async fn final_marker_coalesces_late_controls_without_restarting_finalisation(

@@ -17,11 +17,12 @@
 //! join arm end to end: the error row traverses the join's passthrough path
 //! and every valid row still joins, asserted from the event-sourced journals.
 
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 mod replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -267,9 +268,9 @@ fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> F
     })
 }
 
-fn is_error_row(envelope: &obzenflow_core::event::EventEnvelope<ChainEvent>) -> bool {
+fn is_error_row(envelope: &JournalRecord<ChainPayload>) -> bool {
     matches!(
-        envelope.event.processing_info.status,
+        envelope.envelope.provenance.event.processing.status,
         ProcessingStatus::Error { .. }
     )
 }
@@ -303,14 +304,14 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
     let stream_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "stream_src").await;
     let source_writer = stream_rows
         .iter()
-        .find(|envelope| envelope.event.is_data())
-        .map(|envelope| envelope.event.writer_id)
+        .find(|envelope| envelope.consumes_data_credit())
+        .map(|envelope| envelope.envelope.provenance.event.writer_id)
         .expect("stream source journal must contain data rows");
 
     let validator_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "validator").await;
     let error_rows: Vec<_> = validator_rows
         .iter()
-        .filter(|envelope| envelope.event.is_data() && is_error_row(envelope))
+        .filter(|envelope| envelope.consumes_data_credit() && is_error_row(envelope))
         .collect();
     assert_eq!(
         error_rows.len(),
@@ -318,16 +319,16 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
         "exactly one stream row is rejected by validation"
     );
     assert_eq!(
-        error_rows[0].event.writer_id, source_writer,
+        error_rows[0].envelope.provenance.event.writer_id, source_writer,
         "premise: the error row preserves the original author's writer_id"
     );
     let valid_writer = validator_rows
         .iter()
-        .find(|envelope| envelope.event.is_data() && !is_error_row(envelope))
-        .map(|envelope| envelope.event.writer_id)
+        .find(|envelope| envelope.consumes_data_credit() && !is_error_row(envelope))
+        .map(|envelope| envelope.envelope.provenance.event.writer_id)
         .expect("validator journal must contain re-emitted valid rows");
     assert_ne!(
-        error_rows[0].event.writer_id, valid_writer,
+        error_rows[0].envelope.provenance.event.writer_id, valid_writer,
         "premise: the forwarded error row's author differs from the validator's own writer"
     );
 
@@ -338,7 +339,7 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
     let mut joined_values: Vec<u64> = join_rows
         .iter()
         .filter(|envelope| !is_error_row(envelope))
-        .filter_map(|envelope| JoinedItem::from_event(&envelope.event))
+        .filter_map(|envelope| JoinedItem::from_event(&envelope.authored()))
         .map(|item| item.value)
         .collect();
     joined_values.sort_unstable();
@@ -352,8 +353,8 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
     // stay in the main pipeline as the durable record).
     let forwarded_stream_errors: Vec<_> = join_rows
         .iter()
-        .filter(|envelope| envelope.event.is_data() && is_error_row(envelope))
-        .filter(|envelope| StreamItem::from_event(&envelope.event).is_some())
+        .filter(|envelope| envelope.consumes_data_credit() && is_error_row(envelope))
+        .filter(|envelope| StreamItem::from_event(&envelope.authored()).is_some())
         .collect();
     assert_eq!(
         forwarded_stream_errors.len(),
@@ -361,7 +362,7 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
         "the join forwards the error-marked row downstream"
     );
     assert_eq!(
-        StreamItem::from_event(&forwarded_stream_errors[0].event)
+        StreamItem::from_event(&forwarded_stream_errors[0].authored())
             .expect("forwarded error row keeps its payload")
             .value,
         3,
@@ -370,8 +371,8 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
 
     let forwarded_reference_errors: Vec<_> = join_rows
         .iter()
-        .filter(|envelope| envelope.event.is_data() && is_error_row(envelope))
-        .filter(|envelope| RefItem::from_event(&envelope.event).is_some())
+        .filter(|envelope| envelope.consumes_data_credit() && is_error_row(envelope))
+        .filter(|envelope| RefItem::from_event(&envelope.authored()).is_some())
         .collect();
     assert_eq!(
         forwarded_reference_errors.len(),

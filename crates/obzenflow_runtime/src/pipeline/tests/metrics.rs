@@ -11,16 +11,15 @@ use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 #[cfg(test)]
 use crate::pipeline::metrics::composite_boundaries_from_topology;
 use crate::pipeline::tests::support::{
-    make_context, make_fsm_context, owned_test_stage, source_sink_topology_with_source,
-    test_context, DiscardSnapshots, StartGate, TerminalAppendGate,
+    make_context, make_fsm_context, new_stage_journal, new_system_journal, owned_test_stage,
+    source_sink_topology_with_source, test_context, ControlledJournal, DiscardSnapshots, StartGate,
+    TerminalAppendGate,
 };
-use crate::pipeline::tests::support::{new_stage_journal, new_system_journal, ControlledJournal};
 use crate::pipeline::PipelineState;
 use crate::supervised_base::{ChannelBuilder, SupervisorHandle};
-use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::context::{ExecutionAccounting, StageType};
 use obzenflow_core::event::{
-    ChainEvent, JournalEvent, MetricsCoordinationEvent, SystemEvent, SystemEventFactory,
-    SystemEventType,
+    ChainEvent, MetricsCoordinationEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
@@ -238,13 +237,13 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
     let rows = journal.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
-            .filter(|row| row.event.event_type_name() == "system.metrics.ready")
+            .filter(|row| row.event_type_name() == "system.metrics.ready")
             .count(),
         1
     );
     assert!(!rows
         .iter()
-        .any(|row| row.event.event_type_name() == "system.pipeline.drained"));
+        .any(|row| row.event_type_name() == "system.pipeline.drained"));
 }
 
 pub async fn metrics_preparation_is_passive_and_cancellation_prevents_late_installation(
@@ -346,7 +345,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{context::RuntimeContext, ChainEventFactory};
+    use obzenflow_core::event::{context::RuntimeProvenance, ChainEventFactory};
     let system_id = SystemId::new();
     let mut journals = make_journals();
     let journal: Arc<dyn Journal<SystemEvent>> = new_system_journal(&mut *journals, system_id);
@@ -366,16 +365,18 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
                 serde_json::json!({"n":count}),
             );
             event.flow_context.stage_id = stage;
-            event = event.with_runtime_context(RuntimeContext {
-                events_emitted_total: count,
-                errors_total: if failed { count } else { 0 },
-                errors_by_kind: if failed {
-                    HashMap::from([(ErrorKind::Unknown, count)])
-                } else {
-                    HashMap::new()
+            event = event.with_runtime_provenance(RuntimeProvenance {
+                accounting: ExecutionAccounting {
+                    events_emitted_total: count,
+                    errors_total: if failed { count } else { 0 },
+                    errors_by_kind: if failed {
+                        HashMap::from([(ErrorKind::Unknown, count)])
+                    } else {
+                        HashMap::new()
+                    },
+                    ..Default::default()
                 },
-                ..crate::metrics::instrumentation::StageInstrumentation::new()
-                    .snapshot_with_control()
+                ..Default::default()
             });
             if failed {
                 event = event.mark_as_error("expected", ErrorKind::Unknown);
@@ -456,7 +457,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
         .await
         .unwrap()
         .iter()
-        .any(|row| row.event.event_type_name() == "system.metrics.drained"));
+        .any(|row| row.event_type_name() == "system.metrics.drained"));
 }
 
 pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
@@ -525,8 +526,8 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
         events
             .iter()
             .filter(|envelope| matches!(
-                &envelope.event.event,
-                SystemEventType::MetricsCoordination(MetricsCoordinationEvent::DrainRequested)
+                &envelope.payload,
+                SystemPayload::MetricsCoordination(MetricsCoordinationEvent::DrainRequested)
             ))
             .count(),
         1,
@@ -534,8 +535,8 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
     );
     assert!(!events.iter().any(|envelope| {
         matches!(
-            &envelope.event.event,
-            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Drained)
+            &envelope.payload,
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained)
         )
     }));
     system_journal
@@ -560,8 +561,8 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
     let events = system_journal.read_causally_ordered().await.unwrap();
     assert!(events.iter().any(|envelope| {
         matches!(
-            &envelope.event.event,
-            SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Drained)
+            &envelope.payload,
+            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained)
         )
     }));
 }

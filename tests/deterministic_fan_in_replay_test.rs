@@ -577,7 +577,7 @@ async fn counter_ordered_word(run_dir: &std::path::Path) -> Vec<String> {
     replay_testkit::read_stage_envelopes(run_dir, "counter")
         .await
         .iter()
-        .filter_map(|envelope| OrderedList::from_event(&envelope.event))
+        .filter_map(|envelope| OrderedList::from_event(&envelope.authored()))
         .flat_map(|list| list.items)
         .collect()
 }
@@ -690,14 +690,16 @@ async fn skip_level_fan_in_delivers_causal_ancestors_first() {
     let tap_envelopes = replay_testkit::read_stage_envelopes(&run_dir, "tap").await;
     let tap_parent_of: std::collections::HashMap<_, _> = tap_envelopes
         .iter()
-        .filter(|envelope| envelope.event.is_data())
+        .filter(|envelope| envelope.consumes_data_credit())
         .filter_map(|envelope| {
             envelope
+                .envelope
+                .provenance
                 .event
                 .causality
                 .parent_ids
                 .first()
-                .map(|parent| (envelope.event.id, *parent))
+                .map(|parent| (envelope.envelope.provenance.event.id, *parent))
         })
         .collect();
 

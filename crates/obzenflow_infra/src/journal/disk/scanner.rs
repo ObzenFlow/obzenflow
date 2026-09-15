@@ -32,6 +32,8 @@ pub(crate) enum LineTermination {
 }
 
 /// Classification of a single framed line (I/O-free).
+// Pass the decoded frame inline through classification and disposition.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ParseOutcome<R: JournalEvent> {
     /// A committed-shape record: full body, valid CRC, valid JSON.
     Complete(LogFrame<R>),
@@ -99,6 +101,7 @@ pub(crate) enum ReadPolicy {
 }
 
 /// What a reader should do with a classified frame under its policy.
+#[allow(clippy::large_enum_variant)] // Preserve the scanner's inline frame handoff.
 pub(crate) enum Disposition<R: JournalEvent> {
     /// A committed record to hand to the caller.
     Yield(LogFrame<R>),
@@ -261,23 +264,27 @@ mod tests {
     use crate::journal::disk::log_record::{serialize_record, LogRecord};
     use chrono::Utc;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::{JournalId, StageId, WriterId};
+    use obzenflow_core::event::JournalRecord;
+    use obzenflow_core::{JournalId, JournalWriterId, StageId, WriterId};
     use serde_json::json;
     use std::io::Cursor;
-    use ulid::Ulid;
 
     fn record() -> LogRecord<ChainEvent> {
         let writer_id = WriterId::from(StageId::new());
         let event = ChainEventFactory::data_event(writer_id, "test.event", json!({ "k": "v" }));
-        LogRecord {
-            journal_id: JournalId::new(),
-            event_id: Ulid::new(),
-            writer_id,
-            vector_clock: VectorClock::new(),
-            timestamp: Utc::now(),
+        JournalRecord::commit_event(
             event,
-        }
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(JournalId::new()),
+                vector_clock: VectorClock::new(),
+                timestamp: Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid record")
     }
 
     /// Frame `body` with a correct `<len>:<crc>:` header (no trailing newline).

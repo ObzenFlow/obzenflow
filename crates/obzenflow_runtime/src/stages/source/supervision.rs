@@ -27,14 +27,13 @@ use crate::stages::source::boundary::{
 };
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::SystemPayload;
+
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
-use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -58,29 +57,33 @@ pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
 /// established error-journal representation.
 pub(crate) fn normalise_source_poll_error(
     writer_id: WriterId,
-    source_type: &'static str,
+    source_type: SourcePollKind,
     error: &SourceError,
 ) -> ChainEvent {
-    let kind = source_error_kind(error);
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, SourcePollErrorFact, SourcePollErrorKind,
+    };
+    let error_type = match error {
+        SourceError::Timeout(_) => SourcePollErrorKind::Timeout,
+        SourceError::Transport(_) => SourcePollErrorKind::Transport,
+        SourceError::Deserialization(_) => SourcePollErrorKind::Deserialization,
+        SourceError::Validation(_) => SourcePollErrorKind::Validation,
+        SourceError::Other(_) => SourcePollErrorKind::Other,
+    };
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
-
-    ChainEventFactory::observability_event(
+        .as_millis() as u64;
+    ChainEventFactory::execution_event(
         writer_id,
-        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-            name: "source.poll_error".to_string(),
-            value: json!({
-                "source_type": source_type,
-                "error_type": format!("{error:?}").split('(').next().unwrap_or("unknown"),
-                "message": error.to_string(),
-                "timestamp_ms": timestamp_ms,
-            }),
-            tags: None,
+        ExecutionPayload::SourcePollError(SourcePollErrorFact {
+            source_type,
+            error_type,
+            message: error.to_string(),
+            timestamp_ms,
         }),
     )
-    .mark_as_error(error.to_string(), kind)
+    .mark_as_error(error.to_string(), error_type.processing_error_kind())
 }
 
 /// Record a source adapter/runtime invariant through the common fatal lane.
@@ -116,7 +119,7 @@ pub(crate) async fn record_source_cleanup_failed(
 ) -> Result<(), BoxError> {
     let event = SystemEvent::new(
         WriterId::from(stage_id),
-        obzenflow_core::event::SystemEventType::SourceCleanupFailed {
+        SystemPayload::SourceCleanupFailed {
             stage_id,
             stage_name: stage_name.to_string(),
             error: error.to_string(),
@@ -166,12 +169,12 @@ pub(crate) fn emit_batch_to_pending_outputs(
         let staged_event = event.with_flow_context(stage_flow_context.clone());
 
         // Track error-marked events for lifecycle/flow rollups.
-        if let ProcessingStatus::Error { kind, .. } = &staged_event.processing_info.status {
+        if let ProcessingStatus::Error { kind, .. } = &staged_event.processing.status {
             let k = kind.clone().unwrap_or(ErrorKind::Unknown);
             instrumentation.record_error(k);
         }
 
-        if staged_event.is_data() {
+        if staged_event.consumes_data_credit() {
             instrumentation
                 .events_processed_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -267,7 +270,10 @@ pub(crate) fn stage_source_poll_outputs(
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
     >,
 ) {
-    let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+    let data_events_in_tick = events
+        .iter()
+        .filter(|event| event.consumes_data_credit())
+        .count();
     let per_data_event_duration =
         per_data_event_duration_for_batch(poll_duration, data_events_in_tick);
     emit_batch_to_pending_outputs(
@@ -323,12 +329,12 @@ pub(crate) async fn drain_pending_outputs_sync(
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
-            pending.event.processing_info.status,
+            pending.event.processing.status,
             ProcessingStatus::Error { .. }
         ) {
             let event = pending
                 .event
-                .with_runtime_context(instrumentation.snapshot_with_control());
+                .with_runtime_provenance(instrumentation.snapshot());
             crate::supervised_base::publication::append(error_journal, event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
@@ -386,12 +392,12 @@ where
 
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
-            pending.event.processing_info.status,
+            pending.event.processing.status,
             ProcessingStatus::Error { .. }
         ) {
             let event = pending
                 .event
-                .with_runtime_context(instrumentation.snapshot_with_control());
+                .with_runtime_provenance(instrumentation.snapshot());
             crate::supervised_base::publication::append(error_journal, event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
@@ -468,14 +474,16 @@ where
 mod tests {
     use super::*;
     use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+    use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::id_conversions::StageIdExt;
     use crate::supervised_base::ChannelBuilder;
     use async_trait::async_trait;
+    use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, SourcePollKind};
     use obzenflow_core::event::types::EventId;
-    use obzenflow_core::event::{ChainEventFactory, JournalWriterId, WriterId};
+    use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalWriterId, WriterId};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::{JournalError, JournalReader};
-    use obzenflow_core::{ChainEvent, EventEnvelope, Journal};
+    use obzenflow_core::{ChainEvent, FlowId, Journal, JournalRecord};
     use obzenflow_topology::TopologyBuilder;
     use std::marker::PhantomData;
     use std::num::NonZeroU64;
@@ -490,7 +498,7 @@ mod tests {
     where
         T: obzenflow_core::event::JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
@@ -529,19 +537,19 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
-            Ok(EventEnvelope::new(JournalWriterId::new(), event))
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            Ok(JournalRecord::new(JournalWriterId::new(), event))
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
 
         async fn read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
@@ -555,7 +563,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            _count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
     }
@@ -565,7 +576,7 @@ mod tests {
     // exported. Consolidating these doubles codebase-wide is FLOWIP-114t.
     struct RecordingJournal<T: obzenflow_core::event::JournalEvent> {
         id: JournalId,
-        events: std::sync::Mutex<Vec<EventEnvelope<T>>>,
+        events: std::sync::Mutex<Vec<JournalRecord<T::Payload>>>,
         _phantom: PhantomData<T>,
     }
 
@@ -595,9 +606,9 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
-            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let envelope = JournalRecord::new(JournalWriterId::new(), event);
             self.events
                 .lock()
                 .expect("RecordingJournal: poisoned lock")
@@ -605,7 +616,7 @@ mod tests {
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(self
                 .events
                 .lock()
@@ -616,7 +627,7 @@ mod tests {
         async fn read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
@@ -630,7 +641,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            _count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
     }
@@ -665,21 +679,19 @@ mod tests {
         ];
 
         for (error, expected_kind) in cases {
-            let event = normalise_source_poll_error(writer_id, "async_finite", &error);
+            let event = normalise_source_poll_error(writer_id, SourcePollKind::AsyncFinite, &error);
             assert!(matches!(
-                event.processing_info.status,
+                event.processing.status,
                 ProcessingStatus::Error {
                     kind: Some(ref kind),
                     ..
                 } if *kind == expected_kind
             ));
-            match event.content {
-                obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Metrics(MetricsLifecycle::Custom { name, value, .. }),
-                ) => {
-                    assert_eq!(name, "source.poll_error");
-                    assert_eq!(value["source_type"], "async_finite");
-                    assert_eq!(value["message"], error.to_string());
+            match event.payload {
+                ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
+                    assert_eq!(failure.source_type, SourcePollKind::AsyncFinite);
+                    assert_eq!(failure.error_type.processing_error_kind(), expected_kind);
+                    assert_eq!(failure.message, error.to_string());
                 }
                 other => panic!("expected source.poll_error lifecycle row, got {other:?}"),
             }
@@ -827,11 +839,7 @@ mod tests {
     // credit wait races the external-events channel; when the wait wins (no
     // event delivered), the pulse feeds through the shared append/mirror path.
     #[tokio::test(start_paused = true)]
-    async fn async_source_blocked_wait_flushes_activity_pulse_to_journal() {
-        use obzenflow_core::event::payloads::observability_payload::{
-            BackpressureEvent, ObservabilityPayload,
-        };
-
+    async fn async_source_blocked_wait_offers_activity_pulse_without_journal_rows() {
         if BackpressureWriter::is_bypass_enabled() {
             return;
         }
@@ -857,6 +865,8 @@ mod tests {
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
         let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        instrumentation.bind_observations(FlowId::new(), s.into(), &execution);
         let stage_flow_context = FlowContext {
             flow_name: "flow".to_string(),
             flow_id: "flow_id".to_string(),
@@ -918,17 +928,19 @@ mod tests {
             .read_all_unordered()
             .await
             .expect("read data journal");
-        let has_pulse = appended.iter().any(|envelope| {
-            matches!(
-                &envelope.event.content,
-                obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Backpressure(BackpressureEvent::ActivityPulse { .. })
-                )
-            )
-        });
+        use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
         assert!(
-            has_pulse,
-            "async-source blocked wait must flush a backpressure activity pulse to the journal"
+            appended.is_empty(),
+            "waiting must not append measurement rows"
+        );
+        assert!(
+            execution
+                .observations()
+                .snapshot()
+                .iter()
+                .flat_map(|packet| &packet.records)
+                .any(|record| matches!(record, ObservationRecord::BackpressureActivity { .. })),
+            "blocked wait offers a live backpressure sample"
         );
     }
 }

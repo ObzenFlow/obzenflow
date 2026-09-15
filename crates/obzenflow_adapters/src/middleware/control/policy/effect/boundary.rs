@@ -7,6 +7,7 @@ use super::contract::{EffectAttemptOutcome, PolicyAdmission};
 use crate::middleware::control::EffectResilienceMiddleware;
 use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
 use async_trait::async_trait;
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{
@@ -15,7 +16,7 @@ use obzenflow_runtime::effects::{
     SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant as StdInstant;
 
 /// A per-effect chain, partitioned once at construction so the execution
@@ -50,12 +51,21 @@ impl CompiledEffectChain {
 /// Effect boundary backed by per-effect policy chains, keyed by the declared
 /// effect type. Effects with no declared policies execute unguarded.
 pub struct PerEffectPolicyBoundary {
+    recorder: OnceLock<Arc<dyn ObservationRecorder>>,
     chains: HashMap<&'static str, CompiledEffectChain>,
 }
 
 impl PerEffectPolicyBoundary {
+    fn observation_recorder(&self) -> Arc<dyn ObservationRecorder> {
+        self.recorder
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(NoObservations))
+    }
+
     pub fn new(chains: HashMap<&'static str, Arc<Vec<EffectPolicyAttachment>>>) -> Self {
         Self {
+            recorder: OnceLock::new(),
             chains: chains
                 .into_iter()
                 .map(|(effect_type, chain)| (effect_type, CompiledEffectChain::compile(chain)))
@@ -87,11 +97,15 @@ fn observe_reverse(
 }
 
 pub(in crate::middleware::control) async fn execute_chain_once(
+    recorder: Arc<dyn ObservationRecorder>,
+    effect_type: &str,
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
     operation: &mut RepeatableEffectOperation,
 ) -> EffectBoundaryReport {
-    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+        .with_observation_recorder(recorder)
+        .with_effect_subject(effect_type);
     let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
 
     for policy in chain {
@@ -123,11 +137,15 @@ pub(in crate::middleware::control) async fn execute_chain_once(
 }
 
 async fn execute_single_use_chain_once(
+    recorder: Arc<dyn ObservationRecorder>,
+    effect_type: &str,
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
     operation: SingleUseEffectOperation,
 ) -> SingleUseEffectBoundaryReport {
-    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+        .with_observation_recorder(recorder)
+        .with_effect_subject(effect_type);
     let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
 
     for policy in chain {
@@ -153,11 +171,15 @@ async fn execute_single_use_chain_once(
 }
 
 async fn execute_affine_chain_once(
+    recorder: Arc<dyn ObservationRecorder>,
+    effect_type: &str,
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
     operation: AffineEffectOperation,
 ) -> AffineEffectBoundaryReport {
-    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+        .with_observation_recorder(recorder)
+        .with_effect_subject(effect_type);
     let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
 
     for policy in chain {
@@ -184,6 +206,10 @@ async fn execute_affine_chain_once(
 
 #[async_trait]
 impl EffectBoundary for PerEffectPolicyBoundary {
+    fn install_observation_recorder(&self, recorder: Arc<dyn ObservationRecorder>) {
+        let _ = self.recorder.set(recorder);
+    }
+
     async fn around_repeatable_effect(
         &self,
         identity: &EffectIdentity,
@@ -198,12 +224,21 @@ impl EffectBoundary for PerEffectPolicyBoundary {
                 };
             }
             Some(CompiledEffectChain::Plain(chain)) => {
-                return execute_chain_once(chain, event, &mut operation).await;
+                return execute_chain_once(
+                    self.observation_recorder(),
+                    identity.effect_type,
+                    chain,
+                    event,
+                    &mut operation,
+                )
+                .await;
             }
             Some(CompiledEffectChain::Resilient { outer, resilience }) => (outer, resilience),
         };
 
-        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+            .with_observation_recorder(self.observation_recorder())
+            .with_effect_subject(identity.effect_type);
         let mut admitted_outer: Vec<&EffectPolicyAttachment> = Vec::new();
         for policy in outer {
             match policy.admit(event, &mut ctx).await {
@@ -254,12 +289,21 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         let (outer, resilience) = match self.chains.get(identity.effect_type) {
             None => return operation.execute().await.into_report(Vec::new()),
             Some(CompiledEffectChain::Plain(chain)) => {
-                return execute_single_use_chain_once(chain, event, operation).await;
+                return execute_single_use_chain_once(
+                    self.observation_recorder(),
+                    identity.effect_type,
+                    chain,
+                    event,
+                    operation,
+                )
+                .await;
             }
             Some(CompiledEffectChain::Resilient { outer, resilience }) => (outer, resilience),
         };
 
-        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+            .with_observation_recorder(self.observation_recorder())
+            .with_effect_subject(identity.effect_type);
         let mut admitted_outer: Vec<&EffectPolicyAttachment> = Vec::new();
         for policy in outer {
             match policy.admit(event, &mut ctx).await {
@@ -304,12 +348,21 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         let (outer, resilience) = match self.chains.get(identity.effect_type) {
             None => return operation.execute().await.into_report(Vec::new()),
             Some(CompiledEffectChain::Plain(chain)) => {
-                return execute_affine_chain_once(chain, event, operation).await;
+                return execute_affine_chain_once(
+                    self.observation_recorder(),
+                    identity.effect_type,
+                    chain,
+                    event,
+                    operation,
+                )
+                .await;
             }
             Some(CompiledEffectChain::Resilient { outer, resilience }) => (outer, resilience),
         };
 
-        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+            .with_observation_recorder(self.observation_recorder())
+            .with_effect_subject(identity.effect_type);
         let mut admitted_outer: Vec<&EffectPolicyAttachment> = Vec::new();
         for policy in outer {
             match policy.admit(event, &mut ctx).await {

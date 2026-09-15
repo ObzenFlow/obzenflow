@@ -10,7 +10,7 @@
 mod fixture;
 
 use fixture::{build_flow, ObserverTreatment, Probe, ProbeSnapshot, ORDER_COUNT};
-use obzenflow_core::event::{ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
@@ -42,13 +42,13 @@ fn manifest(run_dir: &Path) -> RunManifest {
     serde_json::from_str(&body).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
 }
 
-async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = manifest(run_dir);
     let stage = manifest
         .stages
         .get(stage_key)
         .unwrap_or_else(|| panic!("manifest contains stage {stage_key:?}"));
-    let journal = DiskJournal::with_owner(
+    let journal = DiskJournal::<ChainEvent>::with_owner(
         run_dir.join(&stage.data_journal_file),
         JournalOwner::stage(StageId::new()),
     )
@@ -63,8 +63,8 @@ async fn delivery_receipts(run_dir: &Path) -> Vec<Value> {
     stage_events(run_dir, "delivered")
         .await
         .into_iter()
-        .filter_map(|envelope| match envelope.event.content {
-            ChainEventContent::Delivery(payload) => {
+        .filter_map(|envelope| match envelope.payload {
+            ChainPayload::Delivery(payload) => {
                 let mut value = serde_json::to_value(payload).expect("serialise delivery receipt");
                 value
                     .as_object_mut()
@@ -82,18 +82,21 @@ async fn effect_facts(run_dir: &Path) -> Vec<Value> {
     let mut facts = Vec::new();
     for stage_key in stage_keys {
         for envelope in stage_events(run_dir, &stage_key).await {
-            if envelope.event.effect_provenance.is_none() {
+            if envelope
+                .envelope
+                .provenance
+                .event
+                .effect_provenance
+                .is_none()
+            {
                 continue;
             }
-            if let ChainEventContent::Data {
-                event_type,
-                payload,
-            } = envelope.event.content
-            {
+            if envelope.consumes_data_credit() {
                 facts.push(json!({
                     "stage": stage_key,
-                    "event_type": event_type,
-                    "payload": payload,
+                    "event_type": envelope.event_type(),
+                    "event_kind": envelope.payload.kind(),
+                    "payload": envelope.payload(),
                 }));
             }
         }

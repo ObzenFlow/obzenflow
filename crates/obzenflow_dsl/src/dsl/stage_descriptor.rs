@@ -2995,7 +2995,7 @@ mod tests {
     use obzenflow_adapters::middleware::CircuitBreaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::{
-        BoundedBindingEvidence, ChainEvent, EventEnvelope, FlowId, StageKey, TypedPayload,
+        BoundedBindingEvidence, ChainEvent, FlowId, JournalRecord, StageKey, TypedPayload,
     };
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
@@ -3952,22 +3952,24 @@ mod tests {
             async fn append(
                 &self,
                 _event: T,
-                _parent: Option<&EventEnvelope<T>>,
-            ) -> Result<EventEnvelope<T>, JournalError> {
+                _parent: Option<&JournalRecord<T::Payload>>,
+            ) -> Result<JournalRecord<T::Payload>, JournalError> {
                 Err(JournalError::Implementation {
                     message: "noop journal".to_string(),
                     source: "noop".into(),
                 })
             }
 
-            async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            async fn read_all_unordered(
+                &self,
+            ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
                 Ok(Vec::new())
             }
 
             async fn read_event(
                 &self,
                 _event_id: &obzenflow_core::EventId,
-            ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
                 Ok(None)
             }
 
@@ -3981,7 +3983,7 @@ mod tests {
             async fn read_last_n(
                 &self,
                 _count: usize,
-            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
                 // NoopJournal never stores events; always return empty.
                 Ok(Vec::new())
             }
@@ -3989,7 +3991,7 @@ mod tests {
 
         #[async_trait]
         impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
-            async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
                 Ok(None)
             }
 

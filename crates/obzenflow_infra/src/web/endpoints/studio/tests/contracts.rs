@@ -12,11 +12,11 @@ use obzenflow_core::event::system_event::{
     SystemFeedRole,
 };
 use obzenflow_core::event::types::{EventType, SeqNo, WriterId};
-use obzenflow_core::event::SystemEventType;
+use obzenflow_core::event::SystemPayload;
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::JournalOwner;
-use obzenflow_core::{event::event_envelope::SystemEventEnvelope, StageId};
+use obzenflow_core::{event::journal_record::SystemJournalRecord, StageId};
 use obzenflow_topology::{
     BoundaryPortSpec, CompositePortRef, DirectedEdge, EdgeKind, PortDirection, StageInfo,
     StageType, Topology, TopologySubgraphInfo,
@@ -82,14 +82,14 @@ fn dual_composite_edge() -> (
     (topology, checkout, audit)
 }
 
-async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemEventEnvelope {
+async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemJournalRecord {
     let system_id = SystemId::new();
     let journal = MemoryJournal::<SystemEvent>::with_owner(JournalOwner::system(system_id));
     journal
         .append(
             SystemEvent::new(
                 WriterId::from(system_id),
-                SystemEventType::ContractResult {
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type: Some(EventType::from("checkout.completed.v1")),
@@ -123,7 +123,7 @@ async fn contract_frame_keeps_one_physical_cursor_and_both_composite_aliases() {
     assert_eq!(frame.event.as_deref(), Some("contract_result"));
     assert_eq!(
         frame.id.as_deref(),
-        Some(envelope.event.id.to_string().as_str())
+        Some(envelope.envelope.provenance.event.id.to_string().as_str())
     );
     let payload = frame_payload(frame);
 
@@ -162,7 +162,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         .append(
             SystemEvent::new(
                 writer,
-                SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Ready),
+                SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Ready),
             ),
             None,
         )
@@ -172,7 +172,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         .append(
             SystemEvent::new(
                 writer,
-                SystemEventType::ContractResult {
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type: Some(EventType::from("checkout.completed.v1")),
@@ -192,7 +192,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         .append(
             SystemEvent::new(
                 writer,
-                SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
             ),
             None,
         )
@@ -206,17 +206,22 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         None,
         receiver,
     );
-    let body = collect_closing(&endpoint, closing, Some(&cursor.event.id.to_string())).await;
+    let body = collect_closing(
+        &endpoint,
+        closing,
+        Some(&cursor.envelope.provenance.event.id.to_string()),
+    )
+    .await;
     let contract_frames = frames(&body, "contract_result");
     assert_eq!(contract_frames.len(), 1);
     let frame = contract_frames[0];
     assert_eq!(
         frame.id.as_deref(),
-        Some(contract.event.id.to_string().as_str())
+        Some(contract.envelope.provenance.event.id.to_string().as_str())
     );
     assert_ne!(
         frame.id.as_deref(),
-        Some(cursor.event.id.to_string().as_str())
+        Some(cursor.envelope.provenance.event.id.to_string().as_str())
     );
     let payload = frame_payload(frame);
     assert_eq!(payload["composite_boundaries"].as_array().unwrap().len(), 2);

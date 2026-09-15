@@ -16,7 +16,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
@@ -75,8 +75,8 @@ pub(super) async fn dispatch_enriching<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
-            let directive = match &envelope.event.content {
-                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+            let directive = match &envelope.payload {
+                ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; the join authors its own at
                     // the flip.
@@ -94,8 +94,8 @@ pub(super) async fn dispatch_enriching<
                         .await);
                     }
 
-                    if envelope.event.is_eof() {
-                        ctx.buffered_eof = Some(envelope.event.clone());
+                    if envelope.is_eof() {
+                        ctx.buffered_eof = Some(envelope.authored());
                         ctx.drain_parent = Some(envelope.clone());
 
                         // FLOWIP-120n F17: an authored EOF can be the delivery
@@ -117,7 +117,7 @@ pub(super) async fn dispatch_enriching<
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
                     // FLOWIP-095k: fold the stream side's terminal kind.
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
                             ctx.terminal_eof_kind = Some(
                                 ctx.terminal_eof_kind
@@ -127,7 +127,7 @@ pub(super) async fn dispatch_enriching<
                     }
                     if let Some(signal_snapshot) = common::signal_snapshot(
                         Some(crate::stages::observer::JoinSide::Stream),
-                        &envelope.event,
+                        &envelope.authored(),
                     ) {
                         common::observe_join_input(
                             ctx,
@@ -136,7 +136,7 @@ pub(super) async fn dispatch_enriching<
                                 None,
                                 subscription.last_delivered_generation(),
                             ),
-                            &envelope.event,
+                            &envelope.authored(),
                             None,
                             Some(&signal_snapshot),
                             Some(&envelope),
@@ -162,7 +162,7 @@ pub(super) async fn dispatch_enriching<
                     match resolution {
                         ControlAction::Forward => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
                             EventLoopDirective::Continue
@@ -170,7 +170,7 @@ pub(super) async fn dispatch_enriching<
                         ControlAction::ForwardAndDrain => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 if last_eof_outcome
                                     .as_ref()
                                     .is_some_and(|outcome| outcome.is_final)
@@ -197,7 +197,7 @@ pub(super) async fn dispatch_enriching<
                         ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Join received cycle-only control resolution without cycle config"
                             );
                             EventLoopDirective::Continue
@@ -205,14 +205,14 @@ pub(super) async fn dispatch_enriching<
                         ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Skipping control event (dangerous!) during Enriching"
                             );
                             EventLoopDirective::Continue
                         }
                     }
                 }
-                obzenflow_core::event::ChainEventContent::Data { .. } => {
+                payload if payload.consumes_data_credit() => {
                     // Edge identity comes from the reader slot that delivered
                     // the envelope, never from `event.writer_id`, which is
                     // preserved across stages for causal attribution.
@@ -220,7 +220,7 @@ pub(super) async fn dispatch_enriching<
                         .last_delivered_upstream_stage()
                         .ok_or("No delivered upstream recorded for stream event")?;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-                    let event = envelope.event.clone();
+                    let event = envelope.authored();
                     let event_id = event.id;
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,
@@ -254,11 +254,11 @@ pub(super) async fn dispatch_enriching<
                     )
                     .await?;
 
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         tracing::info!(
                             stage_name = %ctx.stage_name,
                             event_id = %event.id,
-                            status = ?event.processing_info.status,
+                            status = ?event.processing.status,
                             "Join received pre-error-marked event; forwarding without handler processing"
                         );
                         if let Some(state) = &heartbeat_state {
@@ -296,7 +296,7 @@ pub(super) async fn dispatch_enriching<
 
                     let mut merged_parent = envelope.clone();
                     CausalOrderingService::update_with_parent(
-                        &mut merged_parent.vector_clock,
+                        &mut merged_parent.envelope.provenance.journal.vector_clock,
                         &ctx.reference_high_water_clock,
                     );
 
@@ -379,7 +379,7 @@ pub(super) async fn dispatch_enriching<
                             }
                             let reason = format!("Join handler error during enrichment: {err:?}");
                             let mut error_event =
-                                envelope.event.clone().mark_as_error(reason, err.kind());
+                                envelope.authored().mark_as_error(reason, err.kind());
                             ctx.instrumentation.record_error(err.kind());
                             common::observe_join_outputs(
                                 ctx,
@@ -421,7 +421,7 @@ pub(super) async fn dispatch_enriching<
                 _ => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Join received unexpected event content type during Enriching"
                     );
                     EventLoopDirective::Continue
@@ -498,7 +498,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
-    pending_parent: Option<&EventEnvelope<ChainEvent>>,
+    pending_parent: Option<&JournalRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {

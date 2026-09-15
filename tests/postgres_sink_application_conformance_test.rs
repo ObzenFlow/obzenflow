@@ -31,12 +31,12 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
-    ChainEvent, ChainEventContent, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
-    StageActivity, StageLifecycleEvent, SystemEvent, SystemEventType,
+    ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
+    StageActivity, StageLifecycleEvent, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventEnvelope, StageId, SystemId, TypedPayload};
+use obzenflow_core::{JournalRecord, StageId, SystemId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
@@ -916,7 +916,7 @@ async fn read_stage_journal(
     run: &Path,
     stage: &str,
     field: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = replay_testkit::archive_manifest(run);
     let file = manifest["stages"][stage][field]
         .as_str()
@@ -930,7 +930,7 @@ async fn read_stage_journal(
         .expect("PostgreSQL stage journal reads")
 }
 
-async fn read_system_journal(run: &Path) -> Vec<EventEnvelope<SystemEvent>> {
+async fn read_system_journal(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
     let manifest = replay_testkit::archive_manifest(run);
     let file = manifest["system_journal_file"]
         .as_str()
@@ -957,8 +957,8 @@ async fn assert_operation_failure_lifecycle(
     let operations = errors
         .iter()
         .filter_map(|envelope| {
-            SinkOperationFailed::from_event(&envelope.event)
-                .map(|operation| (envelope.event.id, operation))
+            SinkOperationFailed::from_event(&envelope.authored())
+                .map(|operation| (envelope.envelope.provenance.event.id, operation))
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -981,8 +981,8 @@ async fn assert_operation_failure_lifecycle(
     let system = read_system_journal(run).await;
     let tied_failures = system
         .iter()
-        .filter_map(|envelope| match &envelope.event.event {
-            SystemEventType::StageLifecycle {
+        .filter_map(|envelope| match &envelope.payload {
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event:
                     StageLifecycleEvent::Failed {
@@ -999,8 +999,8 @@ async fn assert_operation_failure_lifecycle(
     );
     assert!(
         !system.iter().any(|envelope| matches!(
-            &envelope.event.event,
-            SystemEventType::StageLifecycle {
+            &envelope.payload,
+            SystemPayload::StageLifecycle {
                 stage_id,
                 event: StageLifecycleEvent::Completed { .. },
             } if *stage_id == operation.stage_id
@@ -1018,7 +1018,9 @@ async fn assert_eof_flush_failure_evidence(
     let source = read_stage_journal(run, "payments", "data_journal_file").await;
     let subject = source
         .iter()
-        .find_map(|envelope| Payment::from_event(&envelope.event).map(|_| envelope.event.id))
+        .find_map(|envelope| {
+            Payment::from_event(&envelope.authored()).map(|_| envelope.envelope.provenance.event.id)
+        })
         .expect("the unresolved PostgreSQL input remains in the source archive");
     let operation = assert_operation_failure_lifecycle(
         run,
@@ -1035,8 +1037,8 @@ async fn assert_eof_flush_failure_evidence(
     let sink_data = read_stage_journal(run, "postgres", "data_journal_file").await;
     let outcomes = sink_data
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Delivery(payload) => Some(&payload.result),
+        .filter_map(|envelope| match &envelope.payload {
+            ChainPayload::Delivery(payload) => Some(&payload.result),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1841,7 +1843,7 @@ async fn postgres_open_failures_traverse_full_application_lifecycle() {
         assert!(
             sink_data
                 .iter()
-                .all(|envelope| !matches!(envelope.event.content, ChainEventContent::Delivery(_))),
+                .all(|envelope| !matches!(envelope.payload, ChainPayload::Delivery(_))),
             "open failure creates no input receipt; case={label}"
         );
         let calls = probe.snapshot();

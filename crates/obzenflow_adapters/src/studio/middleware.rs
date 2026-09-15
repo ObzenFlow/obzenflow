@@ -2,19 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Builds Studio's circuit breaker and rate limiter messages, and keeps their
-//! latest state so a browser can display it without waiting for another change.
+//! Factual revisions and selected measurements are independent Studio updates.
 
-use super::messages::{
-    CircuitBreakerSnapshot, CircuitBreakerUpdate, CircuitSummary, CircuitTotals, CircuitTransition,
-    MiddlewareSnapshot, MiddlewareUpdate, RateLimiterSnapshot, RateLimiterUpdate,
-    RateLimiterWindow, StageMiddlewareSnapshot, StudioMessage,
-};
+use super::messages::*;
 use obzenflow_core::event::{
-    event_envelope::SystemEventEnvelope,
-    payloads::observability_payload::{CircuitBreakerEvent, MiddlewareLifecycle, RateLimiterEvent},
+    journal_record::SystemJournalRecord,
+    observation::{ObservabilityContext, ObservationRecord},
+    payloads::execution_payload::{
+        CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
+    },
     vector_clock::VectorClock,
-    SystemEventType,
+    SystemPayload,
 };
 use obzenflow_core::{web::SseFrame, StageId};
 use std::collections::{BTreeSet, HashMap};
@@ -29,17 +27,31 @@ pub(super) struct MiddlewareView {
     last_vector_clock: Option<VectorClock>,
 }
 
+fn circuit_label(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "closed",
+        CircuitState::Open => "open",
+        CircuitState::HalfOpen => "half_open",
+    }
+}
+fn limiter_label(mode: RateLimiterMode) -> &'static str {
+    match mode {
+        RateLimiterMode::Normal => "normal",
+        RateLimiterMode::Limiting => "limiting",
+    }
+}
+
 impl MiddlewareView {
-    pub(super) fn observe(&mut self, envelope: &SystemEventEnvelope) {
-        self.last_vector_clock = Some(envelope.vector_clock.clone());
-        let SystemEventType::MiddlewareLifecycle {
+    pub(super) fn observe(&mut self, record: &SystemJournalRecord) {
+        self.last_vector_clock = Some(record.envelope.provenance.journal.vector_clock.clone());
+        let SystemPayload::MiddlewareLifecycle {
             stage_id,
             stage_name,
             flow_id,
             flow_name,
             origin,
             middleware,
-        } = &envelope.event.event
+        } = &record.payload
         else {
             return;
         };
@@ -52,83 +64,47 @@ impl MiddlewareView {
         if self.flow_name.is_none() {
             self.flow_name.clone_from(flow_name);
         }
-
         let revision = origin.seq.0;
         match self.message(*stage_id, middleware) {
             Some(MiddlewareUpdate::CircuitBreaker(CircuitBreakerUpdate::StateChange {
                 state_to,
                 ..
             })) => {
-                let entry = self.circuit_breakers.entry(*stage_id).or_insert_with(|| {
-                    CircuitBreakerSnapshot {
-                        state: state_to.into(),
-                        revision,
-                        totals: None,
-                    }
-                });
-                entry.state = state_to.into();
-                entry.revision = revision;
-            }
-            Some(MiddlewareUpdate::CircuitBreaker(CircuitBreakerUpdate::Summary {
-                current_state,
-                summary,
-            })) => {
-                self.circuit_breakers.insert(
-                    *stage_id,
-                    CircuitBreakerSnapshot {
-                        state: current_state,
-                        revision,
-                        totals: Some(summary.totals),
-                    },
-                );
+                let entry = self.circuit_breakers.entry(*stage_id).or_default();
+                if entry.revision.is_none_or(|previous| revision > previous) {
+                    entry.state = Some(state_to.into());
+                    entry.revision = Some(revision);
+                    entry.state_updated_at_ms = Some(record.envelope.provenance.event.timestamp);
+                }
             }
             Some(MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ModeChange {
                 mode_to, ..
             })) => {
                 let mode = mode_to.to_owned();
-                let entry =
-                    self.rate_limiters
-                        .entry(*stage_id)
-                        .or_insert_with(|| RateLimiterSnapshot {
-                            mode: mode.clone(),
-                            revision,
-                            window: None,
-                        });
-                entry.mode = mode;
-                entry.revision = revision;
+                let entry = self.rate_limiters.entry(*stage_id).or_default();
+                if entry.revision.is_none_or(|previous| revision > previous) {
+                    entry.mode = Some(mode);
+                    entry.revision = Some(revision);
+                    entry.state_updated_at_ms = Some(record.envelope.provenance.event.timestamp);
+                }
             }
-            Some(MiddlewareUpdate::RateLimiter(RateLimiterUpdate::WindowUtilization {
-                mode,
-                window,
-            })) => {
-                let mode = mode.to_owned();
-                self.rate_limiters.insert(
-                    *stage_id,
-                    RateLimiterSnapshot {
-                        mode,
-                        revision,
-                        window: Some(window),
-                    },
-                );
-            }
-            Some(MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ActivityPulse { .. })) | None => {
-            }
+            _ => {}
         }
     }
 
     pub(super) fn message<'a>(
         &'a self,
         stage_id: StageId,
-        middleware: &'a MiddlewareLifecycle,
+        middleware: &'a MiddlewareFact,
     ) -> Option<MiddlewareUpdate<'a>> {
         Some(match middleware {
-            MiddlewareLifecycle::CircuitBreaker(event) => {
+            MiddlewareFact::CircuitBreaker(event) => {
                 let state_from = self
                     .circuit_breakers
                     .get(&stage_id)
-                    .map(|snapshot| snapshot.state.as_str());
+                    .and_then(|snapshot| snapshot.state.as_deref());
                 MiddlewareUpdate::CircuitBreaker(match event {
-                    CircuitBreakerEvent::Opened {
+                    CircuitBreakerFact::Opened {
                         error_rate,
                         failure_count,
                         trigger,
@@ -149,7 +125,7 @@ impl MiddlewareView {
                             last_error: last_error.as_deref(),
                         },
                     },
-                    CircuitBreakerEvent::Closed {
+                    CircuitBreakerFact::Closed {
                         success_count,
                         recovery_duration_ms,
                     } => CircuitBreakerUpdate::StateChange {
@@ -160,7 +136,7 @@ impl MiddlewareView {
                             recovery_duration_ms: *recovery_duration_ms,
                         },
                     },
-                    CircuitBreakerEvent::HalfOpen { test_request_count } => {
+                    CircuitBreakerFact::HalfOpen { test_request_count } => {
                         CircuitBreakerUpdate::StateChange {
                             state_from,
                             state_to: "half_open",
@@ -169,82 +145,185 @@ impl MiddlewareView {
                             },
                         }
                     }
-                    CircuitBreakerEvent::Summary {
-                        window_duration_s,
-                        requests_processed,
-                        requests_rejected,
-                        state,
-                        consecutive_failures,
-                        rejection_rate,
-                        successes_total,
-                        failures_total,
-                        opened_total,
-                        time_in_closed_seconds,
-                        time_in_open_seconds,
-                        time_in_half_open_seconds,
-                    } => CircuitBreakerUpdate::Summary {
-                        current_state: normalize_circuit_state(state),
-                        summary: CircuitSummary {
-                            window_duration_s: *window_duration_s,
-                            totals: CircuitTotals {
-                                requests_processed: *requests_processed,
-                                requests_rejected: *requests_rejected,
-                                consecutive_failures: *consecutive_failures,
-                                rejection_rate: *rejection_rate,
-                                successes_total: *successes_total,
-                                failures_total: *failures_total,
-                                opened_total: *opened_total,
-                                time_in_closed_s: *time_in_closed_seconds,
-                                time_in_open_s: *time_in_open_seconds,
-                                time_in_half_open_s: *time_in_half_open_seconds,
-                            },
+                    CircuitBreakerFact::StateChanged {
+                        from_state,
+                        to_state,
+                        timestamp,
+                    } => CircuitBreakerUpdate::StateChange {
+                        state_from: Some(circuit_label(*from_state)),
+                        state_to: circuit_label(*to_state),
+                        context: CircuitTransition::StateChanged {
+                            timestamp: *timestamp,
                         },
                     },
                     _ => return None,
                 })
             }
-            MiddlewareLifecycle::RateLimiter(event) => MiddlewareUpdate::RateLimiter(match event {
-                RateLimiterEvent::ActivityPulse {
+            MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+                mode_from,
+                mode_to,
+                limit_rate,
+            }) => MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ModeChange {
+                mode_from: limiter_label(*mode_from),
+                mode_to: limiter_label(*mode_to),
+                limit_rate: *limit_rate,
+            }),
+            _ => return None,
+        })
+    }
+
+    /// The caller has already selected these families by capture scope, owner,
+    /// kind and subject. No measurement reads or changes a factual revision.
+    pub(super) fn measurements(&mut self, packet: &ObservabilityContext) -> Vec<SseFrame> {
+        let Some(stage_id) = packet.capture.observer.as_stage().copied() else {
+            return Vec::new();
+        };
+        let timestamp_ms = packet.capture.observed_at_ms;
+        let mut updates = Vec::new();
+        if let Some(runtime) = &packet.runtime {
+            if let Some(cb) = &runtime.circuit_breaker {
+                let entry = self.circuit_breakers.entry(stage_id).or_default();
+                let totals = entry.totals.get_or_insert_with(Default::default);
+                totals.successes_total = Some(cb.successes_total);
+                totals.failures_total = Some(cb.failures_total);
+                totals.opened_total = Some(cb.opened_total);
+                totals.time_in_closed_s = Some(cb.time_closed_seconds);
+                totals.time_in_open_s = Some(cb.time_open_seconds);
+                totals.time_in_half_open_s = Some(cb.time_half_open_seconds);
+                entry.totals_observed_at_ms = Some(timestamp_ms);
+                updates.push(MiddlewareUpdate::CircuitBreaker(
+                    CircuitBreakerUpdate::Measurements {
+                        measurements: cb.clone(),
+                    },
+                ));
+            }
+            if let Some(rl) = &runtime.rate_limiter {
+                let entry = self.rate_limiters.entry(stage_id).or_default();
+                if rl.bucket_capacity > 0.0 {
+                    entry
+                        .window
+                        .get_or_insert_with(Default::default)
+                        .utilization_pct =
+                        Some((1.0 - rl.bucket_tokens / rl.bucket_capacity).clamp(0.0, 1.0) * 100.0);
+                    entry.window_observed_at_ms = Some(timestamp_ms);
+                }
+                updates.push(MiddlewareUpdate::RateLimiter(
+                    RateLimiterUpdate::Measurements {
+                        measurements: rl.clone(),
+                    },
+                ));
+            }
+        }
+        for record in &packet.records {
+            match record {
+                ObservationRecord::CircuitBreakerSummary {
+                    effect_type: None,
+                    window_duration_s,
+                    requests_processed,
+                    requests_rejected,
+                    consecutive_failures,
+                    rejection_rate,
+                    successes_total,
+                    failures_total,
+                    opened_total,
+                    time_in_closed_seconds,
+                    time_in_open_seconds,
+                    time_in_half_open_seconds,
+                    ..
+                } => {
+                    let totals = CircuitTotals {
+                        requests_processed: Some(*requests_processed),
+                        requests_rejected: Some(*requests_rejected),
+                        consecutive_failures: Some(*consecutive_failures),
+                        rejection_rate: Some(*rejection_rate),
+                        successes_total: Some(*successes_total),
+                        failures_total: Some(*failures_total),
+                        opened_total: Some(*opened_total),
+                        time_in_closed_s: Some(*time_in_closed_seconds),
+                        time_in_open_s: Some(*time_in_open_seconds),
+                        time_in_half_open_s: Some(*time_in_half_open_seconds),
+                    };
+                    let entry = self.circuit_breakers.entry(stage_id).or_default();
+                    entry.totals = Some(totals.clone());
+                    entry.totals_observed_at_ms = Some(timestamp_ms);
+                    updates.push(MiddlewareUpdate::CircuitBreaker(
+                        CircuitBreakerUpdate::Summary {
+                            summary: CircuitSummary {
+                                window_duration_s: *window_duration_s,
+                                totals,
+                            },
+                        },
+                    ));
+                }
+                ObservationRecord::RateLimiterUtilisation {
+                    effect_type: None,
+                    utilization_percent,
+                    events_in_window,
+                    window_size_ms,
+                } => {
+                    let window = RateLimiterWindow {
+                        utilization_pct: Some(*utilization_percent),
+                        events_in_window: Some(*events_in_window),
+                        window_size_ms: Some(*window_size_ms),
+                    };
+                    let entry = self.rate_limiters.entry(stage_id).or_default();
+                    entry.window = Some(window.clone());
+                    entry.window_observed_at_ms = Some(timestamp_ms);
+                    updates.push(MiddlewareUpdate::RateLimiter(
+                        RateLimiterUpdate::WindowUtilization { window },
+                    ));
+                }
+                ObservationRecord::RateLimiterActivity {
+                    effect_type: None,
                     window_ms,
                     delayed_events,
                     delay_ms_total,
                     delay_ms_max,
                     limit_rate,
-                } => RateLimiterUpdate::ActivityPulse {
-                    window_ms: *window_ms,
-                    delayed_events: *delayed_events,
-                    delay_ms_total: *delay_ms_total,
-                    delay_ms_max: *delay_ms_max,
-                    limit_rate: *limit_rate,
-                },
-                RateLimiterEvent::ModeChange {
-                    mode_from,
-                    mode_to,
-                    limit_rate,
-                } => RateLimiterUpdate::ModeChange {
-                    mode_from,
-                    mode_to,
-                    limit_rate: *limit_rate,
-                },
-                RateLimiterEvent::WindowUtilization {
-                    utilization_percent,
-                    events_in_window,
-                    window_size_ms,
-                } => RateLimiterUpdate::WindowUtilization {
-                    mode: self
-                        .rate_limiters
-                        .get(&stage_id)
-                        .map(|snapshot| snapshot.mode.as_str())
-                        .unwrap_or("normal"),
-                    window: RateLimiterWindow {
-                        utilization_pct: *utilization_percent,
-                        events_in_window: *events_in_window,
-                        window_size_ms: *window_size_ms,
+                } => updates.push(MiddlewareUpdate::RateLimiter(
+                    RateLimiterUpdate::ActivityPulse {
+                        window_ms: *window_ms,
+                        delayed_events: *delayed_events,
+                        delay_ms_total: *delay_ms_total,
+                        delay_ms_max: *delay_ms_max,
+                        limit_rate: *limit_rate,
                     },
-                },
-                _ => return None,
-            }),
-        })
+                )),
+                ObservationRecord::BackpressureActivity {
+                    window_ms,
+                    delayed_events,
+                    delay_ms_total,
+                    delay_ms_max,
+                    min_credit,
+                    limiting_downstream_stage_id,
+                } => updates.push(MiddlewareUpdate::Backpressure(
+                    BackpressureUpdate::ActivityPulse {
+                        window_ms: *window_ms,
+                        delayed_events: *delayed_events,
+                        delay_ms_total: *delay_ms_total,
+                        delay_ms_max: *delay_ms_max,
+                        context: BackpressureContext {
+                            min_credit: *min_credit,
+                            limiting_downstream_stage_id: limiting_downstream_stage_id
+                                .map(|stage| stage.to_string()),
+                        },
+                    },
+                )),
+                _ => {}
+            }
+        }
+        updates
+            .into_iter()
+            .map(|update| {
+                StudioMessage::MiddlewareMeasurements {
+                    stage_id,
+                    update,
+                    timestamp_ms,
+                    capture: packet.capture,
+                }
+                .frame(None)
+            })
+            .collect()
     }
 
     pub(super) fn snapshot_frame(&self, timestamp_ms: u64) -> Option<SseFrame> {
@@ -276,13 +355,5 @@ impl MiddlewareView {
             })
             .frame(None),
         )
-    }
-}
-
-fn normalize_circuit_state(state: &str) -> String {
-    let lower = state.to_ascii_lowercase();
-    match lower.as_str() {
-        "halfopen" | "half_open" | "half-open" => "half_open".to_owned(),
-        _ => lower,
     }
 }

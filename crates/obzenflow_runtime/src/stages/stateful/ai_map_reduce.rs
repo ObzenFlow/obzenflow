@@ -14,8 +14,7 @@
 //! delivery surface includes the internal manifest / wrapper payloads. This is
 //! intentional (FLOWIP-086z-part-2).
 
-use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handler_error::StageFatal;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::stateful::traits::StatefulHandler;
 use crate::stages::common::handlers::{StatefulTerminationKind, TerminalValidation};
 use async_trait::async_trait;
@@ -24,11 +23,9 @@ use obzenflow_core::ai::{
     AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceTaggedPartial,
     ChunkPlanningSummary,
 };
-use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::context::CompositeActivationContext;
-use obzenflow_core::event::ChainEventContent;
-use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, EventId, TypedPayload};
+use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
+use obzenflow_core::{ChainEvent, EventId, TypedFact, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -388,15 +385,13 @@ impl<Partial, Seed, Collected> SeededCollectByInput<Partial, Seed, Collected> {
         state: &mut SeededCollectByInputState<Partial, Seed, Collected>,
         event: ChainEvent,
     ) -> Result<(), HandlerError> {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        else {
+        if !matches!(event.payload, ChainPayload::CompositeData(_)) {
             return Err(Self::protocol_fatal(
-                "ai_map_reduce collector received a non-Data event",
+                "ai_map_reduce collector requires composite protocol data",
             ));
-        };
+        }
+        let event_type = &event.envelope.provenance.event.event_type;
+        let payload = event.payload();
         let activation = self.activation(&event)?;
         let canonical =
             canonical_json_bytes_v1(event_type, &activation, payload.clone()).map_err(|error| {
@@ -672,34 +667,26 @@ where
                 collected,
                 planning: manifest.planning.clone(),
             };
-            ChainEventFactory::derived_data_event(
-                stored_manifest.parent.writer_id,
-                &stored_manifest.parent,
-                AiMapReduceReduceInput::<Seed, Collected>::versioned_event_type(),
-                serde_json::to_value(payload).map_err(|error| {
-                    Self::protocol_fatal(format!(
-                        "ai_map_reduce reduce input encode failed: {error}"
-                    ))
-                })?,
-                self.lineage,
-            )
+            TypedFact::from_payload(payload)
+                .map_err(|error| Self::protocol_fatal(error.to_string()))?
+                .into_derived_event(
+                    stored_manifest.parent.writer_id,
+                    &stored_manifest.parent,
+                    self.lineage,
+                )
         } else {
             let payload = AiMapReduceJobFailed {
                 job_key,
                 chunk_count: manifest.chunk_count,
                 failed_indices,
             };
-            ChainEventFactory::derived_data_event(
-                stored_manifest.parent.writer_id,
-                &stored_manifest.parent,
-                AiMapReduceJobFailed::versioned_event_type(),
-                serde_json::to_value(payload).map_err(|error| {
-                    Self::protocol_fatal(format!(
-                        "ai_map_reduce job failure encode failed: {error}"
-                    ))
-                })?,
-                self.lineage,
-            )
+            TypedFact::from_payload(payload)
+                .map_err(|error| Self::protocol_fatal(error.to_string()))?
+                .into_derived_event(
+                    stored_manifest.parent.writer_id,
+                    &stored_manifest.parent,
+                    self.lineage,
+                )
         };
 
         job.phase = CollectorPhase::HandoffInFlight;
@@ -769,7 +756,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::ai::OversizePolicy;
+
     use obzenflow_core::id::StageId;
     use obzenflow_core::WriterId;
     use serde::{Deserialize, Serialize};
@@ -806,6 +794,8 @@ mod tests {
 
     fn manifest_event(job_key: EventId, chunk_count: usize) -> ChainEvent {
         let manifest = AiMapReducePlanningManifest {
+            oversize_policy: OversizePolicy::Error,
+            exclusions_by_reason: Default::default(),
             job_key,
             chunk_count,
             planning: ChunkPlanningSummary {
@@ -817,12 +807,7 @@ mod tests {
             seed_event_type: "seed.event".to_string(),
         };
 
-        ChainEventFactory::data_event_from(
-            writer_id(),
-            AiMapReducePlanningManifest::versioned_event_type(),
-            &manifest,
-        )
-        .expect("manifest serialization should succeed")
+        manifest.to_event(writer_id())
     }
 
     fn tagged_partial_event(
@@ -838,12 +823,7 @@ mod tests {
             partial: serde_json::to_value(partial).expect("partial serialization should succeed"),
         };
 
-        ChainEventFactory::data_event_from(
-            writer_id(),
-            AiMapReduceTaggedPartial::<serde_json::Value>::versioned_event_type(),
-            &tagged,
-        )
-        .expect("tagged partial serialization should succeed")
+        tagged.to_event(writer_id())
     }
 
     fn chunk_failed_event(
@@ -863,12 +843,7 @@ mod tests {
             },
         };
 
-        ChainEventFactory::data_event_from(
-            writer_id(),
-            AiMapReduceChunkFailed::versioned_event_type(),
-            &failed,
-        )
-        .expect("chunk_failed serialization should succeed")
+        failed.to_event(writer_id())
     }
 
     fn activated(event: ChainEvent, job_key: EventId) -> ChainEvent {

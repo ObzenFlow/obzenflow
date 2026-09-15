@@ -11,7 +11,7 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
@@ -333,7 +333,7 @@ fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     .expect("manifest parses")
 }
 
-async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name]["data_journal_file"]
         .as_str()
@@ -361,26 +361,26 @@ fn stage_writer(run_dir: &Path, stage_name: &str) -> WriterId {
     WriterId::from(stage_id)
 }
 
-fn transport_signature(run_dir: &Path, events: &[EventEnvelope<ChainEvent>]) -> Vec<String> {
+fn transport_signature(run_dir: &Path, events: &[JournalRecord<ChainPayload>]) -> Vec<String> {
     let reference_writer = stage_writer(run_dir, "reference_validate");
     let stream_writer = stage_writer(run_dir, "stream_validate");
     let join_writer = stage_writer(run_dir, "joined");
     events
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => {
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
                 let status = if matches!(
-                    envelope.event.processing_info.status,
+                    envelope.envelope.provenance.event.processing.status,
                     ProcessingStatus::Error { .. }
                 ) {
                     "error"
                 } else {
                     "success"
                 };
-                Some(format!("data:{}:{status}", envelope.event.event_type()))
+                Some(format!("data:{}:{status}", envelope.event_type()))
             }
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
-                let writer = writer_id.unwrap_or(envelope.event.writer_id);
+            ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
+                let writer = writer_id.unwrap_or(envelope.envelope.provenance.event.writer_id);
                 let role = if writer == reference_writer {
                     "reference"
                 } else if writer == stream_writer {
@@ -397,28 +397,28 @@ fn transport_signature(run_dir: &Path, events: &[EventEnvelope<ChainEvent>]) -> 
         .collect()
 }
 
-fn facts(events: &[EventEnvelope<ChainEvent>]) -> Vec<JoinedFact> {
+fn facts(events: &[JournalRecord<ChainPayload>]) -> Vec<JoinedFact> {
     events
         .iter()
-        .filter_map(|envelope| JoinedFact::from_event(&envelope.event))
+        .filter_map(|envelope| JoinedFact::from_event(&envelope.authored()))
         .collect()
 }
 
-fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>]) {
+fn assert_journal_contract(run_dir: &Path, events: &[JournalRecord<ChainPayload>]) {
     let manifest = archive_manifest(run_dir);
     let join_writer = stage_writer(run_dir, "joined");
     let mut finals = 0;
     let mut progress_paths = std::collections::HashSet::new();
     for envelope in events {
-        if envelope.event.writer_id != join_writer {
+        if envelope.envelope.provenance.event.writer_id != join_writer {
             continue;
         }
-        let (is_contract, reader_path) = match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+        let (is_contract, reader_path) = match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
                 reader_path,
                 ..
             }) => (true, Some(reader_path.0.clone())),
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => {
                 finals += 1;
                 (true, None)
             }
@@ -430,7 +430,7 @@ fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>])
         if let Some(path) = reader_path {
             progress_paths.insert(path);
         }
-        let context = &envelope.event.flow_context;
+        let context = &envelope.envelope.provenance.event.flow_context;
         assert_eq!(context.stage_name, "joined");
         assert_eq!(WriterId::from(context.stage_id), join_writer);
         assert_eq!(
@@ -487,24 +487,26 @@ fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>])
     let writer = stage_writer(run_dir, "joined");
     let authored = events
         .iter()
-        .filter(|envelope| JoinedFact::from_event(&envelope.event).is_some())
+        .filter(|envelope| JoinedFact::from_event(&envelope.authored()).is_some())
         .collect::<Vec<_>>();
     assert!(authored.iter().all(|envelope| {
-        envelope.event.writer_id == writer
-            && envelope.event.event_type() == JoinedFact::versioned_event_type()
+        envelope.envelope.provenance.event.writer_id == writer
+            && envelope.event_type() == JoinedFact::versioned_event_type()
     }));
 
     let local_eof = events
         .iter()
         .rev()
-        .find(|envelope| envelope.event.writer_id == writer && envelope.event.is_eof())
+        .find(|envelope| {
+            envelope.envelope.provenance.event.writer_id == writer && envelope.is_eof()
+        })
         .expect("join-authored EOF");
-    let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_seq,
         writer_seq_by_event_type,
         last_event_id,
         ..
-    }) = &local_eof.event.content
+    }) = &local_eof.payload
     else {
         unreachable!("local EOF shape")
     };
@@ -518,7 +520,9 @@ fn assert_journal_contract(run_dir: &Path, events: &[EventEnvelope<ChainEvent>])
     assert_eq!(writer_seq.map(|seq| seq.0), Some(5));
     assert_eq!(
         *last_event_id,
-        authored.last().map(|envelope| envelope.event.id),
+        authored
+            .last()
+            .map(|envelope| envelope.envelope.provenance.event.id),
         "the terminal points at the last locally authored fact, not a forwarded row"
     );
 }
@@ -559,35 +563,45 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
     let foreign = validator_rows
         .iter()
         .find(|envelope| {
-            envelope.event.is_data()
+            envelope.consumes_data_credit()
                 && matches!(
-                    envelope.event.processing_info.status,
+                    envelope.envelope.provenance.event.processing.status,
                     ProcessingStatus::Error { .. }
                 )
         })
         .expect("validator foreign-family error row");
     let forwarded = live_join
         .iter()
-        .find(|envelope| envelope.event.id == foreign.event.id)
+        .find(|envelope| {
+            envelope.envelope.provenance.event.id == foreign.envelope.provenance.event.id
+        })
         .expect("join forwards the same error envelope");
-    assert_eq!(forwarded.event.writer_id, foreign.event.writer_id);
-    assert_eq!(forwarded.event.event_type(), foreign.event.event_type());
+    assert_eq!(
+        forwarded.envelope.provenance.event.writer_id,
+        foreign.envelope.provenance.event.writer_id
+    );
+    assert_eq!(forwarded.event_type(), foreign.event_type());
 
     let validator_authored = validator_rows
         .iter()
-        .filter(|envelope| envelope.event.writer_id == validator_writer && envelope.event.is_data())
+        .filter(|envelope| {
+            envelope.envelope.provenance.event.writer_id == validator_writer
+                && envelope.consumes_data_credit()
+        })
         .collect::<Vec<_>>();
     assert_eq!(validator_authored.len(), 2);
     let validator_eof = validator_rows
         .iter()
-        .find(|envelope| envelope.event.writer_id == validator_writer && envelope.event.is_eof())
+        .find(|envelope| {
+            envelope.envelope.provenance.event.writer_id == validator_writer && envelope.is_eof()
+        })
         .expect("validator-authored EOF");
-    let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_seq,
         writer_seq_by_event_type,
         last_event_id,
         ..
-    }) = &validator_eof.event.content
+    }) = &validator_eof.payload
     else {
         unreachable!("validator EOF shape")
     };
@@ -600,7 +614,9 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
     );
     assert_eq!(
         *last_event_id,
-        validator_authored.last().map(|envelope| envelope.event.id)
+        validator_authored
+            .last()
+            .map(|envelope| envelope.envelope.provenance.event.id)
     );
 
     let replay_reference_reads = Arc::new(AtomicUsize::new(0));

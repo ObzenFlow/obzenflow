@@ -184,7 +184,7 @@ pub fn tally_journal(
             Some(ProjectedRow::Positional(row)) => {
                 out.positional += 1;
                 let key = match &row.kind {
-                    RowKind::Data { event_type } => event_type.clone(),
+                    RowKind::Payload { event_type, .. } => event_type.clone(),
                     RowKind::Watermark => "<watermark>".to_string(),
                 };
                 *out.counts_by_type.entry(key).or_insert(0) += 1;

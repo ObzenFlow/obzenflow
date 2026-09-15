@@ -104,6 +104,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         let instrumentation = self
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        instrumentation.bind_observations(
+            self.resources.flow_id,
+            WriterId::from(self.config.stage_id),
+            &self.resources.runtime_execution,
+        );
 
         let cycle_guard_config = self.config.cycle_guard.clone();
         let publications = crate::supervised_base::publication::PublicationScope::new();
@@ -123,7 +128,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                 spawn_heartbeat(
                     self.config.stage_id,
                     self.config.stage_name.clone(),
-                    self.resources.system_journal.clone(),
+                    instrumentation.clone(),
                     self.resources.liveness_snapshots.clone(),
                     heartbeat_state,
                     heartbeat_config,
@@ -137,6 +142,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         // build-resolved lineage policy before the handler is boxed away.
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
+        handler.install_observation_recorder(instrumentation.observation_recorder());
         handler.install_writer_id(WriterId::from(self.config.stage_id));
         let context = TransformContext {
             handler,

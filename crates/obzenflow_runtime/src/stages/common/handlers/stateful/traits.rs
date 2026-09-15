@@ -8,17 +8,18 @@
 
 use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
-use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handler_error::StageFatal;
+use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
+use obzenflow_core::event::observation::ObservationRecorder;
 use obzenflow_core::event::schema::{TypedFact, TypedPayload};
-use obzenflow_core::{ChainEvent, EventEnvelope, OneFactStageOutput, WriterId};
+use obzenflow_core::event::ChainPayload;
+use obzenflow_core::{ChainEvent, JournalRecord, OneFactStageOutput, WriterId};
 use std::{fmt, sync::Arc, time::Duration};
 
 #[derive(Clone, Copy)]
 pub struct StatefulOutputContext<'a> {
     pub writer_id: WriterId,
-    pub parent: &'a EventEnvelope<ChainEvent>,
+    pub parent: &'a JournalRecord<ChainPayload>,
     pub recorded_flow_id: &'a str,
     pub stage_key: &'a str,
     pub input_seq: StageInputPosition,
@@ -61,6 +62,7 @@ pub trait StatefulHandler: Send + Sync {
 
     /// Installed once by the runtime before the handler is shared.
     fn install_writer_id(&mut self, _writer_id: WriterId) {}
+    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
 
     /// Accumulate an event into the state (called in Accumulating state)
     ///
@@ -158,6 +160,7 @@ pub trait UnifiedStatefulHandler: Send + Sync {
 
     /// Installed once by the runtime before the handler is shared.
     fn install_writer_id(&mut self, _writer_id: WriterId) {}
+    fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
 
     /// Accumulate one event. `scope` is the per-event middleware execution
     /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
@@ -233,6 +236,10 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
         StatefulHandler::install_lineage_policy(self, policy)
+    }
+
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
+        StatefulHandler::install_observation_recorder(self, recorder);
     }
 
     fn install_writer_id(&mut self, writer_id: WriterId) {
@@ -488,6 +495,10 @@ impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
 where
     H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
+        self.effect_boundary.install_observation_recorder(recorder);
+    }
+
     type State = H::State;
 
     async fn accumulate(
@@ -619,7 +630,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ChainEventContent;
+
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug)]
@@ -689,10 +700,8 @@ mod tests {
             decode_effectful_stateful_fact(&event).expect("scalar fact decodes");
 
         assert_eq!(fact, FirstOutput { value: 1 });
-        assert!(matches!(
-            &event.content,
-            ChainEventContent::Data { event_type, .. } if event_type == "stateful.first.v1"
-        ));
+        assert!(event.is_fact());
+        assert_eq!(event.event_type(), "stateful.first.v1");
     }
 
     #[test]

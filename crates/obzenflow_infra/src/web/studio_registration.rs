@@ -189,7 +189,7 @@ async fn deregister(client: &dyn HttpClient, ctx: &HeartbeatContext) {
 mod tests {
     use super::*;
     use crate::journal::MemoryJournal;
-    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemPayload, WriterId};
     use obzenflow_core::id::SystemId;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::JournalOwner;
@@ -265,7 +265,7 @@ mod tests {
     ) {
         journal
             .append(
-                SystemEvent::new(writer_id, SystemEventType::PipelineLifecycle(event)),
+                SystemEvent::new(writer_id, SystemPayload::PipelineLifecycle(event)),
                 None,
             )
             .await

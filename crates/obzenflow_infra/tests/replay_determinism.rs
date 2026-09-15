@@ -8,7 +8,7 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::SystemEvent;
-use obzenflow_core::event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::Ulid;
@@ -32,11 +32,11 @@ use serde_json::json;
 /// Helper: create a FlowControl EOF event with advertised writer_seq.
 fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
     let mut eof = ChainEventFactory::eof_event(writer, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         ref mut writer_id,
         ref mut writer_seq,
         ..
-    }) = eof.content
+    }) = eof.payload
     {
         *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));
@@ -71,13 +71,7 @@ impl SimpleStateful for CountingHandler {
     }
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        if matches!(
-            event.content,
-            ChainEventContent::Data {
-                event_type: _,
-                payload: _
-            }
-        ) {
+        if event.consumes_data_credit() {
             *state += 1;
         }
     }
@@ -109,11 +103,11 @@ async fn run_stateful_fold_once(
         .expect("read upstream journal");
 
     for envelope in events {
-        match envelope.event.content {
-            ChainEventContent::Data { .. } => {
-                handler.accumulate(&mut state, envelope.event.clone());
+        match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                handler.accumulate(&mut state, envelope.authored().clone());
             }
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {
                 break;
             }
             _ => {}
@@ -138,7 +132,7 @@ async fn run_order_sensitive_fold_once(
 
     let mut seen = Vec::new();
     for envelope in events {
-        if let ChainEventContent::Data { payload, .. } = &envelope.event.content {
+        if let ChainPayload::Fact(payload) = &envelope.payload {
             if let Some(seq) = payload.get("seq").and_then(|v| v.as_u64()) {
                 seen.push(seq);
             }
@@ -361,13 +355,7 @@ impl StatefulHandler for SupervisorCountingHandler {
     type State = u64;
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        if matches!(
-            event.content,
-            ChainEventContent::Data {
-                event_type: _,
-                payload: _
-            }
-        ) {
+        if event.consumes_data_credit() {
             *state += 1;
         }
     }
@@ -516,8 +504,8 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
         .expect("read stateful journal");
     events
         .iter()
-        .filter(|env| env.event.event_type() == "test.stateful.count.supervisor")
-        .map(|env| env.event.payload().clone())
+        .filter(|env| env.event_type() == "test.stateful.count.supervisor")
+        .map(|env| env.payload().clone())
         .collect()
 }
 
@@ -736,7 +724,7 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
 
     let joined_env = events
         .iter()
-        .find(|env| JoinedRow::from_event(&env.event).is_some())
+        .find(|env| JoinedRow::from_event(&env.authored()).is_some())
         .expect("expected at least one joined output event");
 
     // FLOWIP-071h: join outputs must carry ancestry from both the matched reference state
@@ -744,19 +732,29 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     let reference_key = WriterId::from(reference_stage).to_string();
     let stream_key = WriterId::from(stream_stage).to_string();
     assert_ne!(
-        joined_env.vector_clock.get(&reference_key),
+        joined_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&reference_key),
         0,
         "joined output vector clock must include reference writer ancestry"
     );
     assert_ne!(
-        joined_env.vector_clock.get(&stream_key),
+        joined_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&stream_key),
         0,
         "joined output vector clock must include stream writer ancestry"
     );
 
     events
         .iter()
-        .filter_map(|env| JoinedRow::from_event(&env.event))
+        .filter_map(|env| JoinedRow::from_event(&env.authored()))
         .collect()
 }
 

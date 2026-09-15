@@ -23,12 +23,14 @@ use crate::stages::transform::fsm::{
 use crate::stages::transform::TryMapTyped;
 use crate::supervised_base::HandlerSupervised;
 use async_trait::async_trait;
-use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{
-    ChainEventFactory, StageFatalCode, StageFatalReason, StageFatalRecorded, SystemEvent,
+    ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason, StageFatalRecorded,
+    SystemEvent,
 };
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -188,7 +190,7 @@ struct TestJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
     seq: AtomicU64,
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
 }
 
 impl<T: JournalEvent> TestJournal<T> {
@@ -207,7 +209,7 @@ impl<T: JournalEvent> TestJournal<T> {
 }
 
 struct TestJournalReader<T: JournalEvent> {
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     pos: usize,
 }
 
@@ -224,24 +226,32 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
-        let mut env = EventEnvelope::new(JournalWriterId::from(self.id), event);
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
 
         if let Some(parent) = parent {
-            CausalOrderingService::update_with_parent(&mut env.vector_clock, &parent.vector_clock);
+            CausalOrderingService::update_with_parent(
+                &mut env.envelope.provenance.journal.vector_clock,
+                &parent.envelope.provenance.journal.vector_clock,
+            );
         }
 
-        let writer_key = env.event.writer_id().to_string();
+        let writer_key = env.writer_id().to_string();
         let seq = self.next_seq();
-        env.vector_clock.clocks.insert(writer_key, seq);
+        env.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(writer_key, seq);
 
         let mut guard = self.events.lock().unwrap();
         guard.push(env.clone());
         Ok(env)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
@@ -249,7 +259,7 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
@@ -260,7 +270,10 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         }))
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         let len = guard.len();
         let start = len.saturating_sub(count);
@@ -270,7 +283,7 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
 
 #[async_trait]
 impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         if self.pos >= guard.len() {
             Ok(None)
@@ -357,9 +370,9 @@ fn generated_continuation(
         "test.generated.non_quiescent",
         json!({}),
     );
-    let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+    let envelope = JournalRecord::new(JournalWriterId::new(), event);
     let admission = DirectFactAdmission::new(
-        envelope.event.event_type().into(),
+        envelope.event_type().into(),
         NonZeroU64::new(3).expect("non-zero generated bound"),
     );
     let release = Arc::new(tokio::sync::Notify::new());
@@ -562,7 +575,7 @@ fn assert_forwarded_control(
         event.flow_context.stage_type,
         obzenflow_core::event::context::StageType::Transform
     );
-    assert!(event.runtime_context.is_none());
+    assert!(event.runtime.is_none());
 }
 
 #[tokio::test]
@@ -585,7 +598,7 @@ async fn forwarding_uses_stage_name_in_running_and_draining_without_reauthoring(
                 s,
                 StageType::FiniteSource,
             ))
-            .with_runtime_context(
+            .with_runtime_provenance(
                 crate::metrics::instrumentation::StageInstrumentation::new().snapshot(),
             );
         upstream.append(original.clone(), None).await.unwrap();
@@ -593,12 +606,12 @@ async fn forwarding_uses_stage_name_in_running_and_draining_without_reauthoring(
         let rows = data.read_causally_ordered().await.unwrap();
         let forwarded = rows
             .iter()
-            .find(|env| env.event.id == original.id)
+            .find(|env| env.envelope.provenance.event.id == original.id)
             .expect("forwarded watermark");
-        assert_forwarded_control(&forwarded.event, &original, t, &ctx.stage_name);
+        assert_forwarded_control(&forwarded.authored(), &original, t, &ctx.stage_name);
         let source_rows = upstream.read_causally_ordered().await.unwrap();
         assert_eq!(
-            serde_json::to_value(&source_rows[0].event).unwrap(),
+            serde_json::to_value(source_rows[0].authored()).unwrap(),
             serde_json::to_value(&original).unwrap()
         );
     }
@@ -622,19 +635,19 @@ async fn forwarding_fan_out_keeps_independent_local_contexts() {
     let left_rows = left_data.read_causally_ordered().await.unwrap();
     let right_rows = right_data.read_causally_ordered().await.unwrap();
     assert_forwarded_control(
-        &left_rows.last().unwrap().event,
+        &left_rows.last().unwrap().authored(),
         &original,
         t,
         &left_ctx.stage_name,
     );
     assert_forwarded_control(
-        &right_rows.last().unwrap().event,
+        &right_rows.last().unwrap().authored(),
         &original,
         right_id,
         &right_ctx.stage_name,
     );
     assert_eq!(
-        serde_json::to_value(&envelope.event).unwrap(),
+        serde_json::to_value(envelope.authored()).unwrap(),
         serde_json::to_value(&original).unwrap()
     );
 }
@@ -675,7 +688,7 @@ async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
         .expect("read outputs");
     let outputs_written = events
         .iter()
-        .filter(|env| env.event.is_data() && env.event.event_type() == "bp_test.expand_out")
+        .filter(|env| env.consumes_data_credit() && env.event_type() == "bp_test.expand_out")
         .count();
     assert_eq!(outputs_written, 1);
     assert_eq!(ctx.pending_outputs.len(), 1);
@@ -698,7 +711,7 @@ async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
         .expect("read outputs");
     let outputs_written = events
         .iter()
-        .filter(|env| env.event.is_data() && env.event.event_type() == "bp_test.expand_out")
+        .filter(|env| env.consumes_data_credit() && env.event_type() == "bp_test.expand_out")
         .count();
     assert_eq!(outputs_written, 2);
     assert!(ctx.pending_outputs.is_empty());
@@ -794,17 +807,23 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
             .await
             .expect("read typed try-map error journal")
             .into_iter()
-            .filter(|envelope| envelope.event.is_data())
+            .filter(|envelope| envelope.consumes_data_credit())
             .collect::<Vec<_>>();
         assert_eq!(errors.len(), 1, "one terminal error parent is journalled");
-        assert_eq!(errors[0].event.id, original.event.id);
-        assert_eq!(errors[0].event.writer_id, original.event.writer_id);
         assert_eq!(
-            serde_json::to_value(&errors[0].event.flow_context).unwrap(),
-            serde_json::to_value(&original.event.flow_context).unwrap()
+            errors[0].envelope.provenance.event.id,
+            original.envelope.provenance.event.id
+        );
+        assert_eq!(
+            errors[0].envelope.provenance.event.writer_id,
+            original.envelope.provenance.event.writer_id
+        );
+        assert_eq!(
+            serde_json::to_value(&errors[0].envelope.provenance.event.flow_context).unwrap(),
+            serde_json::to_value(&original.envelope.provenance.event.flow_context).unwrap()
         );
         assert!(matches!(
-            &errors[0].event.processing_info.status,
+            &errors[0].envelope.provenance.event.processing.status,
             obzenflow_core::event::status::processing_status::ProcessingStatus::Error {
                 kind: Some(obzenflow_core::event::status::processing_status::ErrorKind::Unknown),
                 message,
@@ -818,7 +837,7 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
                 .await
                 .expect("read typed try-map data journal")
                 .iter()
-                .all(|envelope| !envelope.event.is_data()),
+                .all(|envelope| !envelope.consumes_data_credit()),
             "a failed conversion authors no data fact"
         );
         assert_eq!(
@@ -898,7 +917,7 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
             .expect("read binding-fatal error journal");
         let fatals = error_events
             .iter()
-            .filter_map(|envelope| StageFatalRecorded::try_from_event(&envelope.event).ok())
+            .filter_map(|envelope| StageFatalRecorded::try_from_event(&envelope.authored()).ok())
             .collect::<Vec<_>>();
         assert_eq!(fatals.len(), 1, "draining={draining}");
         assert_eq!(fatals[0].code, StageFatalCode::Configuration);
@@ -1231,30 +1250,25 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
         .expect("read data journal");
     let stalled = events
         .iter()
-        .find_map(|envelope| {
-            use obzenflow_core::event::payloads::observability_payload::{
-                BackpressureEvent, ObservabilityPayload,
-            };
-            match &envelope.event.content {
-                obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Backpressure(BackpressureEvent::Stalled {
-                        upstream,
-                        downstream,
-                        window,
-                        stall_timeout_ms,
-                        elapsed_ms,
-                        in_flight,
-                    }),
-                ) => Some((
-                    *upstream,
-                    *downstream,
-                    *window,
-                    *stall_timeout_ms,
-                    *elapsed_ms,
-                    *in_flight,
-                )),
-                _ => None,
-            }
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::Execution(ExecutionPayload::Backpressure(
+                BackpressureFact::Stalled {
+                    upstream,
+                    downstream,
+                    window,
+                    stall_timeout_ms,
+                    elapsed_ms,
+                    in_flight,
+                },
+            )) => Some((
+                *upstream,
+                *downstream,
+                *window,
+                *stall_timeout_ms,
+                *elapsed_ms,
+                *in_flight,
+            )),
+            _ => None,
         })
         .expect("backpressure.stalled fact authored");
     assert_eq!(stalled.0, t);
@@ -1269,8 +1283,8 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
 
     let poison_eof = events
         .iter()
-        .find_map(|envelope| match &envelope.event.content {
-            obzenflow_core::event::ChainEventContent::FlowControl(
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(
                 obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
                     kind,
                     writer_id,
@@ -1311,7 +1325,7 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         .buffered_terminal_envelope
         .as_ref()
         .unwrap()
-        .event
+        .authored()
         .clone();
     assert!(ctx.external_eofs_received.contains(&s));
 
@@ -1321,7 +1335,7 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         .await
         .expect("read data journal")
         .into_iter()
-        .any(|env| env.event.is_eof());
+        .any(|env| env.is_eof());
     assert!(
         !forwarded,
         "expected EOF not to be forwarded while in-flight"
@@ -1344,14 +1358,14 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         .await
         .expect("read data journal")
         .into_iter()
-        .any(|env| env.event.is_eof());
+        .any(|env| env.is_eof());
     assert!(forwarded, "expected EOF to be forwarded after quiescence");
     let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
     let forwarded = rows
         .iter()
-        .find(|env| env.event.id == original.id)
+        .find(|env| env.envelope.provenance.event.id == original.id)
         .expect("released terminal");
-    assert_forwarded_control(&forwarded.event, &original, t, &ctx.stage_name);
+    assert_forwarded_control(&forwarded.authored(), &original, t, &ctx.stage_name);
 }
 
 #[tokio::test]
@@ -1382,7 +1396,7 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         .buffered_terminal_envelope
         .as_ref()
         .unwrap()
-        .event
+        .authored()
         .clone();
     assert!(ctx.drain_received);
 
@@ -1394,8 +1408,8 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         .into_iter()
         .any(|env| {
             matches!(
-                env.event.content,
-                obzenflow_core::event::ChainEventContent::FlowControl(
+                env.payload,
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Drain
                 )
             )
@@ -1424,8 +1438,8 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         .into_iter()
         .any(|env| {
             matches!(
-                env.event.content,
-                obzenflow_core::event::ChainEventContent::FlowControl(
+                env.payload,
+                ChainPayload::FlowControl(
                     obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Drain
                 )
             )
@@ -1434,9 +1448,9 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
     let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
     let forwarded = rows
         .iter()
-        .find(|env| env.event.id == original.id)
+        .find(|env| env.envelope.provenance.event.id == original.id)
         .expect("released terminal");
-    assert_forwarded_control(&forwarded.event, &original, t, &ctx.stage_name);
+    assert_forwarded_control(&forwarded.authored(), &original, t, &ctx.stage_name);
 }
 
 #[tokio::test]

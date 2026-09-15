@@ -15,6 +15,7 @@ use super::{
     PipelineState,
 };
 use crate::journal::RunSubstrateState;
+use crate::metrics::observations::ObservationHub;
 use crate::{
     backpressure::BackpressureRegistry,
     feed_plan::{FeedKey, FeedPlan},
@@ -23,12 +24,12 @@ use crate::{
     stages::LivenessSnapshots,
     supervised_base::{BuilderError, ChannelBuilder, HandleBuilder, SupervisorTaskBuilder},
 };
+use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsSnapshotExporter;
-use obzenflow_core::StageId;
-use obzenflow_core::{DeliveryContract, SourceContract, TransportContract};
+use obzenflow_core::{DeliveryContract, SourceContract, StageId, TransportContract};
 use obzenflow_topology::Topology;
 use std::{
     collections::{HashMap, HashSet},
@@ -73,12 +74,24 @@ pub struct PipelineBuilder {
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
+    observations: Arc<ObservationHub>,
+    host_observations: Arc<dyn ObservationRecorder>,
     feed_plan: FeedPlan,
     run_substrate: Option<RunSubstrateState>,
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 }
 
 impl PipelineBuilder {
+    pub fn with_observations(
+        mut self,
+        observations: Arc<ObservationHub>,
+        host: Arc<dyn ObservationRecorder>,
+    ) -> Self {
+        self.observations = observations;
+        self.host_observations = host;
+        self
+    }
+
     /// Create a new pipeline builder
     pub fn new(
         topology: Arc<Topology>,
@@ -98,6 +111,8 @@ impl PipelineBuilder {
             contract_attachments: None,
             backpressure_registry: None,
             liveness_snapshots: None,
+            observations: Arc::new(ObservationHub::default()),
+            host_observations: Arc::new(NoObservations),
             feed_plan: FeedPlan::default(),
             run_substrate: None,
             flow_effective_config: None,
@@ -338,6 +353,7 @@ impl PipelineBuilder {
             stage_data_journals: self.stage_journals.unwrap_or_default(),
             stage_error_journals: self.error_journals.unwrap_or_default(),
             backpressure_registry: self.backpressure_registry.clone(),
+            observations: self.observations.clone(),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
             resources: Default::default(),
@@ -443,6 +459,8 @@ impl PipelineBuilder {
                 contract_attachments,
                 system_journal: Some(self.system_journal.clone()),
                 pipeline_writer_id: WriterId::from(system_id),
+                observations: self.observations.clone(),
+                host_observations: self.host_observations.clone(),
                 liveness_snapshots: self.liveness_snapshots.clone(),
                 run_substrate: self
                     .run_substrate

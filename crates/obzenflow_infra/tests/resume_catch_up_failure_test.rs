@@ -20,10 +20,9 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -344,14 +343,14 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-fn resume_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<ResumeRow> {
+fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => {
-                Some(ResumeRow::Data(envelope.event.payload().clone()))
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some(ResumeRow::Data(envelope.payload().clone()))
             }
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
             }) => Some(ResumeRow::CatchUp {

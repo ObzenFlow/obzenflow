@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::{SystemEvent, SystemEventType, WriterId};
+use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::ingress::{
     EdgeShedReason, EventSubmission, HostedIngressBindingSlot, IngressAdmissionDecision,
@@ -242,7 +242,7 @@ impl IngestionState {
         };
         let event = SystemEvent::new(
             writer.writer_id,
-            SystemEventType::IngressRefusal {
+            SystemPayload::IngressRefusal {
                 ingress_key: self.ingress_key.clone(),
                 stage_id: filled.stage_id,
                 stage_key: filled.stage_key.clone(),

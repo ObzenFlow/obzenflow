@@ -11,10 +11,9 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
-use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -40,8 +39,7 @@ use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
-use crate::stages::resources_builder::BoundSubscriptionFactory;
-use crate::stages::resources_builder::DirectFactPlan;
+use crate::stages::resources_builder::{BoundSubscriptionFactory, DirectFactPlan};
 
 pub(crate) type TransformHandlerFutureResult =
     Result<Vec<ChainEvent>, Box<dyn std::error::Error + Send + Sync>>;
@@ -103,7 +101,7 @@ impl futures::task::ArcWake for ContinuationWake {
 /// One supervisor-owned generated handler invocation suspended across event
 /// loop iterations. It is never serialised and never accepts another input.
 pub(crate) struct DirectFactContinuation {
-    pub envelope: EventEnvelope<ChainEvent>,
+    pub envelope: JournalRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     pub scope: obzenflow_core::MiddlewareExecutionScope,
@@ -118,7 +116,7 @@ pub(crate) struct DirectFactContinuation {
 }
 
 pub(crate) struct DirectFactContinuationStart {
-    pub envelope: EventEnvelope<ChainEvent>,
+    pub envelope: JournalRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     pub scope: obzenflow_core::MiddlewareExecutionScope,
@@ -130,7 +128,7 @@ impl std::fmt::Debug for DirectFactContinuation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("DirectFactContinuation")
-            .field("event_id", &self.envelope.event.id)
+            .field("event_id", &self.envelope.envelope.provenance.event.id)
             .field("input_position", &self.input_position)
             .field("scope", &self.scope)
             .field("poll_state", &self.poll_state)
@@ -258,7 +256,7 @@ mod direct_fact_continuation_tests {
     };
     use crate::id_conversions::StageIdExt;
     use obzenflow_core::event::JournalWriterId;
-    use obzenflow_core::{EventEnvelope, EventType};
+    use obzenflow_core::{EventType, JournalRecord};
     use obzenflow_topology::TopologyBuilder;
     use std::num::NonZeroU64;
     use std::time::Duration;
@@ -293,7 +291,7 @@ mod direct_fact_continuation_tests {
             "test.generated_input.v1",
             serde_json::json!({}),
         );
-        let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+        let envelope = JournalRecord::new(JournalWriterId::new(), event);
         let continuation = DirectFactContinuation::new(
             DirectFactContinuationStart {
                 envelope,
@@ -342,7 +340,7 @@ mod direct_fact_continuation_tests {
                 "test.generated_input.v1",
                 serde_json::json!({}),
             );
-            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            let envelope = JournalRecord::new(JournalWriterId::new(), event);
             let continuation = DirectFactContinuation::new(
                 DirectFactContinuationStart {
                     envelope,
@@ -694,7 +692,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
-    pub(crate) pending_parent: Option<EventEnvelope<ChainEvent>>,
+    pub(crate) pending_parent: Option<JournalRecord<ChainPayload>>,
 
     /// Upstream stage awaiting a consumption ack once pending outputs are drained.
     pub(crate) pending_ack_upstream: Option<StageId>,
@@ -719,7 +717,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) drain_received: bool,
 
     /// Buffered terminal envelope (EOF or Drain) held by SCC entry points until quiescence (FLOWIP-051n).
-    pub(crate) buffered_terminal_envelope: Option<EventEnvelope<ChainEvent>>,
+    pub(crate) buffered_terminal_envelope: Option<JournalRecord<ChainPayload>>,
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
@@ -867,18 +865,16 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                 // path where no EOF was received.
                 let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
                 let mut upstream_vector_clock = None;
-                let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let runtime_context = ctx.instrumentation.snapshot();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
                 if let Some(buffered_event) = buffered {
-                    if let obzenflow_core::event::ChainEventContent::FlowControl(
-                        FlowControlPayload::Eof {
-                            writer_seq: _,
-                            vector_clock,
-                            ..
-                        },
-                    ) = buffered_event.content.clone()
+                    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
+                        writer_seq: _,
+                        vector_clock,
+                        ..
+                    }) = buffered_event.payload.clone()
                     {
                         upstream_vector_clock = vector_clock;
                         // We intentionally ignore the upstream writer_seq and
@@ -888,16 +884,14 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
 
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
 
-                if let obzenflow_core::event::ChainEventContent::FlowControl(
-                    FlowControlPayload::Eof {
-                        writer_id: ref mut eof_writer,
-                        writer_seq,
-                        writer_seq_by_event_type: eof_writer_seq_by_event_type,
-                        vector_clock,
-                        last_event_id,
-                        ..
-                    },
-                ) = &mut eof_event.content
+                if let ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_id: ref mut eof_writer,
+                    writer_seq,
+                    writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    vector_clock,
+                    last_event_id,
+                    ..
+                }) = &mut eof_event.payload
                 {
                     *eof_writer = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
@@ -916,7 +910,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Transform,
                 };
-                eof_event.runtime_context = Some(runtime_context);
+                eof_event.runtime = Some(runtime_context);
 
                 crate::stages::common::supervision::output_committer::commit_control_output(
                     &ctx.data_journal,

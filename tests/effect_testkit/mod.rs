@@ -4,12 +4,13 @@
 
 #![allow(dead_code)]
 
+use obzenflow_core::event::ChainPayload;
 use std::sync::Arc;
 
 use serde_json::json;
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::EventEnvelope;
+use obzenflow_core::event::JournalRecord;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{FlowId, JournalOwner, JournalWriterId, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
@@ -32,7 +33,7 @@ pub struct EffectInvocationContextBuilder {
     input_seq: StageInputPosition,
     stage_logic_version: String,
     data_journal: Arc<dyn Journal<ChainEvent>>,
-    parent: EventEnvelope<ChainEvent>,
+    parent: JournalRecord<ChainPayload>,
     runtime_execution: RuntimeExecution,
     effect_ports: EffectPortRegistry,
     effect_declarations: Vec<EffectDeclaration>,
@@ -47,7 +48,7 @@ impl EffectInvocationContextBuilder {
         let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
             MemoryJournal::<ChainEvent>::with_owner(JournalOwner::stage(stage_id)),
         );
-        let parent = EventEnvelope::new(
+        let parent = JournalRecord::new(
             JournalWriterId::from(*data_journal.id()),
             ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
         );

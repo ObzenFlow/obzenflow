@@ -10,12 +10,11 @@
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
-use obzenflow_core::event::event_envelope::EventEnvelope;
+use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
-use obzenflow_core::{ChainEvent, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -386,7 +385,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// has succeeded. This lets protocol-aware stateful handlers reject an
     /// incomplete drain before the terminal signal becomes visible
     /// downstream.
-    pub terminal_envelope: Option<EventEnvelope<ChainEvent>>,
+    pub terminal_envelope: Option<JournalRecord<ChainPayload>>,
 
     /// Whether the current drain was requested through the stage handle rather
     /// than by an upstream terminal control row.
@@ -409,7 +408,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Used as the parent for emitted aggregate events so their journal envelopes preserve
     /// happened-before relationships via vector clock propagation, even when upstream events are
     /// concurrent.
-    pub last_consumed_envelope: Option<EventEnvelope<ChainEvent>>,
+    pub last_consumed_envelope: Option<JournalRecord<ChainPayload>>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -637,18 +636,16 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                 // path where no EOF was received.
                 let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
                 let mut upstream_vector_clock = None;
-                let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let runtime_context = ctx.instrumentation.snapshot();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
                 if let Some(buffered_event) = buffered {
-                    if let obzenflow_core::event::ChainEventContent::FlowControl(
-                        FlowControlPayload::Eof {
-                            writer_seq: _,
-                            vector_clock,
-                            ..
-                        },
-                    ) = buffered_event.content.clone()
+                    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
+                        writer_seq: _,
+                        vector_clock,
+                        ..
+                    }) = buffered_event.payload.clone()
                     {
                         upstream_vector_clock = vector_clock;
                         // We intentionally ignore the upstream writer_seq and
@@ -658,16 +655,14 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
 
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
 
-                if let obzenflow_core::event::ChainEventContent::FlowControl(
-                    FlowControlPayload::Eof {
-                        writer_id: ref mut eof_writer,
-                        writer_seq,
-                        writer_seq_by_event_type: eof_writer_seq_by_event_type,
-                        vector_clock,
-                        last_event_id,
-                        ..
-                    },
-                ) = &mut eof_event.content
+                if let ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_id: ref mut eof_writer,
+                    writer_seq,
+                    writer_seq_by_event_type: eof_writer_seq_by_event_type,
+                    vector_clock,
+                    last_event_id,
+                    ..
+                }) = &mut eof_event.payload
                 {
                     *eof_writer = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
@@ -686,7 +681,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Stateful,
                 };
-                eof_event.runtime_context = Some(runtime_context);
+                eof_event.runtime = Some(runtime_context);
 
                 crate::stages::common::supervision::output_committer::commit_control_output(
                     &ctx.data_journal,

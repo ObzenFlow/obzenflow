@@ -13,7 +13,7 @@ use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::Count;
 use obzenflow_core::event::{
-    ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SystemEvent,
+    ChainEventFactory, ChainPayload, ConsumptionFinalEventParams, SystemEvent,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
@@ -25,8 +25,7 @@ use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
-use crate::metrics::tail_read;
+use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
@@ -456,18 +455,18 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let runtime_context = ctx.instrumentation.snapshot();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
                 let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
-                if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                if let ChainPayload::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
                     writer_seq_by_event_type: eof_writer_seq_by_event_type,
                     last_event_id,
                     ..
-                }) = &mut eof_event.content
+                }) = &mut eof_event.payload
                 {
                     *writer_id_field = Some(writer_id);
                     *writer_seq = Some(authored_writer_seq);
@@ -483,7 +482,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::InfiniteSource,
                 };
-                eof_event.runtime_context = Some(runtime_context);
+                eof_event.runtime = Some(runtime_context);
 
                 crate::supervised_base::publication::append(&ctx.data_journal, eof_event, None)
                     .await
@@ -512,7 +511,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::InfiniteSource,
                 };
-                final_event.runtime_context = Some(ctx.instrumentation.snapshot_with_control());
+                final_event.runtime = Some(ctx.instrumentation.snapshot());
 
                 crate::supervised_base::publication::append(&ctx.data_journal, final_event, None)
                     .await
@@ -536,16 +535,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 // Tail-read metrics for failure; if no runtime_context is present
                 // in the journals, fall back to a best-effort snapshot from
                 // instrumentation rather than failing the failure path.
-                let metrics = match tail_read::read_stage_metrics_from_tail(
-                    &ctx.data_journal,
-                    Some(&ctx.error_journal),
-                    ctx.stage_id,
-                )
-                .await
-                {
-                    Some(metrics) => metrics,
-                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
-                };
+                let metrics = snapshot_stage_accounting(ctx.instrumentation.as_ref());
                 let cancel_reason = match message.as_str() {
                     FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
                     STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
@@ -553,13 +543,13 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 };
 
                 let system_event = if let Some(reason) = cancel_reason {
-                    obzenflow_core::event::SystemEvent::stage_cancelled_with_metrics(
+                    SystemEvent::stage_cancelled_with_accounting(
                         ctx.stage_id,
                         reason.to_string(),
                         metrics,
                     )
                 } else {
-                    obzenflow_core::event::SystemEvent::stage_failed_with_metrics(
+                    SystemEvent::stage_failed_with_accounting(
                         ctx.stage_id,
                         message.clone(),
                         false, // not recoverable
@@ -668,18 +658,9 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 // Some stages may legitimately complete without emitting any runtime-context
                 // bearing events (e.g. zero input). In that case, fall back to a best-effort
                 // snapshot from instrumentation instead of failing completion.
-                let metrics = match tail_read::read_stage_metrics_from_tail(
-                    &ctx.data_journal,
-                    Some(&ctx.error_journal),
-                    ctx.stage_id,
-                )
-                .await
-                {
-                    Some(metrics) => metrics,
-                    None => snapshot_stage_metrics(ctx.instrumentation.as_ref()),
-                };
+                let metrics = snapshot_stage_accounting(ctx.instrumentation.as_ref());
                 let completion_event =
-                    SystemEvent::stage_completed_with_metrics(ctx.stage_id, metrics);
+                    SystemEvent::stage_completed_with_accounting(ctx.stage_id, metrics);
 
                 if let Err(e) = crate::supervised_base::publication::append(
                     &ctx.system_journal,

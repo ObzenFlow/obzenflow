@@ -9,7 +9,7 @@ use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
-use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, OneFactStageOutput, TypedPayload, WriterId};
 use std::time::Duration;
 
@@ -257,7 +257,7 @@ impl<H> TypedStatefulHandlerAdapter<H> {
                 }
                 let fact = facts.pop().expect("length checked above");
                 let mut event =
-                    ChainEventFactory::data_event(writer_id, fact.event_type, fact.payload);
+                    fact.into_event(writer_id);
                 output_traces
                     .as_ref()
                     .and_then(|traces| traces.get(index))
@@ -362,7 +362,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ChainEventContent;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::ChainPayload;
     use obzenflow_core::{StageId, TypedPayload};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -704,7 +705,7 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].writer_id, writer_id);
         assert_eq!(outputs[0].causality.parent_ids, vec![parent.id]);
-        assert!(matches!(outputs[0].content, ChainEventContent::Data { .. }));
+        assert!(matches!(outputs[0].payload, ChainPayload::Fact(_)));
     }
 
     #[derive(Clone, Debug)]

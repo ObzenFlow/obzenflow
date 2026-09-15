@@ -137,7 +137,8 @@ impl<T, F, Fut, Mode> SinkTyped<T, F, Fut, Mode> {
 }
 
 fn closure_success() -> SinkWriteReport {
-    SinkWriteReport::terminal(SinkTerminalOutcome::success(Some(1)))
+    // A completed closure delivered one item; it did not measure bytes.
+    SinkWriteReport::terminal(SinkTerminalOutcome::success(None).with_items(1))
 }
 
 /// Mutable execution half of a closure sink.
@@ -372,12 +373,12 @@ mod tests {
             report.primary.delivery_method,
             DeliveryMethod::Custom(ref name) if name == "typed_closure"
         ));
-        assert_eq!(report.primary.bytes_processed, Some(1));
-        assert_eq!(report.primary.items_delivered, None);
+        assert_eq!(report.primary.bytes_processed, None);
+        assert_eq!(report.primary.items_delivered, Some(1));
     }
 
     #[tokio::test]
-    async fn every_closure_mode_uses_the_connector_receipt_method() {
+    async fn every_closure_mode_reports_one_item_without_inventing_bytes() {
         assert_closure_receipt(SinkTyped::new(|_input: TestPayload| async move {})).await;
         assert_closure_receipt(SinkTyped::with_delivery(
             |_input: TestPayload, _delivery| async move {},

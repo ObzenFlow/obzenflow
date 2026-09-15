@@ -10,6 +10,7 @@ pub mod fsm;
 pub mod handle;
 pub mod inputs;
 pub mod instrumentation;
+pub mod observations;
 pub mod supervisor;
 pub mod tail_read;
 

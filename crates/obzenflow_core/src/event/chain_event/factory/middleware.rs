@@ -5,26 +5,23 @@
 use super::ChainEventFactory;
 use crate::event::chain_event::{
     ChainEvent, CircuitBreakerAttemptSettledEventParams, CircuitBreakerOpenedEventParams,
-    CircuitBreakerRecoveryCompletedEventParams, CircuitBreakerSummaryEventParams,
+    CircuitBreakerRecoveryCompletedEventParams,
 };
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::payloads::effect_payload::EffectCursor;
-use crate::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
-    MiddlewareLifecycle, ObservabilityPayload,
+use crate::event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload};
+use crate::event::payloads::execution_payload::{
+    CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
 };
 use crate::event::types::{EventId, WriterId};
 
 impl ChainEventFactory {
     fn circuit_breaker_retry_event(
         writer_id: WriterId,
-        event: CircuitBreakerEvent,
+        event: CircuitBreakerFact,
         cause: EventId,
     ) -> ChainEvent {
-        let mut event = Self::observability_event(
-            writer_id,
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(event)),
-        );
+        let mut event = Self::execution_event(writer_id, ExecutionPayload::CircuitBreaker(event));
         event.causality = CausalityContext::with_parent(cause);
         event
     }
@@ -38,7 +35,7 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         Self::circuit_breaker_retry_event(
             writer_id,
-            CircuitBreakerEvent::RetryScheduled {
+            CircuitBreakerFact::RetryScheduled {
                 cursor,
                 next_attempt,
                 delay_ms,
@@ -62,7 +59,7 @@ impl ChainEventFactory {
         } = params;
         Self::circuit_breaker_retry_event(
             writer_id,
-            CircuitBreakerEvent::AttemptSettled {
+            CircuitBreakerFact::AttemptSettled {
                 cursor,
                 attempt,
                 health_classification,
@@ -83,7 +80,7 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         Self::circuit_breaker_retry_event(
             writer_id,
-            CircuitBreakerEvent::RetrySucceeded {
+            CircuitBreakerFact::RetrySucceeded {
                 cursor,
                 total_attempts,
                 terminal_classification,
@@ -101,7 +98,7 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         Self::circuit_breaker_retry_event(
             writer_id,
-            CircuitBreakerEvent::RetryExhausted {
+            CircuitBreakerFact::RetryExhausted {
                 cursor,
                 total_attempts,
                 reason,
@@ -118,7 +115,7 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         Self::circuit_breaker_retry_event(
             writer_id,
-            CircuitBreakerEvent::RetryStoppedNonRetryable {
+            CircuitBreakerFact::RetryStoppedNonRetryable {
                 cursor,
                 total_attempts,
             },
@@ -139,7 +136,7 @@ impl ChainEventFactory {
         } = params;
         Self::circuit_breaker_retry_event(
             writer_id,
-            CircuitBreakerEvent::RecoveryCompleted {
+            CircuitBreakerFact::RecoveryCompleted {
                 cursor,
                 total_attempts,
                 backoff_elapsed_ms,
@@ -164,59 +161,17 @@ impl ChainEventFactory {
             slow_call_count,
             last_error,
         } = params;
-        Self::observability_event(
+        Self::execution_event(
             writer_id,
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                CircuitBreakerEvent::Opened {
-                    error_rate,
-                    failure_count,
-                    trigger,
-                    observed_calls,
-                    slow_call_rate,
-                    slow_call_count,
-                    last_error,
-                },
-            )),
-        )
-    }
-
-    /// Create a circuit breaker summary event
-    pub fn circuit_breaker_summary(
-        writer_id: WriterId,
-        params: CircuitBreakerSummaryEventParams,
-    ) -> ChainEvent {
-        let CircuitBreakerSummaryEventParams {
-            window_duration_s,
-            requests_processed,
-            requests_rejected,
-            state,
-            consecutive_failures,
-            rejection_rate,
-            successes_total,
-            failures_total,
-            opened_total,
-            time_in_closed_seconds,
-            time_in_open_seconds,
-            time_in_half_open_seconds,
-        } = params;
-        Self::observability_event(
-            writer_id,
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                CircuitBreakerEvent::Summary {
-                    window_duration_s,
-                    requests_processed,
-                    requests_rejected,
-                    state,
-                    consecutive_failures,
-                    rejection_rate,
-                    successes_total,
-                    failures_total,
-                    opened_total,
-                    time_in_closed_seconds,
-                    time_in_open_seconds,
-                    time_in_half_open_seconds,
-                },
-            )),
+            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+                error_rate,
+                failure_count,
+                trigger,
+                observed_calls,
+                slow_call_rate,
+                slow_call_count,
+                last_error,
+            }),
         )
     }
 }

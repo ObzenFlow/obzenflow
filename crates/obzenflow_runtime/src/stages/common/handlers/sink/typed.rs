@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryPayload, DeliveryResult,
 };
-use obzenflow_core::event::{ChainEventContent, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, StageId, TypedPayload};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -954,18 +954,13 @@ impl<W> SinkWriterAdapter<W> {
     where
         W: SinkWriter,
     {
-        let (event_type, payload) = match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => (event_type.as_str(), payload),
-            _ => {
-                return Ok(SinkConsumeReport::new(DeliveryPayload::success(
-                    DeliveryMethod::Custom("Skipped".to_string()),
-                    None,
-                )))
-            }
+        let Some(payload) = event.typed_payload() else {
+            return Ok(SinkConsumeReport::new(DeliveryPayload::success(
+                DeliveryMethod::Custom("Skipped".to_string()),
+                None,
+            )));
         };
+        let event_type = &event.envelope.provenance.event.event_type;
 
         if !W::Input::event_type_matches(event_type) {
             return Err(HandlerError::Validation(format!(

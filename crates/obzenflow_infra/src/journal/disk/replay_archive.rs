@@ -14,14 +14,13 @@ use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, Read
 use async_trait::async_trait;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::run_manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
-use obzenflow_core::journal::JournalReader;
-use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
+use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::fs::File;
@@ -427,7 +426,7 @@ fn scan_recorded_maxima(
     ReplayError,
 > {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-    use obzenflow_core::event::ChainEventContent;
+    use obzenflow_core::event::ChainPayload;
 
     let mut max_generation = 0u64;
     let mut max_admission_seq = 0u64;
@@ -464,13 +463,14 @@ fn scan_recorded_maxima(
             match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
-                        if let ChainEventContent::FlowControl(
-                            FlowControlPayload::CatchUpComplete { generation, .. },
-                        ) = &record.event.content
+                        if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
+                            generation,
+                            ..
+                        }) = &record.payload
                         {
                             max_generation = max_generation.max(generation.0);
                         }
-                        if let Some(seq) = record.event.admission_seq {
+                        if let Some(seq) = record.envelope.provenance.event.admission_seq {
                             max_admission_seq = max_admission_seq.max(seq.0);
                         }
                     }
@@ -541,9 +541,7 @@ pub(crate) fn derive_status_derivation_from_system_log(
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
-                    if let obzenflow_core::event::SystemEventType::PipelineLifecycle(event) =
-                        &record.event.event
-                    {
+                    if let SystemPayload::PipelineLifecycle(event) = &record.payload {
                         match event {
                             obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
                                 terminal_events_found = terminal_events_found.saturating_add(1);

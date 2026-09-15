@@ -27,9 +27,9 @@ pub use effect_binding::{
 };
 pub use error::Result;
 pub use event::chain_event::ChainEvent;
-pub use event::context::runtime_context;
 pub use event::context::MiddlewareExecutionScope;
 pub use event::event_envelope::EventEnvelope;
+pub use event::journal_record::{JournalPayload, JournalRecord};
 pub use event::EventId;
 pub use event::{AdmissionSeq, EventType, JournalWriterId, ReaderGeneration, WriterId};
 pub use journal::journal_error::JournalError;

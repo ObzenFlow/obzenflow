@@ -54,6 +54,8 @@
 //! consumed, so the abandoned poll charges no token; `delayed_total` and
 //! `events_total` are independent counters.
 
+use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::payloads::execution_payload::RateLimiterFact;
 mod admission_core;
 mod config;
 mod factory;
@@ -71,7 +73,7 @@ use crate::middleware::control::provider::PendingControlRegistration;
 use crate::middleware::{
     EffectTypeKey, MaterializationClaim, MiddlewareContext, MiddlewareMaterializationContext,
 };
-use obzenflow_core::event::payloads::observability_payload::RateLimiterEvent;
+
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
 use std::sync::Arc;
@@ -173,15 +175,15 @@ impl RateLimiterMiddleware {
         let snapshotter: Arc<RateLimiterSnapshotter> = Arc::new({
             let core = core.clone();
             move || {
-                let snap = core.snapshot();
-                RateLimiterMetrics {
+                let snap = core.snapshot()?;
+                Some(RateLimiterMetrics {
                     events_total: snap.events_total,
                     delayed_total: snap.delayed_total,
                     tokens_consumed_total: snap.tokens_consumed_total,
                     delay_seconds_total: snap.delay_seconds_total,
                     bucket_tokens: snap.bucket_tokens,
                     bucket_capacity: snap.bucket_capacity,
-                }
+                })
             }
         });
         (
@@ -199,40 +201,35 @@ impl RateLimiterMiddleware {
 
     fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
         if let Some(pulse) = self.core.take_due_pulse(Instant::now()) {
-            ctx.write_control_event(rate_limiter_event(
-                self.writer_id,
-                RateLimiterEvent::ActivityPulse {
-                    window_ms: pulse.window_ms,
-                    delayed_events: pulse.delayed_events,
-                    delay_ms_total: pulse.delay_ms_total,
-                    delay_ms_max: pulse.delay_ms_max,
-                    limit_rate: self.limit_rate(),
-                },
-            ));
+            ctx.observe(ObservationRecord::RateLimiterActivity {
+                effect_type: None,
+                window_ms: pulse.window_ms,
+                delayed_events: pulse.delayed_events,
+                delay_ms_total: pulse.delay_ms_total,
+                delay_ms_max: pulse.delay_ms_max,
+                limit_rate: self.limit_rate(),
+            });
         }
     }
 
-    /// Check if we should emit a summary and do so if needed.
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
         if let Some(summary) = self.core.take_due_summary(Instant::now()) {
             if let Some((from, to)) = summary.mode_change {
                 ctx.write_control_event(rate_limiter_event(
                     self.writer_id,
-                    RateLimiterEvent::ModeChange {
-                        mode_from: from.to_string(),
-                        mode_to: to.to_string(),
+                    RateLimiterFact::ModeChange {
+                        mode_from: from.into(),
+                        mode_to: to.into(),
                         limit_rate: self.limit_rate(),
                     },
                 ));
             }
-            ctx.write_control_event(rate_limiter_event(
-                self.writer_id,
-                RateLimiterEvent::WindowUtilization {
-                    utilization_percent: summary.utilization_percent,
-                    events_in_window: summary.events_in_window,
-                    window_size_ms: summary.window_size_ms,
-                },
-            ));
+            ctx.observe(ObservationRecord::RateLimiterUtilisation {
+                effect_type: None,
+                utilization_percent: summary.utilization_percent,
+                events_in_window: summary.events_in_window,
+                window_size_ms: summary.window_size_ms,
+            });
         }
     }
 
@@ -306,12 +303,13 @@ mod tests {
     use super::admission_core::RateLimiterMode;
     use super::config::validated_rate_limiter_config;
     use super::*;
+    use obzenflow_core::event::observation::ObservationRecord;
+    use obzenflow_core::{FlowId, MiddlewareExecutionScope};
+    use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
+    use obzenflow_runtime::metrics::observations::ObservationHub;
     use std::time::Duration;
 
-    use obzenflow_core::event::chain_event::ChainEventContent;
-    use obzenflow_core::event::payloads::observability_payload::{
-        MiddlewareLifecycle, ObservabilityPayload,
-    };
+    use obzenflow_core::event::chain_event::ChainPayload;
 
     #[test]
     fn test_rate_limiter_default_effective_capacity_is_at_least_one_weighted_event() {
@@ -329,37 +327,40 @@ mod tests {
         assert!((middleware.limit_rate() - 5.0).abs() < 1e-6);
     }
 
+    fn observation_context() -> (MiddlewareContext, Arc<ObservationHub>) {
+        let execution = RuntimeExecution::new(RuntimeMode::Live, None);
+        let recorder = execution.observation_recorder(FlowId::new(), StageId::new().into());
+        (
+            MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary)
+                .with_observation_recorder(recorder),
+            execution.observations().clone(),
+        )
+    }
+
+    fn samples(hub: &ObservationHub) -> Vec<ObservationRecord> {
+        use obzenflow_core::event::observation::ObservationSource;
+        hub.snapshot()
+            .into_iter()
+            .flat_map(|packet| packet.records)
+            .collect()
+    }
+
     #[test]
-    fn test_rate_limiter_snapshotter_does_not_hold_stats_while_waiting_on_bucket() {
-        let stage_id = StageId::new();
+    fn snapshotter_omits_a_contended_bucket_without_holding_stats() {
         let (middleware, snapshotter) = RateLimiterMiddleware::build_unregistered(
-            stage_id,
-            validated_rate_limiter_config(10.0, Some(10.0), 1.0)
-                .expect("snapshotter test configuration should be valid"),
+            StageId::new(),
+            validated_rate_limiter_config(10.0, Some(10.0), 1.0).unwrap(),
         );
-        let bucket_guard = middleware.core.bucket_for_test().lock().unwrap();
+        let bucket = middleware.core.bucket_for_test().lock().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            tx.send(snapshotter()).unwrap();
-        });
-
-        std::thread::sleep(Duration::from_millis(25));
-
-        let stats_guard = middleware
-            .core
-            .stats_for_test()
-            .try_lock()
-            .expect("snapshotter should not hold stats while waiting on bucket");
-        drop(stats_guard);
-
-        drop(bucket_guard);
-
-        let metrics = rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("snapshotter should complete once bucket lock is released");
-        assert!((metrics.bucket_capacity - 10.0).abs() < f64::EPSILON);
-        handle.join().unwrap();
+        let task = std::thread::spawn(move || tx.send(snapshotter()).unwrap());
+        assert!(rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("capture must not wait for the bucket")
+            .is_none());
+        assert!(middleware.core.stats_for_test().try_lock().is_ok());
+        drop(bucket);
+        task.join().unwrap();
     }
 
     #[test]
@@ -370,123 +371,72 @@ mod tests {
             stats.events_window = 1;
             stats.last_summary = Instant::now() - Duration::from_secs(11);
         }
-
-        let bucket_guard = middleware.core.bucket_for_test().lock().unwrap();
-        let middleware_for_thread = middleware.clone();
+        let bucket = middleware.core.bucket_for_test().lock().unwrap();
+        let other = middleware.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            let mut ctx = MiddlewareContext::with_scope(
-                obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-            );
-            middleware_for_thread.maybe_emit_summary(&mut ctx);
-            tx.send(ctx.control_events().len()).unwrap();
+        let task = std::thread::spawn(move || {
+            let (mut ctx, hub) = observation_context();
+            other.maybe_emit_summary(&mut ctx);
+            tx.send((ctx.control_events().len(), samples(&hub).len()))
+                .unwrap();
         });
-
-        let emitted = rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("summary emission should not block on bucket lock");
-        assert_eq!(emitted, 1);
-
-        drop(bucket_guard);
-        handle.join().unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_millis(100)).unwrap(), (0, 1));
+        drop(bucket);
+        task.join().unwrap();
     }
 
     #[test]
     fn test_rate_limiter_mode_hysteresis_transitions() {
+        use obzenflow_core::event::observation::ObservationRecord;
+        use obzenflow_core::event::payloads::execution_payload::{
+            ExecutionPayload, RateLimiterFact, RateLimiterMode as WireMode,
+        };
         let middleware = test_middleware(StageId::new(), 100.0, Some(1000.0), 1.0);
-
-        // ---- Window 1: utilization 120% -> Normal -> Limiting ----
-        {
-            let mut stats = middleware.core.stats_for_test().lock().unwrap();
-            stats.events_window = 1200;
-            stats.tokens_consumed_window = 1200.0;
-            stats.last_summary = Instant::now() - Duration::from_secs(10);
-        }
-
-        let mut ctx = MiddlewareContext::with_scope(
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-        );
-        middleware.maybe_emit_summary(&mut ctx);
-        assert_eq!(ctx.control_events().len(), 2);
-
-        match &ctx.control_events()[0].content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
-                    mode_from,
-                    mode_to,
-                    limit_rate,
-                }),
-            )) => {
-                assert_eq!(mode_from, "normal");
-                assert_eq!(mode_to, "limiting");
-                assert!((limit_rate - 100.0).abs() < 1e-6);
+        for (events, transition) in [
+            (1200, Some((WireMode::Normal, WireMode::Limiting))),
+            (700, None),
+            (700, Some((WireMode::Limiting, WireMode::Normal))),
+        ] {
+            {
+                let mut stats = middleware.core.stats_for_test().lock().unwrap();
+                stats.events_window = events;
+                stats.tokens_consumed_window = events as f64;
+                stats.last_summary = Instant::now() - Duration::from_secs(10);
             }
-            other => panic!("Expected mode change event, got {other:?}"),
-        }
-
-        match &ctx.control_events()[1].content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization {
-                    utilization_percent,
-                    events_in_window,
-                    window_size_ms,
-                }),
-            )) => {
-                assert!((utilization_percent - 120.0).abs() < 0.1);
-                assert_eq!(*events_in_window, 1200);
-                assert!(*window_size_ms >= 10_000);
+            let (mut ctx, hub) = observation_context();
+            middleware.maybe_emit_summary(&mut ctx);
+            assert_eq!(
+                ctx.control_events().len(),
+                usize::from(transition.is_some())
+            );
+            if let Some((from, to)) = transition {
+                let ChainPayload::Execution(ExecutionPayload::RateLimiter(
+                    RateLimiterFact::ModeChange {
+                        mode_from,
+                        mode_to,
+                        limit_rate,
+                    },
+                )) = &ctx.control_events()[0].payload
+                else {
+                    panic!("typed mode change");
+                };
+                assert_eq!((*mode_from, *mode_to), (from, to));
+                assert_eq!(*limit_rate, 100.0);
             }
-            other => panic!("Expected window utilization event, got {other:?}"),
+            let measured = samples(&hub);
+            let ObservationRecord::RateLimiterUtilisation {
+                utilization_percent,
+                events_in_window,
+                window_size_ms,
+                ..
+            } = &measured[0]
+            else {
+                panic!("typed utilisation");
+            };
+            assert!((utilization_percent - events as f64 / 10.0).abs() < 0.1);
+            assert_eq!(*events_in_window, events);
+            assert!(*window_size_ms >= 10_000);
         }
-
-        // ---- Window 2: utilization 70% -> Limiting (hold=1) ----
-        {
-            let mut stats = middleware.core.stats_for_test().lock().unwrap();
-            stats.events_window = 700;
-            stats.tokens_consumed_window = 700.0;
-            stats.last_summary = Instant::now() - Duration::from_secs(10);
-        }
-
-        let mut ctx = MiddlewareContext::with_scope(
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-        );
-        middleware.maybe_emit_summary(&mut ctx);
-        assert_eq!(ctx.control_events().len(), 1);
-        match &ctx.control_events()[0].content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization { .. }),
-            )) => {}
-            other => panic!("Expected window utilization event, got {other:?}"),
-        }
-
-        // ---- Window 3: utilization 70% -> Limiting -> Normal (hold=2) ----
-        {
-            let mut stats = middleware.core.stats_for_test().lock().unwrap();
-            stats.events_window = 700;
-            stats.tokens_consumed_window = 700.0;
-            stats.last_summary = Instant::now() - Duration::from_secs(10);
-        }
-
-        let mut ctx = MiddlewareContext::with_scope(
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-        );
-        middleware.maybe_emit_summary(&mut ctx);
-        assert_eq!(ctx.control_events().len(), 2);
-        match &ctx.control_events()[0].content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
-                    mode_from,
-                    mode_to,
-                    ..
-                }),
-            )) => {
-                assert_eq!(mode_from, "limiting");
-                assert_eq!(mode_to, "normal");
-            }
-            other => panic!("Expected mode change event, got {other:?}"),
-        }
-
         let stats = middleware.core.stats_for_test().lock().unwrap();
         assert_eq!(stats.mode, RateLimiterMode::Normal);
         assert_eq!(stats.exit_hold_count, 0);
@@ -494,8 +444,8 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_activity_pulse_emission() {
+        use obzenflow_core::event::observation::ObservationRecord;
         let middleware = test_middleware(StageId::new(), 5.0, Some(10.0), 1.0);
-
         {
             let mut stats = middleware.core.stats_for_test().lock().unwrap();
             stats.pulse_window_start = Instant::now() - Duration::from_secs(1);
@@ -503,35 +453,35 @@ mod tests {
             stats.pulse_delay_ms_total = 450;
             stats.pulse_delay_ms_max = 200;
         }
-
-        let mut ctx = MiddlewareContext::with_scope(
-            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
-        );
+        let (mut ctx, hub) = observation_context();
         middleware.maybe_emit_activity_pulse(&mut ctx);
-        assert_eq!(ctx.control_events().len(), 1);
-
-        match &ctx.control_events()[0].content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ActivityPulse {
-                    window_ms,
-                    delayed_events,
-                    delay_ms_total,
-                    delay_ms_max,
-                    limit_rate,
-                }),
-            )) => {
-                assert_eq!(*window_ms, super::admission_core::ACTIVITY_PULSE_WINDOW_MS);
-                assert_eq!(*delayed_events, 3);
-                assert_eq!(*delay_ms_total, 450);
-                assert_eq!(*delay_ms_max, 200);
-                assert!((limit_rate - 5.0).abs() < 1e-6);
-            }
-            other => panic!("Expected activity pulse event, got {other:?}"),
-        }
-
+        assert!(ctx.control_events().is_empty());
+        let measured = samples(&hub);
+        let ObservationRecord::RateLimiterActivity {
+            window_ms,
+            delayed_events,
+            delay_ms_total,
+            delay_ms_max,
+            limit_rate,
+            ..
+        } = &measured[0]
+        else {
+            panic!("typed activity pulse");
+        };
+        assert_eq!(*window_ms, super::admission_core::ACTIVITY_PULSE_WINDOW_MS);
+        assert_eq!(
+            (*delayed_events, *delay_ms_total, *delay_ms_max),
+            (3, 450, 200)
+        );
+        assert_eq!(*limit_rate, 5.0);
         let stats = middleware.core.stats_for_test().lock().unwrap();
-        assert_eq!(stats.pulse_delayed_events, 0);
-        assert_eq!(stats.pulse_delay_ms_total, 0);
-        assert_eq!(stats.pulse_delay_ms_max, 0);
+        assert_eq!(
+            (
+                stats.pulse_delayed_events,
+                stats.pulse_delay_ms_total,
+                stats.pulse_delay_ms_max
+            ),
+            (0, 0, 0)
+        );
     }
 }

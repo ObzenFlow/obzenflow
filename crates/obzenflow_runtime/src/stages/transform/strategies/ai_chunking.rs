@@ -14,13 +14,12 @@ use obzenflow_core::ai::{
     AiMapReducePlanningManifest, ChunkEnvelope, ChunkPlanningConfig, ChunkPlanningError,
     ChunkPlanningSummary, ChunkRenderContext, OversizePolicy, TokenCount, TokenEstimator,
 };
-use obzenflow_core::event::observability::AiChunkingSnapshot;
-use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
-};
-use obzenflow_core::event::{
-    ChainEventContent, ChainEventFactory, StageFatalCode, StageFatalReason,
-};
+use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
+use obzenflow_core::event::payloads::execution_payload::{AiChunkingPlannedFact, ExecutionPayload};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use obzenflow_core::event::{ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::{ChainEvent, StageOutputs, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Serialize};
@@ -130,6 +129,8 @@ impl<In, Item> ChunkByBudgetBuilder<In, Item> {
             oversize_policy: self.oversize_policy,
             budget_overhead_tokens: self.budget_overhead_tokens,
             snapshot_excluded_items_limit: self.snapshot_excluded_items_limit,
+            rerender_attempts_total: Arc::new(AtomicU64::new(0)),
+            maximum_depth: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -150,6 +151,8 @@ pub struct ChunkByBudgetTyped<In, Item> {
     oversize_policy: OversizePolicy,
     budget_overhead_tokens: TokenCount,
     snapshot_excluded_items_limit: usize,
+    rerender_attempts_total: Arc<AtomicU64>,
+    maximum_depth: Arc<AtomicU32>,
 }
 
 impl<In, Item> fmt::Debug for ChunkByBudgetTyped<In, Item> {
@@ -168,7 +171,8 @@ impl<In, Item> fmt::Debug for ChunkByBudgetTyped<In, Item> {
 struct PlannedChunks<Item> {
     chunks: Vec<ChunkEnvelope<Item>>,
     summary: ChunkPlanningSummary,
-    snapshot: AiChunkingSnapshot,
+    plan: AiChunkingPlannedFact,
+    work: ObservationRecord,
 }
 
 impl<In, Item> ChunkByBudgetTyped<In, Item> {
@@ -193,37 +197,34 @@ impl<In, Item> ChunkByBudgetTyped<In, Item> {
                 .copied()
                 .collect::<Vec<_>>()
         });
-        let exclusions_by_reason = plan
-            .stats
-            .exclusions_by_reason
-            .iter()
-            .map(|(reason, count)| {
-                let name = match reason {
-                    obzenflow_core::ai::ChunkExclusionReason::MaxDepthExceeded => {
-                        "max_depth_exceeded"
-                    }
-                    obzenflow_core::ai::ChunkExclusionReason::NoProgress => "no_progress",
-                };
-                (name.to_string(), *count)
-            })
-            .collect();
-        let snapshot = AiChunkingSnapshot {
-            input_items_total: plan.summary.input_items_total,
-            planned_items_total: plan.summary.planned_items_total,
-            excluded_items_total: plan.summary.excluded_items_total,
-            chunk_count: plan.stats.chunk_count,
-            rerender_attempts_total: plan.stats.rerender_attempts_total,
-            max_decomposition_depth_reached: plan.stats.max_decomposition_depth_reached,
+        let factual_plan = AiChunkingPlannedFact {
+            planning: plan.summary.clone(),
+            chunk_count: plan.chunks.len(),
+            oversize_policy: self.oversize_policy,
+            exclusions_by_reason: plan.stats.exclusions_by_reason.clone(),
+        };
+        let rerenders = self
+            .rerender_attempts_total
+            .fetch_add(plan.stats.rerender_attempts_total, Ordering::Relaxed)
+            .saturating_add(plan.stats.rerender_attempts_total);
+        let work = ObservationRecord::AiChunkingWork {
+            rerender_attempts_total: rerenders,
+            max_decomposition_depth_reached: self
+                .maximum_depth
+                .fetch_max(
+                    plan.stats.max_decomposition_depth_reached,
+                    Ordering::Relaxed,
+                )
+                .max(plan.stats.max_decomposition_depth_reached),
             budget_overhead_tokens: self.budget_overhead_tokens.get(),
-            oversize_policy: format!("{:?}", self.oversize_policy),
-            exclusions_by_reason,
-            excluded_items,
+            excluded_items: excluded_items.unwrap_or_default(),
         };
 
         Ok(PlannedChunks {
             chunks: plan.chunks,
             summary: plan.summary,
-            snapshot,
+            plan: factual_plan,
+            work,
         })
     }
 }
@@ -262,19 +263,6 @@ fn map_planning_error(error: ChunkPlanningError) -> HandlerError {
     }
 }
 
-fn snapshot_observability(
-    snapshot: &AiChunkingSnapshot,
-) -> Result<ObservabilityPayload, HandlerError> {
-    let value = serde_json::to_value(snapshot).map_err(|error| {
-        HandlerError::Validation(format!("ai_chunking.snapshot encode failed: {error}"))
-    })?;
-    Ok(ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
-        name: "ai_chunking.snapshot".to_string(),
-        value,
-        tags: None,
-    }))
-}
-
 impl<In, Item> TypedTransformHandler for ChunkByBudgetTyped<In, Item>
 where
     In: TypedPayload + Send + Sync + 'static,
@@ -293,10 +281,10 @@ where
         input: In,
     ) -> Result<TypedTransformInvocation<Self::Output>, HandlerError> {
         let planned = self.plan_once(input)?;
-        let observability = snapshot_observability(&planned.snapshot)?;
-        Ok(TypedTransformInvocation::with_framework_observability(
+        Ok(TypedTransformInvocation::with_framework_execution(
             StageOutputs::many(planned.chunks),
-            observability,
+            ExecutionPayload::AiChunkingPlanned(planned.plan),
+            vec![planned.work],
         ))
     }
 }
@@ -309,6 +297,7 @@ where
 #[doc(hidden)]
 #[derive(Clone)]
 pub(crate) struct GeneratedAiChunkHandler<In, Item> {
+    observations: Arc<dyn ObservationRecorder>,
     inner: ChunkByBudgetTyped<In, Item>,
     composite_id: CompositeId,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -318,6 +307,7 @@ pub(crate) struct GeneratedAiChunkHandler<In, Item> {
 impl<In, Item> GeneratedAiChunkHandler<In, Item> {
     pub(crate) fn new(inner: ChunkByBudgetTyped<In, Item>, composite_id: CompositeId) -> Self {
         Self {
+            observations: Arc::new(NoObservations),
             inner,
             composite_id,
             lineage: obzenflow_core::config::LineagePolicy::default(),
@@ -406,44 +396,45 @@ where
                     .map_err(|error| {
                         protocol_fatal(format!("planning failure serialization failed: {error}"))
                     })?;
-                return Ok(vec![ChainEventFactory::derived_data_event(
+                return Ok(vec![ChainEventFactory::derived_event(
                     writer_id,
                     &event,
-                    AiMapReducePlanningFailed::versioned_event_type(),
-                    payload,
+                    ChainPayload::CompositeData(
+                        CompositeDataPayload::decode(
+                            &AiMapReducePlanningFailed::versioned_event_type(),
+                            payload,
+                        )
+                        .map_err(|e| protocol_fatal(e.to_string()))?,
+                    ),
                     self.lineage,
                 )]);
             }
             Err(error) => return Err(error),
         };
 
-        let observability = snapshot_observability(&planned.snapshot)?;
-        let (seed_payload, seed_event_type) = match &event.content {
-            ChainEventContent::Data {
-                event_type,
-                payload,
-            } => (payload.clone(), event_type.clone()),
-            _ => return Err(protocol_fatal("AI map-reduce seed is not Data")),
-        };
+        self.observations.observe(planned.work);
+        let seed_payload = event
+            .typed_payload()
+            .ok_or_else(|| protocol_fatal("AI map-reduce seed is not a typed input"))?;
+        let seed_event_type = event.event_type();
         let chunk_count = planned.chunks.len();
-        let mut outputs = Vec::with_capacity(chunk_count + 2);
-        outputs.push(ChainEventFactory::derived_event(
-            writer_id,
-            &event,
-            ChainEventContent::Observability(observability),
-            self.lineage,
-        ));
+        let mut outputs = Vec::with_capacity(chunk_count + 1);
 
         for chunk in planned.chunks {
             let payload =
                 serde_json::to_value(AiMapReduceMapInput { job_key, chunk }).map_err(|error| {
                     protocol_fatal(format!("generated map input serialization failed: {error}"))
                 })?;
-            outputs.push(ChainEventFactory::derived_data_event(
+            outputs.push(ChainEventFactory::derived_event(
                 writer_id,
                 &event,
-                AiMapReduceMapInput::<ChunkEnvelope<Item>>::versioned_event_type(),
-                payload,
+                ChainPayload::CompositeData(
+                    CompositeDataPayload::decode(
+                        &AiMapReduceMapInput::<ChunkEnvelope<Item>>::versioned_event_type(),
+                        payload,
+                    )
+                    .map_err(|e| protocol_fatal(e.to_string()))?,
+                ),
                 self.lineage,
             ));
         }
@@ -452,17 +443,24 @@ where
             job_key,
             chunk_count,
             planning: planned.summary,
+            oversize_policy: planned.plan.oversize_policy,
+            exclusions_by_reason: planned.plan.exclusions_by_reason,
             seed_payload,
             seed_event_type,
         };
         let payload = serde_json::to_value(manifest).map_err(|error| {
             protocol_fatal(format!("planning manifest serialization failed: {error}"))
         })?;
-        outputs.push(ChainEventFactory::derived_data_event(
+        outputs.push(ChainEventFactory::derived_event(
             writer_id,
             &event,
-            AiMapReducePlanningManifest::versioned_event_type(),
-            payload,
+            ChainPayload::CompositeData(
+                CompositeDataPayload::decode(
+                    &AiMapReducePlanningManifest::versioned_event_type(),
+                    payload,
+                )
+                .map_err(|e| protocol_fatal(e.to_string()))?,
+            ),
             self.lineage,
         ));
         Ok(outputs)
@@ -470,6 +468,10 @@ where
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
+    }
+
+    fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
+        self.observations = recorder;
     }
 
     fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
@@ -487,6 +489,9 @@ mod tests {
     use crate::stages::common::handlers::TypedTransformHandlerAdapter;
     use obzenflow_core::ai::{ChatRequest, EstimateSource, OversizeExhaustion, TokenEstimate};
     use obzenflow_core::event::context::CompositeActivationContext;
+    use obzenflow_core::event::payloads::execution_payload::{
+        AiChunkingPlannedFact, ExecutionPayload,
+    };
     use obzenflow_core::{EventId, StageId, WriterId};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -547,15 +552,12 @@ mod tests {
         )
     }
 
-    fn snapshot(event: &ChainEvent) -> AiChunkingSnapshot {
-        let ChainEventContent::Observability(ObservabilityPayload::Metrics(
-            MetricsLifecycle::Custom { name, value, .. },
-        )) = &event.content
+    fn plan_fact(event: &ChainEvent) -> &AiChunkingPlannedFact {
+        let ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(plan)) = &event.payload
         else {
-            panic!("expected ai_chunking.snapshot observability event")
+            panic!("expected durable planning evidence");
         };
-        assert_eq!(name, "ai_chunking.snapshot");
-        serde_json::from_value(value.clone()).expect("snapshot decodes")
+        plan
     }
 
     fn activated_seed_event(composite_id: &CompositeId, items: Vec<String>) -> ChainEvent {
@@ -564,7 +566,7 @@ mod tests {
             composite_id.clone(),
             event.id,
             "in",
-            event.processing_info.event_time,
+            event.processing.event_time,
         );
         event
             .try_insert_composite_activation(activation)
@@ -587,11 +589,11 @@ mod tests {
                 .expect("direct planning succeeds");
 
             assert_eq!(outputs.len(), expected_chunks + 1);
-            let observed = snapshot(&outputs[0]);
+            let observed = plan_fact(&outputs[0]);
             assert_eq!(observed.chunk_count, expected_chunks);
-            assert_eq!(observed.input_items_total, expected_chunks);
-            assert_eq!(observed.planned_items_total, expected_chunks);
-            assert_eq!(observed.excluded_items_total, 0);
+            assert_eq!(observed.planning.input_items_total, expected_chunks);
+            assert_eq!(observed.planning.planned_items_total, expected_chunks);
+            assert_eq!(observed.planning.excluded_items_total, 0);
 
             let chunks = outputs[1..]
                 .iter()
@@ -648,12 +650,12 @@ mod tests {
                 .expect("exclusions complete the plan");
 
         assert_eq!(outputs.len(), 1);
-        let observed = snapshot(&outputs[0]);
-        assert_eq!(observed.input_items_total, 2);
-        assert_eq!(observed.planned_items_total, 0);
-        assert_eq!(observed.excluded_items_total, 2);
+        let observed = plan_fact(&outputs[0]);
+        assert_eq!(observed.planning.input_items_total, 2);
+        assert_eq!(observed.planning.planned_items_total, 0);
+        assert_eq!(observed.planning.excluded_items_total, 2);
         assert_eq!(observed.chunk_count, 0);
-        assert_eq!(observed.excluded_items, Some(vec![0, 1]));
+        assert_eq!(observed.exclusions_by_reason.values().sum::<u64>(), 2);
         assert_eq!(
             estimator.calls(),
             4,
@@ -680,7 +682,7 @@ mod tests {
 
             let outputs = TransformHandler::process(&handler, parent.clone())
                 .expect("generated planning succeeds");
-            assert_eq!(outputs.len(), expected_chunks + 2);
+            assert_eq!(outputs.len(), expected_chunks + 1);
             assert_ne!(upstream_writer_id, generated_writer_id);
             assert!(outputs
                 .iter()
@@ -688,10 +690,7 @@ mod tests {
             assert!(outputs
                 .iter()
                 .all(|event| event.causality.parent_ids.first() == Some(&parent.id)));
-            let observed = snapshot(&outputs[0]);
-            assert_eq!(observed.chunk_count, expected_chunks);
-
-            let maps = outputs[1..=expected_chunks]
+            let maps = outputs[..expected_chunks]
                 .iter()
                 .map(|event| {
                     AiMapReduceMapInput::<ChunkEnvelope<String>>::try_from_event(event)
@@ -715,7 +714,6 @@ mod tests {
             assert_eq!(manifest.planning.input_items_total, expected_chunks);
             assert_eq!(manifest.planning.planned_items_total, expected_chunks);
             assert_eq!(manifest.planning.excluded_items_total, 0);
-            assert_eq!(observed.chunk_count, manifest.chunk_count);
             assert_eq!(
                 estimator.calls(),
                 expected_chunks,
@@ -776,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_all_excluded_job_authors_snapshot_and_manifest_with_stage_writer() {
+    fn generated_all_excluded_job_authors_complete_manifest_with_stage_writer() {
         let estimator = Arc::new(CountingEstimator::default());
         let planner = ChunkByBudgetBuilder::new()
             .estimator(estimator)
@@ -798,9 +796,8 @@ mod tests {
         let outputs = TransformHandler::process(&handler, parent)
             .expect("all-excluded planning still completes the generated protocol");
 
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(snapshot(&outputs[0]).chunk_count, 0);
-        let manifest = AiMapReducePlanningManifest::try_from_event(&outputs[1])
+        assert_eq!(outputs.len(), 1);
+        let manifest = AiMapReducePlanningManifest::try_from_event(&outputs[0])
             .expect("all-excluded job emits a manifest");
         assert_eq!(manifest.chunk_count, 0);
         assert_eq!(manifest.planning.input_items_total, 1);

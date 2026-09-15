@@ -5,8 +5,8 @@
 //! Composite strategy that combines multiple control event strategies
 
 use super::super::{ProcessingContext, SignalDecision, SignalGate};
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::ChainPayload;
 
 /// Composite strategy that stacks multiple strategies
 ///
@@ -25,7 +25,7 @@ impl CompositeStrategy {
 impl SignalGate for CompositeStrategy {
     fn handle_eof(
         &self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<ChainPayload>,
         ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         // Start with the least restrictive action
@@ -42,7 +42,7 @@ impl SignalGate for CompositeStrategy {
 
     fn handle_checkpoint(
         &self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<ChainPayload>,
         ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         let mut result = SignalDecision::Continue;
@@ -57,7 +57,7 @@ impl SignalGate for CompositeStrategy {
 
     fn handle_watermark(
         &self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<ChainPayload>,
         ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         let mut result = SignalDecision::Continue;
@@ -72,7 +72,7 @@ impl SignalGate for CompositeStrategy {
 
     fn handle_drain(
         &self,
-        envelope: &EventEnvelope<ChainEvent>,
+        envelope: &JournalRecord<ChainPayload>,
         ctx: &mut ProcessingContext,
     ) -> SignalDecision {
         let mut result = SignalDecision::Continue;

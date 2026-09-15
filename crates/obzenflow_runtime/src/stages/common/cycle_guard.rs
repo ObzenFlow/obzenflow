@@ -11,7 +11,7 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{ChainEvent, EventId};
+use obzenflow_core::event::{ChainEvent, ChainPayload, EventId};
 use obzenflow_core::{CycleDepth, SccId, StageId, WriterId};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -116,8 +116,8 @@ impl CycleGuard {
             return false;
         }
 
-        let payload = match &event.content {
-            obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
+        let payload = match &event.payload {
+            ChainPayload::FlowControl(payload) => payload,
             _ => return true,
         };
 
@@ -220,7 +220,7 @@ impl CycleGuard {
             );
 
             let mut error_event = event.clone();
-            error_event.processing_info.status = ProcessingStatus::error(format!(
+            error_event.processing.status = ProcessingStatus::error(format!(
                 "Cycle depth {} exceeds max iterations {} ({}) in stage {}",
                 depth, self.max_iterations, self.scc_id, self.stage_name
             ));
@@ -308,8 +308,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
-    use obzenflow_core::StageId;
-    use obzenflow_core::WriterId;
+    use obzenflow_core::{StageId, WriterId};
     use serde_json::json;
     use std::time::{Duration, Instant};
     fn test_scc_id(n: u128) -> SccId {
@@ -448,7 +447,7 @@ mod tests {
             .check_data(&mut event)
             .expect_err("third iteration should abort");
         assert!(matches!(
-            &err.processing_info.status,
+            &err.processing.status,
             ProcessingStatus::Error { .. }
         ));
     }

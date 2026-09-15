@@ -88,8 +88,16 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
         let instrumentation = self
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+        instrumentation.bind_observations(
+            self.resources.flow_id,
+            WriterId::from(self.config.stage_id),
+            &self.resources.runtime_execution,
+        );
 
         // Create context
+        if let Some(boundary) = &self.config.source_boundary {
+            boundary.install_observation_recorder(instrumentation.observation_recorder());
+        }
         let context = InfiniteSourceContext::<H>::new(InfiniteSourceContextInit {
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
@@ -110,6 +118,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081d).
         let mut handler = self.handler;
         handler.install_writer_id(WriterId::from(self.config.stage_id));
+        handler.install_observation_recorder(context.instrumentation.observation_recorder());
 
         // Create supervisor (private - not exposed)
         let supervisor = InfiniteSourceSupervisor {

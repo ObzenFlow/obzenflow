@@ -22,10 +22,9 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
@@ -225,7 +224,7 @@ async fn wait_for_journal<F>(
     predicate: F,
 ) -> Result<()>
 where
-    F: Fn(&[EventEnvelope<ChainEvent>]) -> bool,
+    F: Fn(&[JournalRecord<ChainPayload>]) -> bool,
 {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -246,14 +245,14 @@ enum ResumeRow {
     CatchUp { stage_key: String, generation: u64 },
 }
 
-fn resume_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<ResumeRow> {
+fn resume_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<ResumeRow> {
     envelopes
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => {
-                Some(ResumeRow::Data(envelope.event.payload().clone()))
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some(ResumeRow::Data(envelope.payload().clone()))
             }
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
             }) => Some(ResumeRow::CatchUp {
@@ -265,19 +264,19 @@ fn resume_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<ResumeRow> {
         .collect()
 }
 
-fn has_watermark(envelopes: &[EventEnvelope<ChainEvent>]) -> bool {
+fn has_watermark(envelopes: &[JournalRecord<ChainPayload>]) -> bool {
     envelopes.iter().any(|envelope| {
         matches!(
-            &envelope.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+            &envelope.payload,
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
         )
     })
 }
 
-fn data_count(envelopes: &[EventEnvelope<ChainEvent>]) -> usize {
+fn data_count(envelopes: &[JournalRecord<ChainPayload>]) -> usize {
     envelopes
         .iter()
-        .filter(|envelope| envelope.event.is_data())
+        .filter(|envelope| envelope.consumes_data_credit())
         .count()
 }
 
@@ -429,7 +428,7 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
         let r2 = replay_testkit::latest_run_dir(&journal_base);
         assert_ne!(r1, r2);
         let complete_resume =
-            |envelopes: &[EventEnvelope<ChainEvent>]| resume_rows(envelopes) == expected_xform;
+            |envelopes: &[JournalRecord<ChainPayload>]| resume_rows(envelopes) == expected_xform;
         wait_for_journal(
             &r2,
             "xform",
@@ -547,7 +546,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         .map_err(|e| anyhow!("resume of the torn archive failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
         let r2 = replay_testkit::latest_run_dir(&journal_base);
-        let live_tail_complete = |envelopes: &[EventEnvelope<ChainEvent>]| {
+        let live_tail_complete = |envelopes: &[JournalRecord<ChainPayload>]| {
             resume_rows(envelopes)
                 .iter()
                 .filter(|row| {

@@ -6,10 +6,12 @@ use chrono::Utc;
 use crc32fast::Hasher;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::types::DurationMs;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, PipelineLifecycleEvent, SystemEvent, SystemEventType,
+    ChainEvent, ChainEventFactory, JournalRecord, PipelineLifecycleEvent, SystemEvent,
+    SystemPayload,
 };
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::run_manifest::{
@@ -17,15 +19,13 @@ use obzenflow_core::journal::run_manifest::{
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
-use obzenflow_core::WriterId;
+use obzenflow_core::{JournalWriterId, WriterId};
 use obzenflow_infra::journal::disk::log_record::{LogRecord, RECORD_FRAME_KIND};
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
-use obzenflow_runtime::replay::ReplayArchive;
-use obzenflow_runtime::replay::ReplayError;
+use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tempfile::tempdir;
-use ulid::Ulid;
 
 fn binding_descriptor_capabilities() -> BTreeMap<String, u32> {
     BTreeMap::from([(EFFECT_BINDING_DESCRIPTOR_CAPABILITY.to_string(), 1)])
@@ -73,7 +73,7 @@ fn write_system_log_completed(dir: &Path) {
     let writer_id = WriterId::from(SystemId::new());
     let event = SystemEvent::new(
         writer_id,
-        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Completed {
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed {
             duration_ms: DurationMs(1),
             metrics: obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
                 events_in_total: 0,
@@ -83,14 +83,17 @@ fn write_system_log_completed(dir: &Path) {
         }),
     );
 
-    let record = LogRecord {
-        event_id: Ulid::new(),
-        writer_id: event.writer_id,
-        journal_id: JournalId::new(),
-        vector_clock: VectorClock::new(),
-        timestamp: Utc::now(),
+    let record = JournalRecord::commit_event(
         event,
-    };
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::from(JournalId::new()),
+            vector_clock: VectorClock::new(),
+            timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
+        },
+    )
+    .expect("valid record");
 
     write_framed_log_record(dir, &record);
 }
@@ -115,14 +118,17 @@ fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
 fn write_released_legacy_retry_row(dir: &Path) {
     let writer_id = WriterId::from(obzenflow_core::StageId::new());
     let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));
-    let record = LogRecord {
-        event_id: Ulid::new(),
-        writer_id: event.writer_id,
-        journal_id: JournalId::new(),
-        vector_clock: VectorClock::new(),
-        timestamp: Utc::now(),
+    let record = JournalRecord::commit_event(
         event,
-    };
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::from(JournalId::new()),
+            vector_clock: VectorClock::new(),
+            timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
+        },
+    )
+    .expect("valid record");
     let mut frame = serde_json::json!({
         "frame_kind": RECORD_FRAME_KIND,
         "record": record,
@@ -236,7 +242,7 @@ async fn open_requires_completed_status_by_default() {
     let writer_id = WriterId::from(SystemId::new());
     let failed_event = SystemEvent::new(
         writer_id,
-        SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed {
             reason: "boom".to_string(),
             duration_ms: DurationMs(1),
             metrics: None,
@@ -244,14 +250,17 @@ async fn open_requires_completed_status_by_default() {
         }),
     );
 
-    let record = LogRecord {
-        event_id: Ulid::new(),
-        writer_id: failed_event.writer_id,
-        journal_id: JournalId::new(),
-        vector_clock: VectorClock::new(),
-        timestamp: Utc::now(),
-        event: failed_event,
-    };
+    let record = JournalRecord::commit_event(
+        failed_event,
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::from(JournalId::new()),
+            vector_clock: VectorClock::new(),
+            timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
+        },
+    )
+    .expect("valid record");
 
     write_framed_log_record(dir.path(), &record);
 
@@ -453,7 +462,7 @@ async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
         (None, "<missing>"),
         (Some(serde_json::json!(3.0)), "3.0"),
         (Some(serde_json::json!("2.0")), "2.0"),
-        (Some(serde_json::json!("4.0")), "4.0"),
+        (Some(serde_json::json!("5.0")), "5.0"),
     ] {
         let dir = tempdir().unwrap();
         let mut manifest = serde_json::json!({

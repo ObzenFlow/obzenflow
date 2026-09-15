@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use crate::event::payloads::effect_payload::EffectCursor;
-use crate::event::payloads::observability_payload::{
+use crate::event::payloads::execution_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerOpenTrigger,
 };
 use crate::event::types::{

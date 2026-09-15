@@ -21,7 +21,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
-    DeliveryContract, EventEnvelope, EventType, Result, StageId, TransportContract,
+    DeliveryContract, EventType, JournalRecord, Result, StageId, TransportContract,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -47,7 +47,9 @@ impl<T> JournalReader<T> for EmptyJournalReader<T>
 where
     T: JournalEvent + Send + Sync + 'static,
 {
-    async fn next(&mut self) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(
+        &mut self,
+    ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 

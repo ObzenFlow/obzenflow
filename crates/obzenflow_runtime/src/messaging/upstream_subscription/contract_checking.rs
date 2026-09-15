@@ -5,7 +5,7 @@
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
 use obzenflow_core::event::system_event::{
-    ContractName, ContractResultStatusLabel, SystemEvent, SystemEventType, SystemFeedRole,
+    ContractName, ContractResultStatusLabel, SystemEvent, SystemFeedRole, SystemPayload,
 };
 use obzenflow_core::event::types::{
     Count, DurationMs, EventType, JournalIndex, JournalPath, SeqNo,
@@ -179,7 +179,7 @@ where
 
                 let result_event = SystemEvent::new(
                     tracker.writer_id,
-                    SystemEventType::ContractResult {
+                    SystemPayload::ContractResult {
                         upstream,
                         reader,
                         selected_event_type: Some(feed.event_type.clone()),
@@ -212,7 +212,7 @@ where
 
             let status_event = SystemEvent::new(
                 tracker.writer_id,
-                SystemEventType::ContractStatus {
+                SystemPayload::ContractStatus {
                     upstream,
                     reader,
                     selected_event_type: Some(feed.event_type.clone()),
@@ -317,7 +317,7 @@ where
 
                 let result_event = SystemEvent::new(
                     writer_id,
-                    SystemEventType::ContractResult {
+                    SystemPayload::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
                         selected_event_type: Some(feed.event_type.clone()),
@@ -542,7 +542,7 @@ where
 
                 let result_event = SystemEvent::new(
                     tracker.writer_id,
-                    SystemEventType::ContractResult {
+                    SystemPayload::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
                         selected_event_type: selected_event_type.clone(),
@@ -605,7 +605,7 @@ where
                 if let Some(system_journal) = &tracker.system_journal {
                     let status_event = SystemEvent::new(
                         tracker.writer_id,
-                        SystemEventType::ContractStatus {
+                        SystemPayload::ContractStatus {
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
@@ -751,7 +751,7 @@ where
 
                     let result_event = SystemEvent::new(
                         tracker.writer_id,
-                        SystemEventType::ContractResult {
+                        SystemPayload::ContractResult {
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
@@ -1005,7 +1005,7 @@ where
         {
             let status_event = SystemEvent::new(
                 tracker.writer_id,
-                SystemEventType::ContractStatus {
+                SystemPayload::ContractStatus {
                     upstream: progress.stage_id,
                     reader: reader_stage,
                     selected_event_type: selected_event_type.clone(),
@@ -1108,7 +1108,7 @@ where
 
                 // IMPORTANT: A stall is a liveness signal, not a transport contract violation.
                 //
-                // Historically we emitted `SystemEventType::ContractStatus { pass: false, reason:
+                // Historically we emitted `SystemPayload::ContractStatus { pass: false, reason:
                 // reader_stalled }` here. PipelineSupervisor treats *any* ContractStatus failure
                 // as a gating contract violation and aborts the flow (including during drain),
                 // which has proven wildly non-actionable for long/variable-latency stages

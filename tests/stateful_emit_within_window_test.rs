@@ -5,7 +5,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow::stateful;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent};
+use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::journal::Journal;
@@ -242,8 +242,7 @@ async fn authored_eof_position(
         .map_err(|e| anyhow!("failed to read stage journal: {e}"))?;
 
     for (idx, env) in ordered.iter().enumerate() {
-        let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
-            &env.event.content
+        let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) = &env.payload
         else {
             continue;
         };
@@ -255,7 +254,7 @@ async fn authored_eof_position(
         };
 
         if authored_by_stage {
-            if let ChainEventContent::FlowControl(payload) = &env.event.content {
+            if let ChainPayload::FlowControl(payload) = &env.payload {
                 return Ok(Some((idx, payload.clone())));
             }
         }
@@ -275,11 +274,8 @@ async fn data_event_ids_of_type(
 
     let mut ids = Vec::new();
     for env in ordered {
-        let ChainEventContent::Data { event_type: ty, .. } = &env.event.content else {
-            continue;
-        };
-        if ty == event_type {
-            ids.push(env.event.id);
+        if env.consumes_data_credit() && env.event_type() == event_type {
+            ids.push(env.envelope.provenance.event.id);
         }
     }
 
@@ -296,8 +292,8 @@ async fn last_window_aggregate_event(
 
     let mut last = None;
     for env in ordered {
-        if WindowAgg::from_event(&env.event).is_some() {
-            last = Some(env.event.clone());
+        if WindowAgg::from_event(&env.authored()).is_some() {
+            last = Some(env.authored().clone());
         }
     }
     Ok(last)
@@ -362,9 +358,9 @@ async fn emit_within_flushes_final_partial_window_before_authored_eof() -> Resul
     let mut last_agg_idx: Option<usize> = None;
     let mut last_agg_event_id: Option<EventId> = None;
     for (idx, env) in ordered.iter().enumerate() {
-        if WindowAgg::from_event(&env.event).is_some() {
+        if WindowAgg::from_event(&env.authored()).is_some() {
             last_agg_idx = Some(idx);
-            last_agg_event_id = Some(env.event.id);
+            last_agg_event_id = Some(env.envelope.provenance.event.id);
         }
     }
 
@@ -501,10 +497,9 @@ async fn emit_within_final_aggregate_folds_runtime_minted_source_correlations() 
         .map_err(|e| anyhow!("failed to read source journal: {e}"))?;
     let mut expected = source_events
         .iter()
-        .filter(|envelope| WindowInput::from_event(&envelope.event).is_some())
+        .filter(|envelope| WindowInput::from_event(&envelope.authored()).is_some())
         .map(|envelope| {
             envelope
-                .event
                 .correlation_id()
                 .expect("the runtime commit seam mints one correlation per source fact")
         })
@@ -627,11 +622,11 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
     let mut agg_idx: Option<usize> = None;
 
     for (idx, env) in ordered.iter().enumerate() {
-        if agg_idx.is_none() && WindowAgg::from_event(&env.event).is_some() {
+        if agg_idx.is_none() && WindowAgg::from_event(&env.authored()).is_some() {
             agg_idx = Some(idx);
         }
 
-        let ChainEventContent::FlowControl(payload) = &env.event.content else {
+        let ChainPayload::FlowControl(payload) = &env.payload else {
             continue;
         };
         let FlowControlPayload::Eof { .. } = payload else {
@@ -711,14 +706,11 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
 
     let mut expected: BTreeMap<String, Vec<EventId>> = BTreeMap::new();
     for env in ordered_src {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &env.event.content
-        else {
+        let event_type = env.event_type();
+        let ChainPayload::Fact(payload) = &env.payload else {
             continue;
         };
-        if !GroupInput::event_type_matches(event_type) {
+        if !GroupInput::event_type_matches(&event_type) {
             continue;
         }
         let group = payload
@@ -726,7 +718,10 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("expected group field on input payload"))?
             .to_string();
-        expected.entry(group).or_default().push(env.event.id);
+        expected
+            .entry(group)
+            .or_default()
+            .push(env.envelope.provenance.event.id);
     }
 
     let ordered_grp = grp_journal
@@ -736,20 +731,20 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
 
     let mut seen: BTreeMap<String, Vec<EventId>> = BTreeMap::new();
     for env in ordered_grp {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &env.event.content
-        else {
+        let event_type = env.event_type();
+        let ChainPayload::Fact(payload) = &env.payload else {
             continue;
         };
-        if !GroupAggOutput::event_type_matches(event_type) {
+        if !GroupAggOutput::event_type_matches(&event_type) {
             continue;
         }
         let output: GroupAggOutput = serde_json::from_value(payload.clone())
             .map_err(|error| anyhow!("expected named group_by output: {error}"))?;
 
-        seen.insert(output.key, env.event.causality.parent_ids.clone());
+        seen.insert(
+            output.key,
+            env.envelope.provenance.event.causality.parent_ids.clone(),
+        );
     }
 
     assert_eq!(

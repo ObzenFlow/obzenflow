@@ -185,7 +185,7 @@ async fn stateful_emit_interval_emits_while_idle() {
             .expect("read stateful journal");
         if events
             .iter()
-            .any(|env| env.event.event_type() == "test.timer.emit")
+            .any(|env| env.event_type() == "test.timer.emit")
         {
             break;
         }
@@ -373,7 +373,7 @@ async fn stateful_emit_interval_advances_under_paused_time() {
             .expect("read stateful journal");
         if events
             .iter()
-            .any(|env| env.event.event_type() == "test.timer.emit")
+            .any(|env| env.event_type() == "test.timer.emit")
         {
             emitted = true;
             break;

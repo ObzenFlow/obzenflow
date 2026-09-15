@@ -18,10 +18,8 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit_with_burst;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
-};
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
+use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
@@ -155,7 +153,7 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .await
         .expect("stage journal should read")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
@@ -164,9 +162,9 @@ fn delayed_rate_limiter_events(events: &[ChainEvent]) -> usize {
         .iter()
         .filter(|event| {
             matches!(
-                &event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. })
+                &event.payload,
+                ChainPayload::Execution(ExecutionPayload::RateLimiter(
+                    RateLimiterFact::Delayed { .. }
                 ))
             )
         })
@@ -248,8 +246,8 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
 
     let metrics = tail
         .iter()
-        .find_map(|env| match &env.event.event {
-            obzenflow_core::event::SystemEventType::PipelineLifecycle(ev) => match ev {
+        .find_map(|env| match &env.payload {
+            SystemPayload::PipelineLifecycle(ev) => match ev {
                 obzenflow_core::event::PipelineLifecycleEvent::Cancelled { metrics, .. } => {
                     metrics.clone()
                 }

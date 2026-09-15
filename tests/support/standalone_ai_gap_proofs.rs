@@ -6,6 +6,8 @@
 
 use super::*;
 use obzenflow::ai::{ChatTransform, EmbeddingTransform};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::EffectAttemptStarted;
 use obzenflow_dsl::infinite_source;
@@ -461,14 +463,14 @@ async fn stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> 
         .await
         .unwrap()
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect()
 }
 
 fn error_projection(events: &[ChainEvent]) -> Vec<(Option<ErrorKind>, String)> {
     events
         .iter()
-        .filter_map(|event| match &event.processing_info.status {
+        .filter_map(|event| match &event.processing.status {
             ProcessingStatus::Error { message, kind } => Some((kind.clone(), message.clone())),
             ProcessingStatus::Success => None,
         })
@@ -485,17 +487,10 @@ async fn stage_processing_errors(
 }
 
 fn failed_effect_record(event: &ChainEvent, effect_type: &str) -> Option<EffectRecord> {
-    let ChainEventContent::Data {
-        event_type,
-        payload,
-    } = &event.content
-    else {
+    let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &event.payload else {
         return None;
     };
-    if event_type != EFFECT_RECORD_EVENT_TYPE {
-        return None;
-    }
-    let record: EffectRecord = serde_json::from_value(payload.clone()).ok()?;
+    let record = record.clone();
     (record.descriptor.effect_type.as_str() == effect_type
         && matches!(record.outcome, EffectOutcomePayload::Failed { .. }))
     .then_some(record)
@@ -1020,7 +1015,10 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
         loop {
             let input_events = stage_events(&active_archive, "input").await;
             let has_eof = input_events.iter().any(|event| {
-                matches!(&event.content, ChainEventContent::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
+                matches!(
+                    &event.payload,
+                    ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+                )
             });
             if has_eof {
                 return;
@@ -1082,7 +1080,10 @@ async fn held_provider_serialises_data_and_keeps_eof_out_of_mappers() {
         .iter()
         .rposition(|event| {
             event.writer_id == chat_writer
-                && matches!(&event.content, ChainEventContent::FlowControl(obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }))
+                && matches!(
+                    &event.payload,
+                    ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+                )
         })
         .expect("chat authors EOF after its in-flight work");
     assert_eq!(output_positions.len(), 2);

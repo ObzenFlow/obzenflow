@@ -9,23 +9,22 @@ use super::{
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
+use obzenflow_core::chrono::Utc;
 use obzenflow_core::event::context::causality_context::CausalityContext;
-use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
+use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::payloads::effect_payload::{
-    EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
-};
+use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectProvenance};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::system_event::{
-    ContractResultStatusLabel, SystemEvent, SystemEventType,
-};
+use obzenflow_core::event::provenance::JournalProvenance;
+use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent, SystemPayload};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::id::{CompositeId, JournalId};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -41,6 +40,20 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
+
+fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecord<ChainPayload> {
+    JournalRecord::commit_event(
+        event,
+        JournalProvenance {
+            journal_writer_id: JournalWriterId::new(),
+            vector_clock,
+            timestamp: Utc::now(),
+            journal_group_id: None,
+            journal_group_member: None,
+        },
+    )
+    .unwrap()
+}
 
 fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::context::FlowContext {
     crate::stages::common::supervision::flow_context_factory::make_flow_context(
@@ -112,13 +125,13 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
     assert_eq!(events.len(), 2);
     let mut observed = HashMap::new();
     for env in events {
-        assert_contract_owner(&env.event, &owner);
-        let ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+        assert_contract_owner(&env.authored(), &owner);
+        let ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
             reader_index,
             reader_path,
             reader_seq,
             ..
-        }) = env.event.content
+        }) = env.payload
         else {
             panic!("expected progress")
         };
@@ -147,21 +160,18 @@ async fn contract_owner_context_covers_both_gap_paths_violation_and_final() {
         let events = journal.read_causally_ordered().await.unwrap();
         let (mut gap, mut violation, mut final_record) = (false, false, false);
         for env in events {
-            assert_contract_owner(&env.event, &owner);
-            match env.event.content {
-                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => {
-                    gap = true
-                }
-                ChainEventContent::FlowControl(FlowControlPayload::AtLeastOnceViolation {
+            assert_contract_owner(&env.authored(), &owner);
+            match env.payload {
+                ChainPayload::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => gap = true,
+                ChainPayload::FlowControl(FlowControlPayload::AtLeastOnceViolation {
                     upstream: id,
                     ..
                 }) => {
                     assert_eq!(id, upstream);
                     violation = true;
                 }
-                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
-                    pass,
-                    ..
+                ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
+                    pass, ..
                 }) => {
                     assert!(!pass);
                     final_record = true;
@@ -177,7 +187,7 @@ async fn contract_owner_context_covers_both_gap_paths_violation_and_final() {
 struct TestJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
 }
 
 impl<T: JournalEvent> TestJournal<T> {
@@ -196,7 +206,7 @@ type AppendFailurePredicate<T> = dyn Fn(&T, usize) -> bool + Send + Sync;
 struct ControlledJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     append_calls: AtomicUsize,
     should_fail: Arc<AppendFailurePredicate<T>>,
 }
@@ -214,7 +224,7 @@ impl<T: JournalEvent> ControlledJournal<T> {
 }
 
 struct TestJournalReader<T: JournalEvent> {
-    events: Vec<EventEnvelope<T>>,
+    events: Vec<JournalRecord<T::Payload>>,
     pos: usize,
 }
 
@@ -231,15 +241,17 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&EventEnvelope<T>>,
-    ) -> std::result::Result<EventEnvelope<T>, JournalError> {
-        let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+        _parent: Option<&JournalRecord<T::Payload>>,
+    ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
+        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
         guard.push(envelope.clone());
         Ok(envelope)
     }
 
-    async fn read_all_unordered(&self) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
@@ -247,7 +259,7 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
@@ -265,7 +277,7 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn read_last_n(
         &self,
         count: usize,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         let len = guard.len();
         let start = len.saturating_sub(count);
@@ -287,8 +299,8 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&EventEnvelope<T>>,
-    ) -> std::result::Result<EventEnvelope<T>, JournalError> {
+        _parent: Option<&JournalRecord<T::Payload>>,
+    ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         let call_index = self.append_calls.fetch_add(1, Ordering::Relaxed);
         if (self.should_fail)(&event, call_index) {
             return Err(JournalError::Implementation {
@@ -297,13 +309,15 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
             });
         }
 
-        let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
         guard.push(envelope.clone());
         Ok(envelope)
     }
 
-    async fn read_all_unordered(&self) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
@@ -311,7 +325,7 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
@@ -329,7 +343,7 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
     async fn read_last_n(
         &self,
         count: usize,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         let len = guard.len();
         let start = len.saturating_sub(count);
@@ -340,7 +354,9 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
 
 #[async_trait]
 impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-    async fn next(&mut self) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+    async fn next(
+        &mut self,
+    ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         if self.pos >= self.events.len() {
             Ok(None)
         } else {
@@ -391,22 +407,24 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
     async fn append(
         &self,
         _event: T,
-        _parent: Option<&EventEnvelope<T>>,
-    ) -> std::result::Result<EventEnvelope<T>, JournalError> {
+        _parent: Option<&JournalRecord<T::Payload>>,
+    ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         Err(JournalError::Implementation {
             message: "append not supported".to_string(),
             source: "append not supported".into(),
         })
     }
 
-    async fn read_all_unordered(&self) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
@@ -429,7 +447,7 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
     async fn read_last_n(
         &self,
         _count: usize,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 }
@@ -514,8 +532,8 @@ async fn final_append_failure_keeps_final_emitted_false() {
         contract_owner,
         Arc::new(|event: &ChainEvent, _call| {
             matches!(
-                &event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+                &event.payload,
+                ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
             )
         }),
     ));
@@ -543,8 +561,8 @@ async fn final_append_failure_keeps_final_emitted_false() {
     let events = contract_journal.read_causally_ordered().await.unwrap();
     assert!(
         !events.iter().any(|env| matches!(
-            &env.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+            &env.payload,
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
         )),
         "expected final event append to have failed"
     );
@@ -592,8 +610,8 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
     let events = contract_journal.read_causally_ordered().await.unwrap();
     assert!(
         !events.iter().any(|env| matches!(
-            &env.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+            &env.payload,
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
         )),
         "diagnostics-only checks must not emit final contract evidence"
     );
@@ -690,7 +708,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
     let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(ControlledJournal::new(
         system_owner,
         Arc::new(|event: &SystemEvent, _call| {
-            matches!(&event.event, SystemEventType::ContractStatus { .. })
+            matches!(&event.payload, SystemPayload::ContractStatus { .. })
         }),
     ));
 
@@ -724,8 +742,8 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
     let contract_events = contract_journal.read_causally_ordered().await.unwrap();
     assert!(
         contract_events.iter().any(|env| matches!(
-            &env.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+            &env.payload,
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
         )),
         "expected final event to be persisted even when ContractStatus append fails"
     );
@@ -774,8 +792,8 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     let events = system_journal.read_causally_ordered().await.unwrap();
     assert!(
         !events.iter().any(|env| matches!(
-            &env.event.event,
-            SystemEventType::ContractResult { .. } | SystemEventType::ContractStatus { .. }
+            &env.payload,
+            SystemPayload::ContractResult { .. } | SystemPayload::ContractStatus { .. }
         )),
         "expected progress contract heartbeats to be suppressed before any data is observed"
     );
@@ -787,8 +805,8 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     let events = system_journal.read_causally_ordered().await.unwrap();
     assert!(
         events.iter().any(|env| matches!(
-            &env.event.event,
-            SystemEventType::ContractResult { contract_name, status, cause, .. }
+            &env.payload,
+            SystemPayload::ContractResult { contract_name, status, cause, .. }
                 if contract_name.as_str() == TransportContract::NAME
                     && *status == ContractResultStatusLabel::Healthy
                     && cause.is_none()
@@ -845,8 +863,8 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
     let events = contract_journal.read_causally_ordered().await.unwrap();
     let progress = events
         .iter()
-        .find_map(|env| match &env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+        .find_map(|env| match &env.payload {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
                 reader_seq,
                 last_event_id,
                 vector_clock,
@@ -898,10 +916,12 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0].track_pending_delivery_input(first.clone(), clock_1.clone());
+    reader_progress[0]
+        .track_pending_delivery_input(committed_input(first.clone(), clock_1.clone()));
     reader_progress[0].track_pending_receipt(first.id, clock_1);
     reader_progress[0].reader_seq = SeqNo(2);
-    reader_progress[0].track_pending_delivery_input(second.clone(), clock_2.clone());
+    reader_progress[0]
+        .track_pending_delivery_input(committed_input(second.clone(), clock_2.clone()));
     reader_progress[0].track_pending_receipt(second.id, clock_2.clone());
 
     let second_receipt = ChainEventFactory::delivery_event(
@@ -968,7 +988,7 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
     let mut clock = VectorClock::new();
     clock.clocks.insert("source".to_string(), 1);
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].track_pending_delivery_input(forwarded.clone(), clock);
+    reader_progress[0].track_pending_delivery_input(committed_input(forwarded.clone(), clock));
 
     let receipt = ChainEventFactory::delivery_event(
         WriterId::from(sink_stage),
@@ -1009,8 +1029,8 @@ async fn stall_append_failure_does_not_set_stalled_since() {
         contract_owner,
         Arc::new(|event: &ChainEvent, _call| {
             matches!(
-                &event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::ReaderStalled { .. })
+                &event.payload,
+                ChainPayload::FlowControl(FlowControlPayload::ReaderStalled { .. })
             )
         }),
     ));
@@ -1118,14 +1138,14 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         .await
         .expect("read contract journal");
     for env in &envelopes {
-        assert_contract_owner(&env.event, &owner);
+        assert_contract_owner(&env.authored(), &owner);
     }
     let stalled_count = envelopes
         .iter()
         .filter(|e| {
             matches!(
-                &e.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::ReaderStalled { .. })
+                &e.payload,
+                ChainPayload::FlowControl(FlowControlPayload::ReaderStalled { .. })
             )
         })
         .count();
@@ -1215,8 +1235,8 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
     let contract_owner = JournalOwner::stage(contract_stage);
     let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(ControlledJournal::new(
         contract_owner,
-        Arc::new(|event: &ChainEvent, _call| match &event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionProgress {
+        Arc::new(|event: &ChainEvent, _call| match &event.payload {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress {
                 reader_index,
                 ..
             }) => reader_index.0 == 0,
@@ -1280,11 +1300,11 @@ async fn build_upstream_with_seq_divergence(
     upstream_journal.append(data_event, None).await.unwrap();
 
     let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_id: writer_id_field,
         writer_seq,
         ..
-    }) = &mut eof_event.content
+    }) = &mut eof_event.payload
     {
         *writer_id_field = Some(writer_id);
         *writer_seq = Some(SeqNo(3));
@@ -1369,8 +1389,8 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
     let mut violation_found = false;
 
     for env in &events {
-        match &env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+        match &env.payload {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
                 pass,
                 reader_seq,
                 advertised_writer_seq,
@@ -1389,7 +1409,7 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
                     other => panic!("expected SeqDivergence failure_reason, got {other:?}"),
                 }
             }
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionGap {
                 from_seq,
                 to_seq,
                 upstream,
@@ -1399,7 +1419,7 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
                 assert_eq!(*to_seq, SeqNo(3));
                 assert_eq!(*upstream, upstream_stage);
             }
-            ChainEventContent::FlowControl(FlowControlPayload::AtLeastOnceViolation {
+            ChainPayload::FlowControl(FlowControlPayload::AtLeastOnceViolation {
                 upstream,
                 reason,
                 reader_seq,
@@ -1434,13 +1454,13 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
     let mut status_found = false;
 
     for env in &system_events {
-        if let SystemEventType::ContractStatus {
+        if let SystemPayload::ContractStatus {
             upstream,
             reader,
             pass,
             reason,
             ..
-        } = &env.event.event
+        } = &env.payload
         {
             if *pass {
                 // FLOWIP-080r may emit passing contract-status heartbeats during
@@ -1540,8 +1560,8 @@ async fn transport_only_skips_observability_events() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match data {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::Data { .. } => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::Fact(_) => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
         },
         other => panic!("expected PollResult::Event, got {other:?}"),
@@ -1565,8 +1585,8 @@ async fn transport_only_skips_observability_events() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match eof {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
         },
         other => panic!("expected PollResult::Event, got {other:?}"),
@@ -1619,11 +1639,11 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .unwrap();
 
     let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_seq,
         writer_seq_by_event_type,
         ..
-    }) = &mut eof_event.content
+    }) = &mut eof_event.payload
     {
         *writer_seq = Some(SeqNo(3));
         writer_seq_by_event_type.insert("test.ignored.v1".into(), SeqNo(1));
@@ -1692,9 +1712,9 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match selected {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::Data { event_type, .. } => {
-                assert_eq!(event_type, "test.selected.v1");
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::Fact(_) => {
+                assert_eq!(env.event_type(), "test.selected.v1");
             }
             other => panic!("expected selected Data event, got {other:?}"),
         },
@@ -1728,8 +1748,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     let contract_events = contract_journal.read_causally_ordered().await.unwrap();
     let mut final_found = false;
     for env in &contract_events {
-        match &env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+        match &env.payload {
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
                 pass,
                 reader_seq,
                 advertised_writer_seq,
@@ -1742,7 +1762,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
                 assert_eq!(*advertised_writer_seq, Some(SeqNo(2)));
                 assert!(failure_reason.is_none());
             }
-            ChainEventContent::FlowControl(
+            ChainPayload::FlowControl(
                 FlowControlPayload::ConsumptionGap { .. }
                 | FlowControlPayload::AtLeastOnceViolation { .. },
             ) => panic!("selected feed should not emit gap or violation events"),
@@ -1753,8 +1773,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 
     let system_events = system_journal.read_causally_ordered().await.unwrap();
     assert!(system_events.iter().any(|env| matches!(
-        &env.event.event,
-        SystemEventType::ContractStatus {
+        &env.payload,
+        SystemPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -1812,7 +1832,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
         "test.joined.v1",
         json!({"foreign": true}),
     );
-    forwarded_error.processing_info.status = ProcessingStatus::error("forwarded pre-error row");
+    forwarded_error.processing.status = ProcessingStatus::error("forwarded pre-error row");
     upstream_journal
         .append(forwarded_error, None)
         .await
@@ -1820,8 +1840,8 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
 
     let mut forwarded_eof =
         ChainEventFactory::eof_event_with_kind(WriterId::Stage(foreign_author), EofKind::Natural);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
-        &mut forwarded_eof.content
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+        &mut forwarded_eof.payload
     {
         *writer_seq = Some(SeqNo(3));
     }
@@ -1829,11 +1849,11 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
 
     let mut local_terminal =
         ChainEventFactory::eof_event_with_kind(WriterId::Stage(upstream_stage), EofKind::Poison);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_seq,
         writer_seq_by_event_type,
         ..
-    }) = &mut local_terminal.content
+    }) = &mut local_terminal.payload
     {
         *writer_seq = Some(SeqNo(2));
         writer_seq_by_event_type.insert("test.joined.v1".into(), SeqNo(2));
@@ -1875,12 +1895,14 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             .await
         {
             PollResult::Event(envelope) => {
-                saw_foreign_error |= envelope.event.writer_id == WriterId::Stage(foreign_author)
-                    && envelope.event.is_data();
-                saw_forwarded_eof |= envelope.event.writer_id == WriterId::Stage(foreign_author)
+                saw_foreign_error |= envelope.envelope.provenance.event.writer_id
+                    == WriterId::Stage(foreign_author)
+                    && envelope.consumes_data_credit();
+                saw_forwarded_eof |= envelope.envelope.provenance.event.writer_id
+                    == WriterId::Stage(foreign_author)
                     && matches!(
-                        envelope.event.content,
-                        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+                        envelope.payload,
+                        ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
                     );
             }
             PollResult::CursorAdvanced { .. } => {}
@@ -1910,20 +1932,20 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     let contract_events = contract_journal.read_causally_ordered().await.unwrap();
     let final_event = contract_events.iter().find(|envelope| {
         matches!(
-            envelope.event.content,
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+            envelope.payload,
+            ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
         )
     });
     let Some(final_event) = final_event else {
         panic!("expected ConsumptionFinal")
     };
-    let ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+    let ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
         pass,
         reader_seq,
         advertised_writer_seq,
         failure_reason,
         ..
-    }) = &final_event.event.content
+    }) = &final_event.payload
     else {
         unreachable!()
     };
@@ -1941,11 +1963,11 @@ async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
     let writer_id = WriterId::Stage(upstream_stage);
 
     let mut ignored = ChainEventFactory::data_event(writer_id, "checkout.other.v1", json!({}));
-    ignored.processing_info.event_time = 100;
+    ignored.processing.event_time = 100;
     upstream_journal.append(ignored, None).await.unwrap();
 
     let mut admitted = ChainEventFactory::data_event(writer_id, "checkout.command.v1", json!({}));
-    admitted.processing_info.event_time = 123;
+    admitted.processing.event_time = 123;
     let admitted_id = admitted.id;
     upstream_journal.append(admitted, None).await.unwrap();
 
@@ -1971,7 +1993,7 @@ async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
     else {
         panic!("expected ignored Data delivery");
     };
-    assert!(ignored.event.composite_activations().is_empty());
+    assert!(ignored.composite_activations().is_empty());
 
     let PollResult::Event(admitted) = subscription
         .poll_next_with_state("test_fsm", Some(&mut progress))
@@ -1979,8 +2001,8 @@ async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
     else {
         panic!("expected boundary Data delivery");
     };
-    assert_eq!(admitted.event.composite_activations().len(), 1);
-    let activation = &admitted.event.composite_activations()[0];
+    assert_eq!(admitted.composite_activations().len(), 1);
+    let activation = &admitted.composite_activations()[0];
     assert_eq!(activation.composite_id, CompositeId::new("saga:checkout"));
     assert_eq!(activation.activation, admitted_id);
     assert_eq!(activation.entry_port, "commands");
@@ -2015,11 +2037,11 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
         .unwrap();
 
     let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_seq,
         writer_seq_by_event_type,
         ..
-    }) = &mut eof_event.content
+    }) = &mut eof_event.payload
     {
         // Aggregate selected count is 2, but the per-feed evidence is deliberately
         // inconsistent: first advertises 2 while second advertises 0.
@@ -2073,7 +2095,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
     let mut aggregate_status_found = false;
 
     for env in &system_events {
-        if let SystemEventType::ContractStatus {
+        if let SystemPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -2082,7 +2104,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             reader_seq,
             advertised_writer_seq,
             reason,
-        } = &env.event.event
+        } = &env.payload
         {
             if *upstream != upstream_stage || *reader != reader_stage {
                 continue;
@@ -2202,13 +2224,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .await;
     assert!(matches!(
         first,
-        PollResult::Event(EventEnvelope {
-            event: ChainEvent {
-                content: ChainEventContent::Data { ref event_type, .. },
-                ..
-            },
-            ..
-        }) if event_type == "test.first.v1"
+        PollResult::Event(ref record) if record.is_fact() && record.event_type() == "test.first.v1"
     ));
 
     let status = subscription.check_contracts(&mut reader_progress).await;
@@ -2222,8 +2238,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .iter()
         .filter(|env| {
             matches!(
-                &env.event.event,
-                SystemEventType::ContractResult {
+                &env.payload,
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
@@ -2249,8 +2265,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .iter()
         .filter(|env| {
             matches!(
-                &env.event.event,
-                SystemEventType::ContractResult {
+                &env.payload,
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
@@ -2268,8 +2284,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .iter()
         .filter(|env| {
             matches!(
-                &env.event.event,
-                SystemEventType::ContractResult {
+                &env.payload,
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type: None,
@@ -2288,13 +2304,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .await;
     assert!(matches!(
         second,
-        PollResult::Event(EventEnvelope {
-            event: ChainEvent {
-                content: ChainEventContent::Data { ref event_type, .. },
-                ..
-            },
-            ..
-        }) if event_type == "test.second.v1"
+        PollResult::Event(ref record) if record.is_fact() && record.event_type() == "test.second.v1"
     ));
 
     let status = subscription.check_contracts(&mut reader_progress).await;
@@ -2308,8 +2318,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .iter()
         .filter(|env| {
             matches!(
-                &env.event.event,
-                SystemEventType::ContractResult {
+                &env.payload,
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
@@ -2327,8 +2337,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .iter()
         .filter(|env| {
             matches!(
-                &env.event.event,
-                SystemEventType::ContractResult {
+                &env.payload,
+                SystemPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
@@ -2384,11 +2394,10 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
 
     upstream_journal
         .append(
-            ChainEventFactory::derived_data_event(
+            ChainEventFactory::derived_event(
                 writer_id,
                 &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-                EFFECT_RECORD_EVENT_TYPE,
-                serde_json::to_value(&effect_record).expect("serialize effect record"),
+                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect_record.clone())),
                 obzenflow_core::config::LineagePolicy::default(),
             )
             .with_effect_provenance(EffectProvenance::from_record(
@@ -2436,8 +2445,8 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::Data { .. } => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::Fact(_) => {}
             other => {
                 panic!("expected framework effect Data to be skipped and domain Data delivered, got {other:?}")
             }
@@ -2480,8 +2489,8 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .unwrap();
 
     let mut forwarded_eof = ChainEventFactory::eof_event(forwarded_writer_id, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
-        &mut forwarded_eof.content
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
+        &mut forwarded_eof.payload
     {
         *writer_id = None;
     }
@@ -2516,8 +2525,8 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::Data { .. } => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::Fact(_) => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
         },
         other => panic!("expected PollResult::Event, got {other:?}"),
@@ -2527,8 +2536,8 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match second {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
         },
         other => panic!("expected PollResult::Event, got {other:?}"),
@@ -2543,8 +2552,8 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match third {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::Data { .. } => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::Fact(_) => {}
             other => panic!("expected third delivered event to be Data, got {other:?}"),
         },
         other => panic!("expected PollResult::Event, got {other:?}"),
@@ -2554,8 +2563,8 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match fourth {
-        PollResult::Event(env) => match env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
+        PollResult::Event(env) => match env.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected fourth delivered event to be EOF, got {other:?}"),
         },
         other => panic!("expected PollResult::Event, got {other:?}"),
@@ -2584,7 +2593,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
 struct SharedTestJournal {
     id: JournalId,
     owner: Option<JournalOwner>,
-    events: Arc<Mutex<Vec<EventEnvelope<ChainEvent>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
 }
 
 impl SharedTestJournal {
@@ -2597,20 +2606,23 @@ impl SharedTestJournal {
     }
 
     fn append_with_clock(&self, event: ChainEvent, vector_clock: VectorClock) {
-        let envelope = EventEnvelope {
-            journal_writer_id: JournalWriterId::from(self.id),
-            vector_clock,
-            timestamp: chrono::Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
+        let envelope = JournalRecord::commit_event(
             event,
-        };
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(self.id),
+                vector_clock,
+                timestamp: chrono::Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid committed fixture");
         self.events.lock().unwrap().push(envelope);
     }
 }
 
 struct SharedTestJournalReader {
-    events: Arc<Mutex<Vec<EventEnvelope<ChainEvent>>>>,
+    events: Arc<Mutex<Vec<JournalRecord<ChainPayload>>>>,
     pos: usize,
 }
 
@@ -2618,7 +2630,7 @@ struct SharedTestJournalReader {
 impl JournalReader<ChainEvent> for SharedTestJournalReader {
     async fn next(
         &mut self,
-    ) -> std::result::Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         if self.pos < guard.len() {
             let envelope = guard[self.pos].clone();
@@ -2651,23 +2663,23 @@ impl Journal<ChainEvent> for SharedTestJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> std::result::Result<EventEnvelope<ChainEvent>, JournalError> {
-        let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+        _parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> std::result::Result<JournalRecord<ChainPayload>, JournalError> {
+        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         self.events.lock().unwrap().push(envelope.clone());
         Ok(envelope)
     }
 
     async fn read_all_unordered(
         &self,
-    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(self.events.lock().unwrap().clone())
     }
 
     async fn read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
@@ -2684,7 +2696,7 @@ impl Journal<ChainEvent> for SharedTestJournal {
     async fn read_last_n(
         &self,
         count: usize,
-    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         let len = guard.len();
         let start = len.saturating_sub(count);
@@ -2735,7 +2747,7 @@ fn merge_catch_up(writer: StageId, generation: u64, stage_key: &str) -> ChainEve
     ChainEventFactory::source_event(
         WriterId::Stage(writer),
         stage_key,
-        ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+        ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
             generation: ReaderGeneration(generation),
             stage_key: obzenflow_core::StageKey::from(stage_key),
         }),
@@ -2815,7 +2827,7 @@ async fn canonical_single(
 
 async fn expect_delivery(
     subscription: &mut UpstreamSubscription<ChainEvent>,
-) -> EventEnvelope<ChainEvent> {
+) -> JournalRecord<ChainPayload> {
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::Event(envelope) => envelope,
         other => panic!(
@@ -2862,7 +2874,7 @@ async fn canonical_merge_waits_while_any_input_is_quiet() {
     // stage name) delivers A first.
     journal_b.append_with_clock(merge_data(stage_b, "b.event"), VectorClock::new());
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event.event_type(), "a.event");
+    assert_eq!(first.event_type(), "a.event");
     assert_eq!(subscription.last_delivered_upstream_stage(), Some(stage_a));
     assert!(subscription.merge_wait().is_none());
 
@@ -2877,7 +2889,7 @@ async fn canonical_merge_waits_while_any_input_is_quiet() {
     // A seals: B's data (ordinal 1) beats A's EOF (ordinal 2).
     journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
     let second = expect_delivery(&mut subscription).await;
-    assert_eq!(second.event.event_type(), "b.event");
+    assert_eq!(second.event_type(), "b.event");
 
     // A's EOF still cannot deliver: B went quiet again. EOFs obey the same
     // wait discipline as data, so exhaustion order stays deterministic.
@@ -2889,13 +2901,13 @@ async fn canonical_merge_waits_while_any_input_is_quiet() {
 
     let third = expect_delivery(&mut subscription).await;
     assert!(matches!(
-        third.event.content,
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        third.payload,
+        ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
     ));
     let fourth = expect_delivery(&mut subscription).await;
     assert!(matches!(
-        fourth.event.content,
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        fourth.payload,
+        ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
     ));
     assert_eq!(delivered(&subscription), [2, 2]);
     assert!(subscription.all_readers_eof());
@@ -2954,7 +2966,7 @@ async fn canonical_merge_excludes_happened_before_heads() {
     let mut order = Vec::new();
     for _ in 0..3 {
         let envelope = expect_delivery(&mut subscription).await;
-        order.push(envelope.event.event_type());
+        order.push(envelope.event_type());
     }
     assert_eq!(
         order,
@@ -3187,8 +3199,8 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         other => panic!("expected delivery, got {other:?}"),
     };
     assert!(matches!(
-        first.event.content,
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        first.payload,
+        ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
     ));
 
     match subscription
@@ -3227,7 +3239,7 @@ async fn canonical_merge_filtered_events_take_no_ordinals() {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(envelope) => {
                 assert_ne!(
-                    envelope.event.event_type(),
+                    envelope.event_type(),
                     "other.event",
                     "unselected events must never deliver"
                 );
@@ -3293,7 +3305,7 @@ async fn long_filtered_run_yields_bounded_cursor_progress_before_delivery() {
 
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::Event(envelope) => {
-            assert_eq!(envelope.event.event_type(), "test.selected");
+            assert_eq!(envelope.event_type(), "test.selected");
         }
         other => panic!("selected row should eventually deliver: {other:?}"),
     }
@@ -3351,7 +3363,7 @@ async fn canonical_merge_skips_reader_telemetry_without_taking_ordinals() {
     let mut order = Vec::new();
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
-            PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+            PollResult::Event(envelope) => order.push(envelope.event_type()),
             PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
@@ -3390,7 +3402,7 @@ async fn round_robin_transport_only_skips_reader_telemetry() {
     let mut order = Vec::new();
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
-            PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+            PollResult::Event(envelope) => order.push(envelope.event_type()),
             PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
@@ -3420,7 +3432,7 @@ async fn interleaved_telemetry_does_not_perturb_merged_order() {
         let mut order = Vec::new();
         loop {
             match subscription.poll_next_with_state("test_fsm", None).await {
-                PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+                PollResult::Event(envelope) => order.push(envelope.event_type()),
                 PollResult::CursorAdvanced { .. } => {}
                 PollResult::NoEvents => break,
                 PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
@@ -3600,7 +3612,7 @@ async fn delivered_upstream_identity_ignores_event_writer() {
         other => panic!("expected delivered data event, got {other:?}"),
     };
     assert_eq!(
-        envelope.event.writer_id,
+        envelope.envelope.provenance.event.writer_id,
         WriterId::Stage(foreign_author),
         "premise: the forwarded row preserves its original author"
     );
@@ -3628,7 +3640,7 @@ async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
 
     // a1 (gen 0, ordinal 1, key a) beats b1 (gen 0, ordinal 1, key b).
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event.event_type(), "a1");
+    assert_eq!(first.event_type(), "a1");
     assert_eq!(
         subscription.last_delivered_generation(),
         Some(ReaderGeneration(0))
@@ -3637,7 +3649,7 @@ async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
     // The held watermark (ordinal 2) loses to b1's strictly lower ordinal 1,
     // and holding it must not advance A's generation.
     let second = expect_delivery(&mut subscription).await;
-    assert_eq!(second.event.event_type(), "b1");
+    assert_eq!(second.event_type(), "b1");
     assert!(
         !subscription.all_readers_caught_up(ReaderGeneration(1)),
         "a merely held watermark must not advance its reader"
@@ -3651,8 +3663,8 @@ async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
     // stamping the generation it closes (0), then advancing A to 1.
     let third = expect_delivery(&mut subscription).await;
     assert!(matches!(
-        third.event.content,
-        ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+        third.payload,
+        ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete { .. })
     ));
     assert_eq!(
         subscription.last_delivered_generation(),
@@ -3668,7 +3680,7 @@ async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
     // b2 (gen 0) beats a2 (gen 1), and takes position 3: the watermark
     // consumed no StageInputPosition.
     let fourth = expect_delivery(&mut subscription).await;
-    assert_eq!(fourth.event.event_type(), "b2");
+    assert_eq!(fourth.event_type(), "b2");
     assert_eq!(
         subscription.last_delivered_stage_input_position(),
         Some(StageInputPosition(3))
@@ -3684,12 +3696,12 @@ async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
     let fifth = expect_delivery(&mut subscription).await;
     assert!(matches!(
-        fifth.event.content,
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        fifth.payload,
+        ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
     ));
 
     let sixth = expect_delivery(&mut subscription).await;
-    assert_eq!(sixth.event.event_type(), "a2");
+    assert_eq!(sixth.event_type(), "a2");
     assert_eq!(
         subscription.last_delivered_generation(),
         Some(ReaderGeneration(1))
@@ -3718,7 +3730,7 @@ async fn recorded_heads_deliver_before_any_live_head() {
     let mut order = Vec::new();
     for _ in 0..5 {
         let envelope = expect_delivery(&mut subscription).await;
-        order.push(envelope.event.event_type());
+        order.push(envelope.event_type());
     }
     assert_eq!(order, ["a1", "b1", "control.catch_up_complete", "b2", "b3"]);
     assert_eq!(delivered(&subscription), [2, 3]);
@@ -3735,9 +3747,9 @@ async fn recorded_heads_deliver_before_any_live_head() {
     // B seals: its EOF (generation 0) still precedes a2 (generation 1).
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
     let sixth = expect_delivery(&mut subscription).await;
-    assert_eq!(sixth.event.event_type(), "control.eof");
+    assert_eq!(sixth.event_type(), "control.eof");
     let seventh = expect_delivery(&mut subscription).await;
-    assert_eq!(seventh.event.event_type(), "a2");
+    assert_eq!(seventh.event_type(), "a2");
     assert_eq!(
         subscription.last_delivered_generation(),
         Some(ReaderGeneration(1))
@@ -3751,7 +3763,7 @@ async fn watermark_generation_skip_fails_closed() {
     journal_a.append_with_clock(merge_catch_up(stage_a, 2, "upstream_a"), VectorClock::new());
 
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event.event_type(), "a1");
+    assert_eq!(first.event_type(), "a1");
 
     // Announcing 2 from 0 skips a boundary: the delivering poll fails closed.
     let message = expect_poll_error(&mut subscription).await;
@@ -3800,7 +3812,7 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
 
     // A's watermark (0,1,a) beats b1 (0,1,b): A crosses to generation 1.
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event.event_type(), "control.catch_up_complete");
+    assert_eq!(first.event_type(), "control.catch_up_complete");
     assert!(
         !subscription.all_readers_caught_up(ReaderGeneration(1)),
         "B has neither crossed nor delivered its EOF"
@@ -3808,12 +3820,12 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
 
     // b1 (generation 0) beats A's held EOF (generation 1).
     let second = expect_delivery(&mut subscription).await;
-    assert_eq!(second.event.event_type(), "b1");
+    assert_eq!(second.event_type(), "b1");
     assert!(!subscription.all_readers_caught_up(ReaderGeneration(1)));
 
     // B's delivered EOF counts as vacuously crossed (F17).
     let third = expect_delivery(&mut subscription).await;
-    assert_eq!(third.event.event_type(), "control.eof");
+    assert_eq!(third.event_type(), "control.eof");
     assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
 
     // EOF crossing is per-reader, never global: a pair where only B sealed
@@ -3825,9 +3837,9 @@ async fn all_readers_caught_up_counts_eof_as_crossed() {
     lag_journal_b.append_with_clock(merge_authored_eof(lag_b), VectorClock::new());
 
     let first = expect_delivery(&mut lagging).await;
-    assert_eq!(first.event.event_type(), "a1");
+    assert_eq!(first.event_type(), "a1");
     let second = expect_delivery(&mut lagging).await;
-    assert_eq!(second.event.event_type(), "control.eof");
+    assert_eq!(second.event_type(), "control.eof");
     assert!(
         !lagging.all_readers_caught_up(ReaderGeneration(1)),
         "only B is EOF-exhausted; A has not crossed"
@@ -3855,7 +3867,7 @@ async fn resume_of_resume_watermarks_stack() {
     ];
     for (event_type, generation) in expected {
         let envelope = expect_delivery(&mut subscription).await;
-        assert_eq!(envelope.event.event_type(), event_type);
+        assert_eq!(envelope.event_type(), event_type);
         assert_eq!(subscription.last_delivered_generation(), Some(generation));
     }
 
@@ -3916,9 +3928,9 @@ async fn seq_merge_delivers_available_head_while_sibling_is_quiet() {
     // The liveness property: B's silence is proof (live run, generation 0 is
     // at the entered generation), so A's heads deliver with B quiet.
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event.event_type(), "a1");
+    assert_eq!(first.event_type(), "a1");
     let second = expect_delivery(&mut subscription).await;
-    assert_eq!(second.event.event_type(), "a2");
+    assert_eq!(second.event_type(), "a2");
     assert!(subscription.merge_wait().is_none());
     assert_eq!(delivered(&subscription), [2, 0]);
 
@@ -3932,7 +3944,7 @@ async fn seq_merge_delivers_available_head_while_sibling_is_quiet() {
     // The quiet input later produces a (larger) sequence and delivers.
     journal_b.append_with_clock(with_seq(merge_data(_stage_b, "b1"), 3), VectorClock::new());
     let third = expect_delivery(&mut subscription).await;
-    assert_eq!(third.event.event_type(), "b1");
+    assert_eq!(third.event_type(), "b1");
 }
 
 #[tokio::test]
@@ -3953,7 +3965,7 @@ async fn seq_merge_orders_by_admission_seq_not_arrival() {
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(envelope) => {
-                order.push(envelope.event.event_type());
+                order.push(envelope.event_type());
                 delivering_stage.push(subscription.last_delivered_upstream_stage().unwrap());
             }
             PollResult::CursorAdvanced { .. } => {}
@@ -4008,7 +4020,7 @@ async fn seq_merge_orders_re_authored_control_by_journal_position_not_stamp() {
     let expected = ["control.source_contract", "a1", "b1", "a2", "b2"];
     for event_type in expected {
         let envelope = expect_delivery(&mut subscription).await;
-        assert_eq!(envelope.event.event_type(), event_type);
+        assert_eq!(envelope.event_type(), event_type);
     }
 }
 
@@ -4052,7 +4064,7 @@ async fn seq_reader_below_entered_generation_keeps_kahn_wait_until_crossing() {
         VectorClock::new(),
     );
     let first = expect_delivery(&mut subscription).await;
-    assert_eq!(first.event.event_type(), "a1");
+    assert_eq!(first.event_type(), "a1");
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::NoEvents => {}
         other => panic!("expected NoEvents while pre-crossing A is quiet, got {other:?}"),
@@ -4067,15 +4079,15 @@ async fn seq_reader_below_entered_generation_keeps_kahn_wait_until_crossing() {
         VectorClock::new(),
     );
     let second = expect_delivery(&mut subscription).await;
-    assert_eq!(second.event.event_type(), "control.catch_up_complete");
+    assert_eq!(second.event_type(), "control.catch_up_complete");
     let third = expect_delivery(&mut subscription).await;
-    assert_eq!(third.event.event_type(), "control.catch_up_complete");
+    assert_eq!(third.event_type(), "control.catch_up_complete");
     assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
 
     // The same reader that blocked the merge no longer blocks: A is quiet
     // but past the crossing, so B's live row delivers immediately.
     journal_b.append_with_clock(with_seq(merge_data(stage_b, "b1"), 4), VectorClock::new());
     let fourth = expect_delivery(&mut subscription).await;
-    assert_eq!(fourth.event.event_type(), "b1");
+    assert_eq!(fourth.event_type(), "b1");
     assert!(subscription.merge_wait().is_none());
 }

@@ -16,10 +16,9 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -295,18 +294,21 @@ async fn run_until_delivered(
 
 /// The user-owned effect outcome facts of a stage journal, in physical append
 /// order: `(recorded_flow_id, input_seq)` per fact.
-fn outcome_fact_cursors(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<(String, u64)> {
+fn outcome_fact_cursors(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<(String, u64)> {
     let outcome_type = EffectValue::versioned_event_type();
     envelopes
         .iter()
         .filter_map(|envelope| {
-            let ChainEventContent::Data { event_type, .. } = &envelope.event.content else {
+            let event_type = envelope.event_type();
+            let ChainPayload::Fact(_) = &envelope.payload else {
                 return None;
             };
             if event_type != outcome_type.as_str() {
                 return None;
             }
             let provenance = envelope
+                .envelope
+                .provenance
                 .event
                 .effect_provenance
                 .as_ref()
@@ -324,13 +326,13 @@ fn outcome_fact_cursors(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<(String,
 }
 
 /// Index of the stage's authored catch-up watermark in append order.
-fn watermark_index(envelopes: &[EventEnvelope<ChainEvent>], stage_key: &str) -> usize {
+fn watermark_index(envelopes: &[JournalRecord<ChainPayload>], stage_key: &str) -> usize {
     envelopes
         .iter()
         .position(|envelope| {
             matches!(
-                &envelope.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+                &envelope.payload,
+                ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                     stage_key: key,
                     ..
                 }) if key.as_str() == stage_key
@@ -420,10 +422,8 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
     let outcome_positions: Vec<usize> = resumed_envelopes
         .iter()
         .enumerate()
-        .filter_map(|(index, envelope)| match &envelope.event.content {
-            ChainEventContent::Data { event_type, .. } if event_type == outcome_type.as_str() => {
-                Some(index)
-            }
+        .filter_map(|(index, envelope)| match &envelope.payload {
+            ChainPayload::Fact(_) if envelope.event_type() == outcome_type.as_str() => Some(index),
             _ => None,
         })
         .collect();

@@ -25,16 +25,15 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
-use obzenflow_core::event::SystemEventType;
+use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::TypedPayload;
 use obzenflow_core::{
-    CycleDepth, DivergenceContract, EventEnvelope, EventId, FlowId, JournalId, StageOutputs,
-    TransportContract,
+    CycleDepth, DivergenceContract, EventId, FlowId, JournalId, JournalRecord, StageOutputs,
+    TransportContract, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::{memory_journals, MemoryJournalFactory};
@@ -288,7 +287,7 @@ struct CycleDepthFaultJournal {
 
 impl CycleDepthFaultJournal {
     fn corrupt(&self, mut event: ChainEvent) -> ChainEvent {
-        if event.is_data() && event.cycle_scc_id.is_some() {
+        if event.consumes_data_credit() && event.cycle_scc_id.is_some() {
             event.cycle_depth = Some(CycleDepth::new(self.bump_to));
         }
         event
@@ -308,8 +307,8 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         self.inner.append(self.corrupt(event), parent).await
     }
 
@@ -317,8 +316,8 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
         &self,
         group_id: &str,
         events: Vec<ChainEvent>,
-        parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        parent: Option<&JournalRecord<ChainPayload>>,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner
             .append_group(
                 group_id,
@@ -331,14 +330,14 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
             .await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
@@ -352,7 +351,7 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
     async fn read_last_n(
         &self,
         count: usize,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }
@@ -502,7 +501,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let divergence_contract_result = EventShape::<SystemEvent>::system_event_predicate(
         "DivergenceContract failed ContractResult",
         |ev| match ev {
-            SystemEventType::ContractResult {
+            SystemPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
@@ -525,7 +524,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let divergence_contract_status = EventShape::<SystemEvent>::system_event_predicate(
         "ContractStatus divergence predicate=signal_to_data_ratio",
         |ev| match ev {
-            SystemEventType::ContractStatus {
+            SystemPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { predicate, .. }),
                 ..
@@ -538,7 +537,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         EventShape::<SystemEvent>::system_event_predicate("PipelineLifecycle::Failed", |ev| {
             matches!(
                 ev,
-                SystemEventType::PipelineLifecycle(
+                SystemPayload::PipelineLifecycle(
                     obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed { .. }
                 )
             )
@@ -623,8 +622,8 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
     let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
 
     for env in snapshot.events(JournalOrder::Append) {
-        match &env.event.event {
-            SystemEventType::ContractResult {
+        match &env.payload {
+            SystemPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
@@ -717,8 +716,8 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     let mut seen_divergence_violation = false;
 
     for env in snapshot.events(JournalOrder::Append) {
-        match &env.event.event {
-            SystemEventType::ContractResult {
+        match &env.payload {
+            SystemPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
@@ -733,7 +732,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
                     seen_divergence_violation = true;
                 }
             }
-            SystemEventType::ContractStatus {
+            SystemPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { .. }),
                 ..
@@ -828,8 +827,8 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let mut seen_cycle_depth_contract_status = false;
 
     for env in snapshot.events(JournalOrder::Append) {
-        match &env.event.event {
-            SystemEventType::ContractResult {
+        match &env.payload {
+            SystemPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
@@ -841,7 +840,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
                     seen_divergence_contract_result = true;
                 }
             }
-            SystemEventType::ContractStatus {
+            SystemPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { predicate, .. }),
                 ..

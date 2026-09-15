@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::context::{FlowContext, IntentContext, StageType};
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{ChainEvent, JournalWriterId, StageId, WriterId};
@@ -13,7 +13,7 @@ use obzenflow_runtime::replay::{ReplayContextTemplate, ReplayDriver, ReplayError
 use std::path::PathBuf;
 
 struct TestReader {
-    envelopes: Vec<EventEnvelope<ChainEvent>>,
+    envelopes: Vec<JournalRecord<ChainPayload>>,
     pos: usize,
     at_end_hint: bool,
     /// When set, `next` returns an error, simulating the reader's own
@@ -23,7 +23,7 @@ struct TestReader {
 
 #[async_trait]
 impl JournalReader<ChainEvent> for TestReader {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         if self.fail {
             return Err(JournalError::Implementation {
                 message: "simulated corrupt archive record".to_string(),
@@ -63,8 +63,8 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     });
 
     let envelopes = vec![
-        EventEnvelope::new(JournalWriterId::new(), eof.clone()),
-        EventEnvelope::new(JournalWriterId::new(), data.clone()),
+        JournalRecord::new(JournalWriterId::new(), eof.clone()),
+        JournalRecord::new(JournalWriterId::new(), data.clone()),
     ];
 
     let reader = Box::new(TestReader {
@@ -103,7 +103,10 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     assert_eq!(replayed.flow_context.flow_name, flow_context.flow_name);
     assert_eq!(replayed.flow_context.stage_name, flow_context.stage_name);
 
-    let replay_ctx = replayed.replay_context.expect("replay_context set");
+    let replay_ctx = replayed
+        .replay_context
+        .as_ref()
+        .expect("replay_context set");
     assert_eq!(replay_ctx.original_event_id, data.id);
     assert_eq!(replay_ctx.original_flow_id, replay_context.original_flow_id);
     assert_eq!(
@@ -119,22 +122,12 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
         _ => panic!("expected preserved Event intent"),
     }
 
-    match (&replayed.content, &data.content) {
-        (
-            obzenflow_core::event::ChainEventContent::Data {
-                event_type: a,
-                payload: pa,
-            },
-            obzenflow_core::event::ChainEventContent::Data {
-                event_type: b,
-                payload: pb,
-            },
-        ) => {
-            assert_eq!(a, b);
-            assert_eq!(pa, pb);
-        }
-        _ => panic!("expected preserved Data content"),
-    }
+    assert!(replayed.is_fact());
+    assert_eq!(replayed.event_type(), data.event_type());
+    assert_eq!(
+        replayed.payload.contract_body().unwrap(),
+        data.payload.contract_body().unwrap()
+    );
 }
 
 fn template() -> ReplayContextTemplate {
@@ -201,8 +194,8 @@ async fn replay_driver_captures_the_archived_eof_kind() {
         let eof = ChainEventFactory::eof_event(archived_writer, natural);
         let reader = Box::new(TestReader {
             envelopes: vec![
-                EventEnvelope::new(JournalWriterId::new(), data),
-                EventEnvelope::new(JournalWriterId::new(), eof),
+                JournalRecord::new(JournalWriterId::new(), data),
+                JournalRecord::new(JournalWriterId::new(), eof),
             ],
             pos: 0,
             at_end_hint: true,
@@ -227,7 +220,7 @@ async fn replay_driver_captures_no_kind_from_an_archive_with_no_committed_eof() 
     let archived_writer = WriterId::from(StageId::new());
     let data = ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({}));
     let reader = Box::new(TestReader {
-        envelopes: vec![EventEnvelope::new(JournalWriterId::new(), data)],
+        envelopes: vec![JournalRecord::new(JournalWriterId::new(), data)],
         pos: 0,
         at_end_hint: false,
         fail: false,

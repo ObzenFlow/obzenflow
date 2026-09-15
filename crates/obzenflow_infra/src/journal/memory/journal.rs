@@ -9,10 +9,12 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use obzenflow_core::event::event_envelope::{EventEnvelope, JournalGroupMember};
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::{
+    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
+};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -25,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use super::reader::MemoryJournalReader;
 
 pub(super) struct MemoryJournalState<T: JournalEvent> {
-    pub(super) events: Vec<EventEnvelope<T>>,
+    pub(super) events: Vec<JournalRecord<T::Payload>>,
     writer_clocks: HashMap<WriterId, VectorClock>,
 }
 
@@ -95,8 +97,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     async fn append(
         &self, // Note: &self, not &mut self
         mut event: T,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<EventEnvelope<T>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
         // Get writer_id from the event
         let writer_id = *event.writer_id();
@@ -118,18 +120,28 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let vector_clock = CausalOrderingService::advance_for_append(
             current.as_ref(),
             &writer_id.to_string(),
-            parent.map(|p| &p.vector_clock),
+            parent.map(|p| &p.envelope.provenance.journal.vector_clock),
         );
         state.writer_clocks.insert(writer_id, vector_clock.clone());
 
         // Create envelope with proper vector clock
-        let envelope = EventEnvelope {
-            journal_writer_id: JournalWriterId::from(self.journal_id),
-            vector_clock,
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-            event,
+        let envelope = {
+            let (authored, payload) = event.into_parts();
+            JournalRecord::commit(
+                authored,
+                payload,
+                JournalProvenance {
+                    journal_writer_id: JournalWriterId::from(self.journal_id),
+                    vector_clock,
+                    timestamp: Utc::now(),
+                    journal_group_id: None,
+                    journal_group_member: None,
+                },
+            )
+            .map_err(|error| JournalError::Implementation {
+                message: "Invalid journal record".to_string(),
+                source: Box::new(error),
+            })?
         };
 
         // Store event
@@ -142,8 +154,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         &self,
         group_id: &str,
         mut events: Vec<T>,
-        parent: Option<&EventEnvelope<T>>,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        parent: Option<&JournalRecord<T::Payload>>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
         if events.is_empty() {
             return Ok(Vec::new());
@@ -179,20 +191,30 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             let vector_clock = CausalOrderingService::advance_for_append(
                 next_writer_clocks.get(&writer_id),
                 &writer_id.to_string(),
-                parent.map(|p| &p.vector_clock),
+                parent.map(|p| &p.envelope.provenance.journal.vector_clock),
             );
             next_writer_clocks.insert(writer_id, vector_clock.clone());
-            envelopes.push(EventEnvelope {
-                journal_writer_id: JournalWriterId::from(self.journal_id),
-                vector_clock,
-                timestamp: Utc::now(),
-                journal_group_id: Some(group_id.to_string()),
-                journal_group_member: Some(JournalGroupMember {
-                    index: u32::try_from(index)
-                        .expect("group size was checked against u32 capacity"),
-                    size: group_size,
-                }),
-                event,
+            envelopes.push({
+                let (authored, payload) = event.into_parts();
+                JournalRecord::commit(
+                    authored,
+                    payload,
+                    JournalProvenance {
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
+                        vector_clock,
+                        timestamp: Utc::now(),
+                        journal_group_id: Some(group_id.to_string()),
+                        journal_group_member: Some(JournalGroupMember {
+                            index: u32::try_from(index)
+                                .expect("group size was checked against u32 capacity"),
+                            size: group_size,
+                        }),
+                    },
+                )
+                .map_err(|error| JournalError::Implementation {
+                    message: "Invalid journal record".to_string(),
+                    source: Box::new(error),
+                })?
             });
         }
         state.writer_clocks = next_writer_clocks;
@@ -200,7 +222,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(envelopes)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let state = self.state.lock().unwrap();
         Ok(state.events.clone())
     }
@@ -208,13 +230,9 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     async fn read_event(
         &self,
         event_id: &EventId,
-    ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let state = self.state.lock().unwrap();
-        Ok(state
-            .events
-            .iter()
-            .find(|e| e.event.id() == event_id)
-            .cloned())
+        Ok(state.events.iter().find(|e| e.id() == event_id).cloned())
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -224,7 +242,10 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         )))
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         if count == 0 {
             return Ok(Vec::new());
         }
@@ -268,8 +289,8 @@ mod tests {
 
         // Verify causal relationship
         assert!(CausalOrderingService::happened_before(
-            &envelope1.vector_clock,
-            &envelope2.vector_clock
+            &envelope1.envelope.provenance.journal.vector_clock,
+            &envelope2.envelope.provenance.journal.vector_clock
         ));
 
         // Read all events
@@ -278,16 +299,25 @@ mod tests {
 
         // Read after first event
         let after_first = journal
-            .read_causally_after(&envelope1.event.id)
+            .read_causally_after(&envelope1.envelope.provenance.event.id)
             .await
             .unwrap();
         assert_eq!(after_first.len(), 1);
-        assert_eq!(after_first[0].event.id, envelope2.event.id);
+        assert_eq!(
+            after_first[0].envelope.provenance.event.id,
+            envelope2.envelope.provenance.event.id
+        );
 
         // Test read_event
-        let found = journal.read_event(&envelope1.event.id).await.unwrap();
+        let found = journal
+            .read_event(&envelope1.envelope.provenance.event.id)
+            .await
+            .unwrap();
         assert!(found.is_some());
-        assert_eq!(found.unwrap().event.id, envelope1.event.id);
+        assert_eq!(
+            found.unwrap().envelope.provenance.event.id,
+            envelope1.envelope.provenance.event.id
+        );
     }
 
     #[tokio::test]
@@ -326,7 +356,7 @@ mod tests {
         let ordered = journal.read_causally_ordered().await.unwrap();
         assert_eq!(ordered.len(), 3);
         for (i, event) in ordered.iter().enumerate() {
-            assert_eq!(event.event.payload()["seq"], i + 1);
+            assert_eq!(event.payload()["seq"], i + 1);
         }
     }
 
@@ -351,10 +381,10 @@ mod tests {
         let mut reader = journal.reader().await.unwrap();
         let mut seen = Vec::new();
         while let Some(env) = reader.next().await.unwrap() {
-            seen.push(*env.event.id());
+            seen.push(*env.id());
         }
 
-        let all_ids: Vec<_> = all.iter().map(|e| *e.event.id()).collect();
+        let all_ids: Vec<_> = all.iter().map(|e| *e.id()).collect();
         assert_eq!(seen, all_ids);
         assert!(reader.is_at_end());
     }

@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
-pub const RUN_MANIFEST_VERSION: &str = "3.0";
+pub const RUN_MANIFEST_VERSION: &str = "4.0";
 
 /// On-disk journal record format version (FLOWIP-120q). Bumped only when the
 /// framed record byte format changes. Readers gate on this in the same raw-JSON

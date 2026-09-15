@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::WriterId;
@@ -27,7 +27,7 @@ pub enum ReplayError {
     #[error("Replay archive is missing run_manifest.json at {path}")]
     MissingManifest { path: PathBuf },
 
-    #[error("Replay archive manifest version '{manifest_version}' is unsupported (supported: {supported}); re-record the run with this build of ObzenFlow")]
+    #[error("unsupported provenance schema version: {manifest_version} (supported: {supported}); re-record the run with this build of ObzenFlow")]
     UnsupportedManifestVersion {
         manifest_version: String,
         supported: &'static str,
@@ -214,9 +214,9 @@ impl ReplayDriver {
                 return Ok(None);
             };
 
-            let original_event = envelope.event;
+            let original_event = envelope.authored();
             if !original_event.is_source_replayable() {
-                if let ChainEventContent::FlowControl(fc) = &original_event.content {
+                if let ChainPayload::FlowControl(fc) = &original_event.payload {
                     if let Some(kind) = fc.eof_kind() {
                         self.archived_eof_kind = Some(kind);
                     }

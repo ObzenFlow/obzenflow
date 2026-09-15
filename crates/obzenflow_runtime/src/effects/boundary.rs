@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::event::observation::ObservationRecorder;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -331,17 +332,17 @@ impl SingleUseEffectOperation {
 /// exchanged between concurrent boundary invocations cannot be mistaken for
 /// reports about the supplied operation.
 #[derive(Clone)]
-pub(super) struct SingleUseEffectProvenance(std::sync::Arc<SingleUseEffectProvenanceMarker>);
+pub(super) struct SingleUseEffectProvenance(Arc<SingleUseEffectProvenanceMarker>);
 
 struct SingleUseEffectProvenanceMarker;
 
 impl SingleUseEffectProvenance {
     fn new() -> Self {
-        Self(std::sync::Arc::new(SingleUseEffectProvenanceMarker))
+        Self(Arc::new(SingleUseEffectProvenanceMarker))
     }
 
     fn matches(&self, expected: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &expected.0)
+        Arc::ptr_eq(&self.0, &expected.0)
     }
 }
 
@@ -591,6 +592,7 @@ impl AffineEffectBoundaryReport {
 /// whichever arm ended it.
 #[async_trait]
 pub trait EffectBoundary: Send + Sync {
+    fn install_observation_recorder(&self, _recorder: Arc<dyn ObservationRecorder>) {}
     async fn around_repeatable_effect(
         &self,
         identity: &EffectIdentity,

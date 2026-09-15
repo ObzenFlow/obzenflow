@@ -7,7 +7,7 @@
 use obzenflow::stateful;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
@@ -323,7 +323,7 @@ async fn read_stage_journal(
     run_dir: &Path,
     stage_name: &str,
     manifest_field: &str,
-) -> Vec<EventEnvelope<ChainEvent>> {
+) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = archive_manifest(run_dir);
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
@@ -339,47 +339,47 @@ async fn read_stage_journal(
         .expect("stage journal reads")
 }
 
-async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "data_journal_file").await
 }
 
-async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<EventEnvelope<ChainEvent>> {
+async fn read_stage_errors(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run_dir, stage_name, "error_journal_file").await
 }
 
-fn facts<T: TypedPayload>(events: &[EventEnvelope<ChainEvent>]) -> Vec<T> {
+fn facts<T: TypedPayload>(events: &[JournalRecord<ChainPayload>]) -> Vec<T> {
     events
         .iter()
-        .filter_map(|envelope| T::from_event(&envelope.event))
+        .filter_map(|envelope| T::from_event(&envelope.authored()))
         .collect()
 }
 
-fn delivery_count(events: &[EventEnvelope<ChainEvent>]) -> usize {
+fn delivery_count(events: &[JournalRecord<ChainPayload>]) -> usize {
     events
         .iter()
-        .filter(|envelope| matches!(envelope.event.content, ChainEventContent::Delivery(_)))
+        .filter(|envelope| matches!(envelope.payload, ChainPayload::Delivery(_)))
         .count()
 }
 
 fn assert_canonical_fact_and_eof<T: TypedPayload>(
-    events: &[EventEnvelope<ChainEvent>],
+    events: &[JournalRecord<ChainPayload>],
     expected_rows: usize,
 ) {
     let canonical = T::versioned_event_type();
     let rows = events
         .iter()
-        .filter(|envelope| T::event_type_matches(&envelope.event.event_type()))
+        .filter(|envelope| T::event_type_matches(&envelope.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), expected_rows);
     assert!(rows
         .iter()
-        .all(|envelope| envelope.event.event_type() == canonical));
+        .all(|envelope| envelope.event_type() == canonical));
 
     let eof_keys = events
         .iter()
         .rev()
-        .find_map(|envelope| match &envelope.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        .find_map(|envelope| match &envelope.payload {
+            ChainPayload::FlowControl(FlowControlPayload::Eof {
                 writer_seq_by_event_type,
                 ..
             }) => Some(writer_seq_by_event_type),
@@ -411,16 +411,16 @@ fn parent_values(output: &ChainEvent, inputs_by_id: &HashMap<EventId, Input>) ->
 }
 
 struct ProjectionJournals<'a> {
-    validate: &'a [EventEnvelope<ChainEvent>],
-    validate_errors: &'a [EventEnvelope<ChainEvent>],
-    fold: &'a [EventEnvelope<ChainEvent>],
-    grouped: &'a [EventEnvelope<ChainEvent>],
-    current_ranking: &'a [EventEnvelope<ChainEvent>],
-    aggregate_ranking: &'a [EventEnvelope<ChainEvent>],
-    fold_sink: &'a [EventEnvelope<ChainEvent>],
-    group_sink: &'a [EventEnvelope<ChainEvent>],
-    current_ranking_sink: &'a [EventEnvelope<ChainEvent>],
-    aggregate_ranking_sink: &'a [EventEnvelope<ChainEvent>],
+    validate: &'a [JournalRecord<ChainPayload>],
+    validate_errors: &'a [JournalRecord<ChainPayload>],
+    fold: &'a [JournalRecord<ChainPayload>],
+    grouped: &'a [JournalRecord<ChainPayload>],
+    current_ranking: &'a [JournalRecord<ChainPayload>],
+    aggregate_ranking: &'a [JournalRecord<ChainPayload>],
+    fold_sink: &'a [JournalRecord<ChainPayload>],
+    group_sink: &'a [JournalRecord<ChainPayload>],
+    current_ranking_sink: &'a [JournalRecord<ChainPayload>],
+    aggregate_ranking_sink: &'a [JournalRecord<ChainPayload>],
 }
 
 fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) {
@@ -444,11 +444,11 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
         .iter()
         .filter(|envelope| {
             matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             )
         })
-        .filter_map(|envelope| Input::from_event(&envelope.event))
+        .filter_map(|envelope| Input::from_event(&envelope.authored()))
         .collect::<Vec<_>>();
     assert_eq!(
         pre_errors,
@@ -462,12 +462,12 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
         .iter()
         .filter_map(|envelope| {
             matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Success
             )
-            .then(|| Input::from_event(&envelope.event))
+            .then(|| Input::from_event(&envelope.authored()))
             .flatten()
-            .map(|input| (envelope.event.id, input))
+            .map(|input| (envelope.envelope.provenance.event.id, input))
         })
         .collect::<HashMap<_, _>>();
     assert_eq!(
@@ -479,16 +479,16 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
     );
 
     assert!(fold.iter().all(|envelope| {
-        !Input::event_type_matches(&envelope.event.event_type())
+        !Input::event_type_matches(&envelope.event_type())
             && !matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             )
     }));
     assert!(grouped.iter().all(|envelope| {
-        !Input::event_type_matches(&envelope.event.event_type())
+        !Input::event_type_matches(&envelope.event_type())
             && !matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             )
     }));
@@ -512,29 +512,30 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
     );
     let fold_rows = fold
         .iter()
-        .filter(|envelope| FoldSnapshot::from_event(&envelope.event).is_some())
+        .filter(|envelope| FoldSnapshot::from_event(&envelope.authored()).is_some())
         .collect::<Vec<_>>();
     assert_eq!(
         fold_rows
             .iter()
-            .map(|envelope| parent_values(&envelope.event, &successful_inputs))
+            .map(|envelope| parent_values(&envelope.authored(), &successful_inputs))
             .collect::<Vec<_>>(),
         vec![vec![1, 2], vec![4, 5], vec![6]],
         "reset epochs partition the whole-batch frontier by invoked boundary"
     );
     assert!(fold_rows
         .iter()
-        .all(|envelope| envelope.event.writer_id == stage_writer(run_dir, "fold")));
+        .all(|envelope| envelope.envelope.provenance.event.writer_id
+            == stage_writer(run_dir, "fold")));
 
     let grouped_rows = grouped
         .iter()
         .filter_map(|envelope| {
-            GroupSnapshot::from_event(&envelope.event).map(|snapshot| {
+            GroupSnapshot::from_event(&envelope.authored()).map(|snapshot| {
                 (
                     snapshot.key,
                     snapshot.total,
                     snapshot.count,
-                    &envelope.event,
+                    envelope.authored(),
                 )
             })
         })
@@ -554,7 +555,7 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
             vec![2, 4, 6]
         };
         assert_eq!(
-            parent_values(event, &successful_inputs),
+            parent_values(&event, &successful_inputs),
             expected,
             "each group owns only its exact contribution frontier"
         );
@@ -583,11 +584,14 @@ fn assert_stateful_projection(run_dir: &Path, journals: ProjectionJournals<'_>) 
     ] {
         let row = rows
             .iter()
-            .find(|envelope| matches!(envelope.event.content, ChainEventContent::Data { .. }))
+            .find(|envelope| envelope.consumes_data_credit())
             .unwrap_or_else(|| panic!("{stage_name} authored one data row"));
-        assert_eq!(row.event.writer_id, stage_writer(run_dir, stage_name));
         assert_eq!(
-            parent_values(&row.event, &successful_inputs),
+            row.envelope.provenance.event.writer_id,
+            stage_writer(run_dir, stage_name)
+        );
+        assert_eq!(
+            parent_values(&row.authored(), &successful_inputs),
             vec![1, 2, 4, 5, 6],
             "{stage_name} retains the complete whole-batch contribution frontier"
         );

@@ -128,8 +128,8 @@ async fn dispatch_draining_inner<
             tracing::trace!(
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
-                event_type = %envelope.event.event_type(),
-                is_eof = envelope.event.is_eof(),
+                event_type = %envelope.event_type(),
+                is_eof = envelope.is_eof(),
                 "transform: draining received event from subscription"
             );
 
@@ -148,10 +148,10 @@ async fn dispatch_draining_inner<
                 .and_then(|subscription| subscription.last_delivered_stage_input_position());
 
             if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
-                if envelope.event.is_data() {
+                if envelope.consumes_data_credit() {
                     heartbeat
                         .state
-                        .record_data_read(upstream, envelope.event.id);
+                        .record_data_read(upstream, envelope.envelope.provenance.event.id);
                 }
             }
 
@@ -168,15 +168,15 @@ async fn dispatch_draining_inner<
                 return Ok(EventLoopDirective::Continue);
             }
 
-            if envelope.event.is_control() {
+            if envelope.is_control() {
                 tracing::debug!(
                     stage_name = %ctx.stage_name,
-                    event_type = envelope.event.event_type(),
+                    event_type = envelope.event_type(),
                     "Forwarding control event during draining"
                 );
 
                 // Do not forward EOF again during draining; it is forwarded after drain completes.
-                if !envelope.event.is_eof() {
+                if !envelope.is_eof() {
                     sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
                         .await?;
                 }
@@ -237,7 +237,7 @@ async fn dispatch_draining_inner<
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
             let handler_invoked = !matches!(
-                envelope.event.processing_info.status,
+                envelope.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             );
             if handler_invoked {
@@ -246,16 +246,16 @@ async fn dispatch_draining_inner<
                     ctx.flow_id,
                     flow_context,
                     scope,
-                    &envelope.event,
+                    &envelope.authored(),
                     observer_input_position,
                 );
             }
             let transformed_result =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
-                    let event = envelope_clone.event.clone();
+                    let event = envelope_clone.authored();
                     let event_id = event.id;
 
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &handler_heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -280,10 +280,8 @@ async fn dispatch_draining_inner<
                                 );
                             }
                             let reason = format!("Transform handler error during drain: {err:?}");
-                            let error_event = envelope_clone
-                                .event
-                                .clone()
-                                .mark_as_error(reason, err.kind());
+                            let error_event =
+                                envelope_clone.authored().mark_as_error(reason, err.kind());
                             if let Some(state) = &handler_heartbeat_state {
                                 state.record_last_consumed(event_id);
                             }
@@ -321,7 +319,7 @@ async fn dispatch_draining_inner<
                                 }
                             }
                             if let Some(state) = &heartbeat_state {
-                                state.record_last_consumed(envelope.event.id);
+                                state.record_last_consumed(envelope.envelope.provenance.event.id);
                             }
                             return Ok(EventLoopDirective::Transition(TransformEvent::Error(
                                 fatal.detail.clone(),
@@ -337,7 +335,7 @@ async fn dispatch_draining_inner<
                     ctx.flow_id,
                     flow_context,
                     scope,
-                    &envelope.event,
+                    &envelope.authored(),
                     observer_input_position,
                     transformed_events.as_slice(),
                 );
@@ -369,7 +367,7 @@ async fn dispatch_draining_inner<
                     continue;
                 }
 
-                if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
+                if let ProcessingStatus::Error { kind, .. } = &event.processing.status {
                     let k = kind.clone().unwrap_or(ErrorKind::Unknown);
                     ctx.instrumentation.record_error(k);
                 }

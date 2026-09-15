@@ -6,8 +6,8 @@ use obzenflow_core::{
     contracts::{ContractContext, ContractReadContext, ContractWriteContext},
     event::types::SeqNo,
     event::{
-        payloads::flow_control_payload::FlowControlPayload, ChainEvent, ChainEventContent,
-        ChainEventFactory,
+        payloads::flow_control_payload::FlowControlPayload, ChainEvent, ChainEventFactory,
+        ChainPayload,
     },
     Contract, StageId, TransportContract, WriterId,
 };
@@ -18,11 +18,11 @@ fn make_data_event(writer: WriterId) -> ChainEvent {
 
 fn make_eof_with_seq(writer: WriterId, seq: u64) -> ChainEvent {
     let mut eof = ChainEventFactory::eof_event(writer, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         writer_id,
         writer_seq,
         ..
-    }) = &mut eof.content
+    }) = &mut eof.payload
     {
         *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));

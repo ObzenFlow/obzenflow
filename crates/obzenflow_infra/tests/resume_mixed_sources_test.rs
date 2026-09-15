@@ -17,10 +17,9 @@ mod replay_testkit;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEventContent, EventEnvelope};
+use obzenflow_core::event::{ChainPayload, JournalRecord};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{
     effectful_transform, flow, infinite_source, sink, source, transform, FlowDefinition,
@@ -394,21 +393,21 @@ enum MixedRow {
     Eof,
 }
 
-fn mixed_rows(envelopes: &[EventEnvelope<ChainEvent>]) -> Vec<MixedRow> {
+fn mixed_rows(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<MixedRow> {
     envelopes
         .iter()
-        .filter_map(|envelope| match &envelope.event.content {
-            ChainEventContent::Data { .. } => {
-                Some(MixedRow::Data(envelope.event.payload().clone()))
+        .filter_map(|envelope| match &envelope.payload {
+            payload if payload.consumes_data_credit() => {
+                Some(MixedRow::Data(envelope.payload().clone()))
             }
-            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                 generation,
                 stage_key,
             }) => Some(MixedRow::CatchUp {
                 stage_key: stage_key.to_string(),
                 generation: generation.0,
             }),
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => Some(MixedRow::Eof),
+            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => Some(MixedRow::Eof),
             _ => None,
         })
         .collect()

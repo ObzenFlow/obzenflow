@@ -12,22 +12,18 @@
 //! - cycle-depth filtering (`cycle_scc_id` + `cycle_depth`),
 //! - paused-time no-event assertions that advance virtual time explicitly.
 //!
-//! The probe counts *data envelopes* only (by `ChainEventContent::Data`), and it
+//! The probe counts *data envelopes* only (by `ChainPayload::Data`), and it
 //! counts them regardless of `processing_info.status`. Error-marked data events
 //! are therefore counted by default.
 
 use crate::testing::stage_journal::StageJournalLookupError;
-use crate::testing::test_clock::SettleSchedulerError;
-use crate::testing::test_clock::TestClockError;
-use crate::testing::FlowTestHarness;
-use crate::testing::TestClock;
+use crate::testing::test_clock::{SettleSchedulerError, TestClockError};
+use crate::testing::{FlowTestHarness, TestClock};
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::event::EventId;
-use obzenflow_core::event::WriterId;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::{ChainPayload, EventId, WriterId};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
-use obzenflow_core::{CycleDepth, SccId};
+use obzenflow_core::{CycleDepth, SccId, StageId};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -105,7 +101,7 @@ pub enum JournalProbeError {
 /// [`Self::stage_writer_seq`].
 pub struct JournalProbeEvent {
     stage_id: StageId,
-    envelope: EventEnvelope<ChainEvent>,
+    envelope: JournalRecord<ChainPayload>,
 }
 
 impl JournalProbeEvent {
@@ -119,6 +115,9 @@ impl JournalProbeEvent {
     pub fn stage_writer_seq(&self) -> Result<u64, JournalProbeError> {
         let key = WriterId::from(self.stage_id).to_string();
         self.envelope
+            .envelope
+            .provenance
+            .journal
             .vector_clock
             .clocks
             .get(&key)
@@ -126,12 +125,12 @@ impl JournalProbeEvent {
             .ok_or_else(|| JournalProbeError::MissingStageWriterSeq {
                 stage_id: self.stage_id,
                 writer_key: key,
-                event_id: self.envelope.event.id,
+                event_id: self.envelope.envelope.provenance.event.id,
             })
     }
 
     /// The observed envelope.
-    pub fn envelope(&self) -> &EventEnvelope<ChainEvent> {
+    pub fn envelope(&self) -> &JournalRecord<ChainPayload> {
         &self.envelope
     }
 }
@@ -192,7 +191,7 @@ impl JournalProbe {
             let envelopes = self.read_all_envelopes().await?;
             let mut data_count: u64 = 0;
             for envelope in envelopes {
-                if envelope.event.is_data() {
+                if envelope.consumes_data_credit() {
                     data_count += 1;
                     if data_count == n {
                         return Ok(JournalProbeEvent {
@@ -229,10 +228,17 @@ impl JournalProbe {
             let envelopes = self.read_all_envelopes().await?;
             let mut count: u64 = 0;
             for envelope in envelopes {
-                if !envelope.event.is_data() {
+                if !envelope.consumes_data_credit() {
                     continue;
                 }
-                if envelope.vector_clock.get(&writer_key) == 0 {
+                if envelope
+                    .envelope
+                    .provenance
+                    .journal
+                    .vector_clock
+                    .get(&writer_key)
+                    == 0
+                {
                     continue;
                 }
                 count += 1;
@@ -257,7 +263,16 @@ impl JournalProbe {
         let envelopes = self.read_all_envelopes().await?;
         Ok(envelopes
             .into_iter()
-            .filter(|env| env.event.is_data() && env.vector_clock.get(&writer_key) != 0)
+            .filter(|env| {
+                env.consumes_data_credit()
+                    && env
+                        .envelope
+                        .provenance
+                        .journal
+                        .vector_clock
+                        .get(&writer_key)
+                        != 0
+            })
             .count() as u64)
     }
 
@@ -273,10 +288,18 @@ impl JournalProbe {
             let envelopes = self.read_all_envelopes().await?;
             let mut count: u64 = 0;
             for envelope in envelopes {
-                if !envelope.event.is_data() {
+                if !envelope.consumes_data_credit() {
                     continue;
                 }
-                if envelope.event.causality.parent_ids.first() != Some(&parent_event_id) {
+                if envelope
+                    .envelope
+                    .provenance
+                    .event
+                    .causality
+                    .parent_ids
+                    .first()
+                    != Some(&parent_event_id)
+                {
                     continue;
                 }
                 count += 1;
@@ -305,10 +328,10 @@ impl JournalProbe {
             let envelopes = self.read_all_envelopes().await?;
             let mut count: u64 = 0;
             for envelope in envelopes {
-                if !envelope.event.is_data() {
+                if !envelope.consumes_data_credit() {
                     continue;
                 }
-                if envelope.event.writer_id != writer_id {
+                if envelope.envelope.provenance.event.writer_id != writer_id {
                     continue;
                 }
                 count += 1;
@@ -342,13 +365,13 @@ impl JournalProbe {
             let envelopes = self.read_all_envelopes().await?;
             let mut count: u64 = 0;
             for envelope in envelopes {
-                if !envelope.event.is_data() {
+                if !envelope.consumes_data_credit() {
                     continue;
                 }
-                if envelope.event.cycle_scc_id != Some(scc_id) {
+                if envelope.envelope.provenance.event.cycle_scc_id != Some(scc_id) {
                     continue;
                 }
-                if envelope.event.cycle_depth != Some(depth) {
+                if envelope.envelope.provenance.event.cycle_depth != Some(depth) {
                     continue;
                 }
                 count += 1;
@@ -368,7 +391,7 @@ impl JournalProbe {
         let envelopes = self.read_all_envelopes().await?;
         Ok(envelopes
             .into_iter()
-            .filter(|env| env.event.is_data())
+            .filter(|env| env.consumes_data_credit())
             .count() as u64)
     }
 
@@ -439,7 +462,7 @@ impl JournalProbe {
 
     async fn read_all_envelopes(
         &self,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalProbeError> {
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalProbeError> {
         let mut reader = self
             .journal
             .reader()
@@ -460,15 +483,20 @@ impl JournalProbe {
 mod tests {
     use super::*;
     use crate::id_conversions::StageIdExt;
+    use crate::metrics::observations::ObservationHub;
     use crate::pipeline::fsm::PipelineFsmEvent;
     use crate::pipeline::handle::FlowHandleExtras;
     use crate::pipeline::{FlowHandle, PipelineState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
     use chrono::Utc;
-    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::observation::NoObservations;
+    use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{ChainEvent, ChainEventFactory, JournalEvent, WriterId};
+    use obzenflow_core::event::{
+        ChainEvent, ChainEventFactory, JournalEvent, JournalWriterId, WriterId,
+    };
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -485,7 +513,7 @@ mod tests {
     struct MemoryJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> Default for MemoryJournal<T> {
@@ -499,14 +527,14 @@ mod tests {
     }
 
     impl<T: JournalEvent> MemoryJournal<T> {
-        fn push_envelope(&self, envelope: EventEnvelope<T>) {
+        fn push_envelope(&self, envelope: JournalRecord<T::Payload>) {
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope);
         }
     }
 
     struct MemoryJournalReader<T: JournalEvent> {
-        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
         pos: usize,
     }
 
@@ -515,7 +543,7 @@ mod tests {
     where
         T: JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self
                 .events
                 .lock()
@@ -550,16 +578,15 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
-            let envelope =
-                EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+            _parent: Option<&JournalRecord<T::Payload>>,
+        ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             Ok(guard.clone())
         }
@@ -567,9 +594,9 @@ mod tests {
         async fn read_event(
             &self,
             event_id: &obzenflow_core::event::types::EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-            Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
+            Ok(guard.iter().find(|e| e.id() == event_id).cloned())
         }
 
         async fn reader_from(
@@ -582,7 +609,10 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             let len = guard.len();
             let start = len.saturating_sub(count);
@@ -610,6 +640,9 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            observations: Arc::new(ObservationHub::default()),
+            host_observations: Arc::new(NoObservations),
+
             stage_cleanup: Vec::new(),
             published_outcome: Default::default(),
             metrics: Default::default(),
@@ -679,7 +712,7 @@ mod tests {
         assert_eq!(observed, 2, "expected to count data envelopes only");
 
         let second = probe.expect_event(2).await.expect("expect second data");
-        assert!(second.envelope().event.is_data());
+        assert!(second.envelope().consumes_data_credit());
     }
 
     #[tokio::test]
@@ -696,14 +729,17 @@ mod tests {
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
         let event = ChainEventFactory::data_event(writer_id, "data", serde_json::json!({}));
-        let envelope = EventEnvelope {
-            journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
-            vector_clock: VectorClock::new(),
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
+        let envelope = JournalRecord::commit_event(
             event,
-        };
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
+                vector_clock: VectorClock::new(),
+                timestamp: Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid committed fixture");
         stage_journal_impl.push_envelope(envelope);
 
         let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
@@ -831,26 +867,32 @@ mod tests {
 
         let mut clock_a = VectorClock::new();
         clock_a.clocks.insert(upstream_a.to_string(), 1);
-        let env_a = EventEnvelope {
-            journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
-            vector_clock: clock_a,
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-            event: ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
-        };
+        let env_a = JournalRecord::commit_event(
+            ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
+                vector_clock: clock_a,
+                timestamp: Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid committed fixture");
         stage_journal_impl.push_envelope(env_a);
 
         let mut clock_b = VectorClock::new();
         clock_b.clocks.insert(upstream_b.to_string(), 1);
-        let env_b = EventEnvelope {
-            journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
-            vector_clock: clock_b,
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-            event: ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
-        };
+        let env_b = JournalRecord::commit_event(
+            ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
+            JournalProvenance {
+                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
+                vector_clock: clock_b,
+                timestamp: Utc::now(),
+                journal_group_id: None,
+                journal_group_member: None,
+            },
+        )
+        .expect("valid committed fixture");
         stage_journal_impl.push_envelope(env_b);
 
         let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
@@ -875,6 +917,9 @@ mod tests {
         assert_ne!(
             observed_b
                 .envelope()
+                .envelope
+                .provenance
+                .journal
                 .vector_clock
                 .get(&upstream_b.to_string()),
             0
@@ -921,9 +966,13 @@ mod tests {
             .expect_event_at_cycle_depth(scc, depth, 2)
             .await
             .expect("expect 2nd match at cycle depth");
-        assert_eq!(second.envelope().event.cycle_scc_id, Some(scc), "scc id");
         assert_eq!(
-            second.envelope().event.cycle_depth,
+            second.envelope().envelope.provenance.event.cycle_scc_id,
+            Some(scc),
+            "scc id"
+        );
+        assert_eq!(
+            second.envelope().envelope.provenance.event.cycle_depth,
             Some(depth),
             "cycle depth"
         );
@@ -987,11 +1036,18 @@ mod tests {
             .await
             .expect("expect 3rd match at cycle depth");
         assert_eq!(
-            third.envelope().event.causality.parent_ids.first(),
+            third
+                .envelope()
+                .envelope
+                .provenance
+                .event
+                .causality
+                .parent_ids
+                .first(),
             Some(&child_2.causality.parent_ids[0]),
             "sanity: lineage still present"
         );
-        assert_eq!(third.envelope().event.id, child_2.id);
+        assert_eq!(third.envelope().envelope.provenance.event.id, child_2.id);
     }
 
     #[tokio::test]
@@ -1008,11 +1064,11 @@ mod tests {
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
         let mut ok = ChainEventFactory::data_event(writer_id, "ok", serde_json::json!({}));
-        ok.processing_info.status = ProcessingStatus::Success;
+        ok.processing.status = ProcessingStatus::Success;
         stage_journal.append(ok, None).await.expect("append ok");
 
         let mut err = ChainEventFactory::data_event(writer_id, "err", serde_json::json!({}));
-        err.processing_info.status = ProcessingStatus::error("boom");
+        err.processing.status = ProcessingStatus::error("boom");
         stage_journal
             .append(err.clone(), None)
             .await
@@ -1029,10 +1085,16 @@ mod tests {
 
         let observed = probe.expect_event(2).await.expect("expect 2nd data");
         assert!(matches!(
-            observed.envelope().event.processing_info.status,
+            observed
+                .envelope()
+                .envelope
+                .provenance
+                .event
+                .processing
+                .status,
             ProcessingStatus::Error { .. }
         ));
-        assert_eq!(observed.envelope().event.id, err.id);
+        assert_eq!(observed.envelope().envelope.provenance.event.id, err.id);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1167,6 +1229,9 @@ mod tests {
 
         let first = probe.expect_event(1).await.expect("first");
         let second = probe.expect_event(2).await.expect("second");
-        assert_ne!(first.envelope().event.id, second.envelope().event.id);
+        assert_ne!(
+            first.envelope().envelope.provenance.event.id,
+            second.envelope().envelope.provenance.event.id
+        );
     }
 }

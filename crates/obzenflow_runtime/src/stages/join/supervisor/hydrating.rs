@@ -11,6 +11,7 @@ use crate::stages::common::supervision::control_resolution::{
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -79,8 +80,8 @@ pub(super) async fn dispatch_hydrating<
             // Capture reference-side ancestry for FLOWIP-071h (conservative high-water interim).
             common::observe_reference_envelope(ctx, &envelope);
 
-            let directive = match &envelope.event.content {
-                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+            let directive = match &envelope.payload {
+                ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; the join authors its own at
                     // the flip.
@@ -101,7 +102,7 @@ pub(super) async fn dispatch_hydrating<
                     // FLOWIP-120n F17: an authored EOF can be the delivery
                     // that completes the caught-up frontier; no watermark
                     // follows, so re-run the flip before normal EOF handling.
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         if let Some(directive) = common::flip_join_caught_up_on_eof(
                             Some(&*subscription),
                             sup.stream_subscription.as_ref(),
@@ -117,7 +118,7 @@ pub(super) async fn dispatch_hydrating<
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
                     // FLOWIP-095k: fold the reference side's terminal kind.
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
                             ctx.terminal_eof_kind = Some(
                                 ctx.terminal_eof_kind
@@ -145,7 +146,7 @@ pub(super) async fn dispatch_hydrating<
                         ControlAction::Forward => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 if let Some(outcome) = subscription.take_last_eof_outcome() {
                                     tracing::info!(
                                         target: "flowip-080o",
@@ -166,7 +167,7 @@ pub(super) async fn dispatch_hydrating<
                         ControlAction::ForwardAndDrain => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
 
@@ -175,7 +176,7 @@ pub(super) async fn dispatch_hydrating<
                         ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Join received cycle-only control resolution without cycle config"
                             );
                             EventLoopDirective::Continue
@@ -183,15 +184,15 @@ pub(super) async fn dispatch_hydrating<
                         ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Skipping control event (dangerous!) during Hydrating"
                             );
                             EventLoopDirective::Continue
                         }
                     }
                 }
-                obzenflow_core::event::ChainEventContent::Data { .. } => {
-                    let event = envelope.event.clone();
+                payload if payload.consumes_data_credit() => {
+                    let event = envelope.authored();
                     let event_id = event.id;
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
@@ -228,7 +229,7 @@ pub(super) async fn dispatch_hydrating<
                     )
                     .await?;
 
-                    if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                    if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
@@ -254,7 +255,7 @@ pub(super) async fn dispatch_hydrating<
                         common::observe_join_outputs(
                             ctx,
                             scope,
-                            Some(&envelope.event),
+                            Some(&envelope.authored()),
                             delivery_snapshot.as_ref(),
                             None,
                             outputs.as_mut_slice(),
@@ -388,7 +389,7 @@ pub(super) async fn dispatch_hydrating<
                 _ => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
-                        event_type = envelope.event.event_type(),
+                        event_type = envelope.event_type(),
                         "Join received unexpected event content type during Hydrating"
                     );
                     EventLoopDirective::Continue

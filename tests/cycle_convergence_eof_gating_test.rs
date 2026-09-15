@@ -366,6 +366,8 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         .expect_event(1)
         .await?
         .envelope()
+        .envelope
+        .provenance
         .event
         .cycle_scc_id
         .expect("scc id");
@@ -550,6 +552,8 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
         .expect_event(1)
         .await?
         .envelope()
+        .envelope
+        .provenance
         .event
         .cycle_scc_id
         .expect("scc id");

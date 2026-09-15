@@ -20,7 +20,8 @@ pub(super) async fn prepare_metrics(
         context.stage_data_journals.clone(),
         context.stage_error_journals.clone(),
     )
-    .with_backpressure_registry_opt(context.backpressure_registry.clone());
+    .with_backpressure_registry_opt(context.backpressure_registry.clone())
+    .with_observations(context.observations.clone());
     let metadata = context
         .stage_supervisors
         .iter()

@@ -9,7 +9,8 @@
 //! method call.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::{ChainEvent, EventEnvelope};
+use obzenflow_core::event::ChainPayload;
+use obzenflow_core::JournalRecord;
 
 use super::core::{ProcessingContext, SignalDecision, SignalGate};
 
@@ -21,7 +22,7 @@ use super::core::{ProcessingContext, SignalDecision, SignalGate};
 pub(crate) fn dispatch_control_signal(
     strategy: &dyn SignalGate,
     signal: &FlowControlPayload,
-    envelope: &EventEnvelope<ChainEvent>,
+    envelope: &JournalRecord<ChainPayload>,
     processing_ctx: &mut ProcessingContext,
 ) -> SignalDecision {
     match signal {

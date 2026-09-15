@@ -4,7 +4,7 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::types::{Count, DurationMs};
-use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType, WriterId};
+use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ impl ReplayCompletionGuard {
 
         let completed_event = SystemEvent::new(
             WriterId::from(stage_id),
-            SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::Completed {
+            SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::Completed {
                 replayed_count: Count(facts.replayed_count),
                 skipped_count: Count(facts.skipped_count),
                 duration_ms: DurationMs(duration_ms),

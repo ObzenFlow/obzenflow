@@ -13,19 +13,18 @@ use crate::middleware::{
     MiddlewareAbortCause, MiddlewareContext,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerOpenTrigger, CircuitBreakerRejectionReason,
-    MiddlewareLifecycle, ObservabilityPayload,
+use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitBreakerRejectionReason, ExecutionPayload,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
-    ChainEventFactory, CircuitBreakerOpenedEventParams, CircuitBreakerSummaryEventParams,
-    EffectFailureCode, EffectFailureSource, RetryDisposition,
+    ChainEventFactory, ChainPayload, CircuitBreakerOpenedEventParams, EffectFailureCode,
+    EffectFailureSource, RetryDisposition,
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::cb_state;
 use obzenflow_runtime::effects::EffectError;
-use serde_json::json;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -551,7 +550,7 @@ impl CircuitBreakerMiddleware {
         let mut first_error_message: Option<String> = None;
 
         for out in outputs {
-            if let ProcessingStatus::Error { kind, message } = &out.processing_info.status {
+            if let ProcessingStatus::Error { kind, message } = &out.processing.status {
                 if first_error_kind.is_none() {
                     first_error_kind = kind.clone();
                     first_error_message = Some(message.clone());
@@ -796,10 +795,10 @@ impl CircuitBreakerMiddleware {
                     evidence.into_event_params(),
                 )
             }
-            (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::observability_event(
+            (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::create_event(
                 self.writer_id,
-                ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                    CircuitBreakerEvent::HalfOpen {
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::HalfOpen {
                         test_request_count: 0,
                     },
                 )),
@@ -808,29 +807,29 @@ impl CircuitBreakerMiddleware {
                 let success_count = self.success_count.load(Ordering::Relaxed) as u64;
                 let recovery_duration_ms = elapsed_in_old_state.as_millis() as u64;
 
-                ChainEventFactory::observability_event(
+                ChainEventFactory::create_event(
                     self.writer_id,
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
-                        CircuitBreakerEvent::Closed {
+                    ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                        CircuitBreakerFact::Closed {
                             success_count,
                             recovery_duration_ms,
                         },
                     )),
                 )
             }
-            _ => {
-                // For other transitions, use a generic metrics event
-                ChainEventFactory::metrics_state_snapshot(
-                    self.writer_id,
-                    json!({
-                        "circuit_breaker": {
-                            "from_state": format!("{:?}", old_state),
-                            "to_state": format!("{:?}", new_state),
-                            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                        }
-                    }),
-                )
-            }
+            _ => ChainEventFactory::create_event(
+                self.writer_id,
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::StateChanged {
+                        from_state: old_state.into(),
+                        to_state: new_state.into(),
+                        timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                    },
+                )),
+            ),
         };
 
         tracing::info!(
@@ -1067,10 +1066,10 @@ impl CircuitBreakerMiddleware {
     }
 
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
-        let mut stats = match self.stats.lock() {
+        let mut stats = match self.stats.try_lock() {
             Ok(stats) => stats,
             Err(_) => {
-                // If stats are poisoned we skip summary emission rather than panicking.
+                // Skip this optional summary if stats are busy or poisoned.
                 return;
             }
         };
@@ -1080,36 +1079,36 @@ impl CircuitBreakerMiddleware {
             || stats.requests_processed + stats.requests_rejected >= 1000;
 
         if should_emit {
-            let (time_in_closed_seconds, time_in_open_seconds, time_in_half_open_seconds) =
-                self.time_in_state_seconds_total();
+            let Some((time_in_closed_seconds, time_in_open_seconds, time_in_half_open_seconds)) =
+                self.time_in_state_seconds_total()
+            else {
+                return;
+            };
             let successes_total = self.successes_total.load(Ordering::Relaxed);
             let failures_total = self.failures_total.load(Ordering::Relaxed);
             let opened_total = self.opened_total.load(Ordering::Relaxed);
 
             // Emit a circuit breaker summary event
-            let event = ChainEventFactory::circuit_breaker_summary(
-                self.writer_id,
-                CircuitBreakerSummaryEventParams {
-                    window_duration_s: stats.last_summary.elapsed().as_secs(),
-                    requests_processed: stats.requests_processed,
-                    requests_rejected: stats.requests_rejected,
-                    state: format!("{:?}", self.current_state()),
-                    consecutive_failures: self.failure_count.load(Ordering::SeqCst),
-                    rejection_rate: if stats.requests_processed + stats.requests_rejected > 0 {
-                        stats.requests_rejected as f64
-                            / (stats.requests_processed + stats.requests_rejected) as f64
-                    } else {
-                        0.0
-                    },
-                    successes_total,
-                    failures_total,
-                    opened_total,
-                    time_in_closed_seconds,
-                    time_in_open_seconds,
-                    time_in_half_open_seconds,
+            ctx.observe(ObservationRecord::CircuitBreakerSummary {
+                effect_type: None,
+                window_duration_s: stats.last_summary.elapsed().as_secs(),
+                requests_processed: stats.requests_processed,
+                requests_rejected: stats.requests_rejected,
+                observed_state: self.current_state().into(),
+                consecutive_failures: self.failure_count.load(Ordering::SeqCst),
+                rejection_rate: if stats.requests_processed + stats.requests_rejected > 0 {
+                    stats.requests_rejected as f64
+                        / (stats.requests_processed + stats.requests_rejected) as f64
+                } else {
+                    0.0
                 },
-            );
-            ctx.write_control_event(event);
+                successes_total,
+                failures_total,
+                opened_total,
+                time_in_closed_seconds,
+                time_in_open_seconds,
+                time_in_half_open_seconds,
+            });
 
             // Reset stats
             stats.requests_processed = 0;
@@ -1118,37 +1117,35 @@ impl CircuitBreakerMiddleware {
         }
     }
 
-    fn time_in_state_seconds_total(&self) -> (f64, f64, f64) {
-        let mut closed = self.time_in_closed.lock().map(|d| *d).unwrap_or_default();
-        let mut open = self.time_in_open.lock().map(|d| *d).unwrap_or_default();
-        let mut half_open = self
-            .time_in_half_open
-            .lock()
-            .map(|d| *d)
-            .unwrap_or_default();
-
-        // NOTE(G2): There is a TOCTOU race between releasing the
-        // last_state_change lock and reading current_state(). A transition
-        // between these operations causes elapsed_current to be attributed
-        // to the wrong state bucket. For summary/metrics purposes this is
-        // acceptable imprecision.
-        let elapsed_current = if let Ok(last) = self.last_state_change.lock() {
-            last.elapsed()
-        } else {
-            Duration::from_secs(0)
+    fn time_in_state_seconds_total(&self) -> Option<(f64, f64, f64)> {
+        // Skip this optional summary if a lock is busy or poisoned.
+        // Copy each duration and release its lock before reading the next.
+        let mut closed_duration = match self.time_in_closed.try_lock() {
+            Ok(duration) => *duration,
+            Err(_) => return None,
         };
-
+        let mut open_duration = match self.time_in_open.try_lock() {
+            Ok(duration) => *duration,
+            Err(_) => return None,
+        };
+        let mut half_open_duration = match self.time_in_half_open.try_lock() {
+            Ok(duration) => *duration,
+            Err(_) => return None,
+        };
+        let elapsed_current = match self.last_state_change.try_lock() {
+            Ok(last_change) => last_change.elapsed(),
+            Err(_) => return None,
+        };
         match self.current_state() {
-            CircuitState::Closed => closed += elapsed_current,
-            CircuitState::Open => open += elapsed_current,
-            CircuitState::HalfOpen => half_open += elapsed_current,
+            CircuitState::Closed => closed_duration += elapsed_current,
+            CircuitState::Open => open_duration += elapsed_current,
+            CircuitState::HalfOpen => half_open_duration += elapsed_current,
         }
-
-        (
-            closed.as_secs_f64(),
-            open.as_secs_f64(),
-            half_open.as_secs_f64(),
-        )
+        Some((
+            closed_duration.as_secs_f64(),
+            open_duration.as_secs_f64(),
+            half_open_duration.as_secs_f64(),
+        ))
     }
 }
 
@@ -1156,7 +1153,10 @@ impl CircuitBreakerMiddleware {
 mod tests {
     use super::config::RateThreshold;
     use super::*;
-    use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
+    use obzenflow_core::event::payloads::execution_payload::{
+        CircuitBreakerFact, ExecutionPayload,
+    };
+    use obzenflow_core::event::{ChainEventFactory, ChainPayload};
     use obzenflow_core::MiddlewareExecutionScope;
     use serde_json::json;
 
@@ -1177,9 +1177,9 @@ mod tests {
     fn opened_evidence(ctx: &MiddlewareContext) -> OpenedEvidence {
         ctx.control_events()
             .iter()
-            .find_map(|event| match &event.content {
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Opened {
+            .find_map(|event| match &event.payload {
+                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
+                    CircuitBreakerFact::Opened {
                         error_rate,
                         failure_count,
                         trigger,
@@ -1187,7 +1187,7 @@ mod tests {
                         slow_call_rate,
                         slow_call_count,
                         ..
-                    }),
+                    },
                 )) => Some(OpenedEvidence {
                     error_rate: *error_rate,
                     failure_count: *failure_count,

@@ -8,7 +8,7 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason, StageFatalRecorded};
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -34,11 +34,11 @@ fn make_eof_event(writer: WriterId, seq: u64) -> ChainEvent {
 
 fn make_eof_event_with_kind(writer: WriterId, seq: u64, kind: EofKind) -> ChainEvent {
     let mut eof = ChainEventFactory::eof_event_with_kind(writer, kind);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+    if let ChainPayload::FlowControl(FlowControlPayload::Eof {
         ref mut writer_id,
         ref mut writer_seq,
         ..
-    }) = eof.content
+    }) = eof.payload
     {
         *writer_id = Some(writer);
         *writer_seq = Some(SeqNo(seq));
@@ -248,25 +248,35 @@ async fn live_join_processes_stream_without_reference_eof() {
         .expect("read join journal");
     let joined_env = events
         .iter()
-        .find(|env| JoinedRow::from_event(&env.event).is_some())
+        .find(|env| JoinedRow::from_event(&env.authored()).is_some())
         .expect("joined output envelope present");
 
     // FLOWIP-071h: fan-in outputs must preserve ancestry from both contributors.
     let reference_key = WriterId::from(reference_stage).to_string();
     let stream_key = WriterId::from(stream_stage).to_string();
     assert_ne!(
-        joined_env.vector_clock.get(&reference_key),
+        joined_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&reference_key),
         0,
         "joined output vector clock must include reference writer ancestry"
     );
     assert_ne!(
-        joined_env.vector_clock.get(&stream_key),
+        joined_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&stream_key),
         0,
         "joined output vector clock must include stream writer ancestry"
     );
     let joined: Vec<JoinedRow> = events
         .iter()
-        .filter_map(|env| JoinedRow::from_event(&env.event))
+        .filter_map(|env| JoinedRow::from_event(&env.authored()))
         .collect();
 
     assert_eq!(
@@ -628,7 +638,7 @@ where
         .await
         .expect("terminal join journal")
         .into_iter()
-        .map(|envelope| envelope.event)
+        .map(|envelope| envelope.authored())
         .collect();
     (completion, failed, events, WriterId::from(join_stage))
 }
@@ -1047,10 +1057,10 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
         .expect("read join journal");
     let observed_env = events
         .iter()
-        .find(|env| StreamObservedRefs::from_event(&env.event).is_some())
+        .find(|env| StreamObservedRefs::from_event(&env.authored()).is_some())
         .expect("expected an on_source_eof output event");
     let observed =
-        StreamObservedRefs::from_event(&observed_env.event).expect("parse observed payload");
+        StreamObservedRefs::from_event(&observed_env.authored()).expect("parse observed payload");
 
     assert_eq!(observed, StreamObservedRefs { refs_seen: 2 });
 
@@ -1058,12 +1068,22 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
     let reference_key = reference_writer.to_string();
     let stream_key = stream_writer.to_string();
     assert_ne!(
-        observed_env.vector_clock.get(&reference_key),
+        observed_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&reference_key),
         0,
         "on_source_eof output vector clock must include reference writer ancestry"
     );
     assert_ne!(
-        observed_env.vector_clock.get(&stream_key),
+        observed_env
+            .envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&stream_key),
         0,
         "on_source_eof output vector clock must include stream writer ancestry"
     );
@@ -1228,7 +1248,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
         .expect("read join journal");
     let observed: Vec<StreamObservedRefs> = events
         .iter()
-        .filter_map(|env| StreamObservedRefs::from_event(&env.event))
+        .filter_map(|env| StreamObservedRefs::from_event(&env.authored()))
         .collect();
 
     assert_eq!(observed, vec![StreamObservedRefs { refs_seen: 3 }]);
@@ -1414,7 +1434,7 @@ async fn live_join_forwards_reference_eof() {
 
     let joined: Vec<JoinedRow> = events
         .iter()
-        .filter_map(|env| JoinedRow::from_event(&env.event))
+        .filter_map(|env| JoinedRow::from_event(&env.authored()))
         .collect();
     assert_eq!(
         joined,
@@ -1425,10 +1445,10 @@ async fn live_join_forwards_reference_eof() {
     );
 
     let saw_reference_eof = events.iter().any(|env| {
-        env.event.writer_id == reference_writer
+        env.envelope.provenance.event.writer_id == reference_writer
             && matches!(
-                &env.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+                &env.payload,
+                ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
             )
     });
     assert!(saw_reference_eof, "expected reference EOF to be forwarded");
@@ -1648,7 +1668,7 @@ async fn live_join_reference_errors_are_per_record() {
         .expect("read join journal");
     let joined: Vec<JoinedRow> = output_events
         .iter()
-        .filter_map(|env| JoinedRow::from_event(&env.event))
+        .filter_map(|env| JoinedRow::from_event(&env.authored()))
         .collect();
     assert_eq!(
         joined,
@@ -1663,10 +1683,10 @@ async fn live_join_reference_errors_are_per_record() {
         .await
         .expect("read join error journal");
     let saw_reference_error = error_events.iter().any(|env| {
-        env.event.writer_id == reference_writer
-            && CatalogRow::from_event(&env.event).is_some()
+        env.envelope.provenance.event.writer_id == reference_writer
+            && CatalogRow::from_event(&env.authored()).is_some()
             && matches!(
-                env.event.processing_info.status,
+                env.envelope.provenance.event.processing.status,
                 ProcessingStatus::Error { .. }
             )
     });

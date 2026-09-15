@@ -29,6 +29,7 @@ use crate::stages::observer::dispatch::{
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -161,13 +162,11 @@ async fn dispatch_running_inner<
 
     match poll_result {
         PollResult::Event(mut envelope) => {
-            use obzenflow_core::event::JournalEvent;
-
             tracing::trace!(
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
                 loop_iteration = loop_count + 1,
-                event_type = %envelope.event.event_type_name(),
+                event_type = %envelope.event_type_name(),
                 "transform: poll_next returned Event"
             );
 
@@ -198,7 +197,7 @@ async fn dispatch_running_inner<
 
             // FLOWIP-095k: fold the joined terminal kind before resolution, so
             // every arm (including cycle Suppress/Buffer) observes it.
-            if envelope.event.is_eof() {
+            if envelope.is_eof() {
                 if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
                     ctx.terminal_eof_kind = Some(
                         ctx.terminal_eof_kind
@@ -208,10 +207,10 @@ async fn dispatch_running_inner<
             }
 
             if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
-                if envelope.event.is_data() {
+                if envelope.consumes_data_credit() {
                     heartbeat
                         .state
-                        .record_data_read(upstream, envelope.event.id);
+                        .record_data_read(upstream, envelope.envelope.provenance.event.id);
                 }
             }
 
@@ -264,8 +263,8 @@ async fn dispatch_running_inner<
                 return Ok(directive);
             }
 
-            let directive = match &envelope.event.content {
-                obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+            let directive = match &envelope.payload {
+                ChainPayload::FlowControl(signal) => {
                     // FLOWIP-120n: consume the catch-up watermark before the
                     // generic control resolution; each stage authors its own.
                     if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {
@@ -307,7 +306,7 @@ async fn dispatch_running_inner<
                     // FLOWIP-120n F17: an authored EOF can be the delivery
                     // that completes the caught-up frontier; no watermark
                     // follows, so re-run the flip before normal EOF handling.
-                    if envelope.event.is_eof() {
+                    if envelope.is_eof() {
                         let subscription = sup
                             .subscription
                             .as_ref()
@@ -357,7 +356,7 @@ async fn dispatch_running_inner<
 
                     match resolution {
                         ControlAction::Forward => {
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     if is_cycle_entry_point {
                                         if is_terminal_eof(&envelope, upstream_stage) {
@@ -383,9 +382,9 @@ async fn dispatch_running_inner<
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
-                            ctx.buffered_eof = Some(envelope.event.clone());
+                            ctx.buffered_eof = Some(envelope.authored());
 
-                            if envelope.event.is_eof() {
+                            if envelope.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     drop(
                                         subscription
@@ -400,7 +399,7 @@ async fn dispatch_running_inner<
 
                             tracing::info!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Transform stage transitioning to draining"
                             );
                             sup.forward_control_event_guarded(&envelope, &ctx.stage_name)
@@ -414,14 +413,14 @@ async fn dispatch_running_inner<
                             if is_drain {
                                 ctx.drain_received = true;
                                 if ctx.buffered_eof.is_none() {
-                                    ctx.buffered_eof = Some(envelope.event.clone());
+                                    ctx.buffered_eof = Some(envelope.authored());
                                 }
                                 tracing::info!(
                                     stage_name = %ctx.stage_name,
                                     "Transform entry point buffered drain signal"
                                 );
                             } else {
-                                ctx.buffered_eof = Some(envelope.event.clone());
+                                ctx.buffered_eof = Some(envelope.authored());
                                 if let Some(upstream) = upstream_stage {
                                     ctx.external_eofs_received.insert(upstream);
                                 }
@@ -443,7 +442,7 @@ async fn dispatch_running_inner<
                             EventLoopDirective::Continue
                         }
                         ControlAction::Suppress => {
-                            if envelope.event.is_eof()
+                            if envelope.is_eof()
                                 && is_cycle_entry_point
                                 && is_terminal_eof(&envelope, upstream_stage)
                             {
@@ -461,14 +460,14 @@ async fn dispatch_running_inner<
                         ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
+                                event_type = envelope.event_type(),
                                 "Skipping control event (dangerous!)"
                             );
                             EventLoopDirective::Continue
                         }
                     }
                 }
-                obzenflow_core::event::ChainEventContent::Data { .. } => {
+                payload if payload.consumes_data_credit() => {
                     let observer_input_position = stage_input_position
                         .ok_or("transform delivered data input without StageInputPosition")?;
                     // FLOWIP-120c H3: the middleware execution scope is
@@ -525,7 +524,7 @@ async fn dispatch_running_inner<
                     });
 
                     let handler_invoked = !matches!(
-                        envelope.event.processing_info.status,
+                        envelope.envelope.provenance.event.processing.status,
                         ProcessingStatus::Error { .. }
                     );
                     if handler_invoked {
@@ -534,23 +533,20 @@ async fn dispatch_running_inner<
                             ctx.flow_id,
                             flow_context,
                             scope,
-                            &envelope.event,
+                            &envelope.authored(),
                             observer_input_position,
                         );
                     }
                     let result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
-                            let event = envelope_clone.event.clone();
+                            let event = envelope_clone.authored();
                             let event_id = event.id;
 
-                            if matches!(
-                                event.processing_info.status,
-                                ProcessingStatus::Error { .. }
-                            ) {
+                            if matches!(event.processing.status, ProcessingStatus::Error { .. }) {
                                 tracing::info!(
                                     "Transform supervisor received pre-error-marked event {}: {:?}",
                                     event.id,
-                                    event.processing_info.status
+                                    event.processing.status
                                 );
                                 if let Some(state) = &handler_heartbeat_state {
                                     state.record_last_consumed(event_id);
@@ -579,10 +575,8 @@ async fn dispatch_running_inner<
                                             as Box<dyn std::error::Error + Send + Sync>);
                                     }
                                     let reason = format!("Transform handler error: {err:?}");
-                                    let error_event = envelope_clone
-                                        .event
-                                        .clone()
-                                        .mark_as_error(reason, err.kind());
+                                    let error_event =
+                                        envelope_clone.authored().mark_as_error(reason, err.kind());
                                     if let Some(state) = &handler_heartbeat_state {
                                         state.record_last_consumed(event_id);
                                     }
@@ -600,7 +594,7 @@ async fn dispatch_running_inner<
                                     ctx.flow_id,
                                     flow_context,
                                     scope,
-                                    &envelope.event,
+                                    &envelope.authored(),
                                     observer_input_position,
                                     transformed_events.as_slice(),
                                 );
@@ -639,7 +633,7 @@ async fn dispatch_running_inner<
                                 }
 
                                 if let ProcessingStatus::Error { kind, .. } =
-                                    &event.processing_info.status
+                                    &event.processing.status
                                 {
                                     let k = kind.clone().unwrap_or(ErrorKind::Unknown);
                                     ctx.instrumentation.record_error(k);
@@ -746,7 +740,7 @@ async fn dispatch_running_inner<
                                         }
                                     }
                                     if let Some(state) = &heartbeat_state {
-                                        state.record_last_consumed(envelope.event.id);
+                                        state.record_last_consumed(envelope.envelope.provenance.event.id);
                                     }
                                     return Ok(EventLoopDirective::Transition(
                                         TransformEvent::Error(fatal.detail.clone()),
