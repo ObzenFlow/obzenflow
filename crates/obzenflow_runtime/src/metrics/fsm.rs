@@ -1604,7 +1604,9 @@ impl FsmAction for MetricsAggregatorAction {
                     // errors across forwarded rows and tail refreshes.
                 } // metrics reference dropped here
 
-                ctx.refresh_measurements();
+                // Retain captures while folding, then project their latest values
+                // at export. Rebuilding every stage's measurement view for each
+                // journal record makes catch-up depend on observation cardinality.
                 Ok(())
             }
 
@@ -1613,7 +1615,6 @@ impl FsmAction for MetricsAggregatorAction {
                 ctx.metrics_store
                     .observations
                     .capture_registered(CaptureReason::Periodic);
-                ctx.refresh_measurements();
                 // Keep wide metrics current even when the physical cursors lag.
                 // This refresh does not advance input coverage or its watermark:
                 // only the collector's sequential reads can authorise Drained.

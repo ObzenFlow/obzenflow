@@ -158,7 +158,7 @@ impl InlineSink for CompletionSink {
 }
 
 #[tokio::test]
-async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
+async fn prometheus_10k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
@@ -168,14 +168,14 @@ async fn prometheus_100k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     let journal_root = journals.path().to_path_buf();
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
-        // Build a minimal flow that mirrors the prometheus_100k_demo core path:
+        // Build a minimal flow that mirrors the Prometheus example's core path:
         // high_volume_source -> error_processor -> completion_sink.
         let source = HighVolumeSource::new(TOTAL_EVENTS);
         let transform = error_prone_transform();
         let sink = CompletionSink::new();
 
         Ok(flow! {
-            name: "prometheus_100k_demo",
+            name: "prometheus_error_kinds",
             journals: disk_journals(journal_root),
 
             stages: {
