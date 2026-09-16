@@ -13,7 +13,7 @@ mod middleware;
 
 use super::{ChainEvent, ChainPayload};
 use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::{FlowContext, IntentContext};
+use crate::event::context::FlowContext;
 use crate::event::observation::ObservabilityContext;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
 use crate::event::types::{EventId, WriterId};
@@ -49,17 +49,6 @@ impl ChainEventFactory {
         event
     }
 
-    /// Create an event with intent
-    pub fn create_with_intent(
-        writer_id: WriterId,
-        content: ChainPayload,
-        intent: IntentContext,
-    ) -> ChainEvent {
-        let mut event = Self::create_event(writer_id, content);
-        event.intent = Some(intent);
-        event
-    }
-
     pub fn create_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
         let provenance = ChainEventProvenance {
             id: EventId::new(),
@@ -72,12 +61,9 @@ impl ChainEventFactory {
             causality: CausalityContext::new(),
             flow_context: FlowContext::default(),
             processing: ProcessingProvenance {
-                processed_by: "unknown".into(),
                 event_time: current_timestamp(),
                 status: ProcessingStatus::Success,
-                error_hops_remaining: None,
             },
-            intent: None,
             correlation: None,
             replay_context: None,
             ingress_context: None,

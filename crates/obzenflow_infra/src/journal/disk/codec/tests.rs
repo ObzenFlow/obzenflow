@@ -140,15 +140,45 @@ pub(super) fn captured_prometheus_records() -> Vec<JournalRecord<ChainPayload>> 
     ]
     .into_iter()
     .flat_map(str::lines)
-    .map(|line| serde_json::from_str(line).unwrap())
+    .map(|line| {
+        // Keep the captured format-3 evidence immutable. Project only the
+        // explicitly retired fields out of this test corpus before exercising
+        // the current schema. This is not a production archive migration.
+        let mut record: Value = serde_json::from_str(line).unwrap();
+        let event = record["envelope"]["provenance"]["event"]
+            .as_object_mut()
+            .unwrap();
+        event.remove("intent");
+        let processing = event
+            .get_mut("processing")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        processing.remove("processed_by");
+        processing.remove("error_hops_remaining");
+        let accounting = event.get_mut("runtime").unwrap()["accounting"]
+            .as_object_mut()
+            .unwrap();
+        accounting.remove("terminal_groups_committed_total");
+        accounting.remove("terminal_group_commit_failures_total");
+        let origin = event.get_mut("correlation").unwrap()["payload"]
+            .as_object_mut()
+            .unwrap();
+        origin.remove("entry_stage");
+        let metadata = origin.remove("metadata").unwrap();
+        assert_eq!(metadata.as_object().unwrap().len(), 3);
+        assert_eq!(metadata["source_event_id"], origin["entry_event_id"]);
+        assert!(metadata["flow_id"].is_string() && metadata["flow_name"].is_string());
+        serde_json::from_value(record).unwrap()
+    })
     .collect()
 }
 
 #[test]
-fn source_metadata_alias_requires_the_complete_named_shape_and_exact_identity() {
+fn origin_metadata_keeps_application_keys_and_values_opaque() {
     use super::values::Standalone;
     let source = captured_prometheus_records().remove(0);
-    let origin = serde_json::to_value(
+    let mut origin = serde_json::to_value(
         source
             .envelope
             .provenance
@@ -159,6 +189,11 @@ fn source_metadata_alias_requires_the_complete_named_shape_and_exact_identity() 
             .unwrap(),
     )
     .unwrap();
+    origin["metadata"] = json!({
+        "source_event_id": origin["entry_event_id"],
+        "flow_id": "application-flow",
+        "flow_name": "application-name",
+    });
     for change in 0..6 {
         let mut value = origin.clone();
         match change {
@@ -172,10 +207,16 @@ fn source_metadata_alias_requires_the_complete_named_shape_and_exact_identity() 
             _ => {}
         }
         let mut bytes = Vec::new();
-        values::write(Kind::Origin, &value, &mut bytes, &mut Standalone).unwrap();
-        assert_eq!(bytes[0], u8::from(change == 0));
+        values::write(
+            Kind::Struct(Shape::Origin),
+            &value,
+            &mut bytes,
+            &mut Standalone,
+        )
+        .unwrap();
         let mut cursor = Cursor::new(&bytes);
-        let decoded = values::read(Kind::Origin, &mut cursor, &mut Standalone).unwrap();
+        let decoded =
+            values::read(Kind::Struct(Shape::Origin), &mut cursor, &mut Standalone).unwrap();
         cursor.finish().unwrap();
         assert_eq!(
             serde_json::to_vec(&value).unwrap(),
@@ -379,7 +420,7 @@ fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip
     let event = &mut value["envelope"]["provenance"]["event"];
     event["causality"]["parent_ids"] = json!([parent]);
     event["correlation"] = json!({"ids":[parent, event["id"]], "truncated": false,
-        "payload": {"entry_time_ns": u64::MAX, "entry_stage": "source", "entry_event_id": parent,
+        "payload": {"entry_time_ns": u64::MAX, "entry_event_id": parent,
             "metadata": {"id": "opaque", "negative_zero": -0.0, "nested": [null, u64::MAX, {"event_type": "custom"}]}}});
     event["runtime"]["accounting"]["events_processed_total"] = json!(u64::MAX);
     event["runtime"]["accounting"]["events_emitted_total"] = json!(9_007_199_254_740_993u64);

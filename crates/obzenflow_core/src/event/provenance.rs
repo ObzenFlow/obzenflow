@@ -6,9 +6,7 @@
 
 use super::chain_event::CorrelationContext;
 use super::context::causality_context::CausalityContext;
-use super::context::{
-    CompositeActivationContext, FlowContext, IntentContext, ReplayContext, RuntimeProvenance,
-};
+use super::context::{CompositeActivationContext, FlowContext, ReplayContext, RuntimeProvenance};
 use super::event_envelope::JournalGroupMember;
 use super::observation::ObservabilityContext;
 use super::payloads::chain_payload::EventKind;
@@ -25,11 +23,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessingProvenance {
-    pub processed_by: String,
     pub event_time: u64,
     pub status: ProcessingStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error_hops_remaining: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +37,6 @@ pub struct ChainEventProvenance {
     pub causality: CausalityContext,
     pub flow_context: FlowContext,
     pub processing: ProcessingProvenance,
-    pub intent: Option<IntentContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation: Option<CorrelationContext>,
     #[serde(skip_serializing_if = "Option::is_none")]

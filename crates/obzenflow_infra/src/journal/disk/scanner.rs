@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One format-3 classifier and policy arbiter for every journal read surface.
+//! One format-4 classifier and policy arbiter for every journal read surface.
 //! Binary lengths delimit frames; a checked fixed trailer commits the frame.
 
 use super::codec::{frame, Decoder};

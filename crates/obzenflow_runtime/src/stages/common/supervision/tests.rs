@@ -1064,7 +1064,6 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
         previous_capture = Some(snapshot.capture.capture_seq);
         let accounting = &row.runtime.as_ref().unwrap().accounting;
         assert_eq!(accounting.events_emitted_total, index as u64);
-        assert_eq!(accounting.terminal_groups_committed_total, 1);
         selected.select_recorded(packet.clone()).unwrap();
     }
     let snapshot = selected

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Format-3 positions are explicit protocol constants, not Rust field order.
+//! Format-4 positions are explicit protocol constants, not Rust field order.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -34,7 +34,7 @@ impl DefinitionKind {
         match self {
             Self::Writer => Kind::Struct(Shape::Writer),
             Self::Context => Kind::Struct(Shape::Context),
-            Self::Origin => Kind::Origin,
+            Self::Origin => Kind::Struct(Shape::Origin),
             Self::Descriptor => Kind::Text,
             Self::CaptureScope => Kind::Struct(Shape::CaptureScope),
             Self::ClockKeys => Kind::List(&Kind::ClockKey),
@@ -55,7 +55,6 @@ pub(super) enum Kind {
     Timestamp,
     PacketCapture,
     SnapshotCapture,
-    Origin,
     StageIdentity,
     Json,
     /// Complete binary values for typed, non-hot-path framework structures.
@@ -95,14 +94,6 @@ const fn field(name: &'static str, kind: Kind) -> Field {
         name,
         kind,
         default,
-    }
-}
-
-const fn text_default(name: &'static str, value: &'static str) -> Field {
-    Field {
-        name,
-        kind: Kind::Text,
-        default: Some(DefaultValue::Text(value)),
     }
 }
 
@@ -174,7 +165,6 @@ impl Shape {
                         field("causality", K::Struct(S::Causality)),
                         field("flow_context", K::Definition(D::Context)),
                         field("processing", K::Struct(S::Processing)),
-                        field("intent", K::Value),
                         field("correlation", K::Struct(S::Correlation)),
                         field("replay_context", K::Value),
                         field("ingress_context", K::Value),
@@ -214,14 +204,12 @@ impl Shape {
             S::Processing => {
                 const {
                     &[
-                        text_default("processed_by", "unknown"),
                         field("event_time", K::Unsigned),
                         Field {
                             name: "status",
                             kind: K::Value,
                             default: Some(DefaultValue::Text("Success")),
                         },
-                        field("error_hops_remaining", K::Unsigned),
                     ]
                 }
             }
@@ -239,7 +227,6 @@ impl Shape {
                 const {
                     &[
                         field("entry_time_ns", K::Unsigned),
-                        field("entry_stage", K::Text),
                         field("entry_event_id", K::Id),
                         field("metadata", K::Json),
                     ]
@@ -252,8 +239,6 @@ impl Shape {
                         field("events_processed_total", K::Unsigned),
                         field("events_accumulated_total", K::Unsigned),
                         field("events_emitted_total", K::Unsigned),
-                        field("terminal_groups_committed_total", K::Unsigned),
-                        field("terminal_group_commit_failures_total", K::Unsigned),
                         field("errors_total", K::Unsigned),
                         field("failures_total", K::Unsigned),
                         field("errors_by_kind", K::Value),

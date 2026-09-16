@@ -196,26 +196,21 @@ fn payment_effect_outcome_group_count(jsonl: &str) -> usize {
         .len()
 }
 
-fn payment_terminal_group_counters(jsonl: &str) -> (u64, u64) {
+fn payment_committed_terminal_group_count(jsonl: &str) -> usize {
     exported_events(jsonl)
         .filter(|row| {
             row.pointer("/envelope/provenance/event/flow_context/stage_name")
-                .and_then(serde_json::Value::as_str) == Some("authorize_payment")
+                .and_then(serde_json::Value::as_str)
+                == Some("authorize_payment")
         })
-        .fold((0, 0), |(committed, failed), row| {
-            (
-                committed.max(
-                    row.pointer("/envelope/provenance/event/runtime/accounting/terminal_groups_committed_total")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0),
-                ),
-                failed.max(
-                    row.pointer("/envelope/provenance/event/runtime/accounting/terminal_group_commit_failures_total")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0),
-                ),
-            )
+        .filter(|row| {
+            // Count physical group starts, including repeated deterministic
+            // group IDs. The exporter validates membership against each frame.
+            row.pointer("/envelope/provenance/journal/journal_group_member/index")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
         })
+        .count()
 }
 
 fn exported_chain_events(jsonl: &str) -> impl Iterator<Item = ChainEvent> + '_ {
@@ -539,7 +534,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&healthy), 5);
-    assert_eq!(payment_terminal_group_counters(&healthy), (5, 0));
+    assert_eq!(payment_committed_terminal_group_count(&healthy), 5);
     assert_eq!(
         last_payment_breaker_counts(&healthy),
         BreakerCounts {
@@ -628,7 +623,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
     );
     assert_eq!(data_event_count(&breaker_only, "payment.authorized.v1"), 0);
     assert_eq!(payment_effect_outcome_group_count(&breaker_only), 1);
-    assert_eq!(payment_terminal_group_counters(&breaker_only), (1, 0));
+    assert_eq!(payment_committed_terminal_group_count(&breaker_only), 1);
     assert_eq!(
         last_payment_breaker_counts(&breaker_only),
         BreakerCounts {
@@ -680,7 +675,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&treatment), 1);
-    assert_eq!(payment_terminal_group_counters(&treatment), (1, 0));
+    assert_eq!(payment_committed_terminal_group_count(&treatment), 1);
     assert_eq!(
         last_payment_breaker_counts(&treatment),
         BreakerCounts {
@@ -772,7 +767,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         0
     );
     assert_eq!(payment_effect_outcome_group_count(&replay), 1);
-    assert_eq!(payment_terminal_group_counters(&replay), (1, 0));
+    assert_eq!(payment_committed_terminal_group_count(&replay), 1);
     assert_eq!(retry_schedules(&replay), retry_schedules(&treatment));
     assert_eq!(retry_successes(&replay), retry_successes(&treatment));
     assert_eq!(retry_terminal_failure_count(&replay), 0);
@@ -806,7 +801,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         6
     );
     assert_eq!(data_event_count(&open, "payment.authorized.v1"), 0);
-    assert_eq!(payment_terminal_group_counters(&open), (6, 0));
+    assert_eq!(payment_committed_terminal_group_count(&open), 6);
     assert_eq!(
         last_payment_breaker_counts(&open),
         BreakerCounts {
@@ -907,7 +902,7 @@ fn payment_gateway_configuration_faithful_release_portfolio() {
         data_event_count(&open_replay, "payment.authorization_unavailable.v1"),
         6
     );
-    assert_eq!(payment_terminal_group_counters(&open_replay), (6, 0));
+    assert_eq!(payment_committed_terminal_group_count(&open_replay), 6);
     assert!(retry_schedules(&open_replay).is_empty());
     assert!(retry_successes(&open_replay).is_empty());
     assert_eq!(retry_terminal_failure_count(&open_replay), 0);
@@ -953,7 +948,7 @@ fn payment_gateway_half_open_release_witness_uses_the_real_cooldown() {
         data_event_count(&live, "payment.authorization_unavailable.v1"),
         6
     );
-    assert_eq!(payment_terminal_group_counters(&live), (7, 0));
+    assert_eq!(payment_committed_terminal_group_count(&live), 7);
     assert_eq!(
         last_payment_breaker_counts(&live),
         BreakerCounts {

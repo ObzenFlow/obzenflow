@@ -12,12 +12,9 @@ use crate::event::types::CorrelationId;
 
 impl ChainEvent {
     /// Create correlation for a source event (flow entry)
-    pub fn with_new_correlation(mut self, stage_name: impl Into<String>) -> Self {
+    pub fn with_new_correlation(mut self) -> Self {
         let correlation_id = CorrelationId::new();
-        self.set_single_correlation(
-            correlation_id,
-            Some(CorrelationPayload::new(stage_name, self.id)),
-        );
+        self.set_single_correlation(correlation_id, Some(CorrelationPayload::new(self.id)));
         self
     }
 

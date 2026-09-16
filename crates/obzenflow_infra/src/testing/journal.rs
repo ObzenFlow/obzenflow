@@ -258,7 +258,9 @@ fn audit_file<T: JournalEvent>(
         offset += consumed as u64;
         let group = frame.group_id().map(str::to_owned);
         if group.is_some() {
-            samples.groups.push((sizes.provenance + sizes.observability + sizes.shared) as f64);
+            samples
+                .groups
+                .push((sizes.provenance + sizes.observability + sizes.shared) as f64);
         }
         let records = frame.into_records();
         let logical: Vec<_> = records
@@ -320,7 +322,10 @@ fn audit_file<T: JournalEvent>(
             if event.get("effect_provenance").is_some() {
                 samples.effects.push(p + o);
             }
-            if event["composite_activations"].as_array().is_some_and(|items| !items.is_empty()) {
+            if event["composite_activations"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            {
                 samples.composites.push(p + o);
             }
             audit.logical_provenance_bytes += serde_json::to_vec(provenance)?.len() as u64;

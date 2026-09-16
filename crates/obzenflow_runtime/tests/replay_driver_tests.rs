@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::context::{FlowContext, IntentContext, StageType};
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::journal_error::JournalError;
@@ -50,17 +50,18 @@ impl JournalReader<ChainEvent> for TestReader {
 #[tokio::test]
 async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     let archived_writer = WriterId::from(StageId::new());
-    let mut eof = ChainEventFactory::eof_event(archived_writer, true);
-    eof.intent = Some(IntentContext::Event {
-        fact: "should_be_skipped".to_string(),
-    });
+    let eof = ChainEventFactory::eof_event(archived_writer, true);
 
     let mut data =
         ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({"k": "v"}));
-    data = data.with_new_correlation("archived_stage");
-    data.intent = Some(IntentContext::Event {
-        fact: "keep_me".to_string(),
-    });
+    data = data.with_new_correlation();
+    data.correlation
+        .as_mut()
+        .unwrap()
+        .payload
+        .as_mut()
+        .unwrap()
+        .metadata = Some(serde_json::json!({"application": "keep_me", "empty": null}));
 
     let envelopes = vec![
         JournalRecord::new(JournalWriterId::new(), eof.clone()),
@@ -78,7 +79,6 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     let replay_context = ReplayContextTemplate {
         original_flow_id: "flow_01HARCHIVE".to_string(),
         original_stage_id: StageId::new(),
-        archive_path: PathBuf::from("/tmp/archive_run"),
     };
 
     let mut driver = ReplayDriver::new(reader, journal_path.clone(), replay_context.clone());
@@ -113,14 +113,10 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
         replay_ctx.original_stage_id,
         replay_context.original_stage_id
     );
-    assert_eq!(replay_ctx.archive_path, replay_context.archive_path);
-
-    match (&replayed.intent, &data.intent) {
-        (Some(IntentContext::Event { fact: a }), Some(IntentContext::Event { fact: b })) => {
-            assert_eq!(a, b)
-        }
-        _ => panic!("expected preserved Event intent"),
-    }
+    assert_eq!(replayed.correlation, data.correlation);
+    assert_eq!(replayed.processing.event_time, data.processing.event_time);
+    let replay_wire = serde_json::to_value(replay_ctx).unwrap();
+    assert_eq!(replay_wire.as_object().unwrap().len(), 3);
 
     assert!(replayed.is_fact());
     assert_eq!(replayed.event_type(), data.event_type());
@@ -134,7 +130,6 @@ fn template() -> ReplayContextTemplate {
     ReplayContextTemplate {
         original_flow_id: "flow_01HARCHIVE".to_string(),
         original_stage_id: StageId::new(),
-        archive_path: PathBuf::from("/tmp/archive_run"),
     }
 }
 

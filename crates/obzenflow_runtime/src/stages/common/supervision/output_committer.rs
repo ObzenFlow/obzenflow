@@ -640,12 +640,6 @@ impl OutputCommitter<'_> {
         let mut snapshot = self
             .instrumentation
             .map(|instrumentation| instrumentation.capture_runtime_in_scope(self.observer_scope));
-        if let Some(snapshot) = &mut snapshot {
-            snapshot.accounting.terminal_groups_committed_total = snapshot
-                .accounting
-                .terminal_groups_committed_total
-                .saturating_add(1);
-        }
         for entry in entries {
             let mut event = self
                 .prepare_prebuilt_with_intent(entry.event, parent, entry.options, entry.intent)
@@ -680,11 +674,6 @@ impl OutputCommitter<'_> {
         {
             Ok(written) => written,
             Err(error) => {
-                if let Some(instrumentation) = self.instrumentation {
-                    instrumentation
-                        .terminal_group_commit_failures_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
                 tracing::error!(
                     group_id,
                     member_count,
@@ -705,11 +694,6 @@ impl OutputCommitter<'_> {
         // cardinality so a broken Journal implementation cannot leak debt.
         if let Some(reservation) = backpressure_reservation {
             reservation.commit(data_count)?;
-        }
-        if let Some(instrumentation) = self.instrumentation {
-            instrumentation
-                .terminal_groups_committed_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         if written.len() != metadata.len() {
             tracing::error!(
@@ -1012,12 +996,7 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
 
     if should_mint {
         let correlation_id = CorrelationId::new();
-        let mut payload = CorrelationPayload::new(&flow.stage_name, event.id);
-        payload.metadata = Some(serde_json::json!({
-            "flow_name": flow.flow_name,
-            "flow_id": flow.flow_id,
-            "source_event_id": event.id.to_string(),
-        }));
+        let payload = CorrelationPayload::new(event.id);
         event.set_single_correlation(correlation_id, Some(payload));
     } else {
         tracing::warn!(
@@ -1025,5 +1004,54 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
             stage_name = %flow.stage_name,
             "Non-source derived data event missing correlation_id"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::ChainEventFactory;
+
+    #[test]
+    fn journey_enrichment_keeps_origin_identity_and_only_application_metadata() {
+        let stage = obzenflow_core::StageId::new();
+        let mut flow = FlowContext::new("source", stage);
+        flow.stage_type = StageType::FiniteSource;
+        let mut event = ChainEventFactory::data_event(
+            WriterId::from(stage),
+            "application.input",
+            serde_json::json!({"id": 1}),
+        );
+        apply_runtime_journey_identity(&mut event, &flow);
+        let origin = event.correlation_payload().unwrap();
+        assert_eq!(origin.entry_event_id, event.id);
+        assert!(origin.entry_time_ns > 0);
+        assert!(origin.metadata.is_none());
+        assert_eq!(
+            serde_json::to_value(origin)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        for metadata in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({"flow_name": "custom", "source_event_id": "custom", "flow_id": "custom"}),
+        ] {
+            event
+                .correlation
+                .as_mut()
+                .unwrap()
+                .payload
+                .as_mut()
+                .unwrap()
+                .metadata = Some(metadata);
+            let original = event.correlation.clone();
+            apply_runtime_journey_identity(&mut event, &flow);
+            assert_eq!(event.correlation, original);
+        }
     }
 }

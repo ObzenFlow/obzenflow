@@ -553,7 +553,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                             original_stage_id: replay_archive
                                 .archived_stage_id(stage_key)
                                 .map_err(|e| format!("Failed to resolve archived stage id: {e}"))?,
-                            archive_path: replay_archive.archive_path().to_path_buf(),
                         };
                         self.replay_driver =
                             Some(ReplayDriver::new(reader, journal_path, replay_context));

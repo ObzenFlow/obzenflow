@@ -430,7 +430,6 @@ enabled = false
                     json!({
                         "content": content,
                         "status": event.processing.status,
-                        "error_hops_remaining": event.processing.error_hops_remaining,
                     })
                     .to_string(),
                 );

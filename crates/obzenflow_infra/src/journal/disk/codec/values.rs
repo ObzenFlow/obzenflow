@@ -146,46 +146,6 @@ pub(super) fn write(
                 write(Kind::Struct(Shape::Capture), value, out, definitions)?;
             }
         }
-        Kind::Origin => {
-            // This one explicitly named source-metadata shape has a local
-            // identity alias. Extra/custom keys or unequal identities select
-            // the complete opaque JSON representation instead.
-            let metadata = value.get("metadata").and_then(Value::as_object);
-            let source_metadata = metadata.filter(|metadata| {
-                metadata.len() == 3
-                    && metadata.get("source_event_id") == value.get("entry_event_id")
-                    && metadata
-                        .get("source_event_id")
-                        .is_some_and(Value::is_string)
-                    && metadata.get("flow_id").is_some_and(Value::is_string)
-                    && metadata.get("flow_name").is_some_and(Value::is_string)
-            });
-            match source_metadata {
-                None => {
-                    out.push(0);
-                    write(Kind::Struct(Shape::Origin), value, out, definitions)?;
-                }
-                Some(metadata) => {
-                    out.push(1);
-                    let mut origin = value.clone();
-                    origin.as_object_mut().unwrap().remove("metadata");
-                    write(Kind::Struct(Shape::Origin), &origin, out, definitions)?;
-                    let flow_id = metadata["flow_id"].as_str().unwrap();
-                    if let Some(id) = flow_id
-                        .strip_prefix("flow_")
-                        .and_then(|id| id.parse::<ulid::Ulid>().ok())
-                        .filter(|id| format!("flow_{id}") == flow_id)
-                    {
-                        out.push(1);
-                        out.extend_from_slice(&id.to_bytes());
-                    } else {
-                        out.push(0);
-                        text(flow_id, out);
-                    }
-                    text(metadata["flow_name"].as_str().unwrap(), out);
-                }
-            }
-        }
         Kind::Value => write_dynamic(value, out, 0)?,
         Kind::Enum(variants) => {
             let index = variants
@@ -314,32 +274,6 @@ pub(super) fn read(
                 .ok_or_else(|| invalid("capture alias has no packet capture"))?,
             _ => return Err(invalid("unknown capture alias tag")),
         },
-        Kind::Origin => {
-            let tag = input.byte()?;
-            let mut origin = read(Kind::Struct(Shape::Origin), input, definitions)?;
-            match tag {
-                0 => {}
-                1 => {
-                    if origin.get("metadata").is_some()
-                        || !origin.get("entry_event_id").is_some_and(Value::is_string)
-                    {
-                        return Err(invalid("invalid local source metadata alias"));
-                    }
-                    let flow_id = match input.byte()? {
-                        0 => input.text()?,
-                        1 => format!("flow_{}", read_id(input)?),
-                        _ => return Err(invalid("unknown source flow ID tag")),
-                    };
-                    origin["metadata"] = serde_json::json!({
-                        "source_event_id": origin["entry_event_id"],
-                        "flow_id": flow_id,
-                        "flow_name": input.text()?,
-                    });
-                }
-                _ => return Err(invalid("unknown origin body tag")),
-            }
-            origin
-        }
         Kind::Value => read_dynamic(input, 0)?,
         Kind::Enum(variants) => Value::String(
             variants

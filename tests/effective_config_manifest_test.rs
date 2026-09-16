@@ -486,7 +486,9 @@ fn checked_schema_v3_studio_fixture_is_a_complete_run_manifest() {
     let manifest: RunManifest =
         serde_json::from_str(fixture).expect("Studio fixture must be a valid RunManifest");
     assert_eq!(manifest.manifest_version, "3.0");
-    assert_eq!(manifest.journal_format_version, 3);
+    // This retained Studio fixture checks structural decoding of manifest 3.0,
+    // whose journals used format 2; it is not a current replay archive.
+    assert_eq!(manifest.journal_format_version, 2);
     let evidence = manifest
         .effective_config
         .expect("Studio fixture must carry effective-config evidence");

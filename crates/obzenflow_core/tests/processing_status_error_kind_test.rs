@@ -63,7 +63,7 @@ fn processing_status_kind_accessor_matches_variant() {
 }
 
 #[test]
-fn chain_event_mark_as_error_sets_status_and_hop_budget() {
+fn chain_event_mark_as_error_sets_status_and_kind() {
     let writer_id = WriterId::from(StageId::new());
     let base: ChainEvent =
         ChainEventFactory::data_event(writer_id, "test.event", json!({ "key": "value" }));
@@ -81,7 +81,6 @@ fn chain_event_mark_as_error_sets_status_and_hop_budget() {
         }
         ref other => panic!("expected Error status, got {other:?}"),
     }
-    assert_eq!(err.processing.error_hops_remaining, Some(1));
 }
 
 #[test]
@@ -100,7 +99,6 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
         }
         ref other => panic!("expected Error status, got {other:?}"),
     }
-    assert_eq!(validation.processing.error_hops_remaining, Some(1));
 
     let infra = base.mark_as_infra_error("remote timeout");
     match infra.processing.status {
@@ -113,5 +111,4 @@ fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
         }
         ref other => panic!("expected Error status, got {other:?}"),
     }
-    assert_eq!(infra.processing.error_hops_remaining, Some(1));
 }

@@ -13,12 +13,10 @@
 //!   state-transition history.
 //! - Agency: `writer_id` records which stage or service emitted the event,
 //!   leaving room for richer provenance later.
-//! - Intent: `intent` keeps goals explicit rather than inferred.
 //! - Narrative: wide-event observability and contextual metadata make
 //!   reconstruction possible.
 //!
-//! This module split is structural only. It does not change `ChainEvent`
-//! semantics or the existing public constructor surface.
+//! Construction helpers follow the current provenance schema.
 //!
 //! `event_type()` remains the richer user-facing classifier, while
 //! `event_type_name()` stays the coarse, zero-allocation fast-path classifier

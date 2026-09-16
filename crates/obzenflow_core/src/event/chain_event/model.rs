@@ -252,12 +252,10 @@ impl ChainEvent {
 
     /// Mark this event as an error with a structured ErrorKind.
     ///
-    /// This sets `processing_info.status` to `ProcessingStatus::Error` with
-    /// the provided message and kind, and primes `error_hops_remaining` so
-    /// stage supervisors can route the event according to FLOWIP-082e/082g.
+    /// This sets `processing.status` to `ProcessingStatus::Error` with
+    /// the provided message and kind for stage error routing.
     pub fn mark_as_error(mut self, reason: impl Into<String>, kind: ErrorKind) -> Self {
         self.processing.status = ProcessingStatus::error_with_kind(reason.into(), Some(kind));
-        self.processing.error_hops_remaining = Some(1);
         self
     }
 

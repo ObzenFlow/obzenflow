@@ -21,10 +21,10 @@ pub const RUN_MANIFEST_VERSION: &str = "4.0";
 /// check that gates `manifest_version`, so an archive written by an incompatible
 /// format is refused before any record is parsed. There is no mixed-format file:
 /// append and resume across a changed format refuse or start a new segment.
-/// Format 3 compacts provenance and observability using absolute scalar values
-/// and complete immutable definitions in checksummed binary record/group frames.
+/// Format 4 removes retired provenance fields from the compact schema. Numbers
+/// remain absolute and immutable definitions contain complete values.
 /// Earlier development formats must be re-recorded.
-pub const JOURNAL_FORMAT_VERSION: u32 = 3;
+pub const JOURNAL_FORMAT_VERSION: u32 = 4;
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.

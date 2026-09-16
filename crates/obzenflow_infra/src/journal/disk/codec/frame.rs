@@ -4,8 +4,8 @@
 
 use std::io;
 
-pub(crate) const MAGIC: [u8; 4] = *b"OJF3";
-pub(crate) const COMMIT_MAGIC: [u8; 4] = *b"3FJO";
+pub(crate) const MAGIC: [u8; 4] = *b"OJF4";
+pub(crate) const COMMIT_MAGIC: [u8; 4] = *b"4FJO";
 pub(crate) const HEADER_LEN: usize = 16;
 pub(crate) const TRAILER_LEN: usize = 16;
 
@@ -37,12 +37,12 @@ pub(crate) fn frame_length(header: &[u8]) -> Result<usize, FrameProblem> {
         .any(|(actual, expected)| *actual != expected)
     {
         return Err(FrameProblem::Corrupt(
-            "invalid format-3 magic; re-record older journal formats".into(),
+            "invalid format-4 magic; re-record older journal formats".into(),
         ));
     }
     if header.len() < HEADER_LEN {
         return Err(FrameProblem::Incomplete(
-            "incomplete format-3 header".into(),
+            "incomplete format-4 header".into(),
         ));
     }
     let expected = u32::from_le_bytes(header[12..16].try_into().unwrap());
@@ -96,6 +96,15 @@ pub(crate) fn io_error(problem: FrameProblem) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previous_format_is_rejected_even_as_an_incomplete_tail() {
+        assert_eq!(obzenflow_core::journal::JOURNAL_FORMAT_VERSION, 4);
+        assert!(matches!(
+            frame_length(b"OJF3"),
+            Err(FrameProblem::Corrupt(message)) if message.contains("format-4")
+        ));
+    }
 
     #[test]
     fn every_truncation_remains_uncommitted_and_every_byte_is_checked() {

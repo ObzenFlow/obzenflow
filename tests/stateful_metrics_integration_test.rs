@@ -396,13 +396,11 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     );
     assert!(sum_s < 10.0, "expected sum < 10s, got {sum_s}");
 
-    let events = sink_events.lock().unwrap();
     assert_eq!(
-        events.len(),
+        sink_events.lock().unwrap().len(),
         1,
         "expected sink to receive exactly one aggregate data event"
     );
-    drop(events);
 
     // Envelope authorship and vector clocks are runtime-owned metadata, so the
     // typed sink observes only the domain value and this proof reads metadata

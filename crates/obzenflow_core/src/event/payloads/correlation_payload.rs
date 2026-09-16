@@ -16,9 +16,6 @@ pub struct CorrelationPayload {
     /// Timestamp when event entered the flow (nanos since epoch)
     pub entry_time_ns: u64,
 
-    /// Stage where event entered the flow
-    pub entry_stage: String,
-
     /// Original event ID at flow entry
     pub entry_event_id: EventId,
 
@@ -33,13 +30,12 @@ pub struct CorrelationPayload {
 
 impl CorrelationPayload {
     /// Create a new correlation payload for flow entry
-    pub fn new(entry_stage: impl Into<String>, entry_event_id: EventId) -> Self {
+    pub fn new(entry_event_id: EventId) -> Self {
         Self {
             entry_time_ns: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos() as u64,
-            entry_stage: entry_stage.into(),
             entry_event_id,
             metadata: None,
         }
@@ -69,9 +65,8 @@ mod tests {
     #[test]
     fn test_correlation_payload_creation() {
         let event_id = EventId::new();
-        let payload = CorrelationPayload::new("http_source", event_id);
+        let payload = CorrelationPayload::new(event_id);
 
-        assert_eq!(payload.entry_stage, "http_source");
         assert_eq!(payload.entry_event_id, event_id);
         assert!(payload.entry_time_ns > 0);
         assert!(payload.metadata.is_none());
@@ -80,7 +75,7 @@ mod tests {
     #[test]
     fn test_latency_calculation() {
         let event_id = EventId::new();
-        let payload = CorrelationPayload::new("test_source", event_id);
+        let payload = CorrelationPayload::new(event_id);
 
         // Sleep a bit to ensure measurable latency
         std::thread::sleep(std::time::Duration::from_millis(10));

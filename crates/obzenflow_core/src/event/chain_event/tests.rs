@@ -28,7 +28,7 @@ fn test_derived_event() {
     let writer_id = WriterId::from(StageId::new());
     let parent =
         ChainEventFactory::data_event(writer_id, "parent.event", json!({"data": "parent"}))
-            .with_new_correlation("test_stage")
+            .with_new_correlation()
             .with_ingress_context(IngressContext {
                 accepted_at_ns: 42,
                 ingress_key: "test".into(),
@@ -122,7 +122,6 @@ fn catch_up_complete_round_trips_and_classifies_re_admit() {
     let writer_id = WriterId::from(StageId::new());
     let event = ChainEventFactory::source_event(
         writer_id,
-        "tx_source",
         ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
             generation: ReaderGeneration(1),
             stage_key: StageKey("tx_source".into()),

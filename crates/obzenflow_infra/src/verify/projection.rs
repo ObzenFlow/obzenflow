@@ -341,8 +341,6 @@ mod tests {
             original_event_id: live.id,
             original_flow_id: "flow_gen0".to_string(),
             original_stage_id: StageId::new(),
-            archive_path: std::path::PathBuf::from("/tmp/archive"),
-            replayed_at: obzenflow_core::chrono::Utc::now(),
         });
 
         let Some(ProjectedRow::Positional(a)) = project(&live) else {
