@@ -483,6 +483,54 @@ fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip
 }
 
 #[test]
+fn streamed_scalars_preserve_the_existing_wire_bytes_and_presence_states() {
+    use super::schema::DefaultValue;
+
+    fn check<T: serde::Serialize>(kind: Kind, value: T, default: Option<DefaultValue>) {
+        let logical = serde_json::to_value(&value).unwrap();
+        let mut expected = Vec::new();
+        let expected_state = if logical.is_null() {
+            1
+        } else if default.is_some_and(|default| values::is_default(&logical, default)) {
+            2
+        } else {
+            values::write(kind, &logical, &mut expected, &mut values::Standalone).unwrap();
+            3
+        };
+        let mut actual = Vec::new();
+        let state = serialize::write(kind, &value, default, &mut actual, &mut values::Standalone)
+            .unwrap();
+        assert_eq!((state, &actual), (expected_state, &expected), "{kind:?}: {logical}");
+        if state == 3 {
+            let mut input = Cursor::new(&actual);
+            let restored: Value = deserialize::read(kind, &mut input, &mut values::Standalone).unwrap();
+            input.finish().unwrap();
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), serde_json::to_vec(&logical).unwrap());
+        }
+    }
+
+    for value in [0, 1, 127, 128, 1000, 1001, 90000, u64::MAX] {
+        check(Kind::Unsigned, value, Some(DefaultValue::Zero));
+        check(Kind::Unsigned, value, None);
+    }
+    check(Kind::Unsigned, None::<u64>, Some(DefaultValue::Zero));
+    check(Kind::Unsigned, Some(0u64), Some(DefaultValue::Zero));
+    check(Kind::Unsigned, u64::MAX as i128, None);
+    for value in [0.0, -0.0, f64::from_bits(1), f64::MIN_POSITIVE, f64::MAX, f64::NAN] {
+        check(Kind::Float, value, Some(DefaultValue::FloatZero));
+    }
+    for value in [false, true] {
+        check(Kind::Boolean, value, Some(DefaultValue::False));
+    }
+    for value in ["", "text", "🙂\n\0"] {
+        check(Kind::Text, value, None);
+    }
+    check(Kind::Text, "default", Some(DefaultValue::Text("default")));
+    check(Kind::Id, EventId::new(), None);
+    check(Kind::Enum(&["first", "second"]), "second", None);
+}
+
+#[test]
 fn primitive_extremes_and_presence_states_are_exact() {
     for value in [
         json!(u64::MAX),

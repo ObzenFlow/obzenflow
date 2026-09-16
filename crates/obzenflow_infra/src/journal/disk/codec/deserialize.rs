@@ -43,6 +43,24 @@ impl<'de, D: ReadDefinitions> Deserializer<'de> for Decode<'_, '_, D> {
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
         match self.kind {
+            Kind::Unsigned => visitor.visit_u64(self.input.unsigned()?),
+            Kind::Float => {
+                let value = f64::from_le_bytes(self.input.take(8)?.try_into().unwrap());
+                if !value.is_finite() {
+                    return Err(invalid("non-finite float"));
+                }
+                visitor.visit_f64(value)
+            }
+            Kind::Boolean => match self.input.byte()? {
+                0 => visitor.visit_bool(false),
+                1 => visitor.visit_bool(true),
+                _ => Err(invalid("invalid boolean")),
+            },
+            Kind::Text => visitor.visit_string(self.input.text()?),
+            Kind::Enum(variants) => visitor.visit_str(
+                variants.get(self.input.length()?)
+                    .ok_or_else(|| invalid("unknown closed enum ordinal"))?,
+            ),
             Kind::Struct(shape) => {
                 let fields = shape.fields();
                 let mask = self.input.unsigned()?;
@@ -92,6 +110,11 @@ impl<'de, D: ReadDefinitions> Deserializer<'de> for Decode<'_, '_, D> {
         variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value> {
+        if let Kind::Enum(variants) = self.kind {
+            let variant = variants.get(self.input.length()?)
+                .ok_or_else(|| invalid("unknown closed enum ordinal"))?;
+            return visitor.visit_enum(serde::de::value::BorrowedStrDeserializer::<Error>::new(variant));
+        }
         values::read(self.kind, self.input, self.definitions)?
             .into_deserializer()
             .deserialize_enum(name, variants, visitor)

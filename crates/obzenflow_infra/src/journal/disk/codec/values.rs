@@ -58,7 +58,7 @@ fn string(value: &Value) -> Result<&str> {
     value.as_str().ok_or_else(|| invalid("expected a string"))
 }
 
-fn id(value: &str, out: &mut Vec<u8>) -> Result<()> {
+pub(super) fn id(value: &str, out: &mut Vec<u8>) -> Result<()> {
     let id = value
         .parse::<ulid::Ulid>()
         .map_err(|_| invalid("invalid typed ULID"))?;

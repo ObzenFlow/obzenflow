@@ -5,7 +5,7 @@
 //! Stream hot framework structures without building a JSON object tree first.
 //! Both paths use the same field table, defaults and scalar wire encodings.
 
-use super::primitives::unsigned;
+use super::primitives::{text, unsigned};
 use super::schema::{DefaultValue, Field, Kind};
 use super::values::{self, WriteDefinitions};
 use super::{invalid, Error, Result};
@@ -25,7 +25,18 @@ pub(super) fn write<T: Serialize + ?Sized>(
     out: &mut Vec<u8>,
     definitions: &mut impl WriteDefinitions,
 ) -> Result<u64> {
-    if matches!(kind, Kind::Struct(_) | Kind::List(_)) {
+    if matches!(
+        kind,
+        Kind::Struct(_)
+            | Kind::List(_)
+            | Kind::Unsigned
+            | Kind::Float
+            | Kind::Boolean
+            | Kind::Text
+            | Kind::Id
+            | Kind::FlowId
+            | Kind::Enum(_)
+    ) {
         return value.serialize(Encode {
             kind,
             default,
@@ -57,6 +68,18 @@ macro_rules! unsupported_scalar {
     )*};
 }
 
+macro_rules! unsigned_scalar {
+    ($($name:ident($ty:ty)),* $(,)?) => {$(
+        fn $name(self, value: $ty) -> Result<u64> { self.serialize_u64(u64::from(value)) }
+    )*};
+}
+
+macro_rules! signed_scalar {
+    ($($name:ident($ty:ty)),* $(,)?) => {$(
+        fn $name(self, value: $ty) -> Result<u64> { self.serialize_i64(i64::from(value)) }
+    )*};
+}
+
 impl<'a, D: WriteDefinitions> Serializer for Encode<'a, D> {
     type Ok = u64;
     type Error = Error;
@@ -68,11 +91,94 @@ impl<'a, D: WriteDefinitions> Serializer for Encode<'a, D> {
     type SerializeStruct = Fields<'a, D>;
     type SerializeStructVariant = Impossible<u64, Error>;
 
-    unsupported_scalar! {
-        serialize_bool(v: bool), serialize_i8(v: i8), serialize_i16(v: i16), serialize_i32(v: i32),
-        serialize_i64(v: i64), serialize_i128(v: i128), serialize_u8(v: u8), serialize_u16(v: u16),
-        serialize_u32(v: u32), serialize_u64(v: u64), serialize_u128(v: u128), serialize_f32(v: f32),
-        serialize_f64(v: f64), serialize_char(v: char), serialize_str(v: &str), serialize_bytes(v: &[u8]),
+    unsupported_scalar! { serialize_bytes(v: &[u8]) }
+    unsigned_scalar! { serialize_u8(u8), serialize_u16(u16), serialize_u32(u32) }
+    signed_scalar! { serialize_i8(i8), serialize_i16(i16), serialize_i32(i32) }
+
+    fn serialize_u64(self, value: u64) -> Result<u64> {
+        if matches!(self.kind, Kind::Float) {
+            return self.serialize_f64(value as f64);
+        }
+        if !matches!(self.kind, Kind::Unsigned) {
+            return Err(invalid("unsigned integer in a non-numeric schema field"));
+        }
+        if value == 0 && matches!(self.default, Some(DefaultValue::Zero)) {
+            return Ok(2);
+        }
+        unsigned(value, self.out);
+        Ok(3)
+    }
+
+    fn serialize_i64(self, value: i64) -> Result<u64> {
+        if matches!(self.kind, Kind::Float) {
+            return self.serialize_f64(value as f64);
+        }
+        self.serialize_u64(u64::try_from(value).map_err(|_| invalid("negative unsigned integer"))?)
+    }
+
+    fn serialize_u128(self, value: u128) -> Result<u64> {
+        self.serialize_u64(u64::try_from(value).map_err(|_| invalid("unsigned integer overflow"))?)
+    }
+
+    fn serialize_i128(self, value: i128) -> Result<u64> {
+        match u64::try_from(value) {
+            Ok(value) => self.serialize_u64(value),
+            Err(_) => self.serialize_i64(
+                i64::try_from(value).map_err(|_| invalid("signed integer overflow"))?,
+            ),
+        }
+    }
+
+    fn serialize_f32(self, value: f32) -> Result<u64> {
+        self.serialize_f64(f64::from(value))
+    }
+
+    fn serialize_f64(self, value: f64) -> Result<u64> {
+        // serde_json::to_value, used by the previous adapter, maps non-finite
+        // values to null. Preserve its presence state as well as finite bits.
+        if !value.is_finite() {
+            return Ok(1);
+        }
+        if !matches!(self.kind, Kind::Float) {
+            return Err(invalid("float in a non-float schema field"));
+        }
+        if value.to_bits() == 0 && matches!(self.default, Some(DefaultValue::FloatZero)) {
+            return Ok(2);
+        }
+        self.out.extend_from_slice(&value.to_le_bytes());
+        Ok(3)
+    }
+
+    fn serialize_bool(self, value: bool) -> Result<u64> {
+        if !matches!(self.kind, Kind::Boolean) {
+            return Err(invalid("boolean in a non-boolean schema field"));
+        }
+        if !value && matches!(self.default, Some(DefaultValue::False)) {
+            return Ok(2);
+        }
+        self.out.push(u8::from(value));
+        Ok(3)
+    }
+
+    fn serialize_str(self, value: &str) -> Result<u64> {
+        if matches!(self.default, Some(DefaultValue::Text(default)) if default == value) {
+            return Ok(2);
+        }
+        match self.kind {
+            Kind::Text => text(value, self.out),
+            Kind::Id | Kind::FlowId => values::id(value, self.out)?,
+            Kind::Enum(variants) => {
+                let index = variants.iter().position(|variant| *variant == value)
+                    .ok_or_else(|| invalid(format!("unknown closed enum value: {value}")))?;
+                unsigned(index as u64, self.out);
+            }
+            _ => return Err(invalid("string in a non-string schema field")),
+        }
+        Ok(3)
+    }
+
+    fn serialize_char(self, value: char) -> Result<u64> {
+        self.serialize_str(value.encode_utf8(&mut [0; 4]))
     }
     fn serialize_none(self) -> Result<u64> {
         Ok(1)
@@ -93,8 +199,8 @@ impl<'a, D: WriteDefinitions> Serializer for Encode<'a, D> {
     ) -> Result<u64> {
         value.serialize(self)
     }
-    fn serialize_unit_variant(self, _: &'static str, _: u32, _: &'static str) -> Result<u64> {
-        Err(invalid("enum in schema container"))
+    fn serialize_unit_variant(self, _: &'static str, _: u32, variant: &'static str) -> Result<u64> {
+        self.serialize_str(variant)
     }
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
         self,
@@ -132,6 +238,7 @@ impl<'a, D: WriteDefinitions> Serializer for Encode<'a, D> {
         };
         Ok(Fields {
             fields: shape.fields(),
+            next: 0,
             mask: 0,
             ranges: Vec::new(),
             body: Vec::new(),
@@ -166,6 +273,7 @@ impl<'a, D: WriteDefinitions> Serializer for Encode<'a, D> {
 
 struct Fields<'a, D> {
     fields: &'static [Field],
+    next: usize,
     mask: u64,
     ranges: Vec<(usize, std::ops::Range<usize>)>,
     body: Vec<u8>,
@@ -181,11 +289,13 @@ impl<D: WriteDefinitions> SerializeStruct for Fields<'_, D> {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
-        let index = self
-            .fields
-            .iter()
-            .position(|field| field.name == key)
-            .ok_or_else(|| invalid(format!("unknown schema field: {key}")))?;
+        let index = if self.fields.get(self.next).is_some_and(|field| field.name == key) {
+            self.next
+        } else {
+            self.fields.iter().position(|field| field.name == key)
+                .ok_or_else(|| invalid(format!("unknown schema field: {key}")))?
+        };
+        self.next = index + 1;
         if (self.mask >> (index * 2)) & 3 != 0 {
             return Err(invalid("duplicate schema field"));
         }
