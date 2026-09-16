@@ -346,10 +346,20 @@ fn audit_file<T: JournalEvent>(
     let mut decoder = Decoder::cold(path);
     let mut bytes = Vec::new();
     let mut offset = 0;
-    while let Some((consumed, _)) = read_frame_sync(&mut reader, &mut bytes)? {
+    let mut decode_time = std::time::Duration::ZERO;
+    let mut roundtrip_time = std::time::Duration::ZERO;
+    let mut accounting_time = std::time::Duration::ZERO;
+    println!("Storage audit: starting {}", path.display());
+    loop {
+        let phase = std::time::Instant::now();
+        let Some((consumed, _)) = read_frame_sync(&mut reader, &mut bytes)? else {
+            break;
+        };
         let body = codec::frame::validate(&bytes).map_err(codec::frame::io_error)?;
         let (frame, sizes) = decoder.decode_measured::<T>(body, offset)?;
         offset += consumed as u64;
+        decode_time += phase.elapsed();
+        let phase = std::time::Instant::now();
         let group = frame.group_id().map(str::to_owned);
         if group.is_some() {
             samples
@@ -375,6 +385,8 @@ fn audit_file<T: JournalEvent>(
                 serde_json::to_vec(&serde_json::to_value(restored)?)?
             );
         }
+        roundtrip_time += phase.elapsed();
+        let phase = std::time::Instant::now();
         audit.frames += 1;
         audit.records += sizes.records as u64;
         audit.packets += sizes.packets as u64;
@@ -453,6 +465,18 @@ fn audit_file<T: JournalEvent>(
                 }
             }
         }
+        accounting_time += phase.elapsed();
+        let frames = audit.frames - initial_frames;
+        if frames.is_multiple_of(10_000) {
+            println!(
+                "Storage audit progress: {frames} frames, {offset} bytes, {:.3}s; decode={:.3}s, JSON roundtrip={:.3}s, accounting={:.3}s; {}",
+                started.elapsed().as_secs_f64(),
+                decode_time.as_secs_f64(),
+                roundtrip_time.as_secs_f64(),
+                accounting_time.as_secs_f64(),
+                path.display(),
+            );
+        }
     }
     let cache = decoder.cache_stats();
     audit.definition_cache_hits += cache.hits;
@@ -464,9 +488,15 @@ fn audit_file<T: JournalEvent>(
         .definition_cache_peak_bytes
         .max(cache.peak_retained_bytes);
     println!(
-        "Storage audit: {} frames in {:.3}s from {}",
+        "Storage audit: {} frames in {:.3}s; decode={:.3}s, JSON roundtrip={:.3}s, accounting={:.3}s, carrier_frames={}, carrier_bytes={}, cache_evictions={}; from {}",
         audit.frames - initial_frames,
         started.elapsed().as_secs_f64(),
+        decode_time.as_secs_f64(),
+        roundtrip_time.as_secs_f64(),
+        accounting_time.as_secs_f64(),
+        cache.carrier_frames,
+        cache.carrier_bytes,
+        cache.evictions,
         path.display()
     );
     Ok(())
