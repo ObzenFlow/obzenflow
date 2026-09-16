@@ -2477,10 +2477,7 @@ mod tests {
             "test.event",
             serde_json::json!({"data": "test"}),
         );
-        event.set_single_correlation(
-            correlation_id,
-            Some(CorrelationPayload::new("test_source", event.id)),
-        );
+        event.set_single_correlation(correlation_id, Some(CorrelationPayload::new(event.id)));
 
         // Simulate what the sink supervisor does when creating a delivery event
         let payload = DeliveryPayload::success(DeliveryMethod::Noop, Some(1));
@@ -2495,8 +2492,8 @@ mod tests {
         assert_eq!(delivery_event.correlation_id(), Some(correlation_id));
         assert!(delivery_event.correlation_payload().is_some());
         assert_eq!(
-            delivery_event.correlation_payload().unwrap().entry_stage,
-            "test_source"
+            delivery_event.correlation_payload(),
+            event.correlation_payload()
         );
     }
 

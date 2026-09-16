@@ -85,12 +85,8 @@ impl ChainEventFactory {
     }
 
     /// Create an event for a source (flow entry point) with new correlation
-    pub fn source_event(
-        writer_id: WriterId,
-        stage_name: impl Into<String>,
-        content: ChainPayload,
-    ) -> ChainEvent {
-        Self::create_event(writer_id, content).with_new_correlation(stage_name)
+    pub fn source_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
+        Self::create_event(writer_id, content).with_new_correlation()
     }
 
     /// Create a data event from system component

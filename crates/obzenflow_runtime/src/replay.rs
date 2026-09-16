@@ -146,7 +146,6 @@ pub trait ReplayArchive: Send + Sync {
 pub struct ReplayContextTemplate {
     pub original_flow_id: String,
     pub original_stage_id: StageId,
-    pub archive_path: PathBuf,
 }
 
 pub struct ReplayDriver {
@@ -232,8 +231,6 @@ impl ReplayDriver {
                 original_event_id,
                 original_flow_id: self.replay_context.original_flow_id.clone(),
                 original_stage_id: self.replay_context.original_stage_id,
-                archive_path: self.replay_context.archive_path.clone(),
-                replayed_at: chrono::Utc::now(),
             });
 
             self.replayed_events = self.replayed_events.saturating_add(1);

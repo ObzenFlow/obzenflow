@@ -1821,8 +1821,6 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             original_event_id: replayed.id,
             original_flow_id: "flow_parent".to_string(),
             original_stage_id: archived_upstream_stage,
-            archive_path: std::path::PathBuf::from("/archive/parent"),
-            replayed_at: chrono::Utc::now(),
         });
         upstream_journal.append(replayed, None).await.unwrap();
     }
@@ -2746,7 +2744,6 @@ fn merge_clock(entries: &[(&str, u64)]) -> VectorClock {
 fn merge_catch_up(writer: StageId, generation: u64, stage_key: &str) -> ChainEvent {
     ChainEventFactory::source_event(
         WriterId::Stage(writer),
-        stage_key,
         ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
             generation: ReaderGeneration(generation),
             stage_key: obzenflow_core::StageKey::from(stage_key),

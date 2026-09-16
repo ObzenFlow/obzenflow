@@ -208,6 +208,72 @@ mod tests {
     }
 
     #[test]
+    fn fan_in_preserves_equal_origins_and_discards_conflicting_evidence() {
+        let policy = obzenflow_core::config::LineagePolicy::default();
+        let mut first = event_with_correlation(deterministic_correlation_id(1));
+        first.correlation.as_mut().unwrap().payload = Some(CorrelationPayload {
+            entry_time_ns: 123_456_789,
+            entry_event_id: EventId::new(),
+            metadata: Some(json!({"application": "first", "zero": 0})),
+        });
+        first.replay_context = Some(ReplayContext {
+            original_event_id: EventId::new(),
+            original_flow_id: "original-flow".into(),
+            original_stage_id: StageId::new(),
+        });
+        for difference in 0..8 {
+            let mut second = first.clone();
+            second.id = EventId::new();
+            let provenance = &mut second.envelope.provenance.event;
+            let origin = provenance
+                .correlation
+                .as_mut()
+                .unwrap()
+                .payload
+                .as_mut()
+                .unwrap();
+            let replay = provenance.replay_context.as_mut().unwrap();
+            match difference {
+                1 => origin.entry_event_id = EventId::new(),
+                2 => origin.entry_time_ns += 1,
+                3 => origin.metadata = Some(json!({"application": "second", "zero": 0})),
+                4 => origin.metadata = Some(serde_json::Value::Null),
+                5 => replay.original_event_id = EventId::new(),
+                6 => replay.original_flow_id = "different-flow".into(),
+                7 => replay.original_stage_id = StageId::new(),
+                _ => {}
+            }
+            let mut trace = TraceState::default();
+            trace.record_event(&first, policy);
+            trace.record_event(&second, policy);
+            let trace: TraceState =
+                serde_json::from_slice(&serde_json::to_vec(&trace).unwrap()).unwrap();
+            let mut output = event_with_correlation(deterministic_correlation_id(2));
+            trace.apply_to_event(&mut output);
+            assert_eq!(output.causality.parent_ids, vec![first.id, second.id]);
+            assert_eq!(output.correlation_id(), first.correlation_id());
+            assert_eq!(
+                output.correlation_payload(),
+                if (1..=4).contains(&difference) {
+                    None
+                } else {
+                    first.correlation_payload()
+                },
+                "origin case {difference}"
+            );
+            assert_eq!(
+                output.replay_context.as_ref(),
+                if difference >= 5 {
+                    None
+                } else {
+                    first.replay_context.as_ref()
+                },
+                "replay case {difference}"
+            );
+        }
+    }
+
+    #[test]
     fn records_all_distinct_correlation_ids_under_cap() {
         let mut trace = TraceState::default();
         let ids = vec![

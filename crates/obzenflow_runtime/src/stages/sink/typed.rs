@@ -409,8 +409,6 @@ mod tests {
             original_event_id: obzenflow_core::EventId::new(),
             original_flow_id: "flow_01SOURCE".to_string(),
             original_stage_id: StageId::new(),
-            archive_path: std::path::PathBuf::from("tmp/archive"),
-            replayed_at: chrono::Utc::now(),
         });
         adapter
             .consume_report(replayed)

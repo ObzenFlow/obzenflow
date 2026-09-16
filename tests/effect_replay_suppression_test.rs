@@ -4,6 +4,7 @@
 
 #[path = "test_support/exported_jsonl.rs"]
 mod exported_jsonl;
+mod replay_testkit;
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiterBuilder, Retry};
@@ -13,8 +14,7 @@ use obzenflow_core::{
     event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
     event::{ChainPayload, StageLifecycleEvent, SystemEvent, SystemPayload},
-    id::{StageId, SystemId},
-    journal::{journal_owner::JournalOwner, Journal},
+    id::StageId,
     BoundedBindingEvidence, StageOutputs, TypedPayload,
 };
 use obzenflow_dsl::{
@@ -1541,8 +1541,12 @@ fn mark_archive_incomplete(run_dir: &Path) {
     let system_journal = manifest["system_journal_file"]
         .as_str()
         .expect("manifest should contain system journal file");
-    std::fs::write(run_dir.join(system_journal), "")
-        .expect("system journal should be writable for test mutation");
+    // Stage frames may reference definitions carried by the system journal.
+    // Re-encode the retained archive before removing its lifecycle records.
+    obzenflow_infra::testing::journal::retain_archive_frames(run_dir, |path, _| {
+        path.file_name().and_then(|name| name.to_str()) != Some(system_journal)
+    })
+    .expect("incomplete fixture must retain readable stage journals");
 }
 
 fn remove_effect_results_for_stage(run_dir: &Path, stage_key: &str) {
@@ -1550,28 +1554,24 @@ fn remove_effect_results_for_stage(run_dir: &Path, stage_key: &str) {
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .expect("manifest should contain stage data journal file");
-    let journal_path = run_dir.join(stage_journal);
-    let original =
-        std::fs::read_to_string(&journal_path).expect("stage journal should be readable");
     // FLOWIP-120b: successful effect outcomes are domain `Data` facts carrying
     // non-framework effect provenance. Failure/capture compatibility rows remain
     // framework-owned reserved event types. Drop both forms so resume sees the
     // effect outcomes as missing and re-executes; ordinary domain outputs on the
     // same journal are retained.
     let effect_outcome_type = ReplayEffectValue::versioned_event_type();
-    let retained = original
-        .lines()
-        .filter(|line| {
-            !line.contains(EFFECT_RECORD_EVENT_TYPE) && !line.contains(&effect_outcome_type)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let retained = if retained.is_empty() {
-        retained
-    } else {
-        format!("{retained}\n")
-    };
-    std::fs::write(&journal_path, retained).expect("stage journal should be writable");
+    obzenflow_infra::testing::journal::retain_archive_frames(run_dir, |path, records| {
+        path.file_name().and_then(|name| name.to_str()) != Some(stage_journal)
+            || !records.iter().any(|record| {
+                record
+                    .pointer("/envelope/provenance/event/event_type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|event_type| {
+                        event_type == EFFECT_RECORD_EVENT_TYPE || event_type == effect_outcome_type
+                    })
+            })
+    })
+    .expect("missing-outcome fixture must retain readable complete frames");
 }
 
 async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
@@ -1579,17 +1579,8 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .expect("manifest should contain stage data journal file");
-    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(stage_journal),
-            JournalOwner::stage(StageId::new()),
-        )
-        .expect("stage journal should open");
-
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(stage_journal))
         .await
-        .expect("stage journal should read")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()
@@ -1600,17 +1591,8 @@ async fn read_stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEv
     let stage_journal = manifest["stages"][stage_key]["error_journal_file"]
         .as_str()
         .expect("manifest should contain stage error journal file");
-    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(stage_journal),
-            JournalOwner::stage(StageId::new()),
-        )
-        .expect("stage error journal should open");
-
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(stage_journal))
         .await
-        .expect("stage error journal should read")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()
@@ -1621,17 +1603,8 @@ async fn read_system_events(run_dir: &Path) -> Vec<SystemEvent> {
     let system_journal = manifest["system_journal_file"]
         .as_str()
         .expect("manifest should contain system journal file");
-    let journal: obzenflow_infra::journal::DiskJournal<SystemEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(system_journal),
-            JournalOwner::system(SystemId::new()),
-        )
-        .expect("system journal should open");
-
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<SystemEvent>(&run_dir.join(system_journal))
         .await
-        .expect("system journal should read")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()
@@ -3526,20 +3499,22 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
     );
 
     let resume_archive = latest_run_dir(&journal_base);
-    let effectful_journal = archive_manifest(&resume_archive)["stages"]["effectful"]
-        ["data_journal_file"]
-        .as_str()
-        .expect("manifest should contain effectful journal")
-        .to_string();
-    let resume_journal =
-        std::fs::read_to_string(resume_archive.join(effectful_journal)).expect("journal readable");
     let original_flow_id = archive_manifest(&archive_dir)["flow_id"]
         .as_str()
         .expect("manifest should contain original flow id")
         .to_string();
+    let cursors: Vec<_> = read_stage_events(&resume_archive, "effectful")
+        .await
+        .iter()
+        .filter(|event| is_domain_effect_outcome_fact(event))
+        .filter_map(recorded_effect_cursor)
+        .collect();
+    assert_eq!(cursors.len(), 3);
     assert!(
-        resume_journal.contains(&original_flow_id),
-        "resume should append effect records using the archived recorded_flow_id cursor"
+        cursors
+            .iter()
+            .all(|cursor| cursor.recorded_flow_id.to_string() == original_flow_id),
+        "resume should append every effect outcome using the archived recorded_flow_id cursor"
     );
 }
 

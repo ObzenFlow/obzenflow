@@ -20,6 +20,24 @@ pub const FORCE_SHUTDOWN_MESSAGE: &str = "Force shutdown requested";
 pub const STOP_REASON_USER_STOP: &str = "user_stop";
 pub const STOP_REASON_TIMEOUT: &str = "stop_timeout";
 
+/// Preserve the error text while distinguishing the existing cancellation
+/// protocol from an unexpected failure delivered after stage termination.
+pub(crate) fn discarded_control_details(
+    error: Option<&str>,
+) -> (
+    obzenflow_core::event::CommandDiscardDisposition,
+    Option<String>,
+) {
+    use obzenflow_core::event::CommandDiscardDisposition;
+    let disposition = match error {
+        None | Some(FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT) => {
+            CommandDiscardDisposition::ObsoleteControl
+        }
+        Some(_) => CommandDiscardDisposition::UnexpectedError,
+    };
+    (disposition, error.map(str::to_owned))
+}
+
 /// Error type for stage operations
 #[derive(Debug, Clone)]
 pub enum StageError {

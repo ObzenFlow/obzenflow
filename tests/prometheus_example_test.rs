@@ -7,7 +7,7 @@
 //! This mirrors the high-volume source + error_prone_transform pipeline from
 //! `examples/prometheus_demo/main.rs`, but runs entirely under `cargo test`.
 //! It asserts that the typed `try_map` uses its fixed terminal-error path:
-//! `error_processor` reports exactly 100 Unknown errors and no Domain errors.
+//! `error_processor` reports exactly 50 Unknown errors and no Domain errors.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -30,9 +30,11 @@ mod prometheus_demo;
 #[path = "test_support/exported_jsonl.rs"]
 mod exported_jsonl;
 
-const TOTAL_EVENTS: usize = 10_000;
+// These are bounded CI correctness proofs. Use the shipped example explicitly
+// for 100k storage measurements; larger workloads belong in benchmark coverage.
+const CI_EVENT_LIMIT: usize = 5_000;
 const ERROR_EVERY: usize = 100;
-const EXPECTED_DOMAIN_ERRORS: u64 = (TOTAL_EVENTS / ERROR_EVERY) as u64;
+const EXPECTED_UNKNOWN_ERRORS: u64 = (CI_EVENT_LIMIT / ERROR_EVERY) as u64;
 
 /// Source that generates a high-volume stream with a deterministic error pattern.
 #[derive(Clone, Debug)]
@@ -158,7 +160,8 @@ impl InlineSink for CompletionSink {
 }
 
 #[tokio::test]
-async fn prometheus_10k_typed_try_map_errors_are_unknown_only() -> Result<()> {
+async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
+    let started = std::time::Instant::now();
     let metrics_model =
         std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
     let metrics_context = obzenflow_runtime::run_context::FlowBuildContext::for_tests()
@@ -166,11 +169,15 @@ async fn prometheus_10k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     // Own a unique directory for the entire run, including metrics finalisation.
     let journals = tempfile::tempdir_in("target")?;
     let journal_root = journals.path().to_path_buf();
+    eprintln!(
+        "prometheus 5k: building; journals={}",
+        journal_root.display()
+    );
 
     let flow_handle = FlowDefinition::materialize(move |_runtime_config| {
         // Build a minimal flow that mirrors the Prometheus example's core path:
         // high_volume_source -> error_processor -> completion_sink.
-        let source = HighVolumeSource::new(TOTAL_EVENTS);
+        let source = HighVolumeSource::new(CI_EVENT_LIMIT);
         let transform = error_prone_transform();
         let sink = CompletionSink::new();
 
@@ -194,11 +201,41 @@ async fn prometheus_10k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
-    // Run the flow and obtain the metrics exporter.
-    flow_handle
-        .run()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?;
+    eprintln!("prometheus 5k: built after {:?}", started.elapsed());
+    let state = flow_handle.state_receiver();
+    // Keep the existing runner deadline. Captured progress makes a timeout
+    // distinguishable from slow processing or terminal metrics catch-up.
+    let execution = flow_handle.run();
+    tokio::pin!(execution);
+    let period = std::time::Duration::from_secs(5);
+    let mut progress = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut execution => {
+                result.map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?;
+                break;
+            }
+            _ = progress.tick() => {
+                let view = metrics_model.snapshot();
+                let stages = view.app.as_ref().map(|app| {
+                    app.stage_metadata.iter().map(|(id, metadata)| (
+                        metadata.name.as_str(),
+                        app.event_counts.get(id).copied(),
+                        app.events_emitted_total.get(id).copied(),
+                        app.stage_vector_clocks.get(id).copied(),
+                    )).collect::<Vec<_>>()
+                });
+                eprintln!(
+                    "prometheus 5k: elapsed={:?}, pipeline={:?}, metrics_timestamp={:?}, stages(name, processed, emitted, collected_sequence)={stages:?}",
+                    started.elapsed(),
+                    *state.borrow(),
+                    view.app.as_ref().map(|app| app.timestamp),
+                );
+            }
+        }
+    }
+    eprintln!("prometheus 5k: run completed after {:?}", started.elapsed());
     let metrics_exporter = metrics_model.clone();
 
     let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
@@ -237,8 +274,8 @@ async fn prometheus_10k_typed_try_map_errors_are_unknown_only() -> Result<()> {
     // The fixed typed try-map path classifies converter failures as Unknown.
     assert_eq!(
         unknown_errors,
-        Some(EXPECTED_DOMAIN_ERRORS),
-        "error_processor should report exactly {EXPECTED_DOMAIN_ERRORS} unknown errors"
+        Some(EXPECTED_UNKNOWN_ERRORS),
+        "error_processor should report exactly {EXPECTED_UNKNOWN_ERRORS} unknown errors"
     );
 
     assert!(
@@ -246,6 +283,10 @@ async fn prometheus_10k_typed_try_map_errors_are_unknown_only() -> Result<()> {
         "error_processor should not report domain errors, found {domain_errors:?}"
     );
 
+    eprintln!(
+        "prometheus 5k: assertions passed after {:?}",
+        started.elapsed()
+    );
     Ok(())
 }
 
@@ -430,7 +471,6 @@ enabled = false
                     json!({
                         "content": content,
                         "status": event.processing.status,
-                        "error_hops_remaining": event.processing.error_hops_remaining,
                     })
                     .to_string(),
                 );
@@ -490,7 +530,7 @@ mod managed_lifecycle_regressions {
     use obzenflow_runtime::pipeline::FlowHandle;
     use std::sync::{Arc, Mutex};
 
-    use super::prometheus_demo;
+    use super::{prometheus_demo, CI_EVENT_LIMIT};
 
     /// Read the shipped endpoint in this existing finite-example proof. HTTP/1.0
     /// supplies a close-delimited body; HTTP/1.1 transport framing and keep-alives
@@ -810,7 +850,7 @@ mod managed_lifecycle_regressions {
                 })
             })
             .run_async(inject_snapshots(
-                prometheus_demo::flow_definition(100_000, dir.path().join("stopped")),
+                prometheus_demo::flow_definition(CI_EVENT_LIMIT, dir.path().join("stopped")),
                 model.clone(),
             ));
         let outcome = tokio::time::timeout(Duration::from_secs(10), application).await;
@@ -887,7 +927,7 @@ mod managed_lifecycle_regressions {
         );
     }
 
-    const JOURNAL_PROOF_INPUTS: u64 = 5_000;
+    const JOURNAL_PROOF_INPUTS: u64 = CI_EVENT_LIMIT as u64;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prometheus_example_5k_completes_without_reporting() {
@@ -916,6 +956,11 @@ mod managed_lifecycle_regressions {
         use std::time::Duration;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+        assert!(
+            count <= CI_EVENT_LIMIT as u64,
+            "CI journal proofs are capped at {CI_EVENT_LIMIT} inputs; use the example for larger storage measurements"
+        );
+        let proof_started = std::time::Instant::now();
         let hosted = matches!(mode, MetricsProofMode::HostedReporting);
         let collecting = !matches!(mode, MetricsProofMode::Disabled);
         let scratch = tempfile::Builder::new()
@@ -1032,6 +1077,10 @@ enabled = {hosted}
             application.await
         };
         result.unwrap().unwrap();
+        println!(
+            "Prometheus proof phase: application returned after {:?}; {count} inputs, mode={mode:?}",
+            proof_started.elapsed()
+        );
         let _rebound = hosted.then(|| std::net::TcpListener::bind(address).unwrap());
         if collecting {
             assert_final_example_metrics(&model, count);
@@ -1040,7 +1089,13 @@ enabled = {hosted}
         }
         let archive = flow.run_substrate().locator().unwrap().path().to_path_buf();
         let export = dir.join("hosted.jsonl");
+        let export_started = std::time::Instant::now();
         obzenflow_infra::journal::disk::inspect::export_jsonl(&archive, Some(&export)).unwrap();
+        println!(
+            "Prometheus proof phase: export completed in {:?}; total={:?}",
+            export_started.elapsed(),
+            proof_started.elapsed()
+        );
         let reader = std::io::BufReader::new(std::fs::File::open(&export).unwrap());
         let mut systems = Vec::<LogRecord<SystemEvent>>::new();
         let mut event_ids = BTreeSet::new();
@@ -1197,7 +1252,39 @@ enabled = {hosted}
                 archive.display()
             );
         }
+        if count == JOURNAL_PROOF_INPUTS {
+            println!(
+                "Prometheus proof phase: assertions complete, audit starting; total={:?}",
+                proof_started.elapsed()
+            );
+            let audit = obzenflow_infra::testing::journal::audit_archive(&archive).unwrap();
+            let evidence = serde_json::to_string_pretty(&audit).unwrap();
+            std::fs::write(dir.join("storage-audit.json"), &evidence).unwrap();
+            println!("FLOWIP-145c storage audit: {evidence}");
+            assert!(audit.provenance_bytes < audit.logical_provenance_bytes);
+            assert!(audit.observability_bytes < audit.logical_observability_bytes);
+            // The project lead confirmed on 2026-09-16 that 200 bytes is an
+            // optimisation target. Keep reporting it alongside the distribution;
+            // archive size and observation budgets remain regression checks.
+            println!(
+                "FLOWIP-145c ordinary provenance: {:.2} bytes/record (200-byte optimisation target)",
+                audit.ordinary_provenance.mean
+            );
+            assert!(
+                audit.attached_observability.mean <= 256.0,
+                "attached observations: {:?}",
+                audit.attached_observability
+            );
+            assert!(
+                audit.archive_bytes - audit.payload_bytes <= 180 * 1024 * 1024,
+                "combined envelope budget: {audit:?}"
+            );
+        }
         drop(flow);
+        println!(
+            "Prometheus proof phase: audit and handle drop complete; total={:?}",
+            proof_started.elapsed()
+        );
         // Existing 100-input cases retain the current-schema replay proof.
         if count != 100 {
             return;

@@ -145,10 +145,31 @@ impl<'de> Deserialize<'de> for SystemEvent {
     }
 }
 
+/// Why a supervisor did not execute a command accepted before mailbox closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandDiscardDisposition {
+    /// A queued lifecycle or cancellation command became obsolete at termination.
+    ObsoleteControl,
+    /// An error was still queued after the terminal outcome had been selected.
+    UnexpectedError,
+}
+
 /// Types of system events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
 pub enum SystemPayload {
+    /// A terminal supervisor closed its mailbox without executing this accepted
+    /// command. The envelope's writer identifies the supervisor's stage. This
+    /// records the disposition without replacing the existing terminal outcome.
+    SupervisorCommandDiscarded {
+        supervisor: String,
+        terminal_state: String,
+        command: String,
+        disposition: CommandDiscardDisposition,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Best-effort async source cleanup failed after the stage entered live
     /// execution (FLOWIP-134g). Cleanup never authors data and never delays a
     /// terminal transition.
@@ -960,6 +981,9 @@ impl JournalEvent for SystemEvent {
 impl SystemPayload {
     pub fn event_type(&self) -> &'static str {
         match self {
+            SystemPayload::SupervisorCommandDiscarded { .. } => {
+                "system.supervisor.command_discarded"
+            }
             SystemPayload::SourceCleanupFailed { .. } => "system.source.cleanup_failed",
             SystemPayload::StageLifecycle { event, .. } => match event {
                 StageLifecycleEvent::Running => "system.stage.running",

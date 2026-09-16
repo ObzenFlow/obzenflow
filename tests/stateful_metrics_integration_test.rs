@@ -77,7 +77,6 @@ struct JoinedMetricEvent {
 impl TypedPayload for JoinedMetricEvent {
     const EVENT_TYPE: &'static str = "metric.joined";
 }
-use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -397,13 +396,11 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     );
     assert!(sum_s < 10.0, "expected sum < 10s, got {sum_s}");
 
-    let events = sink_events.lock().unwrap();
     assert_eq!(
-        events.len(),
+        sink_events.lock().unwrap().len(),
         1,
         "expected sink to receive exactly one aggregate data event"
     );
-    drop(events);
 
     // Envelope authorship and vector clocks are runtime-owned metadata, so the
     // typed sink observes only the domain value and this proof reads metadata
@@ -425,76 +422,16 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
         })
         .ok_or_else(|| anyhow!("missing stateful counter journal in {}", flow_dir.display()))?;
 
-    let file = std::fs::File::open(&stage_log)
-        .map_err(|e| anyhow!("failed to open stage journal {}: {e}", stage_log.display()))?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut aggregate_record: Option<
-        obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent>,
-    > = None;
-    for line in reader.lines() {
-        let line = line.map_err(|e| anyhow!("failed reading {}: {e}", stage_log.display()))?;
-        let mut parts = line.splitn(3, ':');
-        let _len = parts.next();
-        let _crc = parts.next();
-        let json = parts.next().ok_or_else(|| {
-            anyhow!(
-                "invalid journal line (missing json) in {}",
-                stage_log.display()
-            )
-        })?;
-
-        let frame: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-            anyhow!(
-                "failed to parse journal frame in {}: {e}",
-                stage_log.display()
-            )
-        })?;
-        let record_values: Vec<serde_json::Value> =
-            match frame.get("frame_kind").and_then(serde_json::Value::as_str) {
-                Some("record_v2") => frame.get("record").cloned().into_iter().collect(),
-                Some("atomic_group_v2") => frame
-                    .get("records")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "atomic journal frame has no records in {}",
-                            stage_log.display()
-                        )
-                    })?,
-                Some(kind) => {
-                    return Err(anyhow!(
-                        "unknown journal frame kind '{kind}' in {}",
-                        stage_log.display()
-                    ));
-                }
-                None => {
-                    return Err(anyhow!(
-                        "journal frame has no frame_kind in {}",
-                        stage_log.display()
-                    ));
-                }
-            };
-
-        for record_value in record_values {
-            let record: obzenflow_infra::journal::disk::log_record::LogRecord<ChainEvent> =
-                serde_json::from_value(record_value).map_err(|e| {
-                    anyhow!(
-                        "failed to parse journal record in {}: {e}",
-                        stage_log.display()
-                    )
-                })?;
-
-            if AggregateMetricEvent::from_event(&record.authored()).is_some() {
-                aggregate_record = Some(record);
-                break;
-            }
-        }
-        if aggregate_record.is_some() {
-            break;
-        }
-    }
+    use obzenflow_core::Journal;
+    let journal = obzenflow_infra::journal::DiskJournal::<ChainEvent>::with_owner(
+        stage_log.clone(),
+        obzenflow_core::JournalOwner::stage(obzenflow_core::StageId::new()),
+    )?;
+    let aggregate_record = journal
+        .read_all_unordered()
+        .await?
+        .into_iter()
+        .find(|record| AggregateMetricEvent::from_event(&record.authored()).is_some());
 
     let aggregate_record = aggregate_record
         .ok_or_else(|| anyhow!("missing aggregate event in {}", stage_log.display()))?;

@@ -461,6 +461,8 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Ex
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, JoinState::Created) {
             ExternalEventMode::Block
+        } else if matches!(state, JoinState::Drained | JoinState::Failed(_)) {
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

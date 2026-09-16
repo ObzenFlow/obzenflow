@@ -92,8 +92,6 @@ pub struct StageInstrumentation {
     pub events_accumulated_total: AtomicU64,
     /// Total output events emitted by the stage (data/delivery; excludes observability-only events).
     pub events_emitted_total: AtomicU64,
-    pub terminal_groups_committed_total: AtomicU64,
-    pub terminal_group_commit_failures_total: AtomicU64,
     pub errors_total: AtomicU64,
     pub failures_total: AtomicU64,              // Critical failures
     pub event_loops_total: AtomicU64,           // Total event loop iterations
@@ -196,8 +194,6 @@ impl StageInstrumentation {
             events_processed_total: AtomicU64::new(0),
             events_accumulated_total: AtomicU64::new(0),
             events_emitted_total: AtomicU64::new(0),
-            terminal_groups_committed_total: AtomicU64::new(0),
-            terminal_group_commit_failures_total: AtomicU64::new(0),
             errors_total: AtomicU64::new(0),
             failures_total: AtomicU64::new(0),
             event_loops_total: AtomicU64::new(0),
@@ -292,12 +288,6 @@ impl StageInstrumentation {
                 events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
                 events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
                 events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
-                terminal_groups_committed_total: self
-                    .terminal_groups_committed_total
-                    .load(Ordering::Relaxed),
-                terminal_group_commit_failures_total: self
-                    .terminal_group_commit_failures_total
-                    .load(Ordering::Relaxed),
                 errors_total: self.errors_total.load(Ordering::Relaxed),
                 failures_total: self.failures_total.load(Ordering::Relaxed),
                 errors_by_kind: self

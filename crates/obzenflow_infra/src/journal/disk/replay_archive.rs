@@ -8,6 +8,7 @@
 //! archived disk journals, exposed to runtime services via the `ReplayArchive`
 //! trait.
 
+use super::codec::Decoder;
 use super::manifest_gate::require_current_manifest_version;
 use super::reader::DiskJournalReader;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
@@ -447,8 +448,10 @@ fn scan_recorded_maxima(
         let mut reader = BufReader::new(file);
         let mut buf = Vec::new();
         let mut line_no = 0u64;
+        let mut offset = 0u64;
+        let mut decoder = Decoder::new(&path);
         loop {
-            let Some((_, termination)) =
+            let Some((consumed, termination)) =
                 read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
                     message: format!("Failed to read source journal at {}", path.display()),
                     source: e,
@@ -457,10 +460,13 @@ fn scan_recorded_maxima(
                 break;
             };
             line_no += 1;
-            if buf.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
+            let record_offset = offset;
+            offset += consumed as u64;
+            match dispose(
+                classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
+                termination,
+                policy,
+            ) {
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
                         if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
@@ -517,23 +523,24 @@ pub(crate) fn derive_status_derivation_from_system_log(
     let mut chosen = ArchiveStatus::Unknown;
     let mut terminal_events_found: u64 = 0;
     let mut line_no = 0u64;
+    let mut offset = 0u64;
+    let mut decoder = Decoder::new(path);
 
     // FLOWIP-120q: the status-derivation bootstrap tolerates a torn tail, because
     // a crashed run legitimately leaves a torn final system record; that tail
     // just means no terminal event was committed. Mid-file corruption fails loud.
-    while let Some((_, termination)) =
+    while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
             message: format!("Failed to read system.log at {}", path.display()),
             source: e,
         })?
     {
         line_no += 1;
-        if buf.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
+        let record_offset = offset;
+        offset += consumed as u64;
 
         match dispose(
-            classify_frame::<SystemEvent>(&buf),
+            classify_frame::<SystemEvent>(&buf, &mut decoder, record_offset),
             termination,
             ReadPolicy::SealedScan {
                 tolerate_torn_tail: true,

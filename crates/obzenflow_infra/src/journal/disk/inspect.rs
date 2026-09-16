@@ -4,7 +4,7 @@
 
 //! JSONL export and human inspection over a run's framed journals (FLOWIP-120q).
 //!
-//! The raw `.log` files are internal framed storage (`<len>:<crc>:<json>`). This
+//! The raw `.log` files are internal checksummed binary storage. This
 //! module is the supported public projection: `export_jsonl` writes one JSON
 //! object per committed `LogRecord`, and `inspect` prints a filtered, human
 //! view. Both go through the same sealed scanner and policy as replay and
@@ -22,6 +22,7 @@ use obzenflow_core::journal::run_manifest::{
 use obzenflow_core::journal::ArchiveStatus;
 use thiserror::Error;
 
+use super::codec::Decoder;
 use super::manifest_gate::require_current_manifest_version;
 use super::replay_archive::derive_status_derivation_from_system_log;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
@@ -132,6 +133,7 @@ fn export_journal_file<R: JournalEvent>(
     let mut reader = open_reader(path)?;
     let mut buf = Vec::new();
     let mut offset = 0u64;
+    let mut decoder = Decoder::new(path);
 
     while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|source| JournalInspectError::Io {
@@ -141,10 +143,11 @@ fn export_journal_file<R: JournalEvent>(
     {
         let record_offset = offset;
         offset += consumed as u64;
-        if buf.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match dispose(classify_frame::<R>(&buf), termination, policy) {
+        match dispose(
+            classify_frame::<R>(&buf, &mut decoder, record_offset),
+            termination,
+            policy,
+        ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
                     serde_json::to_writer(&mut *out, &record).map_err(|e| {
@@ -185,6 +188,7 @@ fn inspect_chain_journal(
     let mut reader = open_reader(path)?;
     let mut buf = Vec::new();
     let mut offset = 0u64;
+    let mut decoder = Decoder::new(path);
 
     while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|source| JournalInspectError::Io {
@@ -194,10 +198,11 @@ fn inspect_chain_journal(
     {
         let record_offset = offset;
         offset += consumed as u64;
-        if buf.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
+        match dispose(
+            classify_frame::<ChainEvent>(&buf, &mut decoder, record_offset),
+            termination,
+            policy,
+        ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
                     let ty = record.event_type();
@@ -398,11 +403,7 @@ mod tests {
                 serialize_record(&expected[0]).unwrap(),
                 serialize_atomic_group("omission-proof", &expected[1..]).unwrap(),
             ] {
-                framed.extend_from_slice(
-                    format!("{}:{}:", body.len(), crc32fast::hash(&body)).as_bytes(),
-                );
                 framed.extend_from_slice(&body);
-                framed.push(b'\n');
             }
             let path = dir.path().join(format!("{mode}.log"));
             std::fs::write(&path, framed).unwrap();

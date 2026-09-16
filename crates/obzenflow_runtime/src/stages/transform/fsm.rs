@@ -515,6 +515,27 @@ impl<H> std::fmt::Debug for TransformEvent<H> {
     }
 }
 
+impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::ExternalControlEvent
+    for TransformEvent<H>
+{
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(message) => Some(message.as_str()),
+            Self::Initialize
+            | Self::Ready
+            | Self::ReceivedEOF
+            | Self::BeginDrain
+            | Self::DrainComplete => None,
+            Self::_Phantom(_) => unreachable!("PhantomData variant"),
+        })
+    }
+}
+
 impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
     fn variant_name(&self) -> &str {
         match self {

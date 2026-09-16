@@ -404,6 +404,20 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
             self.last_state = Some(new_state);
         }
 
+        if matches!(
+            state,
+            InfiniteSourceState::Drained | InfiniteSourceState::Failed(_)
+        ) {
+            crate::supervised_base::with_external_events::record_terminal_commands(
+                &mut self.external_events,
+                self.system_journal.clone(),
+                WriterId::from(self.stage_id),
+                &self.name,
+                state.variant_name(),
+            )
+            .await?;
+        }
+
         match state {
             InfiniteSourceState::Created
             | InfiniteSourceState::Initialized
@@ -553,7 +567,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                             original_stage_id: replay_archive
                                 .archived_stage_id(stage_key)
                                 .map_err(|e| format!("Failed to resolve archived stage id: {e}"))?,
-                            archive_path: replay_archive.archive_path().to_path_buf(),
                         };
                         self.replay_driver =
                             Some(ReplayDriver::new(reader, journal_path, replay_context));

@@ -23,8 +23,6 @@ pub struct ExecutionAccounting {
     pub events_processed_total: u64,
     pub events_accumulated_total: u64,
     pub events_emitted_total: u64,
-    pub terminal_groups_committed_total: u64,
-    pub terminal_group_commit_failures_total: u64,
     pub errors_total: u64,
     pub failures_total: u64,
     pub errors_by_kind: HashMap<ErrorKind, u64>,

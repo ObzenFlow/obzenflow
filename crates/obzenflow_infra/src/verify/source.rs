@@ -169,6 +169,7 @@ impl RunSource for DiskRunSource {
             source,
         })?;
         Ok(Box::new(JournalRows {
+            decoder: crate::journal::disk::codec::Decoder::new(&path),
             reader: BufReader::new(file),
             buf: Vec::new(),
             pending: std::collections::VecDeque::new(),
@@ -188,6 +189,7 @@ impl RunSource for DiskRunSource {
 }
 
 struct JournalRows {
+    decoder: crate::journal::disk::codec::Decoder,
     reader: BufReader<File>,
     buf: Vec<u8>,
     pending: std::collections::VecDeque<ChainEvent>,
@@ -209,7 +211,7 @@ impl Iterator for JournalRows {
         if self.done {
             return None;
         }
-        loop {
+        {
             let (consumed, termination) = match read_frame_sync(&mut self.reader, &mut self.buf) {
                 Ok(Some(frame)) => frame,
                 Ok(None) => {
@@ -227,11 +229,8 @@ impl Iterator for JournalRows {
             let record_offset = self.byte_offset;
             self.byte_offset += consumed as u64;
             self.line_no += 1;
-            if self.buf.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
             match dispose(
-                classify_frame::<ChainEvent>(&self.buf),
+                classify_frame::<ChainEvent>(&self.buf, &mut self.decoder, record_offset),
                 termination,
                 self.policy,
             ) {
@@ -242,20 +241,20 @@ impl Iterator for JournalRows {
                             .into_iter()
                             .map(|record| record.into_authored()),
                     );
-                    return self.pending.pop_front().map(Ok);
+                    self.pending.pop_front().map(Ok)
                 }
                 // A tolerated final torn tail ends the sealed history cleanly.
                 Disposition::EndOfCommittedRecords | Disposition::Skip => {
                     self.done = true;
-                    return None;
+                    None
                 }
                 Disposition::Corrupt(problem) => {
                     self.done = true;
-                    return Some(Err(VerifyError::CorruptRecord {
+                    Some(Err(VerifyError::CorruptRecord {
                         journal: self.journal.clone(),
                         line: self.line_no,
                         message: format!("at offset {record_offset}: {problem}"),
-                    }));
+                    }))
                 }
             }
         }

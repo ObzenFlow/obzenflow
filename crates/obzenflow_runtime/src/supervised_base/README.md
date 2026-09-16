@@ -89,25 +89,51 @@ This is the piece that often confuses newcomers, but it solves a real problem an
 2. **Checks the external control channel** according to an `ExternalEventMode` policy that varies by FSM state:
    - **`Block`**: `recv().await` until a control event arrives. Used for startup gates (`Created`, `WaitingForGun`) where the supervisor must not begin work until explicitly told to start.
    - **`Poll`**: `try_recv()` once per iteration, then proceed with normal work if empty. Used for `Running` and `Draining` states so data-plane processing continues while still reacting quickly to stop commands.
+   - **`CloseAndRecord`**: close mailbox admission and journal every accepted command without executing it. Used by all six stage families in `Drained` and `Failed`, after transition actions finish.
 
 3. **If a control event is available**, returns `Transition(event)` immediately, preempting the inner supervisor's dispatch.
 
 4. **If no control event**, delegates to `self.inner.dispatch_state(state, context)` as normal.
 
-The wrapper never calls `machine.handle()` and never executes FSM actions. It only influences which `EventLoopDirective` the run loop sees. The single-gateway rule is preserved.
+The wrapper records terminal command dispositions and returns directives. The run loop remains the only caller of `machine.handle()` and executor of transition actions, preserving the single-gateway rule.
 
 **Why a decorator and not a trait method?** Because these stage supervisors share control-channel checking (same `ExternalEventMode` logic, same `StateWatcher` publish, same channel-closed mapping). Putting it in a decorator means supervisors only implement their state-specific dispatch logic, and the control-plane bridging is wired once, tested once, and cannot drift. The supervisor itself never sees the `EventReceiver` or `StateWatcher`. It just writes its dispatch logic and the wrapper handles the rest.
 
-**The `ExternalEventPolicy` trait** is the only thing each supervisor must define to configure the wrapper. It has two methods:
+**The `ExternalEventPolicy` trait** configures when the wrapper reads or closes the mailbox. It has two methods:
 
 ```rust
 fn external_event_mode(state: &Self::State) -> ExternalEventMode;
 fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event>;
 ```
 
-The first returns `Block`, `Poll`, or `Ignore` for each FSM state. The second maps the infrastructure condition "all senders dropped" into an FSM event (typically an error), so even channel failures drive the FSM through its normal failure path rather than silently terminating the task.
+The first returns `Block`, `Poll`, or `CloseAndRecord` for each FSM state. The second maps the infrastructure condition "all senders dropped" into an FSM event (typically an error), so even channel failures drive the FSM through its normal failure path rather than silently terminating the task. The event type implements `ExternalControlEvent` to supply semantic discard details without the shared runner parsing debug output or stage-specific error messages.
+
+**Terminal command accounting.** Each command left in the closed mailbox produces
+`system.supervisor.command_discarded` in the system journal. The envelope's writer
+identifies the stage; the payload records supervisor name, terminal state, command
+variant, disposition, and any original error text. Lifecycle controls and the
+existing cancellation signals are `obsolete_control`; other errors are
+`unexpected_error`. Both are recorded unconditionally, and neither reopens the
+FSM or replaces its chosen outcome. Studio's event stream projects the committed
+fact as `supervisor_command_discarded`.
+
+Closure rejects later sends and bounds the queue to commands already accepted.
+The whole closed receiver transfers to one retained publication operation.
+Normal supervisor join waits for that operation, including when its original
+waiter is cancelled. An append failure fails publication settlement and supervisor
+join; an indeterminate append is never retried. A failed journal cannot certify
+that every command was recorded.
+
+This uses the configured journal's durability policy. A successful mailbox send
+still certifies in-memory acceptance, not execution or durable command admission.
+Process failure or abort before terminal recording takes ownership is outside
+this guarantee. Durable admission and replay of commands would require a separate
+command protocol.
 
 **Exception: async source supervisors.** Some supervisors embed control-channel checking directly instead of using the wrapper, because they need finer-grained responsiveness while awaiting long-running operations (for example, `select!` between handler polling and external events during a backpressure backoff sleep). Even in those cases, the single-gateway rule still holds: the supervisor returns `Transition(event)` and the run loop drives the FSM.
+
+Both async source families use the same terminal recording helper, closing their
+mailboxes before awaiting failure cleanup.
 
 ## The run loop
 

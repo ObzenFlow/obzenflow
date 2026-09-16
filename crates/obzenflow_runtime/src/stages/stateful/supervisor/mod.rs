@@ -417,6 +417,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, StatefulState::Created) {
             ExternalEventMode::Block
+        } else if matches!(state, StatefulState::Drained | StatefulState::Failed(_)) {
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

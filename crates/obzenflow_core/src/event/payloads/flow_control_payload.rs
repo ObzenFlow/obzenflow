@@ -220,7 +220,11 @@ pub enum FlowControlPayload {
     #[serde(rename = "checkpoint")]
     Checkpoint {
         id: CheckpointId,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::serde_support::present_json"
+        )]
         metadata: Option<Value>,
     },
 

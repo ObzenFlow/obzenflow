@@ -389,6 +389,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, TransformState::Created) {
             ExternalEventMode::Block
+        } else if matches!(state, TransformState::Drained | TransformState::Failed(_)) {
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

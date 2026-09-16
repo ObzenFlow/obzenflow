@@ -36,12 +36,9 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
         causality: CausalityContext::new(),
         flow_context: FlowContext::default(),
         processing: ProcessingProvenance {
-            processed_by: "fixture".into(),
             event_time: 10,
             status: ProcessingStatus::Success,
-            error_hops_remaining: None,
         },
-        intent: None,
         correlation: None,
         replay_context: None,
         ingress_context: None,

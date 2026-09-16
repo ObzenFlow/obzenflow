@@ -8,6 +8,7 @@
 //! reused between polls. A poll takes ownership of the buffer before awaiting;
 //! cancellation discards it and the next poll reopens at the committed offset.
 
+use super::codec::Decoder;
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::{
@@ -74,6 +75,7 @@ fn open_existing_std_file(path: &Path) -> Result<StdFile, JournalError> {
 
 /// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
+    decoder: Decoder,
     /// Current position (number of committed events read)
     position: u64,
     /// Byte offset of the next unread record. Advances only past a committed
@@ -123,6 +125,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             let _std_file = open_readable_std_file(&path)?;
 
             return Ok(Self {
+                decoder: Decoder::new(&path),
                 position: 0,
                 read_offset: 0,
                 stall_polls: 0,
@@ -159,6 +162,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
+            decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
             stall_polls: 0,
@@ -202,6 +206,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
+            decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
             stall_polls: 0,
@@ -285,9 +290,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
     /// Read one logical record from `reader` under the current policy, advancing
     /// `read_offset` and `position` exactly as a committed read does. The
-    /// internal loop skips blank lines and advances past a corrupt record so a
-    /// best-effort observer resumes at the next one. Returns the disposition plus
-    /// the byte offset where the disposed (post-whitespace) frame began, for
+    /// reader advances past corruption only when a checked header establishes
+    /// the next physical boundary. Returns the disposition plus
+    /// the byte offset where the disposed frame began, for
     /// corruption reporting. Leaves `at_end`/`stall_polls` to the caller. Clean
     /// EOF maps to `EndOfCommittedRecords`.
     async fn advance_one<B: tokio::io::AsyncBufRead + Unpin>(
@@ -322,7 +327,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             ));
         }
 
-        loop {
+        {
             let frame_start = self.read_offset;
             let Some((consumed, termination)) = read_frame_async(reader, &mut self.buf)
                 .await
@@ -340,12 +345,11 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 gate.release.notified().await;
             }
 
-            if self.buf.iter().all(u8::is_ascii_whitespace) {
-                self.read_offset += consumed as u64;
-                continue;
-            }
-
-            match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
+            match dispose(
+                classify_frame::<T>(&self.buf, &mut self.decoder, frame_start),
+                termination,
+                self.policy,
+            ) {
                 Disposition::Yield(frame) => {
                     self.read_offset += consumed as u64;
                     self.pending_group_id = frame.group_id().map(str::to_string);
@@ -382,7 +386,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         self.pending_group_next_index = 0;
                     }
                     self.position += 1;
-                    return Ok((
+                    Ok((
                         Disposition::Yield(match group_id {
                             Some(group_id) => super::log_record::LogFrame::AtomicGroup {
                                 group_id,
@@ -391,13 +395,17 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                             None => super::log_record::LogFrame::Record(record),
                         }),
                         frame_start,
-                    ));
+                    ))
                 }
                 Disposition::Corrupt(problem) => {
-                    self.read_offset += consumed as u64;
-                    return Ok((Disposition::Corrupt(problem), frame_start));
+                    if super::codec::frame::frame_length(&self.buf)
+                        .is_ok_and(|length| length == consumed)
+                    {
+                        self.read_offset += consumed as u64;
+                    }
+                    Ok((Disposition::Corrupt(problem), frame_start))
                 }
-                other => return Ok((other, frame_start)),
+                other => Ok((other, frame_start)),
             }
         }
     }
@@ -434,12 +442,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         let mut reader = match self.buffered_reader.take() {
             Some(reader)
                 if !self.pending.is_empty()
-                    || reader
-                        .buffer()
-                        .split_inclusive(|byte| *byte == b'\n')
-                        .any(|line| {
-                            line.last() == Some(&b'\n') && !line.iter().all(u8::is_ascii_whitespace)
-                        }) =>
+                    || super::codec::frame::frame_length(reader.buffer())
+                        .is_ok_and(|length| length <= reader.buffer().len()) =>
             {
                 reader
             }
@@ -450,10 +454,9 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         // There is no await between committed cursor advancement and returning
         // the record. An interrupted I/O await leaves buffered_reader empty;
         // read_offset still identifies the next unconsumed physical frame.
-        if matches!(
-            &disposition,
-            Disposition::Yield(_) | Disposition::Corrupt(_)
-        ) {
+        if matches!(&disposition, Disposition::Yield(_))
+            || (matches!(&disposition, Disposition::Corrupt(_)) && self.read_offset > frame_start)
+        {
             self.buffered_reader = Some(reader);
         }
         match disposition {
@@ -503,9 +506,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                 Ok(None)
             }
             Disposition::Corrupt(problem) => {
-                // advance_one already advanced read_offset past the unreadable
-                // record so a best-effort observer that keeps polling resumes at
-                // the next one. Strict consumers abort on this error.
+                // A checked header permits best-effort continuation at its next
+                // boundary. An invalid header leaves the cursor at the error.
                 self.stall_polls = 0;
                 tracing::error!(
                     read_offset = frame_start,
@@ -542,7 +544,6 @@ mod tests {
     use super::*;
     use crate::journal::disk::log_record::serialize_record;
     use chrono::Utc;
-    use crc32fast::Hasher;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::journal_record::JournalPayload;
     use obzenflow_core::event::provenance::JournalProvenance;
@@ -687,7 +688,8 @@ mod tests {
             let first = make_record();
             write_framed_record(&mut file, &first);
             let committed_end = file.as_file().metadata().unwrap().len();
-            file.write_all(b"100:123:uncommitted tail").unwrap();
+            file.write_all(&serialize_record(&make_record()).unwrap()[..20])
+                .unwrap();
             let mut reader = DiskJournalReader::<ChainEvent>::new(
                 file.path().to_path_buf(),
                 journal_id,
@@ -751,13 +753,7 @@ mod tests {
     }
 
     fn write_framed_record<P: JournalPayload>(file: &mut NamedTempFile, record: &JournalRecord<P>) {
-        let json_body = serialize_record(record).unwrap();
-        let mut hasher = Hasher::new();
-        hasher.update(&json_body);
-        let crc = hasher.finalize();
-        let mut bytes = format!("{}:{}:", json_body.len(), crc).into_bytes();
-        bytes.extend_from_slice(&json_body);
-        bytes.push(b'\n');
+        let bytes = serialize_record(record).unwrap();
         file.write_all(&bytes).unwrap();
     }
 

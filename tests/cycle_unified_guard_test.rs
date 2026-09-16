@@ -6,6 +6,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::stateful;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::ChainEvent;
+use obzenflow_core::id::JournalId;
+use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageOutputs};
 use obzenflow_dsl::{
@@ -224,7 +227,7 @@ fn single_flow_run_dir(base: &Path) -> Result<PathBuf> {
     Ok(dirs.pop().expect("dirs is non-empty"))
 }
 
-fn count_log_lines(run_dir: &Path) -> Result<usize> {
+async fn count_journal_records(run_dir: &Path) -> Result<usize> {
     let mut total = 0usize;
     for entry in fs::read_dir(run_dir)? {
         let path = entry?.path();
@@ -237,8 +240,16 @@ fn count_log_lines(run_dir: &Path) -> Result<usize> {
         if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
             continue;
         }
-        let contents = fs::read_to_string(&path)?;
-        total = total.saturating_add(contents.lines().count());
+        let mut reader =
+            obzenflow_infra::journal::disk::reader::DiskJournalReader::<ChainEvent>::new(
+                path,
+                JournalId::new(),
+                Arc::new(tokio::sync::RwLock::new(())),
+            )
+            .await?;
+        while reader.next().await?.is_some() {
+            total += 1;
+        }
     }
     Ok(total)
 }
@@ -383,10 +394,10 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
     );
 
     let run_dir = single_flow_run_dir(&base)?;
-    let total_lines = count_log_lines(&run_dir)?;
+    let total_records = count_journal_records(&run_dir).await?;
     assert!(
-        total_lines < 2000,
-        "expected bounded journal growth; total log lines={total_lines}, run_dir={:?}",
+        total_records < 2000,
+        "expected bounded journal growth; total records={total_records}, run_dir={:?}",
         run_dir
     );
 

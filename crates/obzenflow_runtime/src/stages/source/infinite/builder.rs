@@ -148,6 +148,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             supervisor,
             event_receiver,
             state_watcher_for_task,
+            self.resources.system_journal.clone(),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
             supervisor_with_events,

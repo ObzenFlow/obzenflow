@@ -43,6 +43,21 @@ pub(super) fn frame(
             event,
             at,
         },
+        SystemPayload::SupervisorCommandDiscarded {
+            supervisor,
+            terminal_state,
+            command,
+            disposition,
+            error,
+        } => StudioMessage::SupervisorCommandDiscarded {
+            stage_id: envelope.writer_id().as_stage().map(|id| id.to_string()),
+            supervisor,
+            terminal_state,
+            command,
+            disposition: *disposition,
+            error: error.as_deref(),
+            at,
+        },
         SystemPayload::SourceCleanupFailed {
             stage_id,
             stage_name,

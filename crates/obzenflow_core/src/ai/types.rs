@@ -332,7 +332,11 @@ pub struct ToolDefinition {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_support::present_json"
+    )]
     pub parameters_schema: Option<Value>,
 }
 
@@ -425,7 +429,11 @@ pub struct ChatResponse {
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_support::present_json"
+    )]
     pub raw: Option<Value>,
 }
 
