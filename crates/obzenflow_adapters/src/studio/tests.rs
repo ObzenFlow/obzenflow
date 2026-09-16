@@ -337,6 +337,56 @@ fn assert_fact_payload(
 }
 
 #[test]
+fn discarded_commands_remain_visible_as_journal_backed_studio_facts() {
+    use obzenflow_core::event::CommandDiscardDisposition;
+    for (command, disposition, error, label) in [
+        (
+            "Ready",
+            CommandDiscardDisposition::ObsoleteControl,
+            None,
+            "obsolete_control",
+        ),
+        (
+            "Error",
+            CommandDiscardDisposition::UnexpectedError,
+            Some("late failure"),
+            "unexpected_error",
+        ),
+    ] {
+        let stage_id = StageId::new();
+        let envelope = JournalRecord::new(
+            JournalWriterId::from(JournalId::new()),
+            SystemEvent::new(
+                WriterId::from(stage_id),
+                SystemPayload::SupervisorCommandDiscarded {
+                    supervisor: "transform_orders".into(),
+                    terminal_state: "Drained".into(),
+                    command: command.into(),
+                    disposition,
+                    error: error.map(str::to_owned),
+                },
+            ),
+        );
+        let mut expected = json!({
+            "stage_id": stage_id.to_string(),
+            "supervisor": "transform_orders",
+            "terminal_state": "Drained",
+            "command": command,
+            "disposition": label,
+        });
+        if let Some(error) = error {
+            expected["error"] = json!(error);
+        }
+        assert_fact_payload(
+            envelope,
+            "supervisor_command_discarded",
+            Some("supervisor_command_discarded"),
+            expected,
+        );
+    }
+}
+
+#[test]
 fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() {
     use obzenflow_core::event::observation::*;
     let stage = StageId::new();

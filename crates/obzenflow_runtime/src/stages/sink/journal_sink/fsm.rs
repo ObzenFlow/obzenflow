@@ -196,6 +196,28 @@ impl<H> std::fmt::Debug for JournalSinkEvent<H> {
     }
 }
 
+impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::ExternalControlEvent
+    for JournalSinkEvent<H>
+{
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(message) => Some(message.as_str()),
+            Self::Initialize
+            | Self::Ready
+            | Self::ReceivedEOF
+            | Self::BeginFlush
+            | Self::FlushComplete
+            | Self::BeginDrain => None,
+            Self::_Phantom(_) => unreachable!("PhantomData variant"),
+        })
+    }
+}
+
 impl<H: Send + Sync + 'static> EventVariant for JournalSinkEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
@@ -1266,8 +1288,12 @@ mod tests {
                 subscription: None,
                 _marker: std::marker::PhantomData,
             };
-            let mut wrapped =
-                HandlerSupervisedWithExternalEvents::new(terminal_supervisor, receiver, watcher);
+            let mut wrapped = HandlerSupervisedWithExternalEvents::new(
+                terminal_supervisor,
+                receiver,
+                watcher,
+                ctx.system_journal.clone(),
+            );
             assert!(matches!(
                 wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
                 EventLoopDirective::Terminate

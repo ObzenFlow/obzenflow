@@ -390,7 +390,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         if matches!(state, TransformState::Created) {
             ExternalEventMode::Block
         } else if matches!(state, TransformState::Drained | TransformState::Failed(_)) {
-            ExternalEventMode::Ignore
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

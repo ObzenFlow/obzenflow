@@ -17,7 +17,7 @@ use obzenflow_core::event::{
     },
     types::{Count, DurationMs, EventType, SeqNo, ViolationCause},
     vector_clock::VectorClock,
-    PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
+    CommandDiscardDisposition, PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
 };
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::metrics::FlowLifecycleMetricsSnapshot;
@@ -48,6 +48,18 @@ pub(super) enum StudioMessage<'a> {
         stage_id: Option<String>,
         #[serde(flatten, with = "ReplayUpdate")]
         event: &'a ReplayLifecycleEvent,
+        #[serde(flatten)]
+        at: Observation<'a>,
+    },
+    SupervisorCommandDiscarded {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage_id: Option<String>,
+        supervisor: &'a str,
+        terminal_state: &'a str,
+        command: &'a str,
+        disposition: CommandDiscardDisposition,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<&'a str>,
         #[serde(flatten)]
         at: Observation<'a>,
     },
@@ -158,6 +170,7 @@ impl StudioMessage<'_> {
             Self::FlowLifecycle { .. } => "flow_lifecycle",
             Self::ReplayLifecycle { .. } => "replay_lifecycle",
             Self::SourceCleanupFailed { .. } => "source_cleanup_failed",
+            Self::SupervisorCommandDiscarded { .. } => "supervisor_command_discarded",
             Self::MiddlewareLifecycle { .. } | Self::MiddlewareMeasurements { .. } => {
                 "middleware_lifecycle"
             }

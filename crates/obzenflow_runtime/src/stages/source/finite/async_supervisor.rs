@@ -417,6 +417,20 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             self.last_state = Some(new_state);
         }
 
+        if matches!(
+            state,
+            FiniteSourceState::Drained | FiniteSourceState::Failed(_)
+        ) {
+            crate::supervised_base::with_external_events::record_terminal_commands(
+                &mut self.external_events,
+                self.system_journal.clone(),
+                WriterId::from(self.stage_id),
+                &self.name,
+                state.variant_name(),
+            )
+            .await?;
+        }
+
         match state {
             FiniteSourceState::Created
             | FiniteSourceState::Initialized

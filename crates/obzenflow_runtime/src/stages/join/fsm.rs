@@ -196,6 +196,28 @@ impl<H> std::fmt::Debug for JoinEvent<H> {
     }
 }
 
+impl<H: Clone + Send + Sync + 'static>
+    crate::supervised_base::with_external_events::ExternalControlEvent for JoinEvent<H>
+{
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(message) => Some(message.as_str()),
+            Self::Initialize
+            | Self::Ready
+            | Self::ReceivedEOF
+            | Self::ReferenceComplete
+            | Self::BeginDrain
+            | Self::DrainComplete => None,
+            Self::_Phantom(_) => unreachable!("PhantomData variant"),
+        })
+    }
+}
+
 impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
     fn variant_name(&self) -> &str {
         match self {

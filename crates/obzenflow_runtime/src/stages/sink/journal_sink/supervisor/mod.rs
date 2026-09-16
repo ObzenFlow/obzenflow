@@ -467,7 +467,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> ExternalEv
             state,
             JournalSinkState::Drained | JournalSinkState::Failed(_)
         ) {
-            ExternalEventMode::Ignore
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

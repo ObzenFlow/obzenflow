@@ -216,6 +216,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             supervisor,
             event_receiver,
             state_watcher_for_task,
+            self.resources.system_journal.clone(),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

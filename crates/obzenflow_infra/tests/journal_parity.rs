@@ -7,7 +7,7 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::system_event::SystemEventFactory;
 use obzenflow_core::event::types::EventId;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, SystemPayload};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, SystemId, WriterId};
@@ -571,4 +571,61 @@ async fn test_system_event_parity() {
         .collect();
     assert_eq!(disk_last.len(), 2);
     assert_eq!(disk_last, memory_last, "SystemEvent read_last_n parity");
+}
+
+#[tokio::test]
+async fn discarded_command_facts_survive_disk_reopen_and_json_round_trip() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("discarded_commands.log");
+    let owner = JournalOwner::system(SystemId::new());
+    let disk = DiskJournal::<SystemEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+    let memory = MemoryJournal::<SystemEvent>::with_owner(owner.clone());
+    let stage_id = StageId::new();
+    for (command, disposition, error) in [
+        ("Ready", CommandDiscardDisposition::ObsoleteControl, None),
+        (
+            "Error",
+            CommandDiscardDisposition::UnexpectedError,
+            Some("late failure"),
+        ),
+        (
+            "Error",
+            CommandDiscardDisposition::ObsoleteControl,
+            Some("user_stop"),
+        ),
+    ] {
+        let event = SystemEvent::new(
+            WriterId::from(stage_id),
+            SystemPayload::SupervisorCommandDiscarded {
+                supervisor: "transform_orders".into(),
+                terminal_state: "Drained".into(),
+                command: command.into(),
+                disposition,
+                error: error.map(str::to_owned),
+            },
+        );
+        disk.append(event.clone(), None).await.unwrap();
+        memory.append(event, None).await.unwrap();
+    }
+    drop(disk);
+    let reopened = DiskJournal::<SystemEvent>::with_owner(path, owner).unwrap();
+    let actual = reopened.read_all_unordered().await.unwrap();
+    let expected = memory.read_all_unordered().await.unwrap();
+    assert_eq!(actual.len(), 3);
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.id(), expected.id());
+        assert_eq!(*actual.writer_id(), WriterId::from(stage_id));
+        assert_eq!(
+            actual.envelope.provenance.event.event_type,
+            "system.supervisor.command_discarded"
+        );
+        assert_eq!(
+            serde_json::to_value(&actual.payload).unwrap(),
+            serde_json::to_value(&expected.payload).unwrap()
+        );
+        let json = serde_json::to_value(actual).unwrap();
+        let decoded: obzenflow_core::event::journal_record::SystemJournalRecord =
+            serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
 }

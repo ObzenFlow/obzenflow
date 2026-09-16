@@ -404,6 +404,20 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
             self.last_state = Some(new_state);
         }
 
+        if matches!(
+            state,
+            InfiniteSourceState::Drained | InfiniteSourceState::Failed(_)
+        ) {
+            crate::supervised_base::with_external_events::record_terminal_commands(
+                &mut self.external_events,
+                self.system_journal.clone(),
+                WriterId::from(self.stage_id),
+                &self.name,
+                state.variant_name(),
+            )
+            .await?;
+        }
+
         match state {
             InfiniteSourceState::Created
             | InfiniteSourceState::Initialized

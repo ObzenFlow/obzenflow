@@ -873,7 +873,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             state,
             FiniteSourceState::Drained | FiniteSourceState::Failed(_)
         ) {
-            ExternalEventMode::Ignore
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

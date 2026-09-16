@@ -56,9 +56,9 @@ pub use payloads::stage_fatal_payload::{
     StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
 };
 pub use system_event::{
-    EdgeLivenessState, MetricsCoordinationEvent, PipelineCancellationCause, PipelineLifecycleEvent,
-    PipelineStopAdmission, ReplayLifecycleEvent, StageActivity, StageLifecycleEvent, SystemEvent,
-    SystemEventFactory, SystemPayload,
+    CommandDiscardDisposition, EdgeLivenessState, MetricsCoordinationEvent,
+    PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission, ReplayLifecycleEvent,
+    StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
 pub use types::{
     AdmissionSeq, CorrelationId, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId,

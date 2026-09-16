@@ -1119,7 +1119,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
 }
 
 #[tokio::test]
-async fn terminal_transform_dispatch_precedes_queued_ready() {
+async fn terminal_transform_records_queued_controls_and_errors_without_executing_them() {
     for state in [
         TransformState::Failed("archive corruption".into()),
         TransformState::Drained,
@@ -1138,18 +1138,37 @@ async fn terminal_transform_dispatch_precedes_queued_ready() {
         >::new()
         .build(state.clone());
         sender.send(TransformEvent::Ready).await.unwrap();
+        sender
+            .send(TransformEvent::Error("late failure".into()))
+            .await
+            .unwrap();
         let mut wrapped = crate::supervised_base::HandlerSupervisedWithExternalEvents::new(
-            supervisor, receiver, watcher,
+            supervisor,
+            receiver,
+            watcher,
+            ctx.system_journal.clone(),
         );
         assert!(matches!(
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
             EventLoopDirective::Terminate
         ));
-        drop(sender);
+        assert!(sender.send(TransformEvent::Ready).await.is_err());
         assert!(matches!(
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
             EventLoopDirective::Terminate
         ));
+        let records = ctx.system_journal.read_all_unordered().await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            matches!(&records[0].payload, obzenflow_core::event::SystemPayload::SupervisorCommandDiscarded {
+            command, disposition: obzenflow_core::event::CommandDiscardDisposition::ObsoleteControl, ..
+        } if command == "Ready")
+        );
+        assert!(
+            matches!(&records[1].payload, obzenflow_core::event::SystemPayload::SupervisorCommandDiscarded {
+            terminal_state, disposition: obzenflow_core::event::CommandDiscardDisposition::UnexpectedError, error: Some(error), ..
+        } if terminal_state == state.variant_name() && error == "late failure")
+        );
     }
 }
 
@@ -1186,7 +1205,10 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
     >::new()
     .build(TransformState::Running);
     let mut wrapped = crate::supervised_base::HandlerSupervisedWithExternalEvents::new(
-        supervisor, receiver, watcher,
+        supervisor,
+        receiver,
+        watcher,
+        ctx.system_journal.clone(),
     );
 
     let state = TransformState::<ExpandHandler>::Running;

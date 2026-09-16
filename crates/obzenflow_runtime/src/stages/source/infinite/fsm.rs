@@ -185,6 +185,25 @@ impl<H> std::fmt::Debug for InfiniteSourceEvent<H> {
     }
 }
 
+impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::ExternalControlEvent
+    for InfiniteSourceEvent<H>
+{
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(message) => Some(message.as_str()),
+            Self::Initialize | Self::Ready | Self::Start | Self::BeginDrain | Self::Completed => {
+                None
+            }
+            Self::_Phantom(_) => unreachable!("PhantomData variant"),
+        })
+    }
+}
+
 impl<H: Send + Sync + 'static> EventVariant for InfiniteSourceEvent<H> {
     fn variant_name(&self) -> &str {
         match self {

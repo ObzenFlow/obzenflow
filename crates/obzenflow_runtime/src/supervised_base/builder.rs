@@ -263,7 +263,7 @@ where
 
         (
             EventSender { tx: event_tx },
-            EventReceiver { rx: event_rx },
+            EventReceiver { rx: Some(event_rx) },
             StateWatcher {
                 tx: state_tx,
                 rx: state_rx,
@@ -302,16 +302,27 @@ impl<E> Clone for EventSender<E> {
 
 /// Type-safe event receiver
 pub struct EventReceiver<E> {
-    rx: tokio::sync::mpsc::Receiver<E>,
+    rx: Option<tokio::sync::mpsc::Receiver<E>>,
 }
 
 impl<E> EventReceiver<E> {
     pub async fn recv(&mut self) -> Option<E> {
-        self.rx.recv().await
+        self.rx.as_mut()?.recv().await
     }
 
     pub fn try_recv(&mut self) -> Result<E, tokio::sync::mpsc::error::TryRecvError> {
-        self.rx.try_recv()
+        self.rx
+            .as_mut()
+            .ok_or(tokio::sync::mpsc::error::TryRecvError::Disconnected)?
+            .try_recv()
+    }
+
+    /// Close admission and transfer the accepted queue to retained publication.
+    /// Subsequent calls cannot take or record the same commands again.
+    pub(crate) fn close_and_take(&mut self) -> Option<tokio::sync::mpsc::Receiver<E>> {
+        let mut receiver = self.rx.take()?;
+        receiver.close();
+        Some(receiver)
     }
 }
 

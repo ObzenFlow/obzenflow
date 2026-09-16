@@ -418,7 +418,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         if matches!(state, StatefulState::Created) {
             ExternalEventMode::Block
         } else if matches!(state, StatefulState::Drained | StatefulState::Failed(_)) {
-            ExternalEventMode::Ignore
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

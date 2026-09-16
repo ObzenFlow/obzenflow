@@ -188,6 +188,25 @@ impl<H> std::fmt::Debug for FiniteSourceEvent<H> {
     }
 }
 
+impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::ExternalControlEvent
+    for FiniteSourceEvent<H>
+{
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(message) => Some(message.as_str()),
+            Self::Initialize | Self::Ready | Self::Start | Self::BeginDrain | Self::Completed => {
+                None
+            }
+            Self::_Phantom(_) => unreachable!("PhantomData variant"),
+        })
+    }
+}
+
 impl<H: Send + Sync + 'static> EventVariant for FiniteSourceEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
@@ -944,54 +963,60 @@ pub(crate) mod tests {
             #[tokio::test]
             async fn $test() {
                 use crate::supervised_base::base::Supervisor;
-                use crate::supervised_base::{ChannelBuilder, idle_backoff::IdleBackoff};
+                use crate::supervised_base::{
+                    ChannelBuilder, idle_backoff::IdleBackoff, HandlerSupervised,
+                    HandlerSupervisedWithExternalEvents, EventLoopDirective,
+                };
+                use obzenflow_core::event::SystemPayload;
                 use std::time::{Duration, Instant};
 
                 for asynchronous in [false, true] {
                     let stage_id = CoreStageId::new();
                     let system_journal: Arc<dyn Journal<SystemEvent>> =
                         Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+                    let build_async = |external_events, state_watcher| $async {
+                        name: "source_projection".into(),
+                        handler: DummySource,
+                        system_journal: system_journal.clone(),
+                        stage_id,
+                        poll_timeout: None,
+                        idle_backoff: IdleBackoff::exponential_with_cap(
+                            Duration::from_millis(1), Duration::from_millis(10)),
+                        pending_idle_delay: None,
+                        external_events,
+                        state_watcher,
+                        last_state: None,
+                        replay_driver: None,
+                        replay_started_at: None,
+                        replay_completion: Default::default(),
+                        source_boundary: None,
+                        pending_boundary_error: None,
+                        live_entered: false,
+                        cleanup_attempted: false,
+                        $($extra: $value,)*
+                    };
+                    let build_sync = || $sync {
+                        name: "source_projection".into(),
+                        handler: DummySource,
+                        system_journal: system_journal.clone(),
+                        stage_id,
+                        idle_backoff: IdleBackoff::exponential_with_cap(
+                            Duration::from_millis(1), Duration::from_millis(10)),
+                        pending_idle_delay: None,
+                        replay_driver: None,
+                        replay_started_at: None,
+                        replay_completion: Default::default(),
+                        source_boundary: None,
+                        pending_boundary_error: None,
+                        $($extra: $value,)*
+                    };
                     let build_fsm = |initial_state| {
                         if asynchronous {
                             let (_, external_events, state_watcher) =
                                 ChannelBuilder::new().build($state::<DummySource>::Created);
-                            $async {
-                                name: "source_projection".into(),
-                                handler: DummySource,
-                                system_journal: system_journal.clone(),
-                                stage_id,
-                                poll_timeout: None,
-                                idle_backoff: IdleBackoff::exponential_with_cap(
-                                    Duration::from_millis(1), Duration::from_millis(10)),
-                                pending_idle_delay: None,
-                                external_events,
-                                state_watcher,
-                                last_state: None,
-                                replay_driver: None,
-                                replay_started_at: None,
-                                replay_completion: Default::default(),
-                                source_boundary: None,
-                                pending_boundary_error: None,
-                                live_entered: false,
-                                cleanup_attempted: false,
-                                $($extra: $value,)*
-                            }.build_state_machine(initial_state)
+                            build_async(external_events, state_watcher).build_state_machine(initial_state)
                         } else {
-                            $sync {
-                                name: "source_projection".into(),
-                                handler: DummySource,
-                                system_journal: system_journal.clone(),
-                                stage_id,
-                                idle_backoff: IdleBackoff::exponential_with_cap(
-                                    Duration::from_millis(1), Duration::from_millis(10)),
-                                pending_idle_delay: None,
-                                replay_driver: None,
-                                replay_started_at: None,
-                                replay_completion: Default::default(),
-                                source_boundary: None,
-                                pending_boundary_error: None,
-                                $($extra: $value,)*
-                            }.build_state_machine(initial_state)
+                            build_sync().build_state_machine(initial_state)
                         }
                     };
                     let mut ctx = $context::<DummySource>::new($init {
@@ -1064,6 +1089,34 @@ pub(crate) mod tests {
                         assert_eq!(actions.is_empty(), repeated);
                         assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Failed");
                         assert_eq!(*ctx.instrumentation.state_entered_at.read().unwrap() == old_entry, repeated);
+                    }
+                    // Both physical source paths must account for terminal
+                    // controls, including unexpected errors, without dispatching them.
+                    for state in [$state::Drained, $state::Failed("first failure".into())] {
+                        let before = system_journal.read_all_unordered().await.unwrap().len();
+                        let (sender, receiver, watcher) = ChannelBuilder::new().build(state.clone());
+                        sender.send($event::Ready).await.unwrap();
+                        sender.send($event::Error("late failure".into())).await.unwrap();
+                        if asynchronous {
+                            let mut supervisor = build_async(receiver, watcher);
+                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
+                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
+                        } else {
+                            let mut supervisor = HandlerSupervisedWithExternalEvents::new(build_sync(), receiver, watcher, system_journal.clone());
+                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
+                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
+                        }
+                        assert!(sender.send($event::Ready).await.is_err());
+                        let records = system_journal.read_all_unordered().await.unwrap();
+                        let recorded = &records[before..];
+                        assert_eq!(recorded.len(), 2, "each command recorded once, async={asynchronous}");
+                        assert!(recorded.iter().all(|record| *record.writer_id() == WriterId::from(stage_id)));
+                        assert!(matches!(&recorded[0].payload, SystemPayload::SupervisorCommandDiscarded {
+                            command, disposition: obzenflow_core::event::CommandDiscardDisposition::ObsoleteControl, error: None, ..
+                        } if command == "Ready"));
+                        assert!(matches!(&recorded[1].payload, SystemPayload::SupervisorCommandDiscarded {
+                            terminal_state, command, disposition: obzenflow_core::event::CommandDiscardDisposition::UnexpectedError, error: Some(error), ..
+                        } if terminal_state == state.variant_name() && command == "Error" && error == "late failure"));
                     }
                     if $finite {
                         ctx.instrumentation.transition_to_state("Running");

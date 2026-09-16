@@ -956,7 +956,7 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
             state,
             InfiniteSourceState::Drained | InfiniteSourceState::Failed(_)
         ) {
-            ExternalEventMode::Ignore
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }

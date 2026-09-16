@@ -16,6 +16,8 @@ use obzenflow_fsm::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+mod terminal_commands;
+
 #[derive(Clone, Debug, PartialEq, StateVariant)]
 enum TestState {
     Running,
@@ -311,6 +313,20 @@ enum ExternalEventTestEvent {
     Error(String),
 }
 
+impl super::with_external_events::ExternalControlEvent for ExternalEventTestEvent {
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(error) => Some(error.as_str()),
+            _ => None,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ExternalEventTestAction {
     Noop,
@@ -359,9 +375,9 @@ impl ExternalEventPolicy for ExternalEventTestSelfSupervisor {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         match state {
             ExternalEventTestState::Created => ExternalEventMode::Block,
-            ExternalEventTestState::Materializing => ExternalEventMode::Ignore,
+            ExternalEventTestState::Materializing => ExternalEventMode::Defer,
             ExternalEventTestState::Drained | ExternalEventTestState::Failed(_) => {
-                ExternalEventMode::Ignore
+                ExternalEventMode::CloseAndRecord
             }
             ExternalEventTestState::Running => ExternalEventMode::Poll,
         }
@@ -489,7 +505,12 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         name: "test-self-with-external-events".to_string(),
         dispatch_calls: dispatch_calls.clone(),
     };
-    let mut sup = SelfSupervisedWithExternalEvents::new(inner, receiver, watcher);
+    let mut sup = SelfSupervisedWithExternalEvents::new(
+        inner,
+        receiver,
+        watcher,
+        Arc::new(terminal_commands::TestJournal::default()),
+    );
     let mut ctx = ExternalEventTestContext;
 
     let created = sup
@@ -523,7 +544,12 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         dispatch_calls: dispatch_calls.clone(),
         stage_id: StageId::new_const(1),
     };
-    let mut sup = HandlerSupervisedWithExternalEvents::new(inner, receiver, watcher);
+    let mut sup = HandlerSupervisedWithExternalEvents::new(
+        inner,
+        receiver,
+        watcher,
+        Arc::new(terminal_commands::TestJournal::default()),
+    );
     let mut ctx = ExternalEventTestContext;
 
     let created = sup
@@ -547,7 +573,7 @@ async fn with_external_events_disconnected_maps_to_error_event() {
 }
 
 #[tokio::test]
-async fn with_external_events_ignore_mode_does_not_drain_channel() {
+async fn with_external_events_defer_mode_preserves_commands_for_later_execution() {
     let (sender, receiver, watcher) =
         ChannelBuilder::<ExternalEventTestEvent, ExternalEventTestState>::new()
             .build(ExternalEventTestState::Materializing);
@@ -559,17 +585,22 @@ async fn with_external_events_ignore_mode_does_not_drain_channel() {
 
     let dispatch_calls = Arc::new(AtomicUsize::new(0));
     let inner = ExternalEventTestSelfSupervisor {
-        name: "test-self-ignore-mode".to_string(),
+        name: "test-self-defer-mode".to_string(),
         dispatch_calls: dispatch_calls.clone(),
     };
-    let mut sup = SelfSupervisedWithExternalEvents::new(inner, receiver, watcher);
+    let mut sup = SelfSupervisedWithExternalEvents::new(
+        inner,
+        receiver,
+        watcher,
+        Arc::new(terminal_commands::TestJournal::default()),
+    );
     let mut ctx = ExternalEventTestContext;
 
-    let ignored = sup
+    let deferred = sup
         .dispatch_state(&ExternalEventTestState::Materializing, &mut ctx)
         .await
         .unwrap();
-    assert!(matches!(ignored, EventLoopDirective::Continue));
+    assert!(matches!(deferred, EventLoopDirective::Continue));
     assert_eq!(dispatch_calls.load(Ordering::Relaxed), 1);
 
     let queued = sup

@@ -462,7 +462,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Ex
         if matches!(state, JoinState::Created) {
             ExternalEventMode::Block
         } else if matches!(state, JoinState::Drained | JoinState::Failed(_)) {
-            ExternalEventMode::Ignore
+            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }
