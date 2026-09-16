@@ -298,9 +298,9 @@ fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> Flo
     })
 }
 
-/// Run one memory-substrate flow instance until the sink consumed `expected`
-/// outputs, asserting the handle reports Ephemeral.
-async fn run_memory_until_delivered(first_n: u64, count: u64, expected: u64) -> Result<()> {
+/// Join the bounded archive replay and check its exact deliveries, asserting
+/// the memory-substrate handle reports Ephemeral.
+async fn run_memory_replay_to_completion(first_n: u64, count: u64, expected: u64) -> Result<()> {
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow_memory(first_n, count, delivered.clone())
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
@@ -313,12 +313,24 @@ async fn run_memory_until_delivered(first_n: u64, count: u64, expected: u64) -> 
         ),
         "a memory run must report Ephemeral"
     );
-    wait_for_running(&handle).await?;
-    wait_for_count(&delivered, expected).await?;
-    handle.stop().await?;
+    // Archive exhaustion completes a replay even though its live source shape
+    // is infinite. A watch receiver can miss Running when this small memory
+    // replay has already advanced to draining or completion. Joining preserves
+    // startup/execution failures and works before or after that transition.
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
-        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+        .map_err(|_| {
+            anyhow!(
+                "timeout waiting for memory replay completion (state: {:?}, delivered: {})",
+                handle.current_state(),
+                delivered.load(Ordering::SeqCst)
+            )
+        })??;
+    assert_eq!(
+        delivered.load(Ordering::SeqCst),
+        expected,
+        "memory replay must deliver exactly the recorded prefix"
+    );
     Ok(())
 }
 
@@ -353,7 +365,7 @@ async fn memory_replay_from_disk_archive_is_ephemeral() -> Result<()> {
         );
         // The sink re-consumes the recorded prefix during deterministic
         // replay (F14), so the memory run observably reconstructed it.
-        run_memory_until_delivered(1, RECORDED, RECORDED).await?;
+        run_memory_replay_to_completion(1, RECORDED, RECORDED).await?;
     }
 
     assert_eq!(

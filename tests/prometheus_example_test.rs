@@ -1203,10 +1203,12 @@ enabled = {hosted}
             println!("FLOWIP-145c storage audit: {evidence}");
             assert!(audit.provenance_bytes < audit.logical_provenance_bytes);
             assert!(audit.observability_bytes < audit.logical_observability_bytes);
-            assert!(
-                audit.ordinary_provenance.mean <= 200.0,
-                "ordinary provenance: {:?}",
-                audit.ordinary_provenance
+            // The project lead confirmed on 2026-09-16 that 200 bytes is an
+            // optimisation target. Keep reporting it alongside the distribution;
+            // archive size and observation budgets remain regression checks.
+            println!(
+                "FLOWIP-145c ordinary provenance: {:.2} bytes/record (200-byte optimisation target)",
+                audit.ordinary_provenance.mean
             );
             assert!(
                 audit.attached_observability.mean <= 256.0,
