@@ -498,14 +498,22 @@ fn streamed_scalars_preserve_the_existing_wire_bytes_and_presence_states() {
             3
         };
         let mut actual = Vec::new();
-        let state = serialize::write(kind, &value, default, &mut actual, &mut values::Standalone)
-            .unwrap();
-        assert_eq!((state, &actual), (expected_state, &expected), "{kind:?}: {logical}");
+        let state =
+            serialize::write(kind, &value, default, &mut actual, &mut values::Standalone).unwrap();
+        assert_eq!(
+            (state, &actual),
+            (expected_state, &expected),
+            "{kind:?}: {logical}"
+        );
         if state == 3 {
             let mut input = Cursor::new(&actual);
-            let restored: Value = deserialize::read(kind, &mut input, &mut values::Standalone).unwrap();
+            let restored: Value =
+                deserialize::read(kind, &mut input, &mut values::Standalone).unwrap();
             input.finish().unwrap();
-            assert_eq!(serde_json::to_vec(&restored).unwrap(), serde_json::to_vec(&logical).unwrap());
+            assert_eq!(
+                serde_json::to_vec(&restored).unwrap(),
+                serde_json::to_vec(&logical).unwrap()
+            );
         }
     }
 
@@ -516,7 +524,14 @@ fn streamed_scalars_preserve_the_existing_wire_bytes_and_presence_states() {
     check(Kind::Unsigned, None::<u64>, Some(DefaultValue::Zero));
     check(Kind::Unsigned, Some(0u64), Some(DefaultValue::Zero));
     check(Kind::Unsigned, u64::MAX as i128, None);
-    for value in [0.0, -0.0, f64::from_bits(1), f64::MIN_POSITIVE, f64::MAX, f64::NAN] {
+    for value in [
+        0.0,
+        -0.0,
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::NAN,
+    ] {
         check(Kind::Float, value, Some(DefaultValue::FloatZero));
     }
     for value in [false, true] {

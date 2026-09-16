@@ -168,7 +168,9 @@ impl<'a, D: WriteDefinitions> Serializer for Encode<'a, D> {
             Kind::Text => text(value, self.out),
             Kind::Id | Kind::FlowId => values::id(value, self.out)?,
             Kind::Enum(variants) => {
-                let index = variants.iter().position(|variant| *variant == value)
+                let index = variants
+                    .iter()
+                    .position(|variant| *variant == value)
                     .ok_or_else(|| invalid(format!("unknown closed enum value: {value}")))?;
                 unsigned(index as u64, self.out);
             }
@@ -289,10 +291,16 @@ impl<D: WriteDefinitions> SerializeStruct for Fields<'_, D> {
         key: &'static str,
         value: &T,
     ) -> Result<()> {
-        let index = if self.fields.get(self.next).is_some_and(|field| field.name == key) {
+        let index = if self
+            .fields
+            .get(self.next)
+            .is_some_and(|field| field.name == key)
+        {
             self.next
         } else {
-            self.fields.iter().position(|field| field.name == key)
+            self.fields
+                .iter()
+                .position(|field| field.name == key)
                 .ok_or_else(|| invalid(format!("unknown schema field: {key}")))?
         };
         self.next = index + 1;

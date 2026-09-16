@@ -58,7 +58,8 @@ impl<'de, D: ReadDefinitions> Deserializer<'de> for Decode<'_, '_, D> {
             },
             Kind::Text => visitor.visit_string(self.input.text()?),
             Kind::Enum(variants) => visitor.visit_str(
-                variants.get(self.input.length()?)
+                variants
+                    .get(self.input.length()?)
                     .ok_or_else(|| invalid("unknown closed enum ordinal"))?,
             ),
             Kind::Struct(shape) => {
@@ -111,9 +112,12 @@ impl<'de, D: ReadDefinitions> Deserializer<'de> for Decode<'_, '_, D> {
         visitor: V,
     ) -> Result<V::Value> {
         if let Kind::Enum(variants) = self.kind {
-            let variant = variants.get(self.input.length()?)
+            let variant = variants
+                .get(self.input.length()?)
                 .ok_or_else(|| invalid("unknown closed enum ordinal"))?;
-            return visitor.visit_enum(serde::de::value::BorrowedStrDeserializer::<Error>::new(variant));
+            return visitor.visit_enum(serde::de::value::BorrowedStrDeserializer::<Error>::new(
+                variant,
+            ));
         }
         values::read(self.kind, self.input, self.definitions)?
             .into_deserializer()
