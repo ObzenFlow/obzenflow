@@ -23,7 +23,11 @@ pub struct CorrelationPayload {
     pub entry_event_id: EventId,
 
     /// Optional metadata for future extensibility
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_support::present_json"
+    )]
     pub metadata: Option<serde_json::Value>,
 }
 

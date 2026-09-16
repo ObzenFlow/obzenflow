@@ -129,11 +129,18 @@ pub struct StorageAudit {
     pub definition_bytes_read: u64,
     pub definition_cache_evictions: u64,
     pub definition_cache_peak_bytes: usize,
+    /// Kind order: writer, context, origin, descriptor, capture scope, clock keys, journal writer.
+    pub inline_definition_counts: [u64; 7],
+    pub inline_definition_bytes: [u64; 7],
+    pub definition_reference_bytes: u64,
     pub ordinary_provenance: SizeDistribution,
     pub root_provenance: SizeDistribution,
     pub attached_observability: SizeDistribution,
     pub full_measurement_packets: SizeDistribution,
     pub snapshot_only_packets: SizeDistribution,
+    pub atomic_group_envelope: SizeDistribution,
+    pub effect_record_envelope: SizeDistribution,
+    pub composite_record_envelope: SizeDistribution,
 }
 
 #[derive(Default, Debug, serde::Serialize)]
@@ -171,6 +178,9 @@ struct Samples {
     observations: Vec<f64>,
     full: Vec<f64>,
     snapshots: Vec<f64>,
+    groups: Vec<f64>,
+    effects: Vec<f64>,
+    composites: Vec<f64>,
 }
 
 /// Attribute all physical bytes and compare complete re-encoded logical records
@@ -211,6 +221,9 @@ pub fn audit_archive(run: &Path) -> Result<StorageAudit, Box<dyn std::error::Err
     audit.attached_observability = SizeDistribution::from_samples(samples.observations);
     audit.full_measurement_packets = SizeDistribution::from_samples(samples.full);
     audit.snapshot_only_packets = SizeDistribution::from_samples(samples.snapshots);
+    audit.atomic_group_envelope = SizeDistribution::from_samples(samples.groups);
+    audit.effect_record_envelope = SizeDistribution::from_samples(samples.effects);
+    audit.composite_record_envelope = SizeDistribution::from_samples(samples.composites);
     Ok(audit)
 }
 
@@ -244,6 +257,9 @@ fn audit_file<T: JournalEvent>(
         let (frame, sizes) = decoder.decode_measured::<T>(body, offset)?;
         offset += consumed as u64;
         let group = frame.group_id().map(str::to_owned);
+        if group.is_some() {
+            samples.groups.push((sizes.provenance + sizes.observability + sizes.shared) as f64);
+        }
         let records = frame.into_records();
         let logical: Vec<_> = records
             .iter()
@@ -271,6 +287,11 @@ fn audit_file<T: JournalEvent>(
         audit.observability_bytes += sizes.observability as u64;
         audit.payload_bytes += sizes.payload as u64;
         audit.shared_bytes += sizes.shared as u64;
+        for index in 0..7 {
+            audit.inline_definition_counts[index] += sizes.inline_definition_counts[index] as u64;
+            audit.inline_definition_bytes[index] += sizes.inline_definition_bytes[index] as u64;
+        }
+        audit.definition_reference_bytes += sizes.definition_reference_bytes as u64;
         let control = match group {
             Some(group) => serde_json::json!({"group_id": group, "records": logical}),
             None => serde_json::json!({"record": logical[0]}),
@@ -293,6 +314,15 @@ fn audit_file<T: JournalEvent>(
         for record in &logical {
             let provenance = &record["envelope"]["provenance"];
             let event = &provenance["event"];
+            // These inclusive figures retain every activation and relationship;
+            // they are not the ordinary-record population or a context-stripped
+            // 512-byte estimate. Group members share their group's total cost.
+            if event.get("effect_provenance").is_some() {
+                samples.effects.push(p + o);
+            }
+            if event["composite_activations"].as_array().is_some_and(|items| !items.is_empty()) {
+                samples.composites.push(p + o);
+            }
             audit.logical_provenance_bytes += serde_json::to_vec(provenance)?.len() as u64;
             audit.logical_payload_bytes += serde_json::to_vec(&record["payload"])?.len() as u64;
             if let Some(packet) = record["envelope"].get("observability") {

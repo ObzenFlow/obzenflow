@@ -75,6 +75,8 @@ pub struct DiskJournal<T: JournalEvent> {
     write_file: Arc<Mutex<StdFile>>,
     /// In-memory index: event_id -> file offset
     index: Arc<RwLock<HashMap<Ulid, u64>>>,
+    /// Disposable known frame boundary for bounded reverse-tail discovery.
+    last_frame: Arc<AtomicU64>,
     /// Shared lock to coordinate readers/writers
     ///
     /// Writers take a write lock; readers take a read lock to avoid torn lines.
@@ -217,6 +219,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             journal_id: JournalId::new(),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
+            last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
@@ -259,6 +262,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             journal_id: JournalId::new(),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
+            last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
@@ -385,6 +389,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             path: self.path.clone(),
             write_file: self.write_file.clone(),
             index: self.index.clone(),
+            last_frame: self.last_frame.clone(),
             read_write_lock: self.read_write_lock.clone(),
             writer_clocks: self.writer_clocks.clone(),
             poisoned: self.poisoned.clone(),
@@ -564,6 +569,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         };
 
         prepared.commit(committed.offset);
+        self.last_frame.store(committed.offset, Ordering::Relaxed);
         tracing::debug!(
             path = %self.path.display(),
             offset = committed.offset,
@@ -724,6 +730,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         };
 
         prepared.commit(committed.offset);
+        self.last_frame.store(committed.offset, Ordering::Relaxed);
         tracing::debug!(
             path = %self.path.display(),
             group_id,
@@ -976,7 +983,9 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         }
 
         let mut results = Vec::with_capacity(count);
-        let mut reader = ReverseFrameReader::new(file, file_len);
+        let known = self.last_frame.load(Ordering::Relaxed);
+        let anchor = if known < file_len { known } else { 0 };
+        let mut reader = ReverseFrameReader::new(file, file_len, anchor);
         let mut buffer = Vec::new();
         let mut decoder = Decoder::new(&self.path);
         while results.len() < count {
@@ -1602,6 +1611,18 @@ mod tests {
             reader.next().await.unwrap().is_some(),
             "the reader resumes at the record after the corrupt one"
         );
+
+        // Without a checked header, continuation has no known frame boundary.
+        // Repeated polls must report the same position instead of searching
+        // inside the payload for bytes that resemble another record.
+        bytes[first_end + 12] ^= 1;
+        std::fs::write(&log_path, &bytes).unwrap();
+        let mut reader = log.reader().await.unwrap();
+        assert!(reader.next().await.unwrap().is_some());
+        for _ in 0..3 {
+            assert!(reader.next().await.is_err());
+            assert_eq!(reader.position(), 1);
+        }
 
         std::fs::remove_dir_all(&test_dir).ok();
     }

@@ -21,7 +21,11 @@ All fixed-width integers are little endian. A frame consists of:
 
 The 16-byte trailer commits the entire ordinary record or atomic group. A reader
 validates both lengths, magic values and checksums before exposing members.
-Reverse reads address frames using the terminal length, never newline discovery.
+Reverse reads first follow checked header lengths from the latest indexed frame
+offset to establish the physical tail boundary, then use terminal lengths.
+This prevents a torn payload ending with an embedded frame from inventing a
+boundary. Reopened journals rebuild the disposable index through the same
+forward scanner. No reader uses newline discovery.
 An incomplete final frame follows the existing live/incomplete-archive policy;
 invalid complete frames are corruption. A partial header with incorrect bytes is
 corruption, not a legacy input or a skippable empty line.
@@ -38,7 +42,8 @@ value. Slots and ordinals are zero-based unless stated otherwise.
    basenames. This table is local to the frame and has no external authority.
 2. Definition-slot count and entries. Each entry starts with its kind byte:
    writer `0`, flow/stage context `1`, complete origin `2`, descriptor `3`,
-   capture scope `4`, clock-writer key `5`. Storage tag `0` carries a
+   capture scope `4`, ordered clock-key names `5`, physical journal-writer ID
+   `6`. Storage tag `0` carries a
    length-delimited complete body. Tag `1` carries a journal ordinal, absolute
    carrier-frame offset and definition slot. Each use in a record is the
    current frame's definition-slot ordinal, checked against its contextual kind.
@@ -83,6 +88,23 @@ with the current record's complete packet capture. Capture state is cleared
 between group members. Equal owners or event IDs alone never select this tag.
 Clock components always carry their own complete unsigned values.
 
+A clock carries a reference to its complete ordered key-name list, followed by
+one complete absolute unsigned value for every key. The definition contains no
+clock values. Empty clocks and present zero-valued components remain distinct.
+Typed clock-key strings use tag `0` plus text, `1` plus a raw ULID, `2` plus a
+stage-writer ULID or `3` plus a system-writer ULID. Prefix encodings require
+exact reconstruction of the original string. A stage-identity field can reuse a
+complete `Stage` writer definition; a `System` writer is rejected in that slot.
+
+Complete origins have tag `0` plus the ordinary origin structure, or tag `1`
+for the explicit source metadata shape containing exactly `flow_id`, `flow_name`
+and `source_event_id`, all strings. Tag `1` requires exact equality between
+`source_event_id` and the origin's `entry_event_id`. It stores the complete
+origin fields, full flow ID and flow name, and restores the source-event key
+from that same definition's identity. Canonical `flow_<ULID>` names can use a
+16-byte ULID. Extra keys, unequal IDs or different value types use tag `0` and
+opaque JSON. This alias never consults another record or another definition.
+
 ## Immutable definitions and commitment
 
 Definitions contain complete origin, context or descriptor values. Definition
@@ -116,3 +138,8 @@ Readers validate directly referenced frames and return full logical values.
 They apply zero preceding numerical updates and follow at most one definition
 dependency hop. Definition metadata adds no logical record, clock tick, reader
 position, transport credit, receipt or execution authority.
+
+`serialize.rs` and `deserialize.rs` stream positional structures through Core's
+Serde implementations. They share the same `schema.rs` slots and scalar rules
+with the metadata/dynamic-value codec, avoiding a second full JSON object tree.
+Payload classification and validation remain Core's `JournalPayload` methods.

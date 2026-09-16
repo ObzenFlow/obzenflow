@@ -231,7 +231,12 @@ impl WriteTable {
 
     /// Called only by the append owner after its successful write and flush.
     pub(super) fn commit(self, offset: u64) {
-        let stamp = FileStamp::read(&self.path).ok();
+        let Ok(stamp) = FileStamp::read(&self.path) else {
+            // The append committed, but its path is no longer available. A
+            // later cache miss may duplicate metadata; never publish a locator
+            // whose carrier cannot currently be addressed.
+            return;
+        };
         for (slot, entry) in self.entries.into_iter().enumerate() {
             if let Entry::Local(definition) = entry {
                 self.store.publish(
@@ -241,7 +246,7 @@ impl WriteTable {
                         offset,
                         slot,
                     },
-                    stamp.clone(),
+                    Some(stamp.clone()),
                 );
             }
         }
@@ -343,6 +348,22 @@ impl<'a> ReadTable<'a> {
         (provenance, observation)
     }
 
+    pub(super) fn definition_costs(&self) -> ([usize; 7], [usize; 7], usize) {
+        let mut counts = [0; 7];
+        let mut bytes = [0; 7];
+        let mut references = 0;
+        for (entry, cost) in self.entries.iter().zip(&self.costs) {
+            match entry {
+                Entry::Local(definition) => {
+                    counts[definition.kind as usize] += 1;
+                    bytes[definition.kind as usize] += cost;
+                }
+                Entry::External(..) => references += cost,
+            }
+        }
+        (counts, bytes, references)
+    }
+
     fn definition(&mut self, kind: DefinitionKind, locator: &Locator) -> Result<Definition> {
         if locator.journal == journal_name(self.path)? && locator.offset >= self.offset {
             return Err(invalid(
@@ -421,8 +442,8 @@ impl<'a> ReadTable<'a> {
         let body = frame::validate(&bytes).map_err(frame::io_error)?;
         let mut cursor = Cursor::new(body);
         let entries = read_entries(&mut cursor, &canonical, None)?;
-        let definition = match entries.into_iter().nth(locator.slot) {
-            Some(Entry::Local(definition)) if definition.kind == kind => definition,
+        let definition = match entries.get(locator.slot) {
+            Some(Entry::Local(definition)) if definition.kind == kind => definition.clone(),
             Some(Entry::Local(_)) => return Err(invalid("definition kind mismatch")),
             Some(Entry::External(..)) => {
                 return Err(invalid("definition-to-definition reference forbidden"))
@@ -430,10 +451,27 @@ impl<'a> ReadTable<'a> {
             None => return Err(invalid("missing definition slot")),
         };
         super::validate_carrier(&mut cursor)?;
-        // Validate the complete body before putting it in the cache.
-        decode_definition(&definition)?;
-        self.store
-            .publish(definition.clone(), locator.clone(), Some(stamp));
+        // Several requested definitions usually share one carrier. Validate
+        // and cache its complete local bodies together, without following any
+        // of that carrier's references or materialising its event history.
+        for entry in &entries {
+            if let Entry::Local(definition) = entry {
+                decode_definition(definition)?;
+            }
+        }
+        for (slot, entry) in entries.into_iter().enumerate() {
+            if let Entry::Local(definition) = entry {
+                self.store.publish(
+                    definition,
+                    Locator {
+                        journal: locator.journal.clone(),
+                        offset: locator.offset,
+                        slot,
+                    },
+                    Some(stamp.clone()),
+                );
+            }
+        }
         Ok(definition)
     }
 }
@@ -593,10 +631,12 @@ mod tests {
     #[test]
     fn retained_definitions_are_bounded_and_eviction_only_causes_complete_duplicates() {
         let store = DefinitionStore::default();
-        let path = Path::new("bounded.log");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bounded.log");
+        std::fs::File::create(&path).unwrap();
         let first = Value::String("a complete immutable descriptor".repeat(80));
         for index in 0..8_000 {
-            let mut table = WriteTable::new(store.clone(), path).unwrap();
+            let mut table = WriteTable::new(store.clone(), &path).unwrap();
             let value = if index == 0 {
                 first.clone()
             } else {
@@ -608,7 +648,7 @@ mod tests {
             table.commit(index);
             assert!(store.0.lock().unwrap().bytes <= CACHE_BYTES);
         }
-        let mut table = WriteTable::new(store, path).unwrap();
+        let mut table = WriteTable::new(store, &path).unwrap();
         table
             .reference(DefinitionKind::Descriptor, &first, &mut Vec::new())
             .unwrap();

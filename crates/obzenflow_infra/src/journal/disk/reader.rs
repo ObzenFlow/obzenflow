@@ -290,9 +290,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
     /// Read one logical record from `reader` under the current policy, advancing
     /// `read_offset` and `position` exactly as a committed read does. The
-    /// internal loop skips blank lines and advances past a corrupt record so a
-    /// best-effort observer resumes at the next one. Returns the disposition plus
-    /// the byte offset where the disposed (post-whitespace) frame began, for
+    /// reader advances past corruption only when a checked header establishes
+    /// the next physical boundary. Returns the disposition plus
+    /// the byte offset where the disposed frame began, for
     /// corruption reporting. Leaves `at_end`/`stall_polls` to the caller. Clean
     /// EOF maps to `EndOfCommittedRecords`.
     async fn advance_one<B: tokio::io::AsyncBufRead + Unpin>(
@@ -327,7 +327,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             ));
         }
 
-        loop {
+        {
             let frame_start = self.read_offset;
             let Some((consumed, termination)) = read_frame_async(reader, &mut self.buf)
                 .await
@@ -386,7 +386,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         self.pending_group_next_index = 0;
                     }
                     self.position += 1;
-                    return Ok((
+                    Ok((
                         Disposition::Yield(match group_id {
                             Some(group_id) => super::log_record::LogFrame::AtomicGroup {
                                 group_id,
@@ -395,13 +395,17 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                             None => super::log_record::LogFrame::Record(record),
                         }),
                         frame_start,
-                    ));
+                    ))
                 }
                 Disposition::Corrupt(problem) => {
-                    self.read_offset += consumed as u64;
-                    return Ok((Disposition::Corrupt(problem), frame_start));
+                    if super::codec::frame::frame_length(&self.buf)
+                        .is_ok_and(|length| length == consumed)
+                    {
+                        self.read_offset += consumed as u64;
+                    }
+                    Ok((Disposition::Corrupt(problem), frame_start))
                 }
-                other => return Ok((other, frame_start)),
+                other => Ok((other, frame_start)),
             }
         }
     }
@@ -438,12 +442,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         let mut reader = match self.buffered_reader.take() {
             Some(reader)
                 if !self.pending.is_empty()
-                    || reader
-                        .buffer()
-                        .split_inclusive(|byte| *byte == b'\n')
-                        .any(|line| {
-                            line.last() == Some(&b'\n') && !line.iter().all(u8::is_ascii_whitespace)
-                        }) =>
+                    || super::codec::frame::frame_length(reader.buffer())
+                        .is_ok_and(|length| length <= reader.buffer().len()) =>
             {
                 reader
             }
@@ -454,10 +454,9 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         // There is no await between committed cursor advancement and returning
         // the record. An interrupted I/O await leaves buffered_reader empty;
         // read_offset still identifies the next unconsumed physical frame.
-        if matches!(
-            &disposition,
-            Disposition::Yield(_) | Disposition::Corrupt(_)
-        ) {
+        if matches!(&disposition, Disposition::Yield(_))
+            || (matches!(&disposition, Disposition::Corrupt(_)) && self.read_offset > frame_start)
+        {
             self.buffered_reader = Some(reader);
         }
         match disposition {
@@ -507,9 +506,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                 Ok(None)
             }
             Disposition::Corrupt(problem) => {
-                // advance_one already advanced read_offset past the unreadable
-                // record so a best-effort observer that keeps polling resumes at
-                // the next one. Strict consumers abort on this error.
+                // A checked header permits best-effort continuation at its next
+                // boundary. An invalid header leaves the cursor at the error.
                 self.stall_polls = 0;
                 tracing::error!(
                     read_offset = frame_start,

@@ -17,6 +17,7 @@ pub mod id;
 pub mod ingress;
 pub mod journal;
 pub mod metrics;
+mod serde_support;
 pub mod time;
 pub mod web;
 

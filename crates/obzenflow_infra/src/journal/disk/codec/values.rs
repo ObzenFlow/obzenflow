@@ -36,7 +36,7 @@ impl ReadDefinitions for Standalone {
     }
 }
 
-fn default_value(default: DefaultValue) -> Value {
+pub(super) fn default_value(default: DefaultValue) -> Value {
     match default {
         DefaultValue::Zero => Value::from(0u64),
         DefaultValue::FloatZero => Value::from(0.0),
@@ -46,7 +46,7 @@ fn default_value(default: DefaultValue) -> Value {
     }
 }
 
-fn is_default(value: &Value, default: DefaultValue) -> bool {
+pub(super) fn is_default(value: &Value, default: DefaultValue) -> bool {
     match default {
         // Negative zero has a different representation and must remain explicit.
         DefaultValue::FloatZero => value.as_f64().is_some_and(|n| n.to_bits() == 0),
@@ -97,6 +97,11 @@ pub(super) fn write(
         )),
         Kind::Text => text(string(value)?, out),
         Kind::Id | Kind::FlowId => id(string(value)?, out)?,
+        Kind::StageIdentity => definitions.reference(
+            DefinitionKind::Writer,
+            &serde_json::json!({"type": "Stage", "id": value}),
+            out,
+        )?,
         Kind::ClockKey => {
             let key = string(value)?;
             // This is an explicitly typed writer key, never an application string.
@@ -106,6 +111,17 @@ pub(super) fn write(
             {
                 out.push(1);
                 id(key, out)?;
+            } else if let Some((tag, suffix)) = [(2, "writer_stage_"), (3, "writer_system_")]
+                .into_iter()
+                .find_map(|(tag, prefix)| key.strip_prefix(prefix).map(|suffix| (tag, suffix)))
+                .filter(|(_, suffix)| {
+                    suffix
+                        .parse::<ulid::Ulid>()
+                        .is_ok_and(|id| id.to_string() == *suffix)
+                })
+            {
+                out.push(tag);
+                id(suffix, out)?;
             } else {
                 out.push(0);
                 text(key, out);
@@ -128,6 +144,46 @@ pub(super) fn write(
             } else {
                 out.push(0);
                 write(Kind::Struct(Shape::Capture), value, out, definitions)?;
+            }
+        }
+        Kind::Origin => {
+            // This one explicitly named source-metadata shape has a local
+            // identity alias. Extra/custom keys or unequal identities select
+            // the complete opaque JSON representation instead.
+            let metadata = value.get("metadata").and_then(Value::as_object);
+            let source_metadata = metadata.filter(|metadata| {
+                metadata.len() == 3
+                    && metadata.get("source_event_id") == value.get("entry_event_id")
+                    && metadata
+                        .get("source_event_id")
+                        .is_some_and(Value::is_string)
+                    && metadata.get("flow_id").is_some_and(Value::is_string)
+                    && metadata.get("flow_name").is_some_and(Value::is_string)
+            });
+            match source_metadata {
+                None => {
+                    out.push(0);
+                    write(Kind::Struct(Shape::Origin), value, out, definitions)?;
+                }
+                Some(metadata) => {
+                    out.push(1);
+                    let mut origin = value.clone();
+                    origin.as_object_mut().unwrap().remove("metadata");
+                    write(Kind::Struct(Shape::Origin), &origin, out, definitions)?;
+                    let flow_id = metadata["flow_id"].as_str().unwrap();
+                    if let Some(id) = flow_id
+                        .strip_prefix("flow_")
+                        .and_then(|id| id.parse::<ulid::Ulid>().ok())
+                        .filter(|id| format!("flow_{id}") == flow_id)
+                    {
+                        out.push(1);
+                        out.extend_from_slice(&id.to_bytes());
+                    } else {
+                        out.push(0);
+                        text(flow_id, out);
+                    }
+                    text(metadata["flow_name"].as_str().unwrap(), out);
+                }
             }
         }
         Kind::Value => write_dynamic(value, out, 0)?,
@@ -190,13 +246,11 @@ pub(super) fn write(
                 .get("clocks")
                 .and_then(Value::as_object)
                 .ok_or_else(|| invalid("missing clock components"))?;
-            unsigned(clocks.len() as u64, out);
-            for (writer, count) in clocks {
-                definitions.reference(
-                    DefinitionKind::ClockWriter,
-                    &Value::String(writer.clone()),
-                    out,
-                )?;
+            // Only the immutable ordered key names are shared. Every clock
+            // writes every complete absolute counter, including present zeros.
+            let keys = Value::Array(clocks.keys().cloned().map(Value::String).collect());
+            definitions.reference(DefinitionKind::ClockKeys, &keys, out)?;
+            for count in clocks.values() {
                 write(Kind::Unsigned, count, out, definitions)?;
             }
         }
@@ -225,9 +279,18 @@ pub(super) fn read(
         },
         Kind::Text => Value::String(input.text()?),
         Kind::Id | Kind::FlowId => Value::String(read_id(input)?),
+        Kind::StageIdentity => {
+            let writer = definitions.resolve(DefinitionKind::Writer, input)?;
+            if writer["type"].as_str() != Some("Stage") {
+                return Err(invalid("stage identity references a system writer"));
+            }
+            writer["id"].clone()
+        }
         Kind::ClockKey => Value::String(match input.byte()? {
             0 => input.text()?,
             1 => read_id(input)?,
+            2 => format!("writer_stage_{}", read_id(input)?),
+            3 => format!("writer_system_{}", read_id(input)?),
             _ => return Err(invalid("invalid writer key")),
         }),
         Kind::Timestamp => {
@@ -251,6 +314,32 @@ pub(super) fn read(
                 .ok_or_else(|| invalid("capture alias has no packet capture"))?,
             _ => return Err(invalid("unknown capture alias tag")),
         },
+        Kind::Origin => {
+            let tag = input.byte()?;
+            let mut origin = read(Kind::Struct(Shape::Origin), input, definitions)?;
+            match tag {
+                0 => {}
+                1 => {
+                    if origin.get("metadata").is_some()
+                        || !origin.get("entry_event_id").is_some_and(Value::is_string)
+                    {
+                        return Err(invalid("invalid local source metadata alias"));
+                    }
+                    let flow_id = match input.byte()? {
+                        0 => input.text()?,
+                        1 => format!("flow_{}", read_id(input)?),
+                        _ => return Err(invalid("unknown source flow ID tag")),
+                    };
+                    origin["metadata"] = serde_json::json!({
+                        "source_event_id": origin["entry_event_id"],
+                        "flow_id": flow_id,
+                        "flow_name": input.text()?,
+                    });
+                }
+                _ => return Err(invalid("unknown origin body tag")),
+            }
+            origin
+        }
         Kind::Value => read_dynamic(input, 0)?,
         Kind::Enum(variants) => Value::String(
             variants
@@ -289,12 +378,17 @@ pub(super) fn read(
             Value::Array(values)
         }
         Kind::Clock => {
-            let length = bounded_count(input)?;
+            let keys = definitions.resolve(DefinitionKind::ClockKeys, input)?;
+            let keys = keys
+                .as_array()
+                .ok_or_else(|| invalid("invalid clock key definition"))?;
+            if keys.len() > input.remaining() {
+                return Err(invalid("missing absolute clock values"));
+            }
             let mut clocks = Map::new();
-            for _ in 0..length {
-                let writer = definitions.resolve(DefinitionKind::ClockWriter, input)?;
+            for writer in keys {
                 let count = Value::from(input.unsigned()?);
-                if clocks.insert(string(&writer)?.into(), count).is_some() {
+                if clocks.insert(string(writer)?.into(), count).is_some() {
                     return Err(invalid("duplicate clock writer"));
                 }
             }

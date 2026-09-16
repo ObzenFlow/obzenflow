@@ -2770,6 +2770,14 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let live_map_ids = effect_evidence_ids(&live_map);
     let live_finalise_ids = effect_evidence_ids(&live_finalise);
 
+    let storage = obzenflow_infra::testing::journal::audit_archive(&live_archive)
+        .expect("the current-schema production HN archive is fully decodable");
+    assert!(storage.provenance_bytes < storage.logical_provenance_bytes);
+    assert!(storage.observability_bytes < storage.logical_observability_bytes);
+    assert!(storage.effect_record_envelope.count > 0);
+    assert!(storage.composite_record_envelope.count > 0);
+    println!("FLOWIP-145c HN archive audit: {}", serde_json::to_string(&storage).unwrap());
+
     // Replay prepares a fresh host fixture with a different physical endpoint.
     // The live guard can be retired; neither endpoint is durable flow identity.
     drop(server);

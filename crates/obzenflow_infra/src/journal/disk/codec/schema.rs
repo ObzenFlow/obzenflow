@@ -12,7 +12,8 @@ pub(super) enum DefinitionKind {
     Origin = 2,
     Descriptor = 3,
     CaptureScope = 4,
-    ClockWriter = 5,
+    ClockKeys = 5,
+    JournalWriter = 6,
 }
 
 impl DefinitionKind {
@@ -23,7 +24,8 @@ impl DefinitionKind {
             2 => Self::Origin,
             3 => Self::Descriptor,
             4 => Self::CaptureScope,
-            5 => Self::ClockWriter,
+            5 => Self::ClockKeys,
+            6 => Self::JournalWriter,
             _ => return None,
         })
     }
@@ -32,10 +34,11 @@ impl DefinitionKind {
         match self {
             Self::Writer => Kind::Struct(Shape::Writer),
             Self::Context => Kind::Struct(Shape::Context),
-            Self::Origin => Kind::Struct(Shape::Origin),
+            Self::Origin => Kind::Origin,
             Self::Descriptor => Kind::Text,
             Self::CaptureScope => Kind::Struct(Shape::CaptureScope),
-            Self::ClockWriter => Kind::ClockKey,
+            Self::ClockKeys => Kind::List(&Kind::ClockKey),
+            Self::JournalWriter => Kind::Id,
         }
     }
 }
@@ -52,6 +55,8 @@ pub(super) enum Kind {
     Timestamp,
     PacketCapture,
     SnapshotCapture,
+    Origin,
+    StageIdentity,
     Json,
     /// Complete binary values for typed, non-hot-path framework structures.
     Value,
@@ -186,7 +191,7 @@ impl Shape {
             S::Journal => {
                 const {
                     &[
-                        field("journal_writer_id", K::Id),
+                        field("journal_writer_id", K::Definition(D::JournalWriter)),
                         field("vector_clock", K::Clock),
                         field("timestamp", K::Timestamp),
                         field("journal_group_id", K::Text),
@@ -274,7 +279,7 @@ impl Shape {
             S::InputCount => {
                 const {
                     &[
-                        field("upstream", K::Id),
+                        field("upstream", K::StageIdentity),
                         field("event_type", K::Definition(D::Descriptor)),
                         field("total", K::Unsigned),
                     ]
@@ -328,7 +333,7 @@ impl Shape {
                         field("receipted_seq", K::Unsigned),
                         field("writer_seq", K::Unsigned),
                         field("last_consumed_event_id", K::Id),
-                        field("last_consumed_writer", K::Id),
+                        field("last_consumed_writer", K::Definition(D::JournalWriter)),
                         field("last_consumed_vector_clock", K::Clock),
                         field("last_receipted_event_id", K::Id),
                         field("last_receipted_vector_clock", K::Clock),

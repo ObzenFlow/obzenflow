@@ -90,7 +90,7 @@ fn absolute_current_numbers_do_not_depend_on_previous_numeric_records() {
         .accounting;
     accounting.events_processed_total = 1001;
     accounting.events_emitted_total = 1001;
-    let (offset, current) = persist(&path, &original, store);
+    let (offset, current) = persist(&path, &original, store.clone());
     let mut disk = std::fs::read(&path).unwrap();
     // Damage the preceding numeric record, leaving the immutable definition
     // carrier intact. An addressed read must apply zero preceding updates.
@@ -111,6 +111,215 @@ fn absolute_current_numbers_do_not_depend_on_previous_numeric_records() {
         .accounting;
     assert_eq!(accounting.events_processed_total, 1001);
     assert_eq!(accounting.events_emitted_total, 1001);
+    for total in [1001, 999, 0, u64::MAX] {
+        let accounting = &mut original
+            .envelope
+            .provenance
+            .event
+            .runtime
+            .as_mut()
+            .unwrap()
+            .accounting;
+        accounting.events_processed_total = total;
+        accounting.events_emitted_total = total;
+        original.envelope.provenance.journal.timestamp =
+            "1969-12-31T23:59:59.000000001Z".parse().unwrap();
+        let (offset, bytes) = persist(&path, &original, store.clone());
+        assert_eq!(
+            serde_json::to_vec(&decode(&path, offset, &bytes).unwrap()).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+    }
+}
+
+pub(super) fn captured_prometheus_records() -> Vec<JournalRecord<ChainPayload>> {
+    [
+        include_str!("fixtures/prometheus_source.jsonl"),
+        include_str!("fixtures/prometheus_transform.jsonl"),
+        include_str!("fixtures/prometheus_receipts.jsonl"),
+    ]
+    .into_iter()
+    .flat_map(str::lines)
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect()
+}
+
+#[test]
+fn source_metadata_alias_requires_the_complete_named_shape_and_exact_identity() {
+    use super::values::Standalone;
+    let source = captured_prometheus_records().remove(0);
+    let origin = serde_json::to_value(
+        source
+            .envelope
+            .provenance
+            .event
+            .correlation
+            .unwrap()
+            .payload
+            .unwrap(),
+    )
+    .unwrap();
+    for change in 0..6 {
+        let mut value = origin.clone();
+        match change {
+            1 => value["metadata"]["source_event_id"] = json!(EventId::new()),
+            2 => value["metadata"]["custom"] = json!({"source_event_id": null, "zero": -0.0}),
+            3 => value["metadata"]["flow_id"] = Value::Null,
+            4 => value["metadata"] = Value::Null,
+            5 => {
+                value.as_object_mut().unwrap().remove("metadata");
+            }
+            _ => {}
+        }
+        let mut bytes = Vec::new();
+        values::write(Kind::Origin, &value, &mut bytes, &mut Standalone).unwrap();
+        assert_eq!(bytes[0], u8::from(change == 0));
+        let mut cursor = Cursor::new(&bytes);
+        let decoded = values::read(Kind::Origin, &mut cursor, &mut Standalone).unwrap();
+        cursor.finish().unwrap();
+        assert_eq!(
+            serde_json::to_vec(&value).unwrap(),
+            serde_json::to_vec(&decoded).unwrap()
+        );
+    }
+}
+
+#[test]
+fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("metadata.log");
+    let store = DefinitionStore::default();
+    let records = captured_prometheus_records();
+    for metadata in [
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!([])),
+        Some(json!({"n":-0.0})),
+    ] {
+        for mut record in [records[0].clone(), records[32].clone()] {
+            record
+                .envelope
+                .provenance
+                .event
+                .correlation
+                .as_mut()
+                .unwrap()
+                .payload
+                .as_mut()
+                .unwrap()
+                .metadata = metadata.clone();
+            if let ChainPayload::Delivery(delivery) = &mut record.payload {
+                delivery.middleware_context = metadata.clone();
+            }
+            let original = serde_json::to_vec(&serde_json::to_value(&record).unwrap()).unwrap();
+            let (offset, bytes) = persist(&path, &record, store.clone());
+            let restored = decode(&path, offset, &bytes).unwrap();
+            let jsonl = serde_json::to_vec(&serde_json::to_value(&restored).unwrap()).unwrap();
+            assert_eq!(original, jsonl);
+            let restored: JournalRecord<ChainPayload> = serde_json::from_slice(&jsonl).unwrap();
+            assert_eq!(
+                original,
+                serde_json::to_vec(&serde_json::to_value(restored).unwrap()).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn captured_prometheus_records_preserve_all_fields_and_attribute_complete_origin_costs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("captured.log");
+    let store = DefinitionStore::default();
+    let mut provenance = 0;
+    let mut inline_origins = 0;
+    let mut references = 0;
+    let mut frame_bytes = 0;
+    let mut origin_count = 0;
+    let mut families = std::collections::BTreeMap::<String, (usize, f64, usize)>::new();
+    let records = captured_prometheus_records();
+    assert_eq!(records.len(), 48);
+    for original in &records {
+        let (offset, bytes) = persist(&path, original, store.clone());
+        let (frame, sizes) = Decoder::cold(&path)
+            .decode_measured::<ChainEvent>(frame::validate(&bytes).unwrap(), offset)
+            .unwrap();
+        let restored = frame.into_records().remove(0);
+        assert_eq!(
+            serde_json::to_vec(&serde_json::to_value(original).unwrap()).unwrap(),
+            serde_json::to_vec(&serde_json::to_value(restored).unwrap()).unwrap()
+        );
+        provenance += sizes.provenance;
+        inline_origins += sizes.inline_definition_bytes[2];
+        references += sizes.definition_reference_bytes;
+        frame_bytes += bytes.len();
+        origin_count += sizes.inline_definition_counts[2];
+        let family = families
+            .entry(
+                original
+                    .envelope
+                    .provenance
+                    .event
+                    .flow_context
+                    .stage_name
+                    .clone(),
+            )
+            .or_default();
+        family.0 += 1;
+        family.1 += sizes.provenance as f64 + sizes.shared as f64 / 2.0;
+        family.2 += sizes.inline_definition_counts[2];
+    }
+    println!("Captured Prometheus: {} records, {frame_bytes} frame bytes, {provenance} provenance, {inline_origins} complete inline origins, {references} definition references", records.len());
+    println!("Origins: {origin_count}; stage counts/provenance bytes/inline origins: {families:?}");
+}
+
+#[test]
+fn provenance_growth_follows_retained_relationships_without_expanding_ancestors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("growth.log");
+    let store = DefinitionStore::default();
+    let mut original = record();
+    let mut previous = original.envelope.provenance.event.id;
+    let mut maxima = [0; 3];
+    for (bucket, count) in [16, 128, 1024].into_iter().enumerate() {
+        for index in 0..count {
+            original.envelope.provenance.event.id = EventId::new();
+            original.envelope.provenance.event.causality.parent_ids = vec![previous];
+            original
+                .envelope
+                .provenance
+                .event
+                .runtime
+                .as_mut()
+                .unwrap()
+                .accounting
+                .events_processed_total = index;
+            let (_, bytes) = persist(&path, &original, store.clone());
+            if index > 0 {
+                maxima[bucket] = maxima[bucket].max(bytes.len());
+            }
+            previous = original.envelope.provenance.event.id;
+        }
+    }
+    assert!(
+        maxima[2] <= maxima[0] + 8,
+        "only absolute integer/address widths may grow: {maxima:?}"
+    );
+    let mut prior = None;
+    for count in [1usize, 100, 1000] {
+        original.envelope.provenance.event.causality.parent_ids =
+            (0..count).map(|_| EventId::new()).collect();
+        let (offset, bytes) = persist(&path, &original, store.clone());
+        let restored = decode(&path, offset, &bytes).unwrap();
+        assert_eq!(
+            restored.envelope.provenance.event.causality.parent_ids,
+            original.envelope.provenance.event.causality.parent_ids
+        );
+        if let Some((prior_count, prior_bytes)) = prior {
+            assert!(bytes.len() - prior_bytes <= (count - prior_count) * 16 + 8);
+        }
+        prior = Some((count, bytes.len()));
+    }
 }
 
 #[test]

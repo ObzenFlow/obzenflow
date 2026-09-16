@@ -6,9 +6,13 @@
 //! See README.md for the wire contract and scalar-preservation invariants.
 
 mod definitions;
+mod deserialize;
 pub(crate) mod frame;
+#[cfg(test)]
+mod performance_tests;
 mod primitives;
 mod schema;
+mod serialize;
 #[cfg(test)]
 mod tests;
 mod values;
@@ -70,32 +74,32 @@ pub(crate) fn prepare<P: JournalPayload>(
     }
     for record in records {
         definitions.begin_record();
-        let value = serde_json::to_value(record)?;
-        let envelope = &value["envelope"];
+        record.payload.validate(&record.envelope.provenance.event)?;
         let mut provenance = Vec::new();
-        values::write(
+        serialize::write(
             Kind::Struct(Shape::Provenance),
-            &envelope["provenance"],
+            &record.envelope.provenance,
+            None,
             &mut provenance,
             &mut definitions,
         )?;
         bytes(&provenance, &mut content);
-        match envelope.get("observability") {
+        match record.envelope.observability.as_ref() {
             None => content.push(0),
-            Some(serde_json::Value::Null) => content.push(1),
             Some(observation) => {
                 content.push(2);
                 let mut encoded = Vec::new();
-                values::write(
+                serialize::write(
                     Kind::Struct(Shape::Observation),
                     observation,
+                    None,
                     &mut encoded,
                     &mut definitions,
                 )?;
                 bytes(&encoded, &mut content);
             }
         }
-        bytes(&serde_json::to_vec(&value["payload"])?, &mut content);
+        bytes(&serde_json::to_vec(&record.payload)?, &mut content);
     }
     let mut body = Vec::new();
     definitions.encode(&mut body);
@@ -121,6 +125,9 @@ pub(crate) struct FrameSizes {
     pub(crate) shared: usize,
     pub(crate) records: usize,
     pub(crate) packets: usize,
+    pub(crate) inline_definition_counts: [usize; 7],
+    pub(crate) inline_definition_bytes: [usize; 7],
+    pub(crate) definition_reference_bytes: usize,
 }
 
 impl Decoder {
@@ -174,51 +181,58 @@ impl Decoder {
             let start = input.position();
             definitions.section(1);
             let mut provenance_input = Cursor::new(input.bytes()?);
-            let provenance = values::read(
+            let provenance = deserialize::read::<
+                obzenflow_core::event::provenance::Provenance<
+                    <T::Payload as JournalPayload>::Provenance,
+                >,
+            >(
                 Kind::Struct(Shape::Provenance),
                 &mut provenance_input,
                 &mut definitions,
             )?;
             provenance_input.finish()?;
             sizes.provenance += input.position() - start;
-            let mut envelope = serde_json::Map::new();
-            envelope.insert("provenance".into(), provenance);
             let start = input.position();
             definitions.section(2);
-            match input.byte()? {
-                0 => {}
-                1 => {
-                    envelope.insert("observability".into(), serde_json::Value::Null);
-                }
+            let observability = match input.byte()? {
+                0 | 1 => None,
                 2 => {
                     sizes.packets += 1;
                     let mut observation_input = Cursor::new(input.bytes()?);
-                    let observation = values::read(
+                    let observation = deserialize::read(
                         Kind::Struct(Shape::Observation),
                         &mut observation_input,
                         &mut definitions,
                     )?;
                     observation_input.finish()?;
-                    envelope.insert("observability".into(), observation);
+                    Some(observation)
                 }
                 _ => return Err(invalid("unknown observation presence tag")),
-            }
-            if envelope
-                .get("observability")
-                .is_some_and(|value| !value.is_null())
-            {
+            };
+            if observability.is_some() {
                 sizes.observability += input.position() - start;
             }
             let start = input.position();
             let payload: serde_json::Value = serde_json::from_slice(input.bytes()?)?;
             sizes.payload += input.position() - start;
-            let record: LogRecord<T> = serde_json::from_value(
-                serde_json::json!({"envelope": envelope, "payload": payload}),
-            )?;
+            let payload = T::Payload::decode(&provenance.event, payload)?;
+            payload.validate(&provenance.event)?;
+            let record: LogRecord<T> = JournalRecord {
+                envelope: obzenflow_core::event::provenance::EventEnvelope {
+                    provenance,
+                    observability,
+                },
+                payload,
+            };
             records.push(record);
         }
         input.finish()?;
         let (provenance, observations) = definitions.attributed_bytes();
+        (
+            sizes.inline_definition_counts,
+            sizes.inline_definition_bytes,
+            sizes.definition_reference_bytes,
+        ) = definitions.definition_costs();
         sizes.provenance += provenance;
         sizes.observability += observations;
         sizes.shared = body.len() + frame::HEADER_LEN + frame::TRAILER_LEN

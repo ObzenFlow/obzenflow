@@ -36,7 +36,11 @@ pub struct DeliveryPayload {
 
     /// When + any middleware extensions
     pub processed_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_support::present_json"
+    )]
     pub middleware_context: Option<Value>,
 }
 
