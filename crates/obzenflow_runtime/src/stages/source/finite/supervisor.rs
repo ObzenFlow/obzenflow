@@ -869,6 +869,11 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                 | FiniteSourceState::WaitingForGun
         ) {
             ExternalEventMode::Block
+        } else if matches!(
+            state,
+            FiniteSourceState::Drained | FiniteSourceState::Failed(_)
+        ) {
+            ExternalEventMode::Ignore
         } else {
             ExternalEventMode::Poll
         }

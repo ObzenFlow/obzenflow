@@ -459,32 +459,21 @@ fn assert_probe_provenance<T: Clone + std::fmt::Debug>(
 /// FLOWIP-120i: labels are stdout presentation only. No journal row in a
 /// labelled run may contain the label literal.
 fn assert_journals_carry_no_label(run_dir: &Path) {
-    for entry in walkdir(run_dir) {
-        let Ok(contents) = std::fs::read_to_string(&entry) else {
-            continue;
-        };
+    let export = tempfile::NamedTempFile::new().expect("journal export file");
+    obzenflow_infra::journal::disk::inspect::export_jsonl(run_dir, Some(export.path()))
+        .expect("journals must decode before checking for presentation labels");
+    for entry in [
+        run_dir.join("run_manifest.json"),
+        export.path().to_path_buf(),
+    ] {
+        let contents =
+            std::fs::read_to_string(&entry).expect("journal projection must be readable");
         assert!(
             !contents.contains("[replay]"),
             "journal artifact {} contains the stdout label literal",
             entry.display()
         );
     }
-}
-
-fn walkdir(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            files.extend(walkdir(&path));
-        } else {
-            files.push(path);
-        }
-    }
-    files
 }
 
 // ---------------------------------------------------------------------------

@@ -1247,6 +1247,37 @@ mod tests {
                 repeated
             );
         }
+
+        // A queued startup message must not turn the original terminal result
+        // into an unrelated unhandled-event failure in the external wrapper.
+        use crate::supervised_base::{
+            ChannelBuilder, EventLoopDirective, HandlerSupervised,
+            HandlerSupervisedWithExternalEvents,
+        };
+        for state in [
+            JournalSinkState::Failed("archive corruption".into()),
+            JournalSinkState::Drained,
+        ] {
+            let (sender, receiver, watcher) = ChannelBuilder::new().build(state.clone());
+            sender.send(JournalSinkEvent::Ready).await.unwrap();
+            let terminal_supervisor = JournalSinkSupervisor::<AuditSink> {
+                name: "sink_audit_sink".into(),
+                stage_id,
+                subscription: None,
+                _marker: std::marker::PhantomData,
+            };
+            let mut wrapped =
+                HandlerSupervisedWithExternalEvents::new(terminal_supervisor, receiver, watcher);
+            assert!(matches!(
+                wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
+                EventLoopDirective::Terminate
+            ));
+            drop(sender);
+            assert!(matches!(
+                wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
+                EventLoopDirective::Terminate
+            ));
+        }
     }
 
     fn lifecycle_report(parent_event_id: EventId) -> SinkLifecycleReport {

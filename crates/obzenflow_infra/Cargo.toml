@@ -82,6 +82,8 @@ ai-tiktoken = ["dep:tiktoken-rs"]
 test-support = ["obzenflow_runtime/test-support"]
 
 [dev-dependencies]
+# Integration tests mutate binary archives through the provider's fixture API.
+obzenflow_infra = { workspace = true, features = ["test-support"] }
 hyper = { workspace = true, features = ["client", "http2"] }
 warp = { workspace = true, features = ["test"] }
 # FLOWIP-114o: `test-util` enables `#[tokio::test(start_paused = true)]` for the

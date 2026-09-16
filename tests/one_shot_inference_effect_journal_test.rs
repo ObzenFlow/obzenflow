@@ -4,6 +4,8 @@
 
 //! FLOWIP-120j checked journal witness for scalar `inference!`.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, ChatEffects, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
@@ -19,15 +21,14 @@ use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectFactOwner, EffectOutcomePayload,
     EffectRecord, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
-use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload};
+use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::dsl::backpressure_clause::{
     enforced as enforced_backpressure, off as backpressure_off, track_only as track_backpressure,
     BackpressureClause,
 };
 use obzenflow_dsl::{effectful_transform, flow, inference, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolverWithMetadata, EffectRegistrationBuilder, Effects,
@@ -733,15 +734,8 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
     let relative = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .expect("stage data journal path");
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("stage journal opens");
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative))
         .await
-        .expect("stage journal is readable")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()
@@ -786,15 +780,8 @@ async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
     let relative = manifest["system_journal_file"]
         .as_str()
         .expect("system journal path");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("system journal opens");
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<SystemEvent>(&run_dir.join(relative))
         .await
-        .expect("system journal is readable")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()

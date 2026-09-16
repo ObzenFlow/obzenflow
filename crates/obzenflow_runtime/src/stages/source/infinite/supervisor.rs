@@ -952,6 +952,11 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                 | InfiniteSourceState::WaitingForGun
         ) {
             ExternalEventMode::Block
+        } else if matches!(
+            state,
+            InfiniteSourceState::Drained | InfiniteSourceState::Failed(_)
+        ) {
+            ExternalEventMode::Ignore
         } else {
             ExternalEventMode::Poll
         }

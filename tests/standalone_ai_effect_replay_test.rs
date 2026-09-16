@@ -382,7 +382,10 @@ fn mark_archive_incomplete(run_dir: &Path) {
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("run_manifest.json")).unwrap())
             .unwrap();
     let system_journal = manifest["system_journal_file"].as_str().unwrap();
-    std::fs::write(run_dir.join(system_journal), "").unwrap();
+    obzenflow_infra::testing::journal::retain_archive_frames(run_dir, |path, _| {
+        path.file_name().and_then(|name| name.to_str()) != Some(system_journal)
+    })
+    .expect("incomplete fixture must retain readable stage journals");
 }
 
 async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {

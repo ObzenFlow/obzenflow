@@ -1119,6 +1119,41 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
 }
 
 #[tokio::test]
+async fn terminal_transform_dispatch_precedes_queued_ready() {
+    for state in [
+        TransformState::Failed("archive corruption".into()),
+        TransformState::Drained,
+    ] {
+        let (supervisor, mut ctx, ..) = build_transform_harness(
+            |t| ExpandHandler {
+                writer_id: WriterId::from(t),
+            },
+            1,
+            1,
+        )
+        .await;
+        let (sender, receiver, watcher) = crate::supervised_base::ChannelBuilder::<
+            TransformEvent<ExpandHandler>,
+            TransformState<ExpandHandler>,
+        >::new()
+        .build(state.clone());
+        sender.send(TransformEvent::Ready).await.unwrap();
+        let mut wrapped = crate::supervised_base::HandlerSupervisedWithExternalEvents::new(
+            supervisor, receiver, watcher,
+        );
+        assert!(matches!(
+            wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
+            EventLoopDirective::Terminate
+        ));
+        drop(sender);
+        assert!(matches!(
+            wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
+            EventLoopDirective::Terminate
+        ));
+    }
+}
+
+#[tokio::test]
 async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
     tokio::time::pause();
 

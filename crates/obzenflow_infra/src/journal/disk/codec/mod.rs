@@ -14,6 +14,8 @@ mod primitives;
 mod schema;
 mod serialize;
 #[cfg(test)]
+mod test_data;
+#[cfg(test)]
 mod tests;
 mod values;
 

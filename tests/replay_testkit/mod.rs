@@ -13,10 +13,10 @@
 #![allow(dead_code)]
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::id::StageId;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
+use obzenflow_core::id::{JournalId, StageId};
+use obzenflow_core::journal::JournalReader;
 use obzenflow_core::WriterId;
 use obzenflow_runtime::testing::DeliveredOrderProjection;
 use std::collections::HashMap;
@@ -70,21 +70,10 @@ pub async fn read_stage_envelopes(
     run_dir: &Path,
     stage_key: &str,
 ) -> Vec<JournalRecord<ChainPayload>> {
-    let manifest = archive_manifest(run_dir);
-    let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
-        .as_str()
-        .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
-    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(stage_journal),
-            JournalOwner::stage(StageId::new()),
-        )
-        .expect("stage journal should open");
-
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal should read")
+    CausalOrderingService::order_envelopes_by_event_id(
+        read_stage_envelopes_appended(run_dir, stage_key).await,
+    )
+    .expect("stage journal should order causally")
 }
 
 /// Read a stage's data journal in physical append order, the order a
@@ -102,14 +91,31 @@ pub async fn read_stage_envelopes_appended(
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
-    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(stage_journal),
-            JournalOwner::stage(StageId::new()),
-        )
-        .expect("stage journal should open");
+    read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(stage_journal)).await
+}
 
-    let mut reader = journal.reader().await.expect("stage journal reader");
+/// Observe committed records without opening a writer or recovering its tail.
+pub async fn read_journal_envelopes<T: JournalEvent>(
+    path: &Path,
+) -> Vec<JournalRecord<T::Payload>> {
+    CausalOrderingService::order_envelopes_by_event_id(
+        read_journal_envelopes_appended::<T>(path).await,
+    )
+    .expect("journal should order causally")
+}
+
+pub async fn read_journal_envelopes_appended<T: JournalEvent>(
+    path: &Path,
+) -> Vec<JournalRecord<T::Payload>> {
+    // Probes also run while the stage is writing. Opening another writer here
+    // would recover (truncate) an in-flight tail; a live reader only observes it.
+    let mut reader = obzenflow_infra::journal::disk::reader::DiskJournalReader::<T>::new(
+        path.to_path_buf(),
+        JournalId::new(),
+        std::sync::Arc::new(tokio::sync::RwLock::new(())),
+    )
+    .await
+    .expect("stage journal reader");
     let mut envelopes = Vec::new();
     while let Some(envelope) = reader.next().await.expect("stage journal read") {
         envelopes.push(envelope);

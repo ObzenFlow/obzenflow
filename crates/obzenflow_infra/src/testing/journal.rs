@@ -22,6 +22,74 @@ pub fn omit_observations(
     run: &Path,
     keep: impl Fn(usize) -> bool,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    rewrite_archive(run, keep, |_, _| true).map(|(observations, _)| observations)
+}
+
+/// Retain complete frames in a closed test archive. The predicate receives the
+/// journal path and expanded records so tests need not parse the wire format.
+/// All journals are decoded before any carrier is replaced, and retained frames
+/// are re-encoded with local definitions. Atomic groups cannot be split.
+pub fn retain_archive_frames(
+    run: &Path,
+    keep: impl Fn(&Path, &[serde_json::Value]) -> bool,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    rewrite_archive(run, |_| true, keep).map(|(_, records)| records)
+}
+
+/// Damage exactly one non-final chain frame in a closed test archive without
+/// changing its length or subsequent offsets. First localise all definitions so
+/// the selected corruption cannot invalidate another journal's shared carrier.
+pub fn corrupt_chain_frame(
+    run: &Path,
+    journal: &Path,
+    select: impl Fn(&[serde_json::Value]) -> bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    retain_archive_frames(run, |_, _| true)?;
+    let mut reader = BufReader::new(std::fs::File::open(journal)?);
+    let mut decoder = Decoder::cold(journal);
+    let mut input = Vec::new();
+    let mut offset = 0;
+    let mut selected = None;
+    while let Some((consumed, termination)) = read_frame_sync(&mut reader, &mut input)? {
+        let frame = match dispose(
+            classify_frame::<ChainEvent>(&input, &mut decoder, offset),
+            termination,
+            ReadPolicy::SealedScan {
+                tolerate_torn_tail: false,
+            },
+        ) {
+            Disposition::Yield(frame) => frame,
+            Disposition::Corrupt(problem) => return Err(problem.to_string().into()),
+            _ => return Err("unexpected uncommitted fixture".into()),
+        };
+        let records = frame
+            .into_records()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        if select(&records) {
+            if selected.is_some() {
+                return Err("corruption predicate must select exactly one frame".into());
+            }
+            selected = Some((offset, offset + consumed as u64));
+        }
+        offset += consumed as u64;
+    }
+    let (start, end) = selected.ok_or("corruption predicate did not select a frame")?;
+    if end == offset {
+        return Err("corruption fixture must have a complete frame after the damaged frame".into());
+    }
+    let mut bytes = std::fs::read(journal)?;
+    bytes[start as usize + codec::frame::HEADER_LEN] ^= 1;
+    std::fs::write(journal, bytes)?;
+    Ok(())
+}
+
+fn rewrite_archive(
+    run: &Path,
+    keep_observation: impl Fn(usize) -> bool,
+    keep_frame: impl Fn(&Path, &[serde_json::Value]) -> bool,
+) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
     let manifest: RunManifest =
         serde_json::from_slice(&std::fs::read(run.join("run_manifest.json"))?)?;
     let mut files = std::collections::BTreeMap::new();
@@ -32,6 +100,7 @@ pub fn omit_observations(
     }
     let mut ordinal = 0;
     let mut removed = 0;
+    let mut removed_records = 0;
     let mut replacements = Vec::new();
     for (file, system) in files {
         let path = run.join(file);
@@ -39,23 +108,39 @@ pub fn omit_observations(
             continue;
         }
         let bytes = if system {
-            rewrite::<SystemEvent>(&path, &keep, &mut ordinal, &mut removed)?
+            rewrite::<SystemEvent>(
+                &path,
+                &keep_observation,
+                &keep_frame,
+                &mut ordinal,
+                &mut removed,
+                &mut removed_records,
+            )?
         } else {
-            rewrite::<ChainEvent>(&path, &keep, &mut ordinal, &mut removed)?
+            rewrite::<ChainEvent>(
+                &path,
+                &keep_observation,
+                &keep_frame,
+                &mut ordinal,
+                &mut removed,
+                &mut removed_records,
+            )?
         };
         replacements.push((path, bytes));
     }
     for (path, bytes) in replacements {
         std::fs::write(path, bytes)?;
     }
-    Ok(removed)
+    Ok((removed, removed_records))
 }
 
 fn rewrite<T: JournalEvent>(
     path: &Path,
     keep: &impl Fn(usize) -> bool,
+    keep_frame: &impl Fn(&Path, &[serde_json::Value]) -> bool,
     ordinal: &mut usize,
     removed: &mut usize,
+    removed_records: &mut usize,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = BufReader::new(std::fs::File::open(path)?);
     let mut decoder = Decoder::cold(path);
@@ -77,6 +162,15 @@ fn rewrite<T: JournalEvent>(
         offset += consumed as u64;
         let group = frame.group_id().map(str::to_owned);
         let mut records = frame.into_records();
+        let expanded = records
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        if !keep_frame(path, &expanded) {
+            *removed_records += records.len();
+            *ordinal += records.len();
+            continue;
+        }
         for record in &mut records {
             let protected = serde_json::to_value(&record.envelope.provenance)?;
             let payload = serde_json::to_value(&record.payload)?;

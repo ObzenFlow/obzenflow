@@ -309,6 +309,35 @@ const RECORDED: u64 = 12; // ticks 1..=12
 const R2_LIVE: u64 = 2; // ticks 13..=14
 const SLOW_MS: u64 = 100; // per-event transform delay in the interrupted run
 
+#[tokio::test(flavor = "multi_thread")]
+async fn journal_probe_leaves_an_incomplete_tail_untouched() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+    let delivered = Arc::new(AtomicU64::new(0));
+    let handle = build_flow(journal_base.clone(), 1, RECORDED, 0, delivered.clone())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+        .await
+        .map_err(|error| anyhow!("flow failed to build: {error:?}"))?;
+    wait_for_running(&handle).await?;
+    wait_for_count(&delivered, RECORDED).await?;
+    stop_and_wait(handle).await?;
+
+    let run = replay_testkit::latest_run_dir(&journal_base);
+    let journal = run.join(&manifest(&run).stages["src"].data_journal_file);
+    let mut in_flight = std::fs::read(&journal)?;
+    in_flight.pop().expect("source journal contains frames");
+    // Model a writer paused just before the final commit byte is appended.
+    std::fs::write(&journal, &in_flight)?;
+    let records = replay_testkit::read_stage_envelopes_appended(&run, "src").await;
+    assert!(!records.is_empty(), "the complete prefix remains readable");
+    assert_eq!(
+        std::fs::read(journal)?,
+        in_flight,
+        "an observational probe must not perform writer recovery"
+    );
+    Ok(())
+}
+
 /// Record R0 and produce the interrupted resume R1: the source crossed its
 /// boundary (watermark authored, no live tail), the slow transform was still
 /// mid-catch-up at the cancel. Returns `(r0, r1)`.
@@ -509,17 +538,15 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         .expect("manifest names the src stage")
         .data_journal_file;
     let src_journal_path = r1.join(src_journal_file);
-    let original = std::fs::read_to_string(&src_journal_path)?;
-    let retained: String = original
-        .lines()
-        .filter(|line| !line.contains("catch_up_complete"))
-        .map(|line| format!("{line}\n"))
-        .collect();
-    assert_ne!(
-        original, retained,
-        "the watermark row must have been stripped"
-    );
-    std::fs::write(&src_journal_path, retained)?;
+    let removed = obzenflow_infra::testing::journal::retain_archive_frames(&r1, |path, records| {
+        path != src_journal_path
+            || !records.iter().any(|record| {
+                record.pointer("/envelope/provenance/event/event_type")
+                    == Some(&json!("control.catch_up_complete"))
+            })
+    })
+    .map_err(anyhow::Error::from_boxed)?;
+    assert_eq!(removed, 1, "the watermark row must have been stripped");
 
     // Resume the torn archive. No generation-1 boundary is recorded anywhere,
     // so the resume must enter generation 1 again and extend the prefix.

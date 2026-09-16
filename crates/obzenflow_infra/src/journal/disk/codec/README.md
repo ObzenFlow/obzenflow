@@ -156,3 +156,19 @@ position, transport credit, receipt or execution authority.
 Serde implementations. They share the same `schema.rs` slots and scalar rules
 with the metadata/dynamic-value codec, avoiding a second full JSON object tree.
 Payload classification and validation remain Core's `JournalPayload` methods.
+
+## Provider test data
+
+`test_data.rs` builds deterministic records using current Core types. Its stream
+contains 16 source facts, 16 transformed facts and 16 delivery receipts, with
+distinct event IDs, varying absolute accounting and clocks, and 17 complete
+origins reused across related records. Source and transform records carry runtime
+measurements; receipts carry snapshots only. Separate tests exercise boundary
+values and optional application metadata.
+
+The timing test repeats this 48-record stream to compare the compact codec and
+an uncompressed control over identical logical records. This is a warm,
+low-cardinality workload, not the production-flow 100k archive or cache-eviction
+proof. These synthetic measurements are not directly comparable to the previous
+captured corpus. No historical archive, JSONL capture or schema projection is
+needed by the provider tests.

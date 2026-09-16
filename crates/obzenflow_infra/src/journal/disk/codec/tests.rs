@@ -132,52 +132,10 @@ fn absolute_current_numbers_do_not_depend_on_previous_numeric_records() {
     }
 }
 
-pub(super) fn captured_prometheus_records() -> Vec<JournalRecord<ChainPayload>> {
-    [
-        include_str!("fixtures/prometheus_source.jsonl"),
-        include_str!("fixtures/prometheus_transform.jsonl"),
-        include_str!("fixtures/prometheus_receipts.jsonl"),
-    ]
-    .into_iter()
-    .flat_map(str::lines)
-    .map(|line| {
-        // Keep the captured format-3 evidence immutable. Project only the
-        // explicitly retired fields out of this test corpus before exercising
-        // the current schema. This is not a production archive migration.
-        let mut record: Value = serde_json::from_str(line).unwrap();
-        let event = record["envelope"]["provenance"]["event"]
-            .as_object_mut()
-            .unwrap();
-        event.remove("intent");
-        let processing = event
-            .get_mut("processing")
-            .unwrap()
-            .as_object_mut()
-            .unwrap();
-        processing.remove("processed_by");
-        processing.remove("error_hops_remaining");
-        let accounting = event.get_mut("runtime").unwrap()["accounting"]
-            .as_object_mut()
-            .unwrap();
-        accounting.remove("terminal_groups_committed_total");
-        accounting.remove("terminal_group_commit_failures_total");
-        let origin = event.get_mut("correlation").unwrap()["payload"]
-            .as_object_mut()
-            .unwrap();
-        origin.remove("entry_stage");
-        let metadata = origin.remove("metadata").unwrap();
-        assert_eq!(metadata.as_object().unwrap().len(), 3);
-        assert_eq!(metadata["source_event_id"], origin["entry_event_id"]);
-        assert!(metadata["flow_id"].is_string() && metadata["flow_name"].is_string());
-        serde_json::from_value(record).unwrap()
-    })
-    .collect()
-}
-
 #[test]
 fn origin_metadata_keeps_application_keys_and_values_opaque() {
     use super::values::Standalone;
-    let source = captured_prometheus_records().remove(0);
+    let source = test_data::record(test_data::Stage::Source, 0);
     let mut origin = serde_json::to_value(
         source
             .envelope
@@ -230,7 +188,10 @@ fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("metadata.log");
     let store = DefinitionStore::default();
-    let records = captured_prometheus_records();
+    let records = [
+        test_data::record(test_data::Stage::Source, 0),
+        test_data::record(test_data::Stage::Receipt, 0),
+    ];
     for metadata in [
         None,
         Some(Value::Null),
@@ -238,7 +199,7 @@ fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl(
         Some(json!([])),
         Some(json!({"n":-0.0})),
     ] {
-        for mut record in [records[0].clone(), records[32].clone()] {
+        for mut record in records.clone() {
             record
                 .envelope
                 .provenance
@@ -268,9 +229,9 @@ fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl(
 }
 
 #[test]
-fn captured_prometheus_records_preserve_all_fields_and_attribute_complete_origin_costs() {
+fn representative_records_preserve_all_fields_and_attribute_complete_origin_costs() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("captured.log");
+    let path = dir.path().join("representative.log");
     let store = DefinitionStore::default();
     let mut provenance = 0;
     let mut inline_origins = 0;
@@ -278,8 +239,8 @@ fn captured_prometheus_records_preserve_all_fields_and_attribute_complete_origin
     let mut frame_bytes = 0;
     let mut origin_count = 0;
     let mut families = std::collections::BTreeMap::<String, (usize, f64, usize)>::new();
-    let records = captured_prometheus_records();
-    assert_eq!(records.len(), 48);
+    let records = test_data::records();
+    assert_eq!(records.len(), 3 * test_data::RECORDS_PER_STAGE);
     for original in &records {
         let (offset, bytes) = persist(&path, original, store.clone());
         let (frame, sizes) = Decoder::cold(&path)
@@ -310,7 +271,12 @@ fn captured_prometheus_records_preserve_all_fields_and_attribute_complete_origin
         family.1 += sizes.provenance as f64 + sizes.shared as f64 / 2.0;
         family.2 += sizes.inline_definition_counts[2];
     }
-    println!("Captured Prometheus: {} records, {frame_bytes} frame bytes, {provenance} provenance, {inline_origins} complete inline origins, {references} definition references", records.len());
+    // The first input has no successful transform or receipt; the downstream
+    // samples extend one input beyond the source sample. All shared origins
+    // must be references after their first committed definition.
+    assert_eq!(origin_count, test_data::RECORDS_PER_STAGE + 1);
+    assert!(references > 0);
+    println!("Representative stream: {} records, {frame_bytes} frame bytes, {provenance} provenance, {inline_origins} complete inline origins, {references} definition references", records.len());
     println!("Origins: {origin_count}; stage counts/provenance bytes/inline origins: {families:?}");
 }
 

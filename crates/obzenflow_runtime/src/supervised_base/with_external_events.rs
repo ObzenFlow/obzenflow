@@ -17,7 +17,8 @@ pub(crate) enum ExternalEventMode {
     Block,
     /// Poll using `try_recv()` and proceed if empty.
     Poll,
-    #[cfg(test)]
+    /// Dispatch the current state without admitting further external events.
+    /// Terminal states use this to finish after their transition actions.
     Ignore,
 }
 
@@ -96,7 +97,6 @@ where
         }
 
         match <S as ExternalEventPolicy>::external_event_mode(state) {
-            #[cfg(test)]
             ExternalEventMode::Ignore => {}
             ExternalEventMode::Block => match self.external_events.recv().await {
                 Some(event) => return Ok(EventLoopDirective::Transition(event)),

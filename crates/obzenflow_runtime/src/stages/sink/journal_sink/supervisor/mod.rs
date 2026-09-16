@@ -463,6 +463,11 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> ExternalEv
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, JournalSinkState::Created) {
             ExternalEventMode::Block
+        } else if matches!(
+            state,
+            JournalSinkState::Drained | JournalSinkState::Failed(_)
+        ) {
+            ExternalEventMode::Ignore
         } else {
             ExternalEventMode::Poll
         }

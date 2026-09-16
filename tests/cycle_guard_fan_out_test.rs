@@ -5,6 +5,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::ChainEvent;
+use obzenflow_core::id::JournalId;
+use obzenflow_core::journal::JournalReader;
 use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
@@ -66,7 +69,7 @@ fn single_flow_run_dir(base: &Path) -> Result<PathBuf> {
     Ok(dirs.pop().expect("dirs is non-empty"))
 }
 
-fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
+async fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
     for entry in fs::read_dir(run_dir)? {
         let path = entry?.path();
         if !path.is_file() {
@@ -86,9 +89,17 @@ fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
             continue;
         }
 
-        let contents = fs::read_to_string(&path)?;
-        if contents.contains(needle) {
-            return Ok(true);
+        let mut reader =
+            obzenflow_infra::journal::disk::reader::DiskJournalReader::<ChainEvent>::new(
+                path,
+                JournalId::new(),
+                Arc::new(tokio::sync::RwLock::new(())),
+            )
+            .await?;
+        while let Some(record) = reader.next().await? {
+            if serde_json::to_string(&record)?.contains(needle) {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -341,7 +352,7 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
 
     let run_dir = single_flow_run_dir(&journal_root)?;
     assert!(
-        !any_error_log_contains(&run_dir, "Cycle depth")?,
+        !any_error_log_contains(&run_dir, "Cycle depth").await?,
         "expected no cycle guard aborts; run_dir={run_dir:?}"
     );
 

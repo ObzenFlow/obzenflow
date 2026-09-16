@@ -415,23 +415,16 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         .as_str()
         .expect("manifest names src_b's data journal");
     let journal_path = recorded_run.join(src_b_journal);
-    let original = std::fs::read_to_string(&journal_path)?;
-    let corrupted: String = original
-        .lines()
-        .map(|line| {
-            if line.contains("\"value\":102") {
-                "garbage-that-is-not-a-frame".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .map(|line| format!("{line}\n"))
-        .collect();
-    assert_ne!(
-        original, corrupted,
-        "the b:102 frame must have been mangled"
-    );
-    std::fs::write(&journal_path, corrupted)?;
+    obzenflow_infra::testing::journal::corrupt_chain_frame(
+        &recorded_run,
+        &journal_path,
+        |records| {
+            records
+                .iter()
+                .any(|record| record["payload"]["value"] == 102)
+        },
+    )
+    .map_err(anyhow::Error::from_boxed)?;
 
     // Resume: the corrupted source's catch-up must fail loudly, and no live
     // input may cross the fan-in.

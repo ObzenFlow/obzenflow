@@ -35,10 +35,10 @@ struct Timings {
 }
 
 #[tokio::test]
-async fn matched_captured_stream_append_read_and_reopen_costs() {
+async fn matched_representative_stream_append_read_and_reopen_costs() {
     use crate::journal::disk::{scanner::read_frame_sync, DiskJournal};
-    let captured = super::tests::captured_prometheus_records();
-    let records: Vec<_> = captured.iter().cycle().take(768).collect();
+    let samples = super::test_data::records();
+    let records: Vec<_> = samples.iter().cycle().take(768).collect();
     let dir = tempfile::tempdir().unwrap();
     for repetition in 0..3 {
         // Alternate execution order to avoid consistently favouring one codec.

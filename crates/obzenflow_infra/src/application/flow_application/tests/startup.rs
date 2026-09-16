@@ -210,17 +210,19 @@ enabled = false
         "the negative witness must inspect actual committed records"
     );
     for record in records {
-        let event = &record["event"];
+        let event = &record["envelope"]["provenance"]["event"];
+        let event_type = event["event_type"].as_str().expect("record event type");
+        let event_kind = event["event_kind"].as_str().expect("record event kind");
         assert_ne!(
-            event["pipeline_event"], "running",
+            event_type, "system.pipeline.running",
             "failed bind cannot publish Running"
         );
-        assert_ne!(
-            event["content"]["content_type"], "data",
+        assert!(
+            !["fact", "composite_data", "execution"].contains(&event_kind),
             "failed bind cannot commit source data or effect records"
         );
         assert_ne!(
-            event["content"]["content_type"], "delivery",
+            event_kind, "delivery",
             "failed bind cannot commit sink receipts"
         );
     }
@@ -398,13 +400,21 @@ enabled = false
         .map(|entry| entry.path())
         .find(|path| path.is_dir())
         .expect("one run directory should exist");
-    let system_log =
-        std::fs::read_to_string(run_dir.join("system.log")).expect("system.log readable");
-
+    let export = tempdir.path().join("terminal.jsonl");
+    crate::journal::disk::inspect::export_jsonl(&run_dir, Some(&export)).unwrap();
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(export)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
     assert!(
-            system_log.contains(r#""pipeline_event":"completed""#),
-            "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; system.log:\n{system_log}"
-        );
+        records.iter().any(|record| {
+            record.pointer("/envelope/provenance/event/event_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("system.pipeline.completed")
+        }),
+        "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; records: {records:?}"
+    );
 }
 
 // FLOWIP-114d gap 24 regression: on graceful server-mode shutdown the
