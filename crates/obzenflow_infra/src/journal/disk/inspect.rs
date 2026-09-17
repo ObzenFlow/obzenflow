@@ -254,7 +254,7 @@ fn archive_policy(run_dir: &Path, manifest: &RunManifest) -> ReadPolicy {
     }
 }
 
-fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
+pub(super) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
     let manifest_path = run_dir.join(RUN_MANIFEST_FILENAME);
     let body =
         std::fs::read_to_string(&manifest_path).map_err(|source| JournalInspectError::Io {
@@ -282,6 +282,13 @@ fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
             ),
         });
     }
+
+    super::manifest_gate::require_observability_capture(&value).map_err(|message| {
+        JournalInspectError::Manifest {
+            path: manifest_path.clone(),
+            message,
+        }
+    })?;
 
     serde_json::from_value(value).map_err(|e| JournalInspectError::Manifest {
         path: manifest_path,

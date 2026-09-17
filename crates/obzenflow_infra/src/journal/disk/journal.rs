@@ -14,6 +14,7 @@ use super::reverse_reader::ReverseFrameReader;
 use super::scanner::{
     classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ReadPolicy,
 };
+use crate::journal::observability::JournalObservability;
 use async_trait::async_trait;
 use chrono::Utc;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
@@ -26,7 +27,7 @@ use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::journal::Journal;
+use obzenflow_core::journal::{Journal, JournalCapture, ObservabilityPolicy};
 use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::io::{BufReader, SeekFrom};
@@ -40,12 +41,11 @@ use ulid::Ulid;
 
 /// Global registry of per-path read/write locks so all DiskJournal instances
 /// that point at the same file coordinate access and prevent torn reads.
-static JOURNAL_LOCKS: OnceLock<
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<RwLock<()>>>>,
-> = OnceLock::new();
+type SharedJournalState = (Arc<RwLock<()>>, JournalObservability);
+static JOURNAL_LOCKS: OnceLock<Mutex<HashMap<PathBuf, SharedJournalState>>> = OnceLock::new();
 static RECOVERED_TORN_FRAMES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-fn shared_lock_for_path(path: &Path) -> Arc<RwLock<()>> {
+pub(super) fn shared_state_for_path(path: &Path) -> (Arc<RwLock<()>>, JournalObservability) {
     // FLOWIP-120q: key by a normalized absolute path so the same file maps to one
     // lock regardless of how the path is expressed (relative vs absolute), so a
     // reader and a writer that reach the same file by different spellings still
@@ -57,7 +57,7 @@ fn shared_lock_for_path(path: &Path) -> Arc<RwLock<()>> {
     let mut guard = registry.lock().unwrap();
     guard
         .entry(key)
-        .or_insert_with(|| Arc::new(RwLock::new(())))
+        .or_insert_with(|| (Arc::new(RwLock::new(())), JournalObservability::default()))
         .clone()
 }
 
@@ -91,6 +91,8 @@ pub struct DiskJournal<T: JournalEvent> {
     /// equals append order. None outside factory-built flow journals.
     admission_sequencer: Option<Arc<AtomicU64>>,
     definitions: DefinitionStore,
+    observations: super::observations::DiskObservationReader<T>,
+    observability: JournalObservability,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -217,11 +219,13 @@ impl<T: JournalEvent> DiskJournal<T> {
             owner: None,
             definitions: DefinitionStore::default(),
             journal_id: JournalId::new(),
+            observations: super::observations::DiskObservationReader::new(log_path.clone(), true),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
             last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
             index: Arc::new(RwLock::new(index)),
-            read_write_lock: shared_lock_for_path(&log_path),
+            read_write_lock: shared_state_for_path(&log_path).0,
+            observability: shared_state_for_path(&log_path).1,
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
             poisoned: Arc::new(AtomicBool::new(false)),
             admission_sequencer: None,
@@ -260,11 +264,13 @@ impl<T: JournalEvent> DiskJournal<T> {
             owner: Some(owner),
             definitions: DefinitionStore::for_archive(&log_path),
             journal_id: JournalId::new(),
+            observations: super::observations::DiskObservationReader::new(log_path.clone(), true),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
             last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
             index: Arc::new(RwLock::new(index)),
-            read_write_lock: shared_lock_for_path(&log_path),
+            read_write_lock: shared_state_for_path(&log_path).0,
+            observability: shared_state_for_path(&log_path).1,
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
             poisoned: Arc::new(AtomicBool::new(false)),
             admission_sequencer: None,
@@ -395,6 +401,8 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             poisoned: self.poisoned.clone(),
             admission_sequencer: self.admission_sequencer.clone(),
             definitions: self.definitions.clone(),
+            observations: self.observations.clone(),
+            observability: self.observability.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -518,6 +526,9 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         let path = self.path.clone();
         let write_file = self.write_file.clone();
         let write_bytes = std::mem::take(&mut prepared.bytes);
+        let trailer = write_bytes.len() - codec::frame::TRAILER_LEN;
+        let observation_crc =
+            u32::from_le_bytes(write_bytes[trailer..trailer + 4].try_into().unwrap());
 
         let outcome =
             tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
@@ -587,6 +598,12 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             .write()
             .await
             .insert(writer_id, vector_clock);
+        self.observations.committed(
+            std::slice::from_ref(&envelope),
+            committed.offset,
+            committed.next_offset,
+            observation_crc,
+        );
 
         Ok(envelope)
     }
@@ -688,6 +705,8 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             source: Box::new(e),
         })?;
         let bytes = std::mem::take(&mut prepared.bytes);
+        let trailer = bytes.len() - codec::frame::TRAILER_LEN;
+        let observation_crc = u32::from_le_bytes(bytes[trailer..trailer + 4].try_into().unwrap());
 
         let path = self.path.clone();
         let write_file = self.write_file.clone();
@@ -747,8 +766,22 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             }
         }
         *self.writer_clocks.write().await = next_writer_clocks;
+        self.observations.committed(
+            &envelopes,
+            committed.offset,
+            committed.next_offset,
+            observation_crc,
+        );
 
         Ok(envelopes)
+    }
+}
+
+impl<T: JournalEvent> Drop for DiskJournal<T> {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.write_file) == 1 {
+            self.observations.checkpoint();
+        }
     }
 }
 
@@ -762,15 +795,39 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         self.owner.as_ref()
     }
 
+    fn observation_reader(&self) -> Option<&dyn obzenflow_core::journal::JournalObservationReader> {
+        Some(&self.observations)
+    }
+
+    fn configure_observability(&self, policy: ObservabilityPolicy) -> Result<(), JournalError> {
+        self.observability.configure(policy)
+    }
+
     async fn append(
         &self,
         event: T,
         parent: Option<&JournalRecord<T::Payload>>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        self.append_with_capture(event, parent, JournalCapture::default())
+            .await
+    }
+
+    async fn append_with_capture(
+        &self,
+        event: T,
+        parent: Option<&JournalRecord<T::Payload>>,
+        capture: JournalCapture<T>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let journal = self.clone();
         let parent = parent.cloned();
         retain_commit(self.poisoned.clone(), async move {
-            journal.append_record(event, parent.as_ref()).await
+            let (mut events, reservation) = journal.observability.prepare(vec![event], capture);
+            let result = journal
+                .append_record(events.pop().expect("one event"), parent.as_ref())
+                .await
+                .map(|record| vec![record]);
+            reservation.finish::<T>(&result);
+            result.map(|mut records| records.pop().expect("one record"))
         })
         .await
     }
@@ -781,13 +838,27 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         events: Vec<T>,
         parent: Option<&JournalRecord<T::Payload>>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.append_group_with_capture(group_id, events, parent, JournalCapture::default())
+            .await
+    }
+
+    async fn append_group_with_capture(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        parent: Option<&JournalRecord<T::Payload>>,
+        capture: JournalCapture<T>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let journal = self.clone();
         let parent = parent.cloned();
         let group_id = group_id.to_owned();
         retain_commit(self.poisoned.clone(), async move {
-            journal
+            let (events, reservation) = journal.observability.prepare(events, capture);
+            let result = journal
                 .append_records(&group_id, events, parent.as_ref())
-                .await
+                .await;
+            reservation.finish::<T>(&result);
+            result
         })
         .await
     }
@@ -1076,10 +1147,15 @@ mod tests {
                 obzenflow_core::JournalOwner::stage(stage),
             )
             .unwrap();
+            journal
+                .configure_observability(ObservabilityPolicy::Periodic {
+                    interval: std::time::Duration::from_secs(60),
+                })
+                .unwrap();
             // Hold metadata publication after the physical frame is written.
             let index_guard = journal.index.write().await;
-            let first = ChainEventFactory::data_event(writer, "retained.v1", serde_json::json!(1));
-            let second = ChainEventFactory::data_event(writer, "retained.v1", serde_json::json!(2));
+            let first = crate::journal::observability::tests::event(stage, 1);
+            let second = crate::journal::observability::tests::event(stage, 2);
             let first_id = first.id;
             let pending_journal = journal.clone();
             let mut receipt = Box::pin(async move {
@@ -1101,7 +1177,7 @@ mod tests {
             .await
             .unwrap();
             drop(receipt);
-            let next = ChainEventFactory::data_event(writer, "retained.v1", serde_json::json!(3));
+            let next = crate::journal::observability::tests::event(stage, 3);
             let mut next_receipt = Box::pin(journal.append(next, None));
             assert!(next_receipt.as_mut().now_or_never().is_none());
             assert!(journal.read_write_lock.try_read().is_err());
@@ -1110,6 +1186,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            assert!(appended.envelope.observability.is_none());
             assert_eq!(
                 appended
                     .envelope

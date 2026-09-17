@@ -291,7 +291,7 @@ async fn prometheus_5k_typed_try_map_errors_are_unknown_only() -> Result<()> {
 }
 
 /// FLOWIP-140j: run the shipped example's definition through FlowApplication
-/// twice in this test executable, then compare the supported durable projection.
+/// across hosting and capture policies, then compare the durable projection.
 #[cfg(all(feature = "web-host", feature = "prometheus"))]
 #[test]
 fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
@@ -303,13 +303,21 @@ fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
     use std::collections::{BTreeMap, BTreeSet};
 
     let root = tempfile::Builder::new()
-        .prefix("flowip-145a-omission-")
+        .prefix("flowip-145b-sparse-")
         .tempdir_in("target")
         .expect("example test fixture")
         .keep();
     let mut runs = Vec::new();
-    for hosted in [false, true] {
-        let directory = root.join(if hosted { "hosted" } else { "plain" });
+    let mut storage = Vec::new();
+    for (hosted, periodic) in [(false, false), (true, false), (false, true)] {
+        let directory = root.join(if periodic {
+            "periodic"
+        } else if hosted {
+            "hosted"
+        } else {
+            "plain"
+        });
+        let capture_mode = if periodic { "periodic" } else { "every_record" };
         std::fs::create_dir(&directory).unwrap();
         let config = directory.join("obzenflow.toml");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -329,6 +337,9 @@ on_terminal = "exit"
 # Keep reporting disabled in both runs so only hosting changes. Prometheus
 # reporting requires a listener and is covered by the existing metrics tests.
 enabled = false
+[runtime.observability]
+mode = "{capture_mode}"
+interval_ms = 250
 "#
             ),
         )
@@ -349,6 +360,20 @@ enabled = false
         let export = directory.join("export.jsonl");
         obzenflow_infra::journal::disk::inspect::export_jsonl(&archives[0], Some(&export)).unwrap();
         let jsonl = std::fs::read_to_string(export).unwrap();
+        let packets = jsonl
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["envelope"]["observability"]
+                    .is_object()
+            })
+            .count();
+        let bytes: u64 = std::fs::read_dir(&archives[0])
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+            .map(|path| std::fs::metadata(path).unwrap().len())
+            .sum();
+        storage.push((packets, bytes));
         let terminal: Vec<_> = jsonl
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
@@ -515,8 +540,18 @@ enabled = false
         runs[0], runs[1],
         "hosting must preserve the finite example's durable results"
     );
+    assert_eq!(
+        runs[0], runs[2],
+        "periodic observability must preserve business outcomes"
+    );
+    assert!(storage[2].0 < storage[0].0);
+    assert!(storage[2].1 < storage[0].1);
     println!(
-        "FLOWIP-145a full/selected/omitted export proof: {}",
+        "FLOWIP-145b production demo storage (packets, bytes): every_record={:?}, periodic={:?}",
+        storage[0], storage[2]
+    );
+    println!(
+        "FLOWIP-145b full/selected/omitted export proof: {}",
         root.display()
     );
 }

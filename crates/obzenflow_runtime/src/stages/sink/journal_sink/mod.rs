@@ -44,7 +44,7 @@ pub(super) fn with_committed_receipt_snapshot(
     event: ChainEvent,
     instrumentation: &crate::metrics::instrumentation::StageInstrumentation,
 ) -> ChainEvent {
-    let mut snapshot = instrumentation.capture_runtime();
+    let mut snapshot = instrumentation.capture_accounting();
     snapshot.accounting.events_emitted_total =
         snapshot.accounting.events_emitted_total.saturating_add(1);
     snapshot.project_emission(&event);

@@ -703,12 +703,13 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 payload,
                             )
                             .with_flow_context(flow_ctx);
-                            let evt = ctx.instrumentation.capture_runtime().attach_to(evt);
+                            let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                            crate::supervised_base::publication::append(
+                            crate::supervised_base::publication::append_with_capture(
                                 &ctx.data_journal,
                                 evt,
                                 None,
+                                ctx.instrumentation.journal_capture(None, vec![(0, false)]),
                             )
                             .await
                             .map_err(|e| {
@@ -901,9 +902,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         let evt =
                             journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
                                 .with_flow_context(flow_ctx);
-                        let evt = ctx.instrumentation.capture_runtime().attach_to(evt);
+                        let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                        crate::supervised_base::publication::append(&ctx.data_journal, evt, None).await.map_err(|e| {
+                        crate::supervised_base::publication::append_with_capture(&ctx.data_journal, evt, None, ctx.instrumentation.journal_capture(None, vec![(0, false)])).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to write delivery receipt: {e}"
                             ))
@@ -1023,7 +1024,13 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .map(|subscription| subscription.take_receipt_settlement(&mut ctx.contract_state));
     let settlement = crate::supervised_base::publication::commit(async move {
         let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
-        let written = data_journal.append(event, Some(&parent)).await?;
+        let written = data_journal
+            .append_with_capture(
+                event,
+                Some(&parent),
+                instrumentation.journal_capture(None, vec![(1, false)]),
+            )
+            .await?;
         instrumentation.record_output_event(&written.authored());
         if let Some(settlement) = &mut settlement {
             if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {

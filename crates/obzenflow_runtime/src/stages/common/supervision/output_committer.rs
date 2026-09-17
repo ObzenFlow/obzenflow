@@ -45,12 +45,12 @@ use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 
 use obzenflow_core::event::{ChainPayload, CorrelationId, JournalRecord, SystemEvent};
-use obzenflow_core::journal::Journal;
+use obzenflow_core::journal::{Journal, JournalCapture};
 use obzenflow_core::{ChainEvent, WriterId};
 
 use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFactClaim};
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::{RuntimeCapture, StageInstrumentation};
+use crate::metrics::instrumentation::{CaptureProjection, RuntimeCapture, StageInstrumentation};
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
 
@@ -127,14 +127,11 @@ pub(crate) fn commit_control_output(
             *writer_seq_by_event_type = by_type;
             *last_event_id = last;
         }
-        let mut snapshot = instrumentation.capture_runtime();
+        let mut snapshot = instrumentation.capture_accounting();
         snapshot.project_emission(&event);
-        let runtime_capture = instrumentation.capture_for_record();
-        if event.envelope.observability.is_none() {
-            event.envelope.observability = runtime_capture;
-        }
         event = snapshot.attach_to(event);
-        let written = journal.append(event, None).await?;
+        let capture = instrumentation.journal_capture(None, vec![(1, true)]);
+        let written = journal.append_with_capture(event, None, capture).await?;
         instrumentation.record_emitted(&written.authored());
         Ok(written)
     })
@@ -153,18 +150,18 @@ pub(crate) fn commit_error_output(
     let instrumentation = instrumentation.clone();
     let parent = parent.cloned();
     crate::supervised_base::publication::commit(async move {
-        let mut snapshot = instrumentation.capture_runtime();
+        let mut snapshot = instrumentation.capture_accounting();
         if event.consumes_data_credit() {
             snapshot.accounting.events_emitted_total =
                 snapshot.accounting.events_emitted_total.saturating_add(1);
             snapshot.project_emission(&event);
         }
-        let runtime_capture = instrumentation.capture_for_record();
-        if event.envelope.observability.is_none() {
-            event.envelope.observability = runtime_capture;
-        }
+        let emitted = u64::from(event.consumes_data_credit());
         event = snapshot.attach_to(event);
-        let written = journal.append(event, parent.as_ref()).await?;
+        let capture = instrumentation.journal_capture(None, vec![(emitted, true)]);
+        let written = journal
+            .append_with_capture(event, parent.as_ref(), capture)
+            .await?;
         if written.consumes_data_credit() {
             instrumentation.record_error_journal_output_event(&written.authored());
         }
@@ -450,7 +447,15 @@ impl OutputCommitter<'_> {
             u64::from(event.consumes_data_credit()),
         )?;
 
-        let written = match self.data_journal.append(event, parent).await {
+        let capture = self.observation_capture(vec![(
+            u64::from(options.count_output && event.consumes_data_credit()),
+            intent.receives_runtime_data_enrichment(),
+        )]);
+        let written = match self
+            .data_journal
+            .append_with_capture(event, parent, capture)
+            .await
+        {
             Ok(written) => written,
             Err(error) => {
                 if crate::supervised_base::publication::is_indeterminate(&error) {
@@ -489,7 +494,15 @@ impl OutputCommitter<'_> {
                     StageAppendIntent::NormalStageData,
                 )
                 .await?;
-            let written = match committer.data_journal.append(event, parent.as_ref()).await {
+            let capture = committer.observation_capture(vec![(
+                u64::from(options.count_output && event.consumes_data_credit()),
+                true,
+            )]);
+            let written = match committer
+                .data_journal
+                .append_with_capture(event, parent.as_ref(), capture)
+                .await
+            {
                 Ok(written) => written,
                 Err(error) => {
                     if crate::supervised_base::publication::is_indeterminate(&error) {
@@ -637,24 +650,29 @@ impl OutputCommitter<'_> {
         }
         let mut prepared = Vec::with_capacity(entries.len());
         let mut metadata = Vec::with_capacity(entries.len());
+        let mut projections = Vec::with_capacity(entries.len());
+        let mut emitted = 0u64;
+        let mut last_emission = None;
         let mut snapshot = self
             .instrumentation
-            .map(|instrumentation| instrumentation.capture_runtime_in_scope(self.observer_scope));
+            .map(|instrumentation| instrumentation.capture_accounting());
         for entry in entries {
             let mut event = self
                 .prepare_prebuilt_with_intent(entry.event, parent, entry.options, entry.intent)
                 .await?;
             if let Some(snapshot) = &mut snapshot {
                 self.project_committed_output(snapshot, &event, entry.options);
-                // Every member carries a distinct projected prefix. Give that
-                // body its own identity while retaining the group capture time.
-                let member = snapshot.for_group_member(
-                    self.instrumentation
-                        .expect("group capture has instrumentation"),
-                    self.observer_scope,
-                );
-                event = member.attach_to(event);
+                event = snapshot.clone().attach_to(event);
             }
+            if entry.options.count_output && event.consumes_data_credit() {
+                emitted += 1;
+                last_emission = Some((event.id, event.writer_id));
+            }
+            projections.push(CaptureProjection {
+                emitted,
+                measurements: entry.intent.receives_runtime_data_enrichment(),
+                last_emission,
+            });
             prepared.push(event);
             metadata.push((entry.options, entry.intent));
         }
@@ -669,7 +687,12 @@ impl OutputCommitter<'_> {
         let member_count = metadata.len();
         let written = match self
             .data_journal
-            .append_group(group_id, prepared, parent)
+            .append_group_with_capture(
+                group_id,
+                prepared,
+                parent,
+                self.observation_capture(projections),
+            )
             .await
         {
             Ok(written) => written,
@@ -768,30 +791,25 @@ impl OutputCommitter<'_> {
         }
 
         if let Some(instrumentation) = self.instrumentation {
-            // Stamp the per-event processing-time wide-event field from the
-            // runtime's own per-invocation measurement (FLOWIP-115f, replacing the
-            // deleted TimingMiddleware). This is live-run wall-clock evidence: the
-            // same replay gate as journey identity skips it under strict replay. The
-            // field is excluded from replay equivalence by the value-preserving
-            // projection, like runtime_context telemetry; the authoritative original
-            // journal holds the live measurement.
-            if intent.receives_runtime_data_enrichment()
-                && !self.observer_scope.is_deterministic_replay()
-            {
-                let runtime_capture =
-                    instrumentation.capture_for_record_in_scope(self.observer_scope);
-                // A handler's typed attachment keeps its original identity and
-                // time. The runtime capture still reaches the live view.
-                if event.envelope.observability.is_none() {
-                    event.envelope.observability = runtime_capture;
-                }
-            }
-            let mut snapshot = instrumentation.capture_runtime_in_scope(self.observer_scope);
+            let mut snapshot = instrumentation.capture_accounting();
             self.project_committed_output(&mut snapshot, &event, options);
             event = snapshot.attach_to(event);
         }
 
         Ok(event)
+    }
+
+    fn observation_capture<P: Into<CaptureProjection>>(
+        &self,
+        projections: Vec<P>,
+    ) -> JournalCapture<ChainEvent> {
+        if self.observer_scope.is_deterministic_replay() {
+            JournalCapture::Historical
+        } else if let Some(instrumentation) = self.instrumentation {
+            instrumentation.journal_capture(Some(self.observer_scope), projections)
+        } else {
+            JournalCapture::default()
+        }
     }
 
     /// A visible row describes its committed prefix, including itself. Live

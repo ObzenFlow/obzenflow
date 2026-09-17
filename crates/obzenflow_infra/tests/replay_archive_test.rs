@@ -30,7 +30,13 @@ use std::path::Path;
 use tempfile::tempdir;
 
 fn binding_descriptor_capabilities() -> BTreeMap<String, u32> {
-    BTreeMap::from([(EFFECT_BINDING_DESCRIPTOR_CAPABILITY.to_string(), 1)])
+    BTreeMap::from([
+        (EFFECT_BINDING_DESCRIPTOR_CAPABILITY.to_string(), 1),
+        (
+            obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY.to_string(),
+            1,
+        ),
+    ])
 }
 
 fn write_manifest(dir: &Path) {
@@ -186,45 +192,49 @@ async fn open_fails_when_system_log_missing_unless_allowed() {
 }
 
 #[tokio::test]
-async fn open_gates_binding_descriptor_capability_before_journal_decode() {
-    for version in [None, Some(2_u64)] {
-        let dir = tempdir().unwrap();
-        write_manifest(dir.path());
-        std::fs::write(dir.path().join("system.log"), b"not a journal frame").unwrap();
+async fn open_gates_required_capabilities_before_journal_decode() {
+    for capability in [
+        EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
+        obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY,
+    ] {
+        for version in [None, Some(2_u64)] {
+            let dir = tempdir().unwrap();
+            write_manifest(dir.path());
+            std::fs::write(dir.path().join("system.log"), b"not a journal frame").unwrap();
 
-        let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
-        let mut manifest: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-        match version {
-            Some(version) => {
-                manifest["capabilities"][EFFECT_BINDING_DESCRIPTOR_CAPABILITY] =
-                    serde_json::json!(version);
+            let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            match version {
+                Some(version) => {
+                    manifest["capabilities"][capability] = serde_json::json!(version);
+                }
+                None => {
+                    manifest["capabilities"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(capability);
+                }
             }
-            None => {
-                manifest["capabilities"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove(EFFECT_BINDING_DESCRIPTOR_CAPABILITY);
-            }
+            std::fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+
+            let error = DiskReplayArchive::open(dir.path().to_path_buf(), true)
+                .await
+                .err()
+                .expect("missing or wrong required capability must refuse the archive");
+            assert!(matches!(
+                error,
+                ReplayError::UnsupportedArchiveCapability {
+                    capability: found_capability,
+                    found,
+                    supported: 1,
+                } if found == version && found_capability == capability
+            ));
         }
-        std::fs::write(
-            &manifest_path,
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
-
-        let error = DiskReplayArchive::open(dir.path().to_path_buf(), true)
-            .await
-            .err()
-            .expect("missing or wrong descriptor capability must refuse the archive");
-        assert!(matches!(
-            error,
-            ReplayError::UnsupportedArchiveCapability {
-                capability: EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
-                found,
-                supported: 1,
-            } if found == version
-        ));
     }
 }
 

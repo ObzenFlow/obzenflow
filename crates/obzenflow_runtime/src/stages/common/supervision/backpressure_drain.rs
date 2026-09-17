@@ -459,9 +459,16 @@ async fn emit_stalled_fact(
         }),
     )
     .with_flow_context(flow_context.clone());
-    let event = instrumentation.capture_runtime().attach_to(event);
+    let event = instrumentation.capture_accounting().attach_to(event);
 
-    if let Err(e) = crate::supervised_base::publication::append(data_journal, event, None).await {
+    if let Err(e) = crate::supervised_base::publication::append_with_capture(
+        data_journal,
+        event,
+        None,
+        instrumentation.journal_capture(None, vec![(0, false)]),
+    )
+    .await
+    {
         tracing::warn!(
             journal_error = %e,
             "Failed to append backpressure.stalled fact"

@@ -53,6 +53,8 @@ pub enum KnobTarget {
     Global,
     Flow,
     Stage,
+    /// Applies to the flow journal and independently to stage journals.
+    FlowAndStage,
     /// An unqualified stage point exists only where build-time authoring
     /// evidence declares a consumer. This keeps a stage-scoped facility out
     /// of unrelated stages without admitting effect-qualified subjects.
@@ -717,6 +719,31 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,
             },
+            KnobSpec {
+                key_path: "runtime.observability.interval_ms",
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Flow,
+                default: KnobDefault::Value(ConfigValue::U64(1000)),
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: "runtime.observability.mode",
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: &["every_record", "periodic"],
+                },
+                target: KnobTarget::FlowAndStage,
+                default: KnobDefault::Value(ConfigValue::Text("every_record".into())),
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
             // The runtime.resume.* view over the 010h [replay] parse
             // (absorption without moving the parse; Immutable: run identity).
             KnobSpec {
@@ -817,7 +844,7 @@ pub fn schema_view() -> Vec<KnobSchemaDoc> {
             {
                 KnobTarget::Global => ("global", vec!["global"], vec!["unqualified"], ""),
                 KnobTarget::Flow => ("flow", vec!["global", "flow"], vec!["unqualified"], ".flow"),
-                KnobTarget::Stage => (
+                KnobTarget::Stage | KnobTarget::FlowAndStage => (
                     "stage",
                     vec!["global", "flow", "stage"],
                     vec!["unqualified"],

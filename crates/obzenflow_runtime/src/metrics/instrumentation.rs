@@ -5,7 +5,7 @@
 //! FSM instrumentation for HandlerSupervised stages
 
 mod runtime_capture;
-pub(crate) use runtime_capture::RuntimeCapture;
+pub(crate) use runtime_capture::{CaptureProjection, RuntimeCapture};
 
 use crate::control_plane::{
     CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView, ControlPlaneProvider,

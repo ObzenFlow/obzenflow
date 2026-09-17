@@ -12,6 +12,90 @@ use obzenflow_core::{Journal, JournalOwner, StageId};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::time::Instant;
 
+#[tokio::test(start_paused = true)]
+async fn periodic_capture_reduces_representative_storage_without_changing_protected_records() {
+    use crate::journal::DiskJournal;
+    use obzenflow_core::journal::ObservabilityPolicy;
+    use std::collections::HashMap;
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let samples = super::test_data::records();
+    let mut dense = HashMap::new();
+    let mut sparse = HashMap::new();
+    for record in &samples {
+        let stage = *record
+            .envelope
+            .provenance
+            .event
+            .writer_id
+            .as_stage()
+            .unwrap();
+        if let std::collections::hash_map::Entry::Vacant(entry) = dense.entry(stage) {
+            entry.insert(
+                DiskJournal::<ChainEvent>::with_owner(
+                    directory.path().join(format!("dense-{stage}.log")),
+                    JournalOwner::stage(stage),
+                )
+                .unwrap(),
+            );
+            let journal = DiskJournal::<ChainEvent>::with_owner(
+                directory.path().join(format!("sparse-{stage}.log")),
+                JournalOwner::stage(stage),
+            )
+            .unwrap();
+            journal
+                .configure_observability(ObservabilityPolicy::Periodic {
+                    interval: Duration::from_millis(250),
+                })
+                .unwrap();
+            sparse.insert(stage, journal);
+        }
+    }
+    let mut dense_packets = 0;
+    let mut sparse_packets = 0;
+    for (index, sample) in samples.iter().cycle().take(1000).enumerate() {
+        let mut event = sample.authored();
+        event.id = obzenflow_core::EventId::new();
+        if let Some(packet) = event.envelope.observability.as_mut() {
+            packet.capture.capture_seq =
+                obzenflow_core::event::observation::CaptureSeq(index as u64 + 1);
+            if let Some(snapshot) = packet.runtime_snapshot.as_mut() {
+                snapshot.capture.capture_seq = packet.capture.capture_seq;
+            }
+        }
+        let stage = *event.writer_id.as_stage().unwrap();
+        let control = dense[&stage].append(event.clone(), None).await.unwrap();
+        let treatment = sparse[&stage].append(event, None).await.unwrap();
+        dense_packets += usize::from(control.envelope.observability.is_some());
+        sparse_packets += usize::from(treatment.envelope.observability.is_some());
+        assert_eq!(
+            serde_json::to_value(control.payload).unwrap(),
+            serde_json::to_value(treatment.payload).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(control.envelope.provenance.event).unwrap(),
+            serde_json::to_value(treatment.envelope.provenance.event).unwrap()
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+    }
+    let bytes = |prefix: &str| {
+        dense
+            .keys()
+            .map(|stage| {
+                std::fs::metadata(directory.path().join(format!("{prefix}-{stage}.log")))
+                    .unwrap()
+                    .len()
+            })
+            .sum::<u64>()
+    };
+    let dense_bytes = bytes("dense");
+    let sparse_bytes = bytes("sparse");
+    assert_eq!(dense_packets, 1000);
+    assert!(sparse_packets <= 12, "four packets per second per journal");
+    assert!(sparse_bytes < dense_bytes);
+    println!("FLOWIP-145b representative storage: records=1000, every_record_packets={dense_packets}, periodic_packets={sparse_packets}, every_record_bytes={dense_bytes}, periodic_bytes={sparse_bytes}");
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Control<P> {
     record: P,

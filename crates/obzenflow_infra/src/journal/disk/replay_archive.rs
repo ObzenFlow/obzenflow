@@ -122,6 +122,15 @@ impl DiskReplayArchive {
                 supported: 1,
             });
         }
+        super::manifest_gate::require_observability_capture(&manifest_value).map_err(|_| {
+            ReplayError::UnsupportedArchiveCapability {
+                capability: obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY,
+                found: manifest_value["capabilities"]
+                    [obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY]
+                    .as_u64(),
+                supported: 1,
+            }
+        })?;
         let manifest: RunManifest =
             serde_json::from_value(manifest_value).map_err(|e| ReplayError::Parse {
                 message: format!(

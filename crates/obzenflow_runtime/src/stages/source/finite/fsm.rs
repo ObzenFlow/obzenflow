@@ -473,7 +473,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.capture_runtime();
+                let runtime_context = ctx.instrumentation.capture_accounting();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
@@ -528,19 +528,29 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
                 final_event = runtime_context.attach_to(final_event);
 
-                crate::supervised_base::publication::append(&ctx.data_journal, eof_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
-                    })?;
+                crate::supervised_base::publication::append_with_capture(
+                    &ctx.data_journal,
+                    eof_event,
+                    None,
+                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
+                })?;
 
-                crate::supervised_base::publication::append(&ctx.data_journal, final_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to send source consumption_final: {e}"
-                        ))
-                    })?;
+                crate::supervised_base::publication::append_with_capture(
+                    &ctx.data_journal,
+                    final_event,
+                    None,
+                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to send source consumption_final: {e}"
+                    ))
+                })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

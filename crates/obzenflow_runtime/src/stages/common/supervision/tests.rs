@@ -1038,6 +1038,11 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
                         intent: StageAppendIntent::NormalStageData,
                     });
                 }
+                entries.push(AtomicCommitEntry {
+                    event: ChainEventFactory::eof_event(stage.into(), true),
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                });
                 committer
                     .commit_atomic_group("atomic-accounting", entries, None)
                     .await
@@ -1047,23 +1052,26 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
         .await
         .unwrap();
-    assert_eq!(journal.appended().len(), 3);
+    assert_eq!(journal.appended().len(), 4);
     let rows = journal.appended();
     let selected = crate::metrics::observations::ObservationHub::default();
     let mut previous_capture = None;
     for (index, row) in rows.iter().enumerate() {
         let packet = row.envelope.observability.as_ref().unwrap();
         let snapshot = packet.runtime_snapshot.as_ref().unwrap();
-        assert_eq!(snapshot.progress.writer_seq, index as u64);
+        assert_eq!(snapshot.progress.writer_seq, index.min(2) as u64);
         if index > 0 {
-            assert_eq!(snapshot.progress.last_emitted_event_id, Some(row.id));
+            assert_eq!(
+                snapshot.progress.last_emitted_event_id,
+                Some(rows[index.min(2)].id)
+            );
         }
         if let Some(previous) = previous_capture {
             assert!(snapshot.capture.capture_seq > previous);
         }
         previous_capture = Some(snapshot.capture.capture_seq);
         let accounting = &row.runtime.as_ref().unwrap().accounting;
-        assert_eq!(accounting.events_emitted_total, index as u64);
+        assert_eq!(accounting.events_emitted_total, index.min(2) as u64);
         selected.select_recorded(packet.clone()).unwrap();
     }
     let snapshot = selected

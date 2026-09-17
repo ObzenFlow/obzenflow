@@ -150,6 +150,29 @@ impl FlowEffectiveConfig {
             .expect("registry default guarantees cycle_max_iterations")
     }
 
+    pub fn observability_policy_for(
+        &self,
+        stage: Option<&StageKey>,
+    ) -> obzenflow_core::journal::ObservabilityPolicy {
+        let point = stage.map_or(ConfigScope::Flow, |stage| ConfigScope::Stage {
+            stage: stage.clone(),
+        });
+        match self
+            .get("runtime.observability.mode", &point)
+            .and_then(|value| value.value.as_text())
+            .expect("registry default guarantees observability mode")
+        {
+            "every_record" => obzenflow_core::journal::ObservabilityPolicy::EveryRecord,
+            "periodic" => obzenflow_core::journal::ObservabilityPolicy::Periodic {
+                interval: std::time::Duration::from_millis(
+                    self.u64_at("runtime.observability.interval_ms", &ConfigScope::Flow)
+                        .expect("registry default guarantees observability interval"),
+                ),
+            },
+            _ => unreachable!("validated observability mode"),
+        }
+    }
+
     pub fn heartbeat_interval_for(&self, stage: &StageKey) -> u64 {
         self.u64_at(
             "runtime.heartbeat_interval",

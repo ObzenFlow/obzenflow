@@ -13,6 +13,8 @@ pub mod journal_name;
 pub mod journal_owner;
 pub mod journal_reader;
 pub mod journal_trait;
+pub mod observability;
+pub mod observation_reader;
 pub mod run_manifest;
 
 // Re-export commonly used types
@@ -20,6 +22,10 @@ pub use archive::{ArchiveStatus, StatusDerivation};
 pub use journal_error::JournalError;
 pub use journal_reader::JournalReader;
 pub use journal_trait::Journal;
+pub use observability::{JournalCapture, ObservabilityPolicy, ObservationCapture};
+pub use observation_reader::{
+    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+};
 pub use run_manifest::{
     RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_FORMAT_VERSION,
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,

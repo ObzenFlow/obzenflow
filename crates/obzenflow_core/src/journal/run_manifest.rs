@@ -29,6 +29,8 @@ pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
 pub const EFFECT_BINDING_DESCRIPTOR_CAPABILITY: &str = "effect_binding_descriptor";
+/// Family-stamped optional attachments, independent of protected accounting.
+pub const OBSERVABILITY_CAPTURE_CAPABILITY: &str = "observability_capture";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {

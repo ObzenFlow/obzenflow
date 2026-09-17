@@ -979,6 +979,8 @@ fn parse_current_manifest(raw: &str) -> Result<RunManifest, SinkConformanceFailu
     {
         return Err(failure("archive", "manifest-version", error.to_string()));
     }
+    crate::journal::disk::manifest_gate::require_observability_capture(&raw_value)
+        .map_err(|error| failure("archive", "observability-capability", error))?;
     serde_json::from_value(raw_value)
         .map_err(|error| failure("archive", "manifest-shape", error.to_string()))
 }

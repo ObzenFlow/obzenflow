@@ -212,7 +212,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 .flatten()
                                 .all(MetricsSubscription::is_complete)
                         {
-                            ctx.metrics_store.ensure_snapshots_reconciled()?;
                             ctx.metrics_store.inputs_covered = true;
                             return Ok(EventLoopDirective::Transition(
                                 MetricsAggregatorEvent::FlowTerminal,
@@ -234,7 +233,6 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         .flatten()
                         .all(MetricsSubscription::is_complete)
                 {
-                    ctx.metrics_store.ensure_snapshots_reconciled()?;
                     ctx.metrics_store.inputs_covered = true;
                     return Ok(EventLoopDirective::Transition(
                         MetricsAggregatorEvent::FlowTerminal,

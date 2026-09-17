@@ -405,6 +405,29 @@ pub(crate) struct RawFileRuntimeConfig {
     pub(crate) flow: RawRuntimeFlowScope,
     pub(crate) stages: BTreeMap<String, RawRuntimeStageScope>,
     pub(crate) backpressure: RawBackpressureConfig,
+    pub(crate) observability: RawObservabilityConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawObservabilityConfig {
+    pub(crate) mode: Option<String>,
+    pub(crate) interval_ms: Option<i64>,
+    pub(crate) flow: RawObservabilityFlow,
+    pub(crate) stages: BTreeMap<String, RawObservabilityStage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawObservabilityFlow {
+    pub(crate) mode: Option<String>,
+    pub(crate) interval_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawObservabilityStage {
+    pub(crate) mode: Option<String>,
 }
 
 /// `[runtime.flow]`: flow-scoped entries for Flow-or-finer-target knobs.

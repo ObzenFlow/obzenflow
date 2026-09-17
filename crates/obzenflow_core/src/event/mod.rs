@@ -14,6 +14,7 @@ pub mod journal_event;
 pub mod journal_record;
 pub mod observability;
 pub mod observation;
+pub mod observation_families;
 pub mod system_event;
 pub mod types;
 pub mod vector_clock;

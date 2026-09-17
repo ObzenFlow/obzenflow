@@ -15,7 +15,7 @@ use obzenflow_fsm::FsmAction;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_coverage(
+pub async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::{MetricsCoordinationEvent, SystemEvent, SystemPayload};
@@ -106,12 +106,8 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
     {
         let snapshots = exporter.0.lock().unwrap();
         let snapshot = snapshots.last().unwrap();
-        assert_eq!(snapshot.event_counts[&stage], 2);
-        assert_eq!(snapshot.error_counts[&stage], 2);
-        assert_eq!(
-            snapshot.error_counts_by_kind[&stage][&ErrorKind::Unknown],
-            2
-        );
+        assert!(!snapshot.event_counts.contains_key(&stage));
+        assert!(!snapshot.error_counts.contains_key(&stage));
         assert!(snapshot.stage_vector_clocks.is_empty());
     }
     assert!(context.metrics_store.last_event_id.is_none());

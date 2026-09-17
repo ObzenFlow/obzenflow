@@ -1032,6 +1032,9 @@ where
                 ))
             })?;
 
+        control_journal.configure_observability(__flow_effective.observability_policy_for(None))
+            .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
+
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
         let mut manifest_stages: HashMap<String, obzenflow_core::journal::run_manifest::RunManifestStage> = HashMap::new();
@@ -1078,6 +1081,10 @@ where
                         stage_id, e
                     ))
             })?;
+            let observation_policy = __flow_effective.observability_policy_for(
+                Some(&obzenflow_core::StageKey::from(name.as_str())));
+            journal.configure_observability(observation_policy)
+                .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
             stage_journals.insert(stage_id, journal);
 
             // Create error journal for this stage (FLOWIP-082e)
@@ -1096,6 +1103,8 @@ where
                         stage_id, e
                     ))
             })?;
+            error_journal.configure_observability(observation_policy)
+                .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
             error_journals.insert(stage_id, error_journal);
 
             // Record static mapping for replay lookup (FLOWIP-095a).
@@ -1196,6 +1205,10 @@ where
             });
 
         let mut manifest_capabilities = std::collections::BTreeMap::new();
+        manifest_capabilities.insert(
+            obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY.to_string(),
+            1,
+        );
         manifest_capabilities.insert(
             obzenflow_core::journal::run_manifest::EFFECT_ATTEMPT_HISTORY_CAPABILITY.to_string(),
             1,

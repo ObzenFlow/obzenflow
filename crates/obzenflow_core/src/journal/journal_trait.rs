@@ -5,6 +5,7 @@
 use super::journal_error::JournalError;
 use super::journal_owner::JournalOwner;
 use super::journal_reader::JournalReader;
+use super::{JournalCapture, ObservabilityPolicy};
 use crate::event::journal_record::JournalRecord;
 use crate::event::types::EventId;
 use crate::event::vector_clock::CausalOrderingService;
@@ -27,6 +28,54 @@ where
 
     /// Get the owner of this journal (if any)
     fn owner(&self) -> Option<&JournalOwner>;
+
+    fn observation_reader(&self) -> Option<&dyn super::JournalObservationReader> {
+        None
+    }
+
+    /// Configure this journal before publication starts. Handles of the same
+    /// journal share the policy and allowance; other journals are independent.
+    fn configure_observability(&self, policy: ObservabilityPolicy) -> Result<(), JournalError> {
+        match policy {
+            ObservabilityPolicy::EveryRecord => Ok(()),
+            ObservabilityPolicy::Periodic { .. } => Err(JournalError::Implementation {
+                message: "This journal does not support sparse observability".into(),
+                source: "unsupported observability policy".into(),
+            }),
+        }
+    }
+
+    /// Construct optional diagnostics only after journal admission. Ordinary
+    /// append calls must enforce the same policy on inherited attachments.
+    async fn append_with_capture(
+        &self,
+        mut event: T,
+        parent: Option<&JournalRecord<T::Payload>>,
+        capture: JournalCapture<T>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        if let JournalCapture::Live(Some(mut capture)) = capture {
+            event = capture(0, event);
+        }
+        self.append(event, parent).await
+    }
+
+    async fn append_group_with_capture(
+        &self,
+        group_id: &str,
+        events: Vec<T>,
+        parent: Option<&JournalRecord<T::Payload>>,
+        capture: JournalCapture<T>,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        let events = match capture {
+            JournalCapture::Live(Some(mut capture)) => events
+                .into_iter()
+                .enumerate()
+                .map(|(index, event)| capture(index, event))
+                .collect(),
+            _ => events,
+        };
+        self.append_group(group_id, events, parent).await
+    }
 
     /// Append an event to the journal
     ///

@@ -117,7 +117,10 @@ fn ladder(spec: &KnobSpec, point: &ResolutionPoint) -> Vec<ConfigScope> {
             ]
         }
         (
-            KnobTarget::Stage | KnobTarget::StageConsumer | KnobTarget::StageOrEffect,
+            KnobTarget::Stage
+            | KnobTarget::FlowAndStage
+            | KnobTarget::StageConsumer
+            | KnobTarget::StageOrEffect,
             ResolutionPoint::Stage(stage),
         ) => vec![
             ConfigScope::Stage {
@@ -135,7 +138,7 @@ fn ladder(spec: &KnobSpec, point: &ResolutionPoint) -> Vec<ConfigScope> {
                 ConfigScope::Global,
             ]
         }
-        (KnobTarget::Flow, ResolutionPoint::Flow) => {
+        (KnobTarget::Flow | KnobTarget::FlowAndStage, ResolutionPoint::Flow) => {
             vec![ConfigScope::Flow, ConfigScope::Global]
         }
         (KnobTarget::Global, ResolutionPoint::Global) => vec![ConfigScope::Global],
@@ -387,6 +390,9 @@ pub fn materialize_flow_config(
         let points: Vec<ResolutionPoint> = match spec.target {
             KnobTarget::Global => vec![ResolutionPoint::Global],
             KnobTarget::Flow => vec![ResolutionPoint::Flow],
+            KnobTarget::FlowAndStage => std::iter::once(ResolutionPoint::Flow)
+                .chain(ctx.stages.iter().cloned().map(ResolutionPoint::Stage))
+                .collect(),
             KnobTarget::Stage => ctx
                 .stages
                 .iter()

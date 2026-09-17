@@ -402,12 +402,13 @@ pub(super) async fn dispatch_draining<
                         } else {
                             let enriched_error = ctx
                                 .instrumentation
-                                .capture_runtime()
+                                .capture_accounting()
                                 .attach_to(error_event.with_flow_context(flow_context.clone()));
-                            crate::supervised_base::publication::append(
+                            crate::supervised_base::publication::append_with_capture(
                                 &ctx.data_journal,
                                 enriched_error,
                                 Some(&envelope),
+                                ctx.instrumentation.journal_capture(None, vec![(0, false)]),
                             )
                             .await
                             .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;

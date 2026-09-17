@@ -37,6 +37,19 @@ pub(crate) fn require_current_manifest_version(
     }
 }
 
+pub(crate) fn require_observability_capture(manifest: &serde_json::Value) -> Result<(), String> {
+    use obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY;
+    let found = manifest
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get(OBSERVABILITY_CAPTURE_CAPABILITY))
+        .and_then(serde_json::Value::as_u64);
+    if found == Some(1) {
+        Ok(())
+    } else {
+        Err(format!("unsupported archive capability {OBSERVABILITY_CAPTURE_CAPABILITY}={found:?} (supported: 1); re-record the archive"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
