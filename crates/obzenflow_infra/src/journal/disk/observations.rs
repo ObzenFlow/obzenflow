@@ -18,7 +18,7 @@ use obzenflow_core::journal::{
 use obzenflow_core::WriterId;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tokio::sync::RwLock;
@@ -209,10 +209,12 @@ impl<T: JournalEvent> DiskObservationReader<T> {
                     ..Default::default()
                 };
             }
-            if state.offset < end {
-                rebuild::<T>(&this.path, &mut state, end)?;
-            }
-            if state.offset < end {
+            let progress = if state.offset == end {
+                RebuildProgress::AtCommittedEnd
+            } else {
+                rebuild::<T>(&this.path, &mut state, end)?
+            };
+            if matches!(progress, RebuildProgress::BudgetExhausted) {
                 return Ok(ObservationLookup::Rebuilding {
                     examined_through: state.index.examined_through,
                     committed_len: None,
@@ -327,21 +329,33 @@ fn read_at(
     Ok((bytes, termination))
 }
 
-fn rebuild<T: JournalEvent>(path: &Path, state: &mut State, end: u64) -> Result<(), JournalError> {
+enum RebuildProgress {
+    AtCommittedEnd,
+    BudgetExhausted,
+}
+
+fn rebuild<T: JournalEvent>(
+    path: &Path,
+    state: &mut State,
+    end: u64,
+) -> Result<RebuildProgress, JournalError> {
     let mut file = File::open(path).map_err(|error| unavailable(error.to_string()))?;
     file.seek(SeekFrom::Start(state.offset))
         .map_err(|error| unavailable(error.to_string()))?;
-    let mut reader = BufReader::new(file);
+    let remaining = end
+        .checked_sub(state.offset)
+        .ok_or_else(|| unavailable("indexed prefix exceeds scan boundary"))?;
+    let mut reader = BufReader::new(file.take(remaining));
     let mut decoder = Decoder::new(path);
     let mut bytes = Vec::new();
     for _ in 0..REBUILD_FRAMES {
         if state.offset >= end {
-            break;
+            return Ok(RebuildProgress::AtCommittedEnd);
         }
         let Some((_, termination)) = read_frame_sync(&mut reader, &mut bytes)
             .map_err(|error| unavailable(error.to_string()))?
         else {
-            break;
+            return Err(unavailable("journal ended before captured scan boundary"));
         };
         let frame = dispose(
             classify_frame::<T>(&bytes, &mut decoder, state.offset),
@@ -350,7 +364,14 @@ fn rebuild<T: JournalEvent>(path: &Path, state: &mut State, end: u64) -> Result<
         );
         let records = match frame {
             Disposition::Yield(frame) => frame.into_records(),
-            Disposition::Skip | Disposition::EndOfCommittedRecords => break,
+            Disposition::Skip | Disposition::EndOfCommittedRecords => {
+                if bytes.len() as u64 != end - state.offset {
+                    return Err(unavailable("journal ended before captured scan boundary"));
+                }
+                // A torn final frame contributes no committed positions. Keep
+                // the cursor before it so later lookups can retry its completion.
+                return Ok(RebuildProgress::AtCommittedEnd);
+            }
             Disposition::Corrupt(problem) => return Err(unavailable(problem.to_string())),
         };
         #[cfg(test)]
@@ -367,7 +388,11 @@ fn rebuild<T: JournalEvent>(path: &Path, state: &mut State, end: u64) -> Result<
         state.offset += anchor.length;
         state.last = Some(anchor);
     }
-    Ok(())
+    Ok(if state.offset == end {
+        RebuildProgress::AtCommittedEnd
+    } else {
+        RebuildProgress::BudgetExhausted
+    })
 }
 
 fn archive_id(path: &Path) -> Option<String> {
@@ -513,6 +538,206 @@ mod tests {
                 ..
             } => observation,
             other => panic!("expected indexed observation, got {other:?}"),
+        }
+    }
+
+    async fn archive_with_tail(
+        path: &Path,
+        prefix_frames: usize,
+        tail_members: usize,
+    ) -> (ChainEvent, Vec<u8>, usize) {
+        let stage = StageId::new();
+        let journal = DiskJournal::with_owner(path.to_owned(), JournalOwner::stage(stage)).unwrap();
+        let observed = event(stage, 1);
+        for index in 0..prefix_frames {
+            let mut fact = observed.clone();
+            if index != 0 {
+                fact.envelope.observability = None;
+            }
+            journal.append(fact, Default::default()).await.unwrap();
+        }
+        let tail_offset = std::fs::metadata(path).unwrap().len() as usize;
+        let mut tail: Vec<_> = (0..tail_members)
+            .map(|member| {
+                let mut fact = observed.clone();
+                fact.envelope
+                    .observability
+                    .as_mut()
+                    .unwrap()
+                    .capture
+                    .capture_seq = CaptureSeq(member as u64 + 2);
+                fact
+            })
+            .collect();
+        if tail_members == 1 {
+            journal
+                .append(tail.pop().unwrap(), Default::default())
+                .await
+                .unwrap();
+        } else {
+            journal
+                .append_group("tail", tail, Default::default())
+                .await
+                .unwrap();
+        }
+        drop(journal);
+        (observed, std::fs::read(path).unwrap(), tail_offset)
+    }
+
+    #[tokio::test]
+    async fn read_only_torn_tail_preserves_prefix_and_retries_completed_frame() {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        for tail_members in [1, 2] {
+            let path = directory.path().join(format!("tail-{tail_members}.log"));
+            let (observed, bytes, tail_offset) = archive_with_tail(&path, 1, tail_members).await;
+            let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+            let capture = observed.envelope.observability.as_ref().unwrap().capture;
+            let checkpoint = std::fs::read(checkpoint_path(&path)).unwrap();
+            for keep_checkpoint in [false, true] {
+                for cut in [
+                    tail_offset + 1,
+                    tail_offset + frame::HEADER_LEN + 1,
+                    bytes.len() - 1,
+                ] {
+                    std::fs::write(&path, &bytes[..cut]).unwrap();
+                    if keep_checkpoint {
+                        // This checkpoint includes the now-incomplete frame and must be rejected.
+                        std::fs::write(checkpoint_path(&path), &checkpoint).unwrap();
+                    } else if checkpoint_path(&path).exists() {
+                        std::fs::remove_file(checkpoint_path(&path)).unwrap();
+                    }
+                    let reader = DiskObservationReader::<ChainEvent>::open(path.clone()).unwrap();
+                    for _ in 0..2 {
+                        let ObservationLookup::Ready {
+                            committed_len,
+                            observation,
+                        } = reader.latest_observation(&key).await.unwrap()
+                        else {
+                            panic!("torn tail must not prevent complete prefix coverage");
+                        };
+                        assert_eq!(committed_len, 1);
+                        let observation = observation.unwrap();
+                        assert_eq!(observation.position, 0);
+                        assert_eq!(observation.observation.capture, capture);
+                    }
+                    let mut absent = key.clone();
+                    absent.kind = ObservationFamily::new("runtime_snapshot");
+                    assert!(matches!(
+                        reader.latest_observation(&absent).await.unwrap(),
+                        ObservationLookup::Ready {
+                            committed_len: 1,
+                            observation: None
+                        }
+                    ));
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes[..cut]);
+                    if keep_checkpoint {
+                        assert_eq!(std::fs::read(checkpoint_path(&path)).unwrap(), checkpoint);
+                    } else {
+                        assert!(!checkpoint_path(&path).exists());
+                    }
+
+                    // Completing the same frame must remain visible through the existing reader.
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(&bytes[cut..])
+                        .unwrap();
+                    let ObservationLookup::Ready {
+                        committed_len,
+                        observation,
+                    } = reader.latest_observation(&key).await.unwrap()
+                    else {
+                        panic!("completed tail must become visible");
+                    };
+                    assert_eq!(committed_len, 1 + tail_members as u64);
+                    let observation = observation.unwrap();
+                    assert_eq!(observation.position, tail_members as u64);
+                    let mut expected = capture;
+                    expected.capture_seq = CaptureSeq(tail_members as u64 + 1);
+                    assert_eq!(observation.observation.capture, expected);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_incomplete_first_frame_has_an_empty_committed_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("first.log");
+        let (observed, bytes, _) = archive_with_tail(&path, 0, 2).await;
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        std::fs::remove_file(checkpoint_path(&path)).unwrap();
+        for cut in [0, 1, frame::HEADER_LEN + 1, bytes.len() - 1] {
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            let reader = DiskObservationReader::<ChainEvent>::open(path.clone()).unwrap();
+            assert!(matches!(
+                reader.latest_observation(&key).await.unwrap(),
+                ObservationLookup::Ready {
+                    committed_len: 0,
+                    observation: None
+                }
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), bytes[..cut]);
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_torn_tail_distinguishes_budget_exhaustion_from_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("budget.log");
+        let (observed, bytes, _) = archive_with_tail(&path, REBUILD_FRAMES, 2).await;
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        std::fs::remove_file(checkpoint_path(&path)).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        let first = DiskObservationReader::<ChainEvent>::open(path.clone()).unwrap();
+        let second = DiskObservationReader::<ChainEvent>::open(path).unwrap();
+        assert!(matches!(
+            first.latest_observation(&key).await.unwrap(),
+            ObservationLookup::Rebuilding { examined_through, committed_len: None }
+                if examined_through == REBUILD_FRAMES as u64
+        ));
+        let ObservationLookup::Ready {
+            committed_len,
+            observation,
+        } = second.latest_observation(&key).await.unwrap()
+        else {
+            panic!("the next shared rebuild must certify the prefix before the torn group");
+        };
+        assert_eq!(committed_len, REBUILD_FRAMES as u64);
+        assert_eq!(observation.unwrap().position, 0);
+        assert_eq!(first.state.lock().unwrap().rebuilt_frames, REBUILD_FRAMES);
+    }
+
+    #[tokio::test]
+    async fn read_only_corrupt_tail_remains_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("corrupt-tail.log");
+        let (observed, mut bytes, tail_offset) = archive_with_tail(&path, 1, 2).await;
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        std::fs::remove_file(checkpoint_path(&path)).unwrap();
+        bytes[tail_offset + frame::HEADER_LEN] ^= 1;
+        std::fs::write(&path, &bytes).unwrap();
+        let reader = DiskObservationReader::<ChainEvent>::open(path.clone()).unwrap();
+        for _ in 0..2 {
+            let error = reader.latest_observation(&key).await.unwrap_err();
+            assert!(error.to_string().contains("frame body checksum mismatch"));
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn rebuild_rejects_a_file_shorter_than_its_captured_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shortened.log");
+        let (_, bytes, tail_offset) = archive_with_tail(&path, 1, 1).await;
+        for cut in [tail_offset, bytes.len() - 1] {
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            assert!(
+                rebuild::<ChainEvent>(&path, &mut State::default(), bytes.len() as u64).is_err()
+            );
         }
     }
 
