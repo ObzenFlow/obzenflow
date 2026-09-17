@@ -89,6 +89,7 @@ anyhow = "1"
 proc-macro2 = "1"
 quote = "1"
 syn = "2"
+strum_macros = "0.28"
 
 # Core types
 url = "2"

@@ -490,11 +490,11 @@ mod tests {
     use super::*;
     use crate::journal::observability::tests::event;
     use crate::journal::{DiskJournal, MemoryJournal};
-    use obzenflow_core::event::observability::families::ObservationKind;
+    use obzenflow_core::event::observability::families::ObservationFamily;
     use obzenflow_core::event::observability::{CaptureSeq, ExecutionProgress, RuntimeSnapshot};
     use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
 
-    fn key(event: &ChainEvent, kind: ObservationKind) -> ObservationKey {
+    fn key(event: &ChainEvent, kind: ObservationFamily) -> ObservationKey {
         let stamp = event.envelope.observability.as_ref().unwrap().capture;
         ObservationKey {
             capture_scope: stamp.capture_scope,
@@ -529,7 +529,7 @@ mod tests {
         let memory = MemoryJournal::with_owner(JournalOwner::stage(stage));
         for journal in [&disk as &dyn Journal<ChainEvent>, &memory] {
             let mut first = event(foreign, 900);
-            let outer_key = key(&first, ObservationKind::InFlight);
+            let outer_key = key(&first, ObservationFamily::new("runtime.in_flight"));
             let mut stamp = first.envelope.observability.as_ref().unwrap().capture;
             stamp.observer = stage.into();
             stamp.capture_seq = CaptureSeq(1);
@@ -541,7 +541,7 @@ mod tests {
             let local_key = ObservationKey {
                 capture_scope: stamp.capture_scope,
                 observer: stage.into(),
-                kind: ObservationKind::RuntimeSnapshot,
+                kind: ObservationFamily::new("runtime_snapshot"),
             };
             let mut second = first.clone();
             let packet = second.envelope.observability.as_mut().unwrap();
@@ -574,7 +574,7 @@ mod tests {
         let stage = StageId::new();
         let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
         let observed = event(stage, 1);
-        let key = key(&observed, ObservationKind::InFlight);
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
         let mut noise = observed.clone();
         noise.envelope.observability = None;
         journal.append(observed, Default::default()).await.unwrap();
@@ -624,7 +624,7 @@ mod tests {
             })
             .unwrap();
         let observed = event(stage, 1);
-        let key = key(&observed, ObservationKind::InFlight);
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
         first
             .append(observed.clone(), Default::default())
             .await
@@ -671,13 +671,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_corrupt_and_foreign_checkpoints_share_incremental_rebuilds() {
+    async fn missing_corrupt_foreign_and_old_key_checkpoints_share_incremental_rebuilds() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("recovery.log");
         let stage = StageId::new();
         let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
         let observed = event(stage, 1);
-        let key = key(&observed, ObservationKind::InFlight);
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
         let mut noise = observed.clone();
         noise.envelope.observability = None;
         journal.append(observed, Default::default()).await.unwrap();
@@ -689,6 +689,14 @@ mod tests {
         }
         drop(journal);
         let valid = std::fs::read(checkpoint_path(&path)).unwrap();
+        // Old enum keys must rebuild through the existing recovery path, even
+        // when their checkpoint framing and checksum are otherwise valid.
+        let mut old: CheckedCheckpoint = serde_json::from_slice(&valid).unwrap();
+        let mut body: serde_json::Value = serde_json::from_str(&old.body).unwrap();
+        body["entries"][0][0]["kind"] = serde_json::json!("InFlight");
+        old.body = serde_json::to_string(&body).unwrap();
+        old.crc = crc32fast::hash(old.body.as_bytes());
+        let old_keys = serde_json::to_vec(&old).unwrap();
         let foreign_directory = tempfile::tempdir().unwrap();
         let foreign_path = foreign_directory.path().join("recovery.log");
         let foreign =
@@ -699,7 +707,12 @@ mod tests {
             .unwrap();
         drop(foreign);
         let foreign_checkpoint = std::fs::read(checkpoint_path(&foreign_path)).unwrap();
-        for checkpoint in [None, Some(b"broken".to_vec()), Some(foreign_checkpoint)] {
+        for checkpoint in [
+            None,
+            Some(b"broken".to_vec()),
+            Some(foreign_checkpoint),
+            Some(old_keys),
+        ] {
             match checkpoint {
                 None => std::fs::remove_file(checkpoint_path(&path)).unwrap(),
                 Some(bytes) => std::fs::write(checkpoint_path(&path), bytes).unwrap(),
@@ -735,7 +748,7 @@ mod tests {
         let stage = StageId::new();
         let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
         let observation = event(stage, 1);
-        let key = key(&observation, ObservationKind::InFlight);
+        let key = key(&observation, ObservationFamily::new("runtime.in_flight"));
         journal
             .append(observation.clone(), Default::default())
             .await

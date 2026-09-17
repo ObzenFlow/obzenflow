@@ -99,7 +99,7 @@ pub(super) fn locate(
 mod tests {
     use super::*;
     use crate::journal::observability::tests::event;
-    use obzenflow_core::event::observability::families::ObservationKind;
+    use obzenflow_core::event::observability::families::ObservationFamily;
     use obzenflow_core::StageId;
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
         let key = ObservationKey {
             capture_scope: packet.capture.capture_scope,
             observer: packet.capture.observer,
-            kind: ObservationKind::InFlight,
+            kind: ObservationFamily::new("runtime.in_flight"),
         };
         let mut index = ObservationIndex::default();
         for seq in 1..=20 {

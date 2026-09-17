@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::layout::{DefaultValue, DefinitionKind, Kind, Layout, NAMES};
 use super::primitives::{bytes, text, unsigned, Cursor};
-use super::schema::{DefaultValue, DefinitionKind, Kind, Shape, NAMES};
 use super::{invalid, Result};
 use serde_json::{Map, Value};
 
@@ -135,7 +135,7 @@ pub(super) fn write(
         }
         Kind::Json => bytes(&serde_json::to_vec(value)?, out),
         Kind::PacketCapture => {
-            write(Kind::Struct(Shape::Capture), value, out, definitions)?;
+            write(Kind::Struct(Layout::Capture), value, out, definitions)?;
             definitions.remember_capture(value);
         }
         Kind::SnapshotCapture => {
@@ -143,7 +143,7 @@ pub(super) fn write(
                 out.push(1);
             } else {
                 out.push(0);
-                write(Kind::Struct(Shape::Capture), value, out, definitions)?;
+                write(Kind::Struct(Layout::Capture), value, out, definitions)?;
             }
         }
         Kind::Value => write_dynamic(value, out, 0)?,
@@ -263,12 +263,12 @@ pub(super) fn read(
         }
         Kind::Json => serde_json::from_slice(input.bytes()?)?,
         Kind::PacketCapture => {
-            let value = read(Kind::Struct(Shape::Capture), input, definitions)?;
+            let value = read(Kind::Struct(Layout::Capture), input, definitions)?;
             definitions.remember_capture(&value);
             value
         }
         Kind::SnapshotCapture => match input.byte()? {
-            0 => read(Kind::Struct(Shape::Capture), input, definitions)?,
+            0 => read(Kind::Struct(Layout::Capture), input, definitions)?,
             1 => definitions
                 .capture()
                 .ok_or_else(|| invalid("capture alias has no packet capture"))?,

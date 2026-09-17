@@ -104,7 +104,8 @@ impl ObservabilityContext {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, strum_macros::IntoStaticStr)]
+#[strum(prefix = "records.")]
 #[serde(
     tag = "observation_type",
     rename_all = "snake_case",
@@ -260,7 +261,7 @@ pub mod measurement_snapshots;
 pub mod runtime_observability;
 pub mod runtime_snapshot;
 
-pub use families::{observation_families, ObservationKind};
+pub use families::{observation_families, ObservationFamily, ObservationSubject};
 pub use http::*;
 pub use measurement_snapshots::{MetricsSnapshot, SliSnapshot};
 pub use runtime_observability::{

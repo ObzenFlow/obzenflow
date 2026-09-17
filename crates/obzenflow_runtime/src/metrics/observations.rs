@@ -7,7 +7,7 @@
 
 use crate::execution::RuntimeExecution;
 use obzenflow_core::event::observability::families::{
-    observation_families as split, ObservationKind as Kind,
+    observation_families as split, ObservationFamily,
 };
 #[cfg(test)]
 use obzenflow_core::event::observability::RuntimeObservability;
@@ -24,7 +24,7 @@ const MAX_OWNERS: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
     observer: WriterId,
-    kind: Kind,
+    kind: ObservationFamily,
 }
 
 #[derive(Debug, Clone, Default)]

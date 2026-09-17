@@ -1,0 +1,360 @@
+{
+  "envelope": {
+    "provenance": {
+      "event": {
+        "id": "01M2R1P9BVTYM3VW6A1C977A2X",
+        "writer_id": {
+          "type": "Stage",
+          "id": "01M2R1P9BTCYETFDCV5JYHW1VZ"
+        },
+        "event_kind": "fact",
+        "event_type": "application.value",
+        "causality": {
+          "parent_ids": [
+            "01M2R1P9BW8HY0RX3NQGTKYGMG"
+          ]
+        },
+        "flow_context": {
+          "flow_name": "unknown",
+          "flow_id": "unknown",
+          "stage_name": "unknown",
+          "stage_id": "01M2R1P9BVN71QD6W0D7EABTFC",
+          "stage_type": "Transform"
+        },
+        "processing": {
+          "event_time": 1789660964219,
+          "status": "Success"
+        },
+        "correlation": {
+          "ids": [
+            "01M2R1P9BW8HY0RX3NQGTKYGMG",
+            "01M2R1P9BVTYM3VW6A1C977A2X"
+          ],
+          "payload": {
+            "entry_time_ns": 18446744073709551615,
+            "entry_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
+            "metadata": {
+              "id": "opaque",
+              "negative_zero": -0.0,
+              "nested": [
+                null,
+                18446744073709551615,
+                {
+                  "event_type": "custom"
+                }
+              ]
+            }
+          }
+        },
+        "runtime": {
+          "accounting": {
+            "events_processed_total": 18446744073709551615,
+            "events_accumulated_total": 0,
+            "events_emitted_total": 9007199254740993,
+            "errors_total": 0,
+            "failures_total": 0,
+            "errors_by_kind": {},
+            "data_outputs_by_event_type": [],
+            "data_inputs_by_upstream_event_type": []
+          }
+        },
+        "composite_activations": []
+      },
+      "journal": {
+        "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
+        "vector_clock": {
+          "clocks": {
+            "independent-writer": 18446744073709551615,
+            "zero-writer": 0
+          }
+        },
+        "timestamp": "2037-01-02T03:04:05.123456789Z",
+        "journal_group_id": null,
+        "journal_group_member": null
+      }
+    },
+    "observability": {
+      "capture": {
+        "capture_scope": {
+          "flow_id": "01M2R1P9BWGZY1Q6P6EZ0B8V8B",
+          "resume_generation": 18446744073709551615
+        },
+        "observer": {
+          "type": "Stage",
+          "id": "01M2R1P9BWXJ47EG8TH3B5744R"
+        },
+        "capture_seq": 18446744073709551615,
+        "capture_reason": "periodic",
+        "observed_at_ms": 18446744073709551615
+      },
+      "runtime": {
+        "in_flight": 0,
+        "join_reference_since_last_stream": 18446744073709551615,
+        "time_in_state_ms": 1001,
+        "event_loops_total": 18446744073709551615,
+        "event_loops_with_work_total": 0,
+        "timing": {
+          "processing_time_count": 18446744073709551615,
+          "processing_time_sum_nanos": 18446744073709551615,
+          "recent_p50_ms": 0,
+          "recent_p90_ms": null,
+          "recent_p95_ms": 1,
+          "recent_p99_ms": 18446744073709551615,
+          "recent_p999_ms": 18446744073709551615,
+          "window": {
+            "started_at_ms": 0,
+            "ended_at_ms": 18446744073709551615
+          }
+        },
+        "circuit_breaker": {
+          "observed_state": "half_open",
+          "requests_total": 18446744073709551615,
+          "successes_total": 0,
+          "failures_total": 1,
+          "slow_total": 2,
+          "rejections_total": 3,
+          "opened_total": 4,
+          "time_closed_seconds": -0.0,
+          "time_open_seconds": 1.7976931348623157e+308,
+          "time_half_open_seconds": 2.2250738585072014e-308
+        },
+        "rate_limiter": {
+          "events_total": 18446744073709551615,
+          "delayed_total": 1,
+          "tokens_consumed_total": -0.0,
+          "delay_seconds_total": 0.125,
+          "bucket_tokens": 2.2250738585072014e-308,
+          "bucket_capacity": 1.7976931348623157e+308
+        },
+        "effect_circuit_breakers": [
+          {
+            "effect_type": "payments.authorise",
+            "cb_requests_total": 18446744073709551615,
+            "cb_successes_total": 1,
+            "cb_failures_total": 2,
+            "cb_slow_total": 3,
+            "cb_rejections_total": 4,
+            "cb_opened_total": 5,
+            "cb_time_closed_seconds": -0.0,
+            "cb_time_open_seconds": 0.25,
+            "cb_time_half_open_seconds": 0.5,
+            "cb_state": 0.5
+          }
+        ],
+        "effect_rate_limiters": [
+          {
+            "effect_type": "payments.authorise",
+            "rl_events_total": 18446744073709551615,
+            "rl_delayed_total": 1001,
+            "rl_tokens_consumed_total": -0.0,
+            "rl_delay_seconds_total": 2.2250738585072014e-308,
+            "rl_bucket_tokens": 12.5,
+            "rl_bucket_capacity": 100.0
+          }
+        ]
+      },
+      "runtime_snapshot": {
+        "capture": {
+          "capture_scope": {
+            "flow_id": "01M2R1P9BWGZY1Q6P6EZ0B8V8B",
+            "resume_generation": 18446744073709551615
+          },
+          "observer": {
+            "type": "Stage",
+            "id": "01M2R1P9BTCYETFDCV5JYHW1VZ"
+          },
+          "capture_seq": 18446744073709551614,
+          "capture_reason": "periodic",
+          "observed_at_ms": 18446744073709551615
+        },
+        "progress": {
+          "reader_seq": 18446744073709551615,
+          "receipted_seq": 1001,
+          "writer_seq": 1000,
+          "last_consumed_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
+          "last_consumed_writer": "01M2R1P9BW7XQBHPJCNNKZG5B2",
+          "last_consumed_vector_clock": {
+            "clocks": {
+              "independent-writer": 18446744073709551615,
+              "zero-writer": 0
+            }
+          },
+          "last_receipted_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
+          "last_receipted_vector_clock": {
+            "clocks": {
+              "independent-writer": 18446744073709551614,
+              "zero-writer": 0
+            }
+          },
+          "last_emitted_event_id": "01M2R1P9BVTYM3VW6A1C977A2X",
+          "last_emitted_writer": {
+            "type": "Stage",
+            "id": "01M2R1P9BTCYETFDCV5JYHW1VZ"
+          }
+        },
+        "fsm_state": "Running"
+      },
+      "processing_time": 18446744073709551615,
+      "metrics": {
+        "events_processed": 18446744073709551615,
+        "events_in_flight": 4294967295,
+        "queue_depth": 0,
+        "processing_rate": -0.0,
+        "error_rate": 0.0,
+        "latency_p50_ms": 2.2250738585072014e-308,
+        "latency_p99_ms": 1.7976931348623157e+308
+      },
+      "sli": {
+        "availability": 1.0,
+        "error_budget_remaining": -0.0,
+        "latency_budget_used": 0.125
+      },
+      "records": [
+        {
+          "observation_type": "llm",
+          "metadata": {
+            "schema_version": 1,
+            "provider": "fixture",
+            "model": "complete-model",
+            "hashes": {
+              "version": "sha256-v1",
+              "prompt_hash": "a",
+              "params_hash": "b",
+              "schema_hash": "c"
+            },
+            "usage": {
+              "source": "provider",
+              "input_tokens": 1001,
+              "output_tokens": 1000,
+              "total_tokens": 2001
+            },
+            "cache": {
+              "mode": "replay",
+              "hit": true
+            }
+          }
+        },
+        {
+          "observation_type": "circuit_breaker_summary",
+          "effect_type": "effect",
+          "window_duration_s": 1,
+          "requests_processed": 2,
+          "requests_rejected": 3,
+          "observed_state": "open",
+          "consecutive_failures": 4,
+          "rejection_rate": -0.0,
+          "successes_total": 5,
+          "failures_total": 6,
+          "opened_total": 7,
+          "time_in_closed_seconds": 0.0,
+          "time_in_open_seconds": 0.5,
+          "time_in_half_open_seconds": 0.25
+        },
+        {
+          "observation_type": "rate_limiter_activity",
+          "effect_type": "effect",
+          "window_ms": 1,
+          "delayed_events": 2,
+          "delay_ms_total": 3,
+          "delay_ms_max": 4,
+          "limit_rate": -0.0
+        },
+        {
+          "observation_type": "rate_limiter_utilisation",
+          "utilization_percent": 0.25,
+          "events_in_window": 18446744073709551615,
+          "window_size_ms": 0
+        },
+        {
+          "observation_type": "backpressure_activity",
+          "window_ms": 0,
+          "delayed_events": 1,
+          "delay_ms_total": 2,
+          "delay_ms_max": 3,
+          "min_credit": 0,
+          "limiting_downstream_stage_id": "01M2R1P9BWM2V4JYQ1JJYT2YMD"
+        },
+        {
+          "observation_type": "resource_usage",
+          "cpu_percent": -0.0,
+          "memory_bytes": 18446744073709551615,
+          "thread_count": null
+        },
+        {
+          "observation_type": "http_pull",
+          "requests_total": 18446744073709551615,
+          "responses_2xx": 1,
+          "responses_4xx": 2,
+          "responses_5xx": 3,
+          "rate_limited_total": 4,
+          "retries_total": 5,
+          "events_decoded_total": 6,
+          "wait_seconds_rate_limit": -0.0,
+          "wait_seconds_poll_interval": 0.25,
+          "wait_seconds_backoff": 0.5
+        },
+        {
+          "observation_type": "ai_chunking_work",
+          "rerender_attempts_total": 18446744073709551615,
+          "max_decomposition_depth_reached": 4294967295,
+          "budget_overhead_tokens": 1001,
+          "excluded_items": [
+            0,
+            127,
+            128
+          ]
+        },
+        {
+          "observation_type": "stage_heartbeat",
+          "activity": {
+            "kind": "polling"
+          },
+          "handler_blocked_ms": 0,
+          "last_consumed_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
+          "last_output_event_id": null
+        },
+        {
+          "observation_type": "edge_liveness",
+          "upstream": "01M2R1P9BWK72MZKNPS7V6NMHW",
+          "reader": "01M2R1P9BWVYVFJT9TAJ9ZNNM7",
+          "state": "recovered",
+          "idle_ms": 18446744073709551615,
+          "last_reader_seq": 0,
+          "last_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG"
+        },
+        {
+          "observation_type": "http_surface",
+          "snapshot": {
+            "routes": [
+              {
+                "surface_name": "api",
+                "method": "Get",
+                "path": "/items",
+                "status_class": "2xx",
+                "requests_total": 18446744073709551615,
+                "request_duration_ms_total": 1001,
+                "request_bytes_total": 0,
+                "response_bytes_total": 1000
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "payload": {
+    "float": 0.8455123990878513,
+    "integer": 18446744073709551615,
+    "nested": {
+      "envelope": {
+        "provenance": [
+          null,
+          true,
+          "🙂\n\u0000"
+        ]
+      }
+    },
+    "tiny": 2.2250738585072014e-308,
+    "zero": -0.0
+  }
+}

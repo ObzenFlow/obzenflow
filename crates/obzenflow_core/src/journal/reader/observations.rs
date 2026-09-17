@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::event::observability::families::ObservationKind;
+use crate::event::observability::families::ObservationFamily;
 use crate::event::observability::{CaptureScope, ObservabilityContext};
 use crate::journal::JournalError;
 use crate::WriterId;
@@ -13,7 +13,7 @@ use async_trait::async_trait;
 pub struct ObservationKey {
     pub capture_scope: CaptureScope,
     pub observer: WriterId,
-    pub kind: ObservationKind,
+    pub kind: ObservationFamily,
 }
 
 #[derive(Debug, Clone)]

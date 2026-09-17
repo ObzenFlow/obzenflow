@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::layout::DefinitionKind;
 use super::primitives::{bytes, text, unsigned, Cursor};
-use super::schema::DefinitionKind;
 use super::values::{self, ReadDefinitions, Standalone, WriteDefinitions};
 use super::{frame, invalid, Result};
 use serde_json::Value;

@@ -165,7 +165,7 @@ fn origin_metadata_keeps_application_keys_and_values_opaque() {
         }
         let mut bytes = Vec::new();
         values::write(
-            Kind::Struct(Shape::Origin),
+            Kind::Struct(Layout::Origin),
             &value,
             &mut bytes,
             &mut Standalone,
@@ -173,7 +173,7 @@ fn origin_metadata_keeps_application_keys_and_values_opaque() {
         .unwrap();
         let mut cursor = Cursor::new(&bytes);
         let decoded =
-            values::read(Kind::Struct(Shape::Origin), &mut cursor, &mut Standalone).unwrap();
+            values::read(Kind::Struct(Layout::Origin), &mut cursor, &mut Standalone).unwrap();
         cursor.finish().unwrap();
         assert_eq!(
             serde_json::to_vec(&value).unwrap(),
@@ -376,8 +376,7 @@ fn immutable_references_are_committed_run_local_complete_and_not_keyed_by_event_
     );
 }
 
-#[test]
-fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip() {
+fn complete_observation_record() -> JournalRecord<ChainPayload> {
     let mut value = serde_json::to_value(record()).unwrap();
     let author = value["envelope"]["provenance"]["event"]["writer_id"].clone();
     let observer = serde_json::to_value(WriterId::from(StageId::new())).unwrap();
@@ -432,7 +431,12 @@ fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip
         ]
     });
     value["envelope"]["observability"] = packet;
-    let record: JournalRecord<ChainPayload> = serde_json::from_value(value).unwrap();
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip() {
+    let record = complete_observation_record();
     assert_eq!(
         record
             .envelope
@@ -483,7 +487,7 @@ fn every_observation_family_and_absolute_boundary_survives_full_record_roundtrip
 
 #[test]
 fn streamed_scalars_preserve_the_existing_wire_bytes_and_presence_states() {
-    use super::schema::DefaultValue;
+    use super::layout::DefaultValue;
 
     fn check<T: serde::Serialize>(kind: Kind, value: T, default: Option<DefaultValue>) {
         let logical = serde_json::to_value(&value).unwrap();
@@ -575,14 +579,14 @@ fn primitive_extremes_and_presence_states_are_exact() {
     ] {
         let mut bytes = Vec::new();
         values::write(
-            Kind::Struct(Shape::Measurements),
+            Kind::Struct(Layout::Measurements),
             &value,
             &mut bytes,
             &mut values::Standalone,
         )
         .unwrap();
         let restored = values::read(
-            Kind::Struct(Shape::Measurements),
+            Kind::Struct(Layout::Measurements),
             &mut Cursor::new(&bytes),
             &mut values::Standalone,
         )
@@ -624,4 +628,44 @@ fn warm_caches_cannot_hide_missing_or_edited_carriers_and_archives_are_relocatab
         serde_json::to_value(restored).unwrap(),
         serde_json::to_value(original).unwrap()
     );
+}
+
+#[test]
+fn format_four_fixtures_preserve_bytes_and_logical_records() {
+    for (json, bytes) in [
+        (
+            include_str!("fixtures/observations.json"),
+            include_bytes!("fixtures/observations.frame").as_slice(),
+        ),
+        (
+            include_str!("fixtures/plain.json"),
+            include_bytes!("fixtures/plain.frame").as_slice(),
+        ),
+    ] {
+        let record: JournalRecord<ChainPayload> = serde_json::from_str(json).unwrap();
+        let prepared = prepare(
+            std::slice::from_ref(&record),
+            None,
+            Path::new("fixture.log"),
+            DefinitionStore::default(),
+        )
+        .unwrap();
+        assert_eq!(prepared.bytes, bytes);
+        let restored = decode(Path::new("fixture.log"), 0, bytes).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&record).unwrap(),
+            serde_json::to_vec(&restored).unwrap()
+        );
+        if let Some(packet) = record.envelope.observability {
+            let families =
+                obzenflow_core::event::observability::observation_families(packet).unwrap();
+            assert_eq!(families.len(), 25);
+            let keys: std::collections::HashSet<_> = families.iter().map(|(key, _)| key).collect();
+            assert_eq!(
+                keys.len(),
+                families.len(),
+                "independent measurements must not share a retention key"
+            );
+        }
+    }
 }

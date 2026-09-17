@@ -21,6 +21,14 @@ Record components have separate homes under `event`: `envelope`, `provenance`, `
 
 The `journal` module owns the storage contracts: append inputs, configuration, readers, factories, and archives. Both `append` and `append_group` take `AppendOptions`, which carries the causal parent and optional deferred capture. Capture reads the event and returns only its optional observation packet. The journal applies its configured policy to that complete packet. `JournalConfig::default()` retains observability on every record; sparse capture is opt-in. Runtime executes replay and gathers measurements through these Core contracts.
 
+Observation retention uses a shared Core family key: the selected field or record
+variant name plus its effect or edge subject. Strum derives record variant names
+from `ObservationRecord`; there is no parallel observation-kind catalogue or
+numbered schema. Field selection is explicit and exhaustive, and runtime snapshots
+keep their own capture stamps. These keys belong to internal retention and
+disposable indexes; journal records and backend HTTP/SSE schemas keep their
+existing Serde representations.
+
 ## Record contract (FLOWIP-145a)
 
 Manifest 4.0 journals and JSONL exports contain exactly `envelope` and `payload` at the root. Event authors own `envelope.provenance.event`; journals assign `envelope.provenance.journal`. The descriptor selects the payload family: `fact`, `composite_data`, `flow_signal`, `delivery`, `execution`, or `system`. Application facts retain their original JSON value, including scalars, arrays and null. Built-in composite carriers are durable intermediary records; a final application result remains a fact even when it has composite ancestry.
