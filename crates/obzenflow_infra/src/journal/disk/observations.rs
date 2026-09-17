@@ -8,7 +8,7 @@
 use super::codec::{frame, Decoder};
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use crate::journal::observation_index::{
-    locate, unavailable, Locator, ObservationIndex, HISTORY_PER_KEY, MAX_KEYS,
+    locate, unavailable, Locator, ObservationIndex, HISTORY_PER_KEY,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::{JournalEvent, JournalRecord};
@@ -638,7 +638,6 @@ fn load_checkpoint(path: &Path, committed_end: u64) -> Option<State> {
         || checkpoint.journal != path.file_name()?.to_str()?
         || end > committed_end
         || checkpoint.first.offset != 0
-        || checkpoint.entries.len() > MAX_KEYS
     {
         return None;
     }
@@ -681,6 +680,9 @@ fn load_checkpoint(path: &Path, committed_end: u64) -> Option<State> {
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+mod cardinality_tests;
 
 #[cfg(test)]
 mod tests {

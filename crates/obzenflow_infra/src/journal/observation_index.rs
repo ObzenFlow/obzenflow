@@ -7,7 +7,6 @@ use obzenflow_core::event::observability::{CaptureSeq, ObservabilityContext};
 use obzenflow_core::journal::{JournalError, LocatedObservation, ObservationKey};
 use std::collections::{HashMap, VecDeque};
 
-pub(super) const MAX_KEYS: usize = 4096;
 pub(super) const HISTORY_PER_KEY: usize = 4;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -19,6 +18,7 @@ pub(super) struct Locator {
 }
 
 /// Disposable locators only. Packets remain in their committed carriers.
+/// Every key retains its latest capture; only the history per key is bounded.
 #[derive(Default, Clone)]
 pub(super) struct ObservationIndex {
     pub examined_through: u64,
@@ -48,9 +48,6 @@ impl ObservationIndex {
                     observer: packet.capture.observer,
                     kind,
                 };
-                if self.entries.len() >= MAX_KEYS && !self.entries.contains_key(&key) {
-                    return Err(unavailable("attachment key capacity reached"));
-                }
                 let history = self.entries.entry(key).or_default();
                 if history
                     .back()
