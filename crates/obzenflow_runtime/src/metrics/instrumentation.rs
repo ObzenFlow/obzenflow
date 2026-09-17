@@ -13,13 +13,11 @@ use crate::control_plane::{
 };
 use crate::execution::RuntimeExecution;
 use hdrhistogram::Histogram;
-use obzenflow_core::event::context::{
-    EffectCircuitBreakerContext, EffectRateLimiterContext, EventTypeCountContext,
-    UpstreamEventTypeCountContext,
-};
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::observability::{EffectCircuitBreakerContext, EffectRateLimiterContext};
 use obzenflow_core::event::payloads::execution_payload::CircuitState;
+use obzenflow_core::event::provenance::{EventTypeCountContext, UpstreamEventTypeCountContext};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, JournalEvent};
@@ -763,13 +761,12 @@ impl StageInstrumentation {
     }
 }
 
-use obzenflow_core::event::context::{
-    CircuitBreakerMeasurements, ExecutionAccounting, MeasurementWindow, RateLimiterMeasurements,
-    RuntimeObservability, RuntimeProvenance, TimingMeasurements,
+use obzenflow_core::event::observability::{
+    CaptureReason, CircuitBreakerMeasurements, MeasurementWindow, NoObservations,
+    ObservabilityContext, ObservationRecord, ObservationRecorder, RateLimiterMeasurements,
+    RuntimeObservability, TimingMeasurements,
 };
-use obzenflow_core::event::observation::{
-    CaptureReason, NoObservations, ObservabilityContext, ObservationRecord, ObservationRecorder,
-};
+use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
 use std::error::Error;
 /// Higher-order function for instrumented event processing
 use std::future::Future;
@@ -971,7 +968,7 @@ mod tests {
                 .accounting
                 .data_inputs_by_upstream_event_type,
             vec![
-                obzenflow_core::event::context::UpstreamEventTypeCountContext {
+                obzenflow_core::event::provenance::UpstreamEventTypeCountContext {
                     upstream: physical_upstream,
                     event_type: EventType::from("checkout.command.v1"),
                     total: 1,

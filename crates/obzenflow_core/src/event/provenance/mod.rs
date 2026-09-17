@@ -4,15 +4,12 @@
 
 //! Event authorship and journal commitment have separate authorities.
 
-use super::chain_event::CorrelationContext;
-use super::context::causality_context::CausalityContext;
-use super::context::{CompositeActivationContext, FlowContext, ReplayContext, RuntimeProvenance};
-use super::event_envelope::JournalGroupMember;
-use super::observation::ObservabilityContext;
-use super::payloads::chain_payload::EventKind;
-use super::payloads::effect_payload::EffectProvenance;
-use super::status::processing_status::ProcessingStatus;
-use super::vector_clock::VectorClock;
+use crate::event::chain_event::CorrelationContext;
+use crate::event::payloads::chain_payload::EventKind;
+use crate::event::payloads::effect_payload::EffectProvenance;
+use crate::event::provenance::causality_context::CausalityContext;
+use crate::event::status::processing_status::ProcessingStatus;
+use crate::event::vector_clock::VectorClock;
 use crate::id::{CycleDepth, SccId};
 use crate::ingress::IngressContext;
 use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
@@ -90,23 +87,6 @@ pub struct AuthoredProvenance<E> {
     pub event: E,
 }
 
-/// An author cannot supply physical journal commitment through this type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthoredEnvelope<E> {
-    pub provenance: AuthoredProvenance<E>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observability: Option<ObservabilityContext>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EventEnvelope<E> {
-    pub provenance: Provenance<E>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observability: Option<ObservabilityContext>,
-}
-
 /// Shared identity access for the two protected event provenance families.
 pub trait RecordProvenance {
     fn id(&self) -> &EventId;
@@ -142,3 +122,29 @@ impl RecordProvenance for SystemEventProvenance {
         None
     }
 }
+
+/// Position of one logical event inside the physical atomic journal frame
+/// that committed it.
+///
+/// The zero-based index and total size make a repeated use of one
+/// deterministic group identity observable during replay. Without this
+/// witness, two adjacent physical frames with the same `journal_group_id`
+/// collapse into one indistinguishable list of logical events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalGroupMember {
+    pub index: u32,
+    pub size: u32,
+}
+
+pub mod causality_context;
+pub mod composite_activation_context;
+pub mod flow_context;
+pub mod replay_context;
+pub mod runtime_provenance;
+
+pub use composite_activation_context::CompositeActivationContext;
+pub use flow_context::FlowContext;
+pub use replay_context::ReplayContext;
+pub use runtime_provenance::{
+    EventTypeCountContext, ExecutionAccounting, RuntimeProvenance, UpstreamEventTypeCountContext,
+};

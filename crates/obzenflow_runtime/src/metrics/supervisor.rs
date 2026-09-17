@@ -82,8 +82,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             ),
         );
 
-        if let Err(e) =
-            crate::supervised_base::publication::append(&self.system_journal, event, None).await
+        if let Err(e) = crate::supervised_base::publication::append(
+            &self.system_journal,
+            event,
+            Default::default(),
+        )
+        .await
         {
             tracing::error!(
                 journal_error = %e,
@@ -116,10 +120,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     ),
                 );
 
-                crate::supervised_base::publication::append(&self.system_journal, event, None)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| format!("Failed to write ready event: {e}"))?;
+                crate::supervised_base::publication::append(
+                    &self.system_journal,
+                    event,
+                    Default::default(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to write ready event: {e}"))?;
 
                 tracing::info!("Metrics aggregator published ready event");
 
@@ -340,7 +348,7 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            _options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "append failed".to_string(),

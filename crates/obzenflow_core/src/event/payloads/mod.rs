@@ -13,3 +13,10 @@ pub mod execution_payload;
 pub mod flow_control_payload;
 pub mod sink_operation_payload;
 pub mod stage_fatal_payload;
+
+pub mod journal_payload;
+pub mod system_payload;
+
+pub use chain_payload::ChainPayload;
+pub use journal_payload::JournalPayload;
+pub use system_payload::SystemPayload;

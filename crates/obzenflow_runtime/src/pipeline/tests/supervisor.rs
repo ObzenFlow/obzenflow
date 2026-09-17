@@ -7,7 +7,6 @@
 use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
-use crate::journal::FlowJournalFactory;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::resources::ProducerTail;
@@ -23,8 +22,9 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::{JournalRecord, StageId, SystemId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -340,7 +340,7 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
     let journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink) = source_sink_topology();
     let row = journal
-        .append(SystemEvent::stage_running(sink), None)
+        .append(SystemEvent::stage_running(sink), Default::default())
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -425,7 +425,7 @@ pub async fn producer_tail_capture_finishes_an_owned_read_before_waiting_behind_
     let journal = new_system_journal(&mut *journals, system_id);
     let (topology, sink) = source_sink_topology();
     let row = journal
-        .append(SystemEvent::stage_running(sink), None)
+        .append(SystemEvent::stage_running(sink), Default::default())
         .await
         .unwrap();
     let id = *row.id();

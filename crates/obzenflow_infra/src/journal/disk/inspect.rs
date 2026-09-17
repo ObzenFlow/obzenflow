@@ -16,7 +16,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
-use obzenflow_core::journal::run_manifest::{
+use obzenflow_core::journal::archive::manifest::{
     RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
@@ -305,13 +305,12 @@ mod tests {
         use super::super::log_record::{serialize_atomic_group, serialize_record};
         use crate::journal::DiskJournal;
         use obzenflow_core::ai::AiMapReduceTaggedPartial;
-        use obzenflow_core::event::context::{
-            ExecutionProgress, RuntimeObservability, RuntimeProvenance, RuntimeSnapshot,
-        };
-        use obzenflow_core::event::observation::{
-            CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ObservabilityContext,
+        use obzenflow_core::event::observability::{
+            CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ExecutionProgress,
+            ObservabilityContext, RuntimeObservability, RuntimeSnapshot,
         };
         use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+        use obzenflow_core::event::provenance::RuntimeProvenance;
         use obzenflow_core::event::vector_clock::VectorClock;
         use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
         use obzenflow_core::{
@@ -382,10 +381,13 @@ mod tests {
             JournalOwner::stage(stage),
         )
         .unwrap();
-        let mut original = vec![journal.append(events.remove(0), None).await.unwrap()];
+        let mut original = vec![journal
+            .append(events.remove(0), Default::default())
+            .await
+            .unwrap()];
         original.extend(
             journal
-                .append_group("omission-proof", events, None)
+                .append_group("omission-proof", events, Default::default())
                 .await
                 .unwrap(),
         );

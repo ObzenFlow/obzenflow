@@ -38,11 +38,13 @@
 //! its compatibility append until typed outcome facts replace it.
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::journal::AppendOptions;
 use std::sync::Arc;
 
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::context::{MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::provenance::FlowContext;
 
 use obzenflow_core::event::{ChainPayload, CorrelationId, JournalRecord, SystemEvent};
 use obzenflow_core::journal::{Journal, JournalCapture};
@@ -131,7 +133,9 @@ pub(crate) fn commit_control_output(
         snapshot.project_emission(&event);
         event = snapshot.attach_to(event);
         let capture = instrumentation.journal_capture(None, vec![(1, true)]);
-        let written = journal.append_with_capture(event, None, capture).await?;
+        let written = journal
+            .append(event, AppendOptions::new(None).with_capture(capture))
+            .await?;
         instrumentation.record_emitted(&written.authored());
         Ok(written)
     })
@@ -160,7 +164,10 @@ pub(crate) fn commit_error_output(
         event = snapshot.attach_to(event);
         let capture = instrumentation.journal_capture(None, vec![(emitted, true)]);
         let written = journal
-            .append_with_capture(event, parent.as_ref(), capture)
+            .append(
+                event,
+                AppendOptions::new(parent.as_ref()).with_capture(capture),
+            )
             .await?;
         if written.consumes_data_credit() {
             instrumentation.record_error_journal_output_event(&written.authored());
@@ -453,7 +460,7 @@ impl OutputCommitter<'_> {
         )]);
         let written = match self
             .data_journal
-            .append_with_capture(event, parent, capture)
+            .append(event, AppendOptions::new(parent).with_capture(capture))
             .await
         {
             Ok(written) => written,
@@ -500,7 +507,10 @@ impl OutputCommitter<'_> {
             )]);
             let written = match committer
                 .data_journal
-                .append_with_capture(event, parent.as_ref(), capture)
+                .append(
+                    event,
+                    AppendOptions::new(parent.as_ref()).with_capture(capture),
+                )
                 .await
             {
                 Ok(written) => written,
@@ -687,11 +697,10 @@ impl OutputCommitter<'_> {
         let member_count = metadata.len();
         let written = match self
             .data_journal
-            .append_group_with_capture(
+            .append_group(
                 group_id,
                 prepared,
-                parent,
-                self.observation_capture(projections),
+                AppendOptions::new(parent).with_capture(self.observation_capture(projections)),
             )
             .await
         {
@@ -840,7 +849,7 @@ impl OutputCommitter<'_> {
                 count.total = count.total.saturating_add(1);
             } else {
                 snapshot.accounting.data_outputs_by_event_type.push(
-                    obzenflow_core::event::context::EventTypeCountContext {
+                    obzenflow_core::event::provenance::EventTypeCountContext {
                         event_type: event_type.into(),
                         total: 1,
                     },

@@ -9,11 +9,10 @@ use super::{
     DeliveryFilter, EofOutcome, HeldHead, MergeCandidateMeta, PollResult, ReaderProgress,
     StageInputPosition, UpstreamSubscription,
 };
-use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::chain_payload::EventKind;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::provenance::ChainEventProvenance;
+use obzenflow_core::event::provenance::{ChainEventProvenance, CompositeActivationContext};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
@@ -565,7 +564,7 @@ where
                             spec.port_name.clone(),
                             provenance.processing.event_time,
                         );
-                        match obzenflow_core::event::context::composite_activation_context::union_composite_activations(&provenance.composite_activations, &[activation]) {
+                        match obzenflow_core::event::provenance::composite_activation_context::union_composite_activations(&provenance.composite_activations, &[activation]) {
                             Ok(merged) => provenance.composite_activations = merged,
                             Err(error) => return PollResult::Error(Box::new(error)),
                         }

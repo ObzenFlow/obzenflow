@@ -7,12 +7,15 @@
 //! These DTOs define the observations published by execution and host samplers,
 //! implementing the dual collection pattern for application and infrastructure metrics.
 
-use crate::event::context::{MeasurementWindow, StageType};
-use crate::event::observability::{HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot};
-use crate::event::status::processing_status::ErrorKind;
-use crate::event::system_event::{
-    ContractName, ContractResultStatusLabel, EdgeLivenessState, StageActivity, SystemFeedRole,
+use crate::event::context::StageType;
+use crate::event::observability::{
+    EdgeLivenessState, HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot, MeasurementWindow,
+    StageActivity,
 };
+use crate::event::payloads::system_payload::{
+    ContractName, ContractResultStatusLabel, SystemFeedRole,
+};
+use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::EventType;
 use crate::event::SinkOperationPhase;
 use crate::id::{FlowId, StageId};

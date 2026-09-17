@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;

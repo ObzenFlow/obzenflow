@@ -17,6 +17,7 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
 use std::collections::VecDeque;
@@ -396,7 +397,7 @@ pub(super) async fn dispatch_enriching<
                                 crate::supervised_base::publication::append(
                                     &ctx.error_journal,
                                     error_event,
-                                    Some(&merged_parent),
+                                    AppendOptions::new(Some(&merged_parent)),
                                 )
                                 .await
                                 .map_err(|e| format!("Failed to write join error event: {e}"))?;

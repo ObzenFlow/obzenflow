@@ -10,13 +10,15 @@
 
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, ConsumptionFinalEventParams, SourceContractEventParams,
     SystemEvent,
 };
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -528,22 +530,22 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
                 final_event = runtime_context.attach_to(final_event);
 
-                crate::supervised_base::publication::append_with_capture(
+                crate::supervised_base::publication::append(
                     &ctx.data_journal,
                     eof_event,
-                    None,
-                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                    AppendOptions::new(None)
+                        .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
                 )
                 .await
                 .map_err(|e| {
                     obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
                 })?;
 
-                crate::supervised_base::publication::append_with_capture(
+                crate::supervised_base::publication::append(
                     &ctx.data_journal,
                     final_event,
-                    None,
-                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                    AppendOptions::new(None)
+                        .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
                 )
                 .await
                 .map_err(|e| {
@@ -590,7 +592,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 match crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     system_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {
@@ -654,7 +656,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 if let Err(e) = crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     running_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {
@@ -686,13 +688,17 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     StageType::FiniteSource,
                 ));
 
-                crate::supervised_base::publication::append(&ctx.data_journal, contract, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to append source_contract: {e}"
-                        ))
-                    })?;
+                crate::supervised_base::publication::append(
+                    &ctx.data_journal,
+                    contract,
+                    Default::default(),
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to append source_contract: {e}"
+                    ))
+                })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -730,7 +736,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 if let Err(e) = crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     completion_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {
@@ -794,7 +800,7 @@ pub(crate) mod tests {
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::StageId as CoreStageId;
     use serde_json::json;
@@ -864,8 +870,9 @@ pub(crate) mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let env = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(env.clone());

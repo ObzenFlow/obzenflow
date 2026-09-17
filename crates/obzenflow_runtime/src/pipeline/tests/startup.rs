@@ -7,7 +7,6 @@
 use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
-use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::tests::support::{
@@ -19,6 +18,7 @@ use crate::pipeline::PipelineState;
 use crate::supervised_base::ChannelBuilder;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::SystemId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -265,7 +265,10 @@ pub async fn running_state_requires_committed_source_running_after_start(
         .send(())
         .expect("source start action should still be waiting");
     system_journal
-        .append(SystemEvent::stage_running(source_stage_id), None)
+        .append(
+            SystemEvent::stage_running(source_stage_id),
+            Default::default(),
+        )
         .await
         .unwrap();
     wait_for_state(&mut state_rx, "Running", |state| {
@@ -367,7 +370,7 @@ pub async fn stage_failures_and_cancellations_before_readiness_use_journal_evide
             } else {
                 SystemEvent::stage_failed(sink, "ready fault".into(), false)
             };
-            let envelope = journal.append(event, None).await.unwrap();
+            let envelope = journal.append(event, Default::default()).await.unwrap();
             let mut context = test_context(topology, system_id, journal, None);
             let mut machine = crate::pipeline::fsm::build_pipeline_fsm_with_initial(state.clone());
             machine
@@ -395,7 +398,7 @@ pub async fn materialisation_reconsiders_readiness_facts_already_consumed(
     let mut machine =
         crate::pipeline::fsm::build_pipeline_fsm_with_initial(PipelineFsmState::Materializing);
     let envelope = journal
-        .append(SystemEvent::stage_running(sink), None)
+        .append(SystemEvent::stage_running(sink), Default::default())
         .await
         .unwrap();
     assert!(machine
@@ -418,7 +421,7 @@ pub async fn materialisation_reconsiders_readiness_facts_already_consumed(
             _ => None,
         })
         .expect("previously consumed Running fact must authorise readiness publication");
-    let envelope = journal.append(readiness, None).await.unwrap();
+    let envelope = journal.append(readiness, Default::default()).await.unwrap();
     machine
         .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
         .await

@@ -42,7 +42,7 @@ impl Fixture {
             "tail.test",
             serde_json::json!({ "index": index, "padding": padding }),
         )
-        .with_flow_context(obzenflow_core::event::context::FlowContext::new(
+        .with_flow_context(obzenflow_core::event::provenance::FlowContext::new(
             "tail.test",
             self.stage,
         ))
@@ -100,7 +100,7 @@ async fn metrics_tail_read_keeps_the_latest_snapshot_across_chunks() {
     f.journal
         .append(
             f.event(0, "old").with_runtime_provenance(snapshot.clone()),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -110,13 +110,13 @@ async fn metrics_tail_read_keeps_the_latest_snapshot_across_chunks() {
         .append(
             f.event(1, &"é🙂".repeat(30_000))
                 .with_runtime_provenance(snapshot),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
     // Force the graduated metrics search beyond its first, non-metric row.
     f.journal
-        .append(f.event(2, "no snapshot"), None)
+        .append(f.event(2, "no snapshot"), Default::default())
         .await
         .unwrap();
     let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(f.journal);
@@ -135,7 +135,10 @@ async fn read_last_n_preserves_records_across_chunk_boundaries() {
     for index in 0..80 {
         written.push(
             f.journal
-                .append(f.event(index, &"é🙂:0:1372:".repeat(180)), None)
+                .append(
+                    f.event(index, &"é🙂:0:1372:".repeat(180)),
+                    Default::default(),
+                )
                 .await
                 .unwrap(),
         );
@@ -153,7 +156,7 @@ async fn read_last_n_preserves_records_larger_than_multiple_chunks() {
     for index in 0..3 {
         written.push(
             f.journal
-                .append(f.event(index, &"界🙂".repeat(30_000)), None)
+                .append(f.event(index, &"界🙂".repeat(30_000)), Default::default())
                 .await
                 .unwrap(),
         );
@@ -166,18 +169,27 @@ async fn read_last_n_preserves_records_larger_than_multiple_chunks() {
 #[tokio::test]
 async fn read_last_n_preserves_large_atomic_groups_and_member_positions() {
     let f = Fixture::new();
-    let mut written = vec![f.journal.append(f.event(0, "older"), None).await.unwrap()];
+    let mut written = vec![f
+        .journal
+        .append(f.event(0, "older"), Default::default())
+        .await
+        .unwrap()];
     written.extend(
         f.journal
             .append_group(
                 "tail-regression",
                 (1..=80).map(|i| f.event(i, &"界🙂".repeat(500))).collect(),
-                None,
+                Default::default(),
             )
             .await
             .unwrap(),
     );
-    written.push(f.journal.append(f.event(81, "newest"), None).await.unwrap());
+    written.push(
+        f.journal
+            .append(f.event(81, "newest"), Default::default())
+            .await
+            .unwrap(),
+    );
     for count in [1, 2, 40, 81, 100] {
         assert_tail(&f.journal, &written, count).await;
     }
@@ -189,7 +201,7 @@ async fn read_last_n_excludes_unterminated_single_and_group_tails() {
         let f = Fixture::new();
         let committed = f
             .journal
-            .append(f.event(0, "committed"), None)
+            .append(f.event(0, "committed"), Default::default())
             .await
             .unwrap();
         let committed_len = std::fs::metadata(&f.path).unwrap().len() as usize;
@@ -198,12 +210,15 @@ async fn read_last_n_excludes_unterminated_single_and_group_tails() {
                 .append_group(
                     "uncommitted",
                     vec![f.event(1, "tail"), f.event(2, "tail")],
-                    None,
+                    Default::default(),
                 )
                 .await
                 .unwrap();
         } else {
-            f.journal.append(f.event(1, "tail"), None).await.unwrap();
+            f.journal
+                .append(f.event(1, "tail"), Default::default())
+                .await
+                .unwrap();
         }
         let bytes = std::fs::read(&f.path).unwrap();
         // Emulate a crash at the header, body, or final commit-marker boundary
@@ -218,10 +233,21 @@ async fn read_last_n_excludes_unterminated_single_and_group_tails() {
 #[tokio::test]
 async fn read_last_n_retains_best_effort_behavior_for_real_corruption() {
     let f = Fixture::new();
-    let first = f.journal.append(f.event(0, "older"), None).await.unwrap();
+    let first = f
+        .journal
+        .append(f.event(0, "older"), Default::default())
+        .await
+        .unwrap();
     let middle_offset = std::fs::metadata(&f.path).unwrap().len() as usize;
-    f.journal.append(f.event(1, "corrupt"), None).await.unwrap();
-    let last = f.journal.append(f.event(2, "newer"), None).await.unwrap();
+    f.journal
+        .append(f.event(1, "corrupt"), Default::default())
+        .await
+        .unwrap();
+    let last = f
+        .journal
+        .append(f.event(2, "newer"), Default::default())
+        .await
+        .unwrap();
     let mut bytes = std::fs::read(&f.path).unwrap();
     let middle_end = middle_offset + codec::frame::frame_length(&bytes[middle_offset..]).unwrap();
     let crc_start = middle_end - codec::frame::TRAILER_LEN;

@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, WriterId};
@@ -151,7 +150,7 @@ async fn stateful_emit_interval_emits_while_idle() {
     let input_event =
         ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": 1 }));
     src_journal
-        .append(input_event, None)
+        .append(input_event, Default::default())
         .await
         .expect("append upstream event");
 
@@ -330,7 +329,7 @@ async fn stateful_emit_interval_advances_under_paused_time() {
     let input_event =
         ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": 1 }));
     src_journal
-        .append(input_event, None)
+        .append(input_event, Default::default())
         .await
         .expect("append upstream event");
 

@@ -7,7 +7,9 @@
 //! This module provides a separate context that flows through middleware
 //! during event processing, preserving the immutability of ChainEvent.
 
-use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::event::observability::{
+    NoObservations, ObservationRecord, ObservationRecorder,
+};
 use obzenflow_core::{ChainEvent, MiddlewareContextKey, MiddlewareExecutionScope};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -150,7 +152,7 @@ impl std::fmt::Debug for MiddlewareContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::observation::ObservationRecord;
+    use obzenflow_core::event::observability::ObservationRecord;
     use obzenflow_core::event::payloads::execution_payload::CircuitBreakerOpenTrigger;
     use obzenflow_core::event::{ChainEventFactory, CircuitBreakerOpenedEventParams};
     use obzenflow_core::WriterId;

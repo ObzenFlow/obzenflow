@@ -11,12 +11,12 @@
 use super::codec::Decoder;
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
-use obzenflow_core::event::{
-    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
-};
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::provenance::JournalGroupMember;
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
 use std::collections::VecDeque;
 use std::fs::File as StdFile;
 use std::io::SeekFrom;
@@ -545,7 +545,7 @@ mod tests {
     use crate::journal::disk::log_record::serialize_record;
     use chrono::Utc;
     use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::event::journal_record::JournalPayload;
+    use obzenflow_core::event::payloads::JournalPayload;
     use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::JournalRecord;
@@ -574,7 +574,7 @@ mod tests {
         let first = journal
             .append(
                 ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();
@@ -585,7 +585,7 @@ mod tests {
                     "large",
                     serde_json::json!({"body": "x".repeat(READ_BUFFER_BYTES * 3)}),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();
@@ -601,7 +601,7 @@ mod tests {
                         )
                     })
                     .collect(),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();

@@ -3,8 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::context::RuntimeProvenance;
-use obzenflow_core::event::provenance::JournalProvenance;
+use obzenflow_core::event::provenance::{JournalProvenance, RuntimeProvenance};
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::{EventId, JournalWriterId, StageId, WriterId};

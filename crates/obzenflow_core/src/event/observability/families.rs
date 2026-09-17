@@ -3,8 +3,7 @@
 // https://obzenflow.dev
 
 //! Shared family selection for live retention and journal attachment indexing.
-use super::context::RuntimeObservability;
-use super::observation::*;
+use super::*;
 use crate::StageId;
 const MAX_PACKET_FAMILIES: usize = 128;
 

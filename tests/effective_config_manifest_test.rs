@@ -9,12 +9,12 @@
 use obzenflow_adapters::middleware::{rate_limit, CircuitBreaker, EffectResilience};
 use obzenflow_core::config::{ConfigSubject, ResolvedForDoc};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::journal::run_manifest::RunManifest;
+use obzenflow_core::journal::archive::manifest::RunManifest;
+use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
-use obzenflow_runtime::journal::RunSubstrateState;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::{
     CandidateSet, ConfigValue, ResolvedRuntimeConfig, ScopedCandidate,

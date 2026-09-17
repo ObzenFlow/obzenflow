@@ -22,8 +22,8 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
     ChainPayload, JournalRecord, ReplayLifecycleEvent, SystemEvent, SystemPayload,
 };
+use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{SystemId, TypedPayload};
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};

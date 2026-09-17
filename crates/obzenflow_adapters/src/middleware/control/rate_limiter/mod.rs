@@ -54,7 +54,7 @@
 //! consumed, so the abandoned poll charges no token; `delayed_total` and
 //! `events_total` are independent counters.
 
-use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::observability::ObservationRecord;
 use obzenflow_core::event::payloads::execution_payload::RateLimiterFact;
 mod admission_core;
 mod config;
@@ -303,7 +303,7 @@ mod tests {
     use super::admission_core::RateLimiterMode;
     use super::config::validated_rate_limiter_config;
     use super::*;
-    use obzenflow_core::event::observation::ObservationRecord;
+    use obzenflow_core::event::observability::ObservationRecord;
     use obzenflow_core::{FlowId, MiddlewareExecutionScope};
     use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
     use obzenflow_runtime::metrics::observations::ObservationHub;
@@ -338,7 +338,7 @@ mod tests {
     }
 
     fn samples(hub: &ObservationHub) -> Vec<ObservationRecord> {
-        use obzenflow_core::event::observation::ObservationSource;
+        use obzenflow_core::event::observability::ObservationSource;
         hub.snapshot()
             .into_iter()
             .flat_map(|packet| packet.records)
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_mode_hysteresis_transitions() {
-        use obzenflow_core::event::observation::ObservationRecord;
+        use obzenflow_core::event::observability::ObservationRecord;
         use obzenflow_core::event::payloads::execution_payload::{
             ExecutionPayload, RateLimiterFact, RateLimiterMode as WireMode,
         };
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_activity_pulse_emission() {
-        use obzenflow_core::event::observation::ObservationRecord;
+        use obzenflow_core::event::observability::ObservationRecord;
         let middleware = test_middleware(StageId::new(), 5.0, Some(10.0), 1.0);
         {
             let mut stats = middleware.core.stats_for_test().lock().unwrap();

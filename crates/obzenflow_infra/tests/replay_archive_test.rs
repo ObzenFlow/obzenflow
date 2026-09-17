@@ -14,17 +14,17 @@ use obzenflow_core::event::{
     SystemPayload,
 };
 use obzenflow_core::id::{JournalId, SystemId};
-use obzenflow_core::journal::run_manifest::{
+use obzenflow_core::journal::archive::manifest::{
     RunManifest, RunManifestStage, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::Journal;
 use obzenflow_core::{JournalWriterId, WriterId};
 use obzenflow_infra::journal::disk::log_record::LogRecord;
 use obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive;
 use obzenflow_infra::journal::DiskJournal;
-use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use tempfile::tempdir;
@@ -33,7 +33,8 @@ fn binding_descriptor_capabilities() -> BTreeMap<String, u32> {
     BTreeMap::from([
         (EFFECT_BINDING_DESCRIPTOR_CAPABILITY.to_string(), 1),
         (
-            obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY.to_string(),
+            obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY
+                .to_string(),
             1,
         ),
     ])
@@ -112,7 +113,10 @@ async fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
         obzenflow_core::JournalOwner::system(SystemId::new()),
     )
     .unwrap();
-    journal.append(record.authored(), None).await.unwrap();
+    journal
+        .append(record.authored(), Default::default())
+        .await
+        .unwrap();
 }
 
 fn write_released_legacy_retry_row(dir: &Path) {
@@ -195,7 +199,7 @@ async fn open_fails_when_system_log_missing_unless_allowed() {
 async fn open_gates_required_capabilities_before_journal_decode() {
     for capability in [
         EFFECT_BINDING_DESCRIPTOR_CAPABILITY,
-        obzenflow_core::journal::run_manifest::OBSERVABILITY_CAPTURE_CAPABILITY,
+        obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY,
     ] {
         for version in [None, Some(2_u64)] {
             let dir = tempdir().unwrap();

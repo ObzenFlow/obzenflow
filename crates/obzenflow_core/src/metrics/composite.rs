@@ -9,7 +9,9 @@
 //! output counts. The projection in this module never guesses a boundary from
 //! a first entry/exit member, stage names, payload heuristics, or display state.
 
-use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
+use crate::event::payloads::system_payload::{
+    ContractName, ContractResultStatusLabel, SystemFeedRole,
+};
 use crate::event::ChainEvent;
 use crate::id::{CompositeId, StageId};
 use crate::metrics::snapshots::{ContractMetricsSnapshot, ContractViolationCauseLabel};
@@ -693,8 +695,8 @@ impl CompositeDurationAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::context::CompositeActivationContext;
-    use crate::event::system_event::SystemFeedRole;
+    use crate::event::payloads::system_payload::SystemFeedRole;
+    use crate::event::provenance::CompositeActivationContext;
     use crate::event::{ChainEventFactory, ChainPayload, WriterId};
     use crate::metrics::snapshots::{ContractMetricEdgeKey, ContractMetricResultKey};
     use serde_json::json;

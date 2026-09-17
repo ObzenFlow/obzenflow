@@ -6,7 +6,6 @@
 
 #[cfg(test)]
 use crate::id_conversions::StageIdExt;
-use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{PipelineAction, PipelineFsmEvent, PipelineFsmState};
 #[cfg(test)]
 use crate::pipeline::metrics::composite_boundaries_from_topology;
@@ -17,10 +16,12 @@ use crate::pipeline::tests::support::{
 };
 use crate::pipeline::PipelineState;
 use crate::supervised_base::{ChannelBuilder, SupervisorHandle};
-use obzenflow_core::event::context::{ExecutionAccounting, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::{
     ChainEvent, MetricsCoordinationEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{FlowId, StageId, SystemId};
@@ -344,8 +345,9 @@ pub async fn drain_metrics_skips_when_metrics_not_started(
 pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
+    use obzenflow_core::event::provenance::RuntimeProvenance;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{context::RuntimeProvenance, ChainEventFactory};
+    use obzenflow_core::event::ChainEventFactory;
     let system_id = SystemId::new();
     let mut journals = make_journals();
     let journal: Arc<dyn Journal<SystemEvent>> = new_system_journal(&mut *journals, system_id);
@@ -380,7 +382,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
             if failed {
                 event = event.mark_as_error("expected", ErrorKind::Unknown);
             }
-            target.append(event, None).await.unwrap();
+            target.append(event, Default::default()).await.unwrap();
         }
     }
     // The observer starts after publication, with no stage terminal or EOF.
@@ -389,7 +391,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
     journal
         .append(
             SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -399,7 +401,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
         None,
         None,
     );
-    journal.append(terminal, None).await.unwrap();
+    journal.append(terminal, Default::default()).await.unwrap();
     journal
         .append(
             SystemEventFactory::new(system_id).pipeline_failed(
@@ -408,7 +410,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
                 None,
                 None,
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -541,7 +543,7 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
     system_journal
         .append(
             SystemEventFactory::new(system_id).pipeline_not_started(),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();

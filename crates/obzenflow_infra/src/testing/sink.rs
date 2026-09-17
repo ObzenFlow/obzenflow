@@ -1746,9 +1746,10 @@ mod tests {
     use super::*;
     use crate::journal::disk_journals;
     use obzenflow_adapters::sources;
-    use obzenflow_core::event::context::causality_context::CausalityContext;
-    use obzenflow_core::event::context::{FlowContext, StageType};
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+    use obzenflow_core::event::provenance::causality_context::CausalityContext;
+    use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::WriterId;
     use obzenflow_dsl::{flow, sink, source};

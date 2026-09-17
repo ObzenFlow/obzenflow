@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use crate::event::payloads::delivery_payload::DeliveryResult;
-use crate::event::system_event::ContractName;
+use crate::event::payloads::system_payload::ContractName;
 use crate::event::{
     types::{Count, JournalIndex, SeqNo},
     ChainEvent, ChainPayload, EventId,
@@ -933,8 +933,8 @@ impl Contract for DivergenceContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::context::causality_context::CausalityContext;
     use crate::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use crate::event::provenance::causality_context::CausalityContext;
     use crate::event::types::SeqNo;
     use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
     use crate::{CycleDepth, WriterId};

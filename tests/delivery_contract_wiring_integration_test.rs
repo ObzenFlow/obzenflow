@@ -14,7 +14,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
+use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
+use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::SystemPayload;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;

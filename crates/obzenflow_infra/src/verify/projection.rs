@@ -201,10 +201,10 @@ mod tests {
     use super::*;
     use obzenflow_core::ai::AiMapReduceTaggedPartial;
     use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::event::context::replay_context::ReplayContext;
     use obzenflow_core::event::payloads::effect_payload::{
         EffectCursor, EffectDescriptor, EffectProvenance,
     };
+    use obzenflow_core::event::provenance::replay_context::ReplayContext;
     use obzenflow_core::event::EventKind;
     use obzenflow_core::{EventId, StageId, WriterId};
 

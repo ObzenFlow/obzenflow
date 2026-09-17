@@ -6,13 +6,13 @@
 use obzenflow::{sinks, sources};
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::{ChainEvent, PipelineLifecycleEvent, SystemEvent, SystemPayload};
+use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_core::journal::{
     journal_name::JournalName, journal_owner::JournalOwner, Journal, JournalError,
 };
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::{memory_journals, MemoryJournalFactory};
-use obzenflow_runtime::journal::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_runtime::run_context::FlowBuildContext;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};

@@ -144,7 +144,7 @@ async fn get_and_post_failures_select_safe_500_before_optional_measurements() {
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(metrics.total_requests(), 1);
             HttpSurfaceMetricsEmitter::new(metrics, recorder).capture_final();
-            use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+            use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
             let captures = execution.observations().snapshot();
             let ObservationRecord::HttpSurface { snapshot } = &captures[0].records[0] else {
                 panic!("expected surface snapshot")

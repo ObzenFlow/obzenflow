@@ -28,7 +28,7 @@ use middleware::MiddlewareView;
 use obzenflow_core::composite::{
     CompositeDefinition, CompositeLifecycleProjection, CompositeProjectionError,
 };
-use obzenflow_core::event::observation::{ObservabilityContext, ObservationSource};
+use obzenflow_core::event::observability::{ObservabilityContext, ObservationSource};
 use obzenflow_core::event::{
     journal_record::SystemJournalRecord, PipelineLifecycleEvent, SystemPayload,
 };
@@ -152,7 +152,7 @@ impl StudioProjection {
     }
 
     fn measurement_frames(&mut self, selected: Vec<ObservabilityContext>) -> Vec<SseFrame> {
-        use obzenflow_core::event::observation::ObservationRecord;
+        use obzenflow_core::event::observability::ObservationRecord;
         let mut frames = Vec::new();
         for selected in selected {
             frames.extend(self.middleware.measurements(&selected));

@@ -13,8 +13,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::Ulid;
 use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
-use obzenflow_infra::journal::DiskJournal;
-use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use obzenflow_runtime::__private::{TypedJoinHandlerAdapter, UnifiedJoinHandler};
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
@@ -156,12 +155,12 @@ async fn stateful_replay_produces_identical_aggregates() {
         let event =
             ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": i }));
         upstream_journal
-            .append(event, None)
+            .append(event, Default::default())
             .await
             .expect("append data");
     }
     upstream_journal
-        .append(make_eof_event(upstream_writer, 3), None)
+        .append(make_eof_event(upstream_writer, 3), Default::default())
         .await
         .expect("append eof");
 
@@ -199,11 +198,11 @@ async fn replay_determinism_covers_concurrent_writer_ordering() {
     }
 
     upstream_journal
-        .append(high, None)
+        .append(high, Default::default())
         .await
         .expect("append high-id event");
     upstream_journal
-        .append(low, None)
+        .append(low, Default::default())
         .await
         .expect("append low-id event");
 
@@ -450,10 +449,13 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     for i in 0..3 {
         let event =
             ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": i }));
-        src_journal.append(event, None).await.expect("append data");
+        src_journal
+            .append(event, Default::default())
+            .await
+            .expect("append data");
     }
     src_journal
-        .append(make_eof_event(upstream_writer, 3), None)
+        .append(make_eof_event(upstream_writer, 3), Default::default())
         .await
         .expect("append eof");
 
@@ -624,14 +626,14 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     ];
     for row in &ref_rows {
         reference_journal
-            .append(row.clone().to_event(reference_writer), None)
+            .append(row.clone().to_event(reference_writer), Default::default())
             .await
             .expect("append reference");
     }
     reference_journal
         .append(
             make_eof_event(reference_writer, ref_rows.len() as u64),
-            None,
+            Default::default(),
         )
         .await
         .expect("append reference eof");
@@ -646,14 +648,14 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     ];
     for row in &stream_rows {
         stream_journal
-            .append(row.clone().to_event(stream_writer), None)
+            .append(row.clone().to_event(stream_writer), Default::default())
             .await
             .expect("append stream");
     }
     stream_journal
         .append(
             make_eof_event(stream_writer, stream_rows.len() as u64),
-            None,
+            Default::default(),
         )
         .await
         .expect("append stream eof");

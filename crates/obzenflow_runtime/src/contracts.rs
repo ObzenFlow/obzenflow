@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::system_event::ContractName;
+use obzenflow_core::event::payloads::system_payload::ContractName;
 use obzenflow_core::{
     Contract, ContractContext, ContractEventScope, ContractReadContext, ContractResult,
     ContractWriteContext,

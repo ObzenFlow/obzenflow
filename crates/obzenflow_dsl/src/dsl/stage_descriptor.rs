@@ -3918,7 +3918,7 @@ mod tests {
         use obzenflow_core::id::JournalId;
         use obzenflow_core::journal::journal_error::JournalError;
         use obzenflow_core::journal::journal_owner::JournalOwner;
-        use obzenflow_core::journal::journal_reader::JournalReader;
+        use obzenflow_core::journal::reader::JournalReader;
         use obzenflow_core::journal::Journal;
 
         struct NoopJournal<T: JournalEvent> {
@@ -3952,7 +3952,7 @@ mod tests {
             async fn append(
                 &self,
                 _event: T,
-                _parent: Option<&JournalRecord<T::Payload>>,
+                _options: obzenflow_core::journal::AppendOptions<'_, T>,
             ) -> Result<JournalRecord<T::Payload>, JournalError> {
                 Err(JournalError::Implementation {
                     message: "noop journal".to_string(),

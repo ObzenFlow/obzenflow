@@ -5,7 +5,6 @@
 //! Replay-safe user effects.
 
 use async_trait::async_trait;
-use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_escape_controls_group_id, effect_outcome_group_id, framework_effect_event_type,
     is_framework_effect_event_type, CanonicalInputHash, EffectAttemptOrdinal, EffectAttemptStarted,
@@ -18,6 +17,7 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EFFECT_ATTEMPT_STARTED_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
     EFFECT_RECOVERY_ABANDONED_EVENT_TYPE,
 };
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::schema::EffectOutcomeFacts;
 pub use obzenflow_core::event::schema::{
     TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
@@ -39,11 +39,11 @@ use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::replay::{ReplayArchive, ReplayError};
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::output_committer::{
     AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
 };
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 
 mod binding;
 mod boundary;

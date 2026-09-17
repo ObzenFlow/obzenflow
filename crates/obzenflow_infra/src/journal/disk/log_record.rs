@@ -39,7 +39,7 @@ impl<T: JournalEvent> LogFrame<T> {
 /// Fixtures use the production codec, with complete local definitions so they
 /// remain independent of any other test archive or process cache.
 #[cfg(test)]
-pub(crate) fn serialize_record<P: obzenflow_core::event::journal_record::JournalPayload>(
+pub(crate) fn serialize_record<P: obzenflow_core::event::payloads::JournalPayload>(
     record: &JournalRecord<P>,
 ) -> Result<Vec<u8>, super::codec::Error> {
     Ok(super::codec::prepare(
@@ -52,7 +52,7 @@ pub(crate) fn serialize_record<P: obzenflow_core::event::journal_record::Journal
 }
 
 #[cfg(test)]
-pub(crate) fn serialize_atomic_group<P: obzenflow_core::event::journal_record::JournalPayload>(
+pub(crate) fn serialize_atomic_group<P: obzenflow_core::event::payloads::JournalPayload>(
     group: &str,
     records: &[JournalRecord<P>],
 ) -> Result<Vec<u8>, super::codec::Error> {

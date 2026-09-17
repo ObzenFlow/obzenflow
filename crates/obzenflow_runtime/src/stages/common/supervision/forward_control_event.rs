@@ -4,8 +4,10 @@
 
 //! Common helper to forward control events downstream.
 
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use std::sync::Arc;
@@ -36,10 +38,13 @@ pub(crate) async fn forward_control_event(
     // omit runtime_context to avoid leaking upstream snapshots.
     forward_event.runtime = None;
 
-    let written =
-        crate::supervised_base::publication::append(data_journal, forward_event, Some(envelope))
-            .await
-            .map_err(|e| format!("Failed to forward control event: {e}"))?;
+    let written = crate::supervised_base::publication::append(
+        data_journal,
+        forward_event,
+        AppendOptions::new(Some(envelope)),
+    )
+    .await
+    .map_err(|e| format!("Failed to forward control event: {e}"))?;
 
     Ok(written)
 }

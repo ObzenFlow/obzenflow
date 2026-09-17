@@ -129,7 +129,7 @@ mod tests {
                         stage_count: Some(99),
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append old run event");
@@ -139,7 +139,7 @@ mod tests {
                     current_writer,
                     SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append starting");
@@ -151,7 +151,7 @@ mod tests {
                         stage_count: Some(3),
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append ready");
@@ -163,7 +163,7 @@ mod tests {
                         stage_count: Some(3),
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append running");
@@ -176,7 +176,7 @@ mod tests {
                         metrics: completed_metrics(),
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append completed");
@@ -186,7 +186,7 @@ mod tests {
                     current_writer,
                     SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append drained");

@@ -9,6 +9,7 @@
 
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
@@ -34,7 +35,7 @@ async fn test_journal_causal_ordering() {
     );
 
     let source_envelope = journal
-        .append(source_event, None)
+        .append(source_event, Default::default())
         .await
         .expect("Failed to append source event");
 
@@ -52,7 +53,7 @@ async fn test_journal_causal_ordering() {
     let transform_envelope = journal
         .append(
             transform_event,
-            Some(&source_envelope), // Parent relationship
+            AppendOptions::new(Some(&source_envelope)), // Parent relationship
         )
         .await
         .expect("Failed to append transform event");
@@ -70,7 +71,7 @@ async fn test_journal_causal_ordering() {
     let _sink_envelope = journal
         .append(
             sink_event,
-            Some(&transform_envelope), // Parent relationship
+            AppendOptions::new(Some(&transform_envelope)), // Parent relationship
         )
         .await
         .expect("Failed to append sink event");
@@ -125,9 +126,9 @@ async fn test_journal_parallel_writers() {
     );
 
     // Append in parallel (in practice these would be concurrent)
-    let _envelope1 = journal.append(event1, None).await.unwrap();
-    let envelope2 = journal.append(event2, None).await.unwrap();
-    let _envelope3 = journal.append(event3, None).await.unwrap();
+    let _envelope1 = journal.append(event1, Default::default()).await.unwrap();
+    let envelope2 = journal.append(event2, Default::default()).await.unwrap();
+    let _envelope3 = journal.append(event3, Default::default()).await.unwrap();
 
     // Worker 2 finishes first and emits result
     let result_event = ChainEventFactory::data_event(
@@ -137,7 +138,7 @@ async fn test_journal_parallel_writers() {
     );
 
     let _result_envelope = journal
-        .append(result_event, Some(&envelope2))
+        .append(result_event, AppendOptions::new(Some(&envelope2)))
         .await
         .unwrap();
 
@@ -178,7 +179,7 @@ async fn test_journal_event_chain() {
         );
 
         let envelope = journal
-            .append(event, previous_envelope.as_ref())
+            .append(event, AppendOptions::new(previous_envelope.as_ref()))
             .await
             .expect("Failed to append chain event");
 

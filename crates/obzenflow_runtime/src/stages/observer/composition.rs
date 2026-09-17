@@ -931,7 +931,8 @@ mod tests {
     };
     use crate::messaging::upstream_subscription::StageInputPosition;
     use crate::stages::observer::EffectObserverOutcome;
-    use obzenflow_core::event::context::{FlowContext, StageType};
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::event::provenance::FlowContext;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{FlowId, StageId, WriterId};
     use std::sync::atomic::{AtomicUsize, Ordering};

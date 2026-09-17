@@ -21,8 +21,9 @@ mod values;
 
 pub(crate) use definitions::DefinitionStore;
 use definitions::{ReadTable, WriteTable};
-use obzenflow_core::event::event_envelope::JournalGroupMember;
-use obzenflow_core::event::journal_record::{JournalPayload, JournalRecord};
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::JournalPayload;
+use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::JournalEvent;
 use primitives::{bytes, text, unsigned, Cursor};
 use schema::{Kind, Shape};
@@ -220,7 +221,7 @@ impl Decoder {
             let payload = T::Payload::decode(&provenance.event, payload)?;
             payload.validate(&provenance.event)?;
             let record: LogRecord<T> = JournalRecord {
-                envelope: obzenflow_core::event::provenance::EventEnvelope {
+                envelope: obzenflow_core::event::envelope::EventEnvelope {
                     provenance,
                     observability,
                 },

@@ -5,7 +5,6 @@
 //! Shared pipeline contexts, controlled journals, stages and runner fixtures.
 
 use crate::id_conversions::StageIdExt;
-use crate::journal::FlowJournalFactory;
 use crate::messaging::SystemSubscription;
 use crate::metrics::observations::ObservationHub;
 use crate::pipeline::fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState};
@@ -17,10 +16,12 @@ use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, JournalId, SystemId};
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsSnapshotExporter;
 use obzenflow_core::{JournalRecord, StageId};
@@ -77,7 +78,7 @@ where
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if event.event_type_name() == "system.metrics.ready" {
             if let Some(gate) = &self.metrics_ready_append {
@@ -97,16 +98,16 @@ where
                 }
             }
         }
-        self.inner.append(event, parent).await
+        self.inner.append(event, options).await
     }
 
     async fn append_group(
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.inner.append_group(group_id, events, parent).await
+        self.inner.append_group(group_id, events, options).await
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -191,7 +192,10 @@ pub(in crate::pipeline) async fn system_subscription_with(
     events: impl IntoIterator<Item = SystemEvent>,
 ) -> SystemSubscription<SystemEvent> {
     for event in events {
-        journal.append(event, None).await.expect("append event");
+        journal
+            .append(event, Default::default())
+            .await
+            .expect("append event");
     }
     SystemSubscription::new(journal.reader().await.expect("reader"), "test".to_string())
 }
@@ -457,7 +461,7 @@ pub(in crate::pipeline) async fn ready_stage(ctx: &mut PipelineContext, id: Stag
         TestPipelineStageHandle::boxed(id, "sink", StageType::Sink),
     );
     ctx.system_journal
-        .append(SystemEvent::stage_running(id), None)
+        .append(SystemEvent::stage_running(id), Default::default())
         .await
         .unwrap();
 }

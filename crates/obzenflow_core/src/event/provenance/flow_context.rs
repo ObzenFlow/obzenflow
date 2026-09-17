@@ -6,7 +6,7 @@
 //!
 //! Tracks which flow and stage an event belongs to.
 
-use super::stage_type::StageType;
+use crate::event::context::stage_type::StageType;
 use crate::StageId;
 use serde::{Deserialize, Serialize};
 

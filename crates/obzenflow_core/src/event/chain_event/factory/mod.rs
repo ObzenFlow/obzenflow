@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::event::provenance::{
-    AuthoredEnvelope, AuthoredProvenance, ChainEventProvenance, ProcessingProvenance,
-};
+use crate::event::envelope::AuthoredEnvelope;
+use crate::event::provenance::{AuthoredProvenance, ChainEventProvenance, ProcessingProvenance};
 use crate::event::status::processing_status::ProcessingStatus;
 mod control;
 mod data;
@@ -12,10 +11,10 @@ mod lifecycle;
 mod middleware;
 
 use super::{ChainEvent, ChainPayload};
-use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::FlowContext;
-use crate::event::observation::ObservabilityContext;
+use crate::event::observability::ObservabilityContext;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
+use crate::event::provenance::causality_context::CausalityContext;
+use crate::event::provenance::FlowContext;
 use crate::event::types::{EventId, WriterId};
 
 /// Stateless factory for creating ChainEvents with consistent patterns.

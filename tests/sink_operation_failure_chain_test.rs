@@ -11,8 +11,11 @@ use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkDestinationErrorCode, SinkOperationFailed, SinkOperationPhase,
     SinkWritePhase, StageLifecycleEvent, SystemEvent, SystemPayload,
 };
+use obzenflow_core::journal::archive::ReplayArchive;
+use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
 use obzenflow_core::{
     AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, StageId, SystemId, TypedPayload,
@@ -21,8 +24,6 @@ use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
 use obzenflow_infra::journal::{disk_journals, DiskJournal, DiskJournalFactory};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::journal::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
-use obzenflow_runtime::replay::ReplayArchive;
 use obzenflow_runtime::stages::sink::{
     PendingSinkInput, SinkCommitReceipt, SinkConnector, SinkDescription, SinkOperationError,
     SinkOperationResult, SinkTerminalOutcome, SinkWriteContext, SinkWriteFailure, SinkWriteReport,
@@ -72,7 +73,7 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let fact = (self.fact)(&event);
         if let Some(fact) = fact {
@@ -85,7 +86,7 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
                     admission_seq: (self.admission_seq)(&event),
                 });
         }
-        let result = self.inner.append(event, parent).await;
+        let result = self.inner.append(event, options).await;
         if let (Some(fact), Ok(envelope)) = (fact, &result) {
             self.probe
                 .lock()
@@ -103,9 +104,9 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.inner.append_group(group_id, events, parent).await
+        self.inner.append_group(group_id, events, options).await
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

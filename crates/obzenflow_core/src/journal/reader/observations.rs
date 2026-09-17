@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::JournalError;
-use crate::event::observation::{CaptureScope, ObservabilityContext};
-use crate::event::observation_families::ObservationKind;
+use crate::event::observability::families::ObservationKind;
+use crate::event::observability::{CaptureScope, ObservabilityContext};
+use crate::journal::JournalError;
 use crate::WriterId;
 use async_trait::async_trait;
 

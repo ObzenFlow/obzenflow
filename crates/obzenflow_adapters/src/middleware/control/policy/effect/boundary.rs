@@ -7,7 +7,7 @@ use super::contract::{EffectAttemptOutcome, PolicyAdmission};
 use crate::middleware::control::EffectResilienceMiddleware;
 use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
 use async_trait::async_trait;
-use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{

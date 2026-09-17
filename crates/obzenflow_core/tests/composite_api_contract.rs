@@ -7,8 +7,8 @@
 use obzenflow_core::composite::{
     CompositeDefinition, CompositeLifecycleProjection, CompositeStatus,
 };
-use obzenflow_core::event::context::CompositeActivationContext;
-use obzenflow_core::event::system_event::SystemFeedRole;
+use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
+use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::id::{CompositeId, RoleId, StageId};
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, BoundaryDirection, CompositeContract, CompositeDurationBucket,
@@ -85,16 +85,16 @@ fn extensible_and_hidden_surface_lists_are_source_guarded() {
         assert_attribute_before(projection, declaration, "#[non_exhaustive]");
     }
 
-    let activation = include_str!("../src/event/context/composite_activation_context.rs");
+    let activation = include_str!("../src/event/provenance/composite_activation_context.rs");
     assert_attribute_before(
         activation,
         "pub struct CompositeActivationContext",
         "#[non_exhaustive]",
     );
     // Activation membership is protected provenance; optional observations are closed.
-    let provenance = include_str!("../src/event/provenance.rs");
+    let provenance = include_str!("../src/event/provenance/mod.rs");
     assert!(provenance.contains("pub composite_activations: Vec<CompositeActivationContext>"));
-    let observation = include_str!("../src/event/observation.rs");
+    let observation = include_str!("../src/event/observability/mod.rs");
     assert_attribute_before(
         observation,
         "pub struct ObservabilityContext",

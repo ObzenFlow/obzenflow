@@ -10,6 +10,7 @@
 
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 mod draining;
 mod running;
 
@@ -508,11 +509,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
         let heartbeat = runtime_context.attach_to(heartbeat);
 
-        crate::supervised_base::publication::append_with_capture(
+        crate::supervised_base::publication::append(
             &ctx.data_journal,
             heartbeat,
-            None,
-            ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+            AppendOptions::new(None)
+                .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
         )
         .await?;
 

@@ -490,9 +490,8 @@ mod tests {
     use super::*;
     use crate::journal::observability::tests::event;
     use crate::journal::{DiskJournal, MemoryJournal};
-    use obzenflow_core::event::context::{ExecutionProgress, RuntimeSnapshot};
-    use obzenflow_core::event::observation::CaptureSeq;
-    use obzenflow_core::event::observation_families::ObservationKind;
+    use obzenflow_core::event::observability::families::ObservationKind;
+    use obzenflow_core::event::observability::{CaptureSeq, ExecutionProgress, RuntimeSnapshot};
     use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
 
     fn key(event: &ChainEvent, kind: ObservationKind) -> ObservationKey {
@@ -555,7 +554,7 @@ mod tests {
                 .capture
                 .capture_seq = CaptureSeq(2);
             journal
-                .append_group("same-event-id", vec![first, second], None)
+                .append_group("same-event-id", vec![first, second], Default::default())
                 .await
                 .unwrap();
             let reader = journal.observation_reader().unwrap();
@@ -578,11 +577,15 @@ mod tests {
         let key = key(&observed, ObservationKind::InFlight);
         let mut noise = observed.clone();
         noise.envelope.observability = None;
-        journal.append(observed, None).await.unwrap();
+        journal.append(observed, Default::default()).await.unwrap();
         // Deliberately repeated EventIds: the lookup must use physical positions.
         for group in 0..1000 {
             journal
-                .append_group(&format!("quiet-{group}"), vec![noise.clone(); 1000], None)
+                .append_group(
+                    &format!("quiet-{group}"),
+                    vec![noise.clone(); 1000],
+                    Default::default(),
+                )
                 .await
                 .unwrap();
         }
@@ -614,13 +617,18 @@ mod tests {
         let stage = StageId::new();
         let first = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
         first
-            .configure_observability(ObservabilityPolicy::Periodic {
-                interval: Duration::from_millis(250),
+            .configure(obzenflow_core::journal::JournalConfig {
+                observability: ObservabilityPolicy::Periodic {
+                    interval: Duration::from_millis(250),
+                },
             })
             .unwrap();
         let observed = event(stage, 1);
         let key = key(&observed, ObservationKind::InFlight);
-        first.append(observed.clone(), None).await.unwrap();
+        first
+            .append(observed.clone(), Default::default())
+            .await
+            .unwrap();
         let second = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
         assert_ne!(
             first.id(),
@@ -628,7 +636,7 @@ mod tests {
             "handle identity is not archive identity"
         );
         assert!(second
-            .append(observed.clone(), None)
+            .append(observed.clone(), Default::default())
             .await
             .unwrap()
             .envelope
@@ -648,7 +656,7 @@ mod tests {
             .capture
             .capture_seq = CaptureSeq(2);
         assert!(reopened
-            .append(next, None)
+            .append(next, Default::default())
             .await
             .unwrap()
             .envelope
@@ -672,9 +680,12 @@ mod tests {
         let key = key(&observed, ObservationKind::InFlight);
         let mut noise = observed.clone();
         noise.envelope.observability = None;
-        journal.append(observed, None).await.unwrap();
+        journal.append(observed, Default::default()).await.unwrap();
         for _ in 0..600 {
-            journal.append(noise.clone(), None).await.unwrap();
+            journal
+                .append(noise.clone(), Default::default())
+                .await
+                .unwrap();
         }
         drop(journal);
         let valid = std::fs::read(checkpoint_path(&path)).unwrap();
@@ -682,7 +693,10 @@ mod tests {
         let foreign_path = foreign_directory.path().join("recovery.log");
         let foreign =
             DiskJournal::with_owner(foreign_path.clone(), JournalOwner::stage(stage)).unwrap();
-        foreign.append(event(stage, 1), None).await.unwrap();
+        foreign
+            .append(event(stage, 1), Default::default())
+            .await
+            .unwrap();
         drop(foreign);
         let foreign_checkpoint = std::fs::read(checkpoint_path(&foreign_path)).unwrap();
         for checkpoint in [None, Some(b"broken".to_vec()), Some(foreign_checkpoint)] {
@@ -722,14 +736,23 @@ mod tests {
         let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
         let observation = event(stage, 1);
         let key = key(&observation, ObservationKind::InFlight);
-        journal.append(observation.clone(), None).await.unwrap();
+        journal
+            .append(observation.clone(), Default::default())
+            .await
+            .unwrap();
         let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
         reader.maintain(|_| panic!("optional index maintenance fault"));
-        journal.append(observation.clone(), None).await.unwrap();
+        journal
+            .append(observation.clone(), Default::default())
+            .await
+            .unwrap();
         std::fs::create_dir(checkpoint_path(&path)).unwrap();
         assert_eq!(ready(&reader, &key).await.position, 0);
         reader.checkpoint();
-        journal.append(observation, None).await.unwrap();
+        journal
+            .append(observation, Default::default())
+            .await
+            .unwrap();
         assert_eq!(journal.read_all_unordered().await.unwrap().len(), 3);
     }
 }

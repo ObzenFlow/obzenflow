@@ -17,7 +17,7 @@ pub(super) struct StageLifecycleView {
 
 impl StageLifecycleView {
     pub(super) fn observe(&mut self, envelope: &SystemJournalRecord) {
-        use obzenflow_core::event::system_event::StageLifecycleEvent;
+        use obzenflow_core::event::payloads::system_payload::StageLifecycleEvent;
         use obzenflow_core::event::SystemPayload;
 
         let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {

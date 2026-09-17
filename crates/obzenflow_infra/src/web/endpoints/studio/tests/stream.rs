@@ -7,9 +7,10 @@ use crate::journal::MemoryJournal;
 use futures::StreamExt;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::composite::CompositeDefinition;
-use obzenflow_core::event::journal_record::{JournalRecord, SystemJournalRecord};
+use obzenflow_core::event::journal_record::SystemJournalRecord;
 use obzenflow_core::event::{PipelineLifecycleEvent, StageLifecycleEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -28,7 +29,7 @@ async fn append(
     event: SystemPayload,
 ) -> SystemJournalRecord {
     journal
-        .append(SystemEvent::new(writer, event), None)
+        .append(SystemEvent::new(writer, event), Default::default())
         .await
         .expect("test event appends")
 }
@@ -185,11 +186,11 @@ async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
 
 #[tokio::test]
 async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up() {
-    use obzenflow_core::event::observation::*;
+    use obzenflow_core::event::observability::*;
     use obzenflow_core::event::payloads::execution_payload::{
         CircuitBreakerFact, CircuitState, MiddlewareFact,
     };
-    use obzenflow_core::event::system_event::MiddlewareEventOrigin;
+    use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
     use obzenflow_core::event::types::SeqNo;
     use obzenflow_runtime::metrics::observations::ObservationHub;
 
@@ -259,7 +260,7 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
         },
     );
     opened.envelope.observability = Some(sample(3));
-    let opened = journal.append(opened, None).await.unwrap();
+    let opened = journal.append(opened, Default::default()).await.unwrap();
     source.offer(sample(11));
     let (closing, receiver) = watch::channel(false);
     let endpoint = StudioUpdatesEndpoint::new(
@@ -496,9 +497,9 @@ impl Journal<SystemEvent> for ScriptedJournal {
     async fn append(
         &self,
         event: SystemEvent,
-        parent: Option<&JournalRecord<SystemPayload>>,
+        options: AppendOptions<'_, SystemEvent>,
     ) -> Result<SystemJournalRecord, JournalError> {
-        self.inner.append(event, parent).await
+        self.inner.append(event, options).await
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<SystemJournalRecord>, JournalError> {

@@ -490,7 +490,7 @@ mod tests {
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
     use chrono::Utc;
     use obzenflow_core::event::journal_record::JournalRecord;
-    use obzenflow_core::event::observation::NoObservations;
+    use obzenflow_core::event::observability::NoObservations;
     use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::event::vector_clock::VectorClock;
@@ -500,7 +500,7 @@ mod tests {
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_topology::TopologyBuilder;
     use std::sync::{Arc, Mutex};
@@ -578,8 +578,9 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
@@ -655,7 +656,7 @@ mod tests {
                 obzenflow_core::id::SystemId::new(),
             ),
             liveness_snapshots: None,
-            run_substrate: crate::journal::RunSubstrateState::Ephemeral,
+            run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
         };
 
@@ -680,24 +681,30 @@ mod tests {
 
         // Non-data envelopes should be ignored by the probe.
         stage_journal
-            .append(ChainEventFactory::eof_event(writer_id, true), None)
+            .append(
+                ChainEventFactory::eof_event(writer_id, true),
+                Default::default(),
+            )
             .await
             .expect("append eof");
         stage_journal
             .append(
                 ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                None,
+                Default::default(),
             )
             .await
             .expect("append data1");
         stage_journal
-            .append(ChainEventFactory::drain_event(writer_id), None)
+            .append(
+                ChainEventFactory::drain_event(writer_id),
+                Default::default(),
+            )
             .await
             .expect("append drain");
         stage_journal
             .append(
                 ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                None,
+                Default::default(),
             )
             .await
             .expect("append data2");
@@ -781,7 +788,7 @@ mod tests {
                 stage_journal
                     .append(
                         ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                        None,
+                        Default::default(),
                     )
                     .await
                     .expect("append data at boundary");
@@ -825,7 +832,7 @@ mod tests {
                     stage_journal
                         .append(
                             ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                            None,
+                            Default::default(),
                         )
                         .await
                         .expect("append chained data");
@@ -861,7 +868,10 @@ mod tests {
 
         // Non-data envelopes do not count.
         stage_journal
-            .append(ChainEventFactory::eof_event(stage_writer_id, true), None)
+            .append(
+                ChainEventFactory::eof_event(stage_writer_id, true),
+                Default::default(),
+            )
             .await
             .expect("append eof");
 
@@ -947,7 +957,7 @@ mod tests {
         other.cycle_scc_id = Some(scc);
         other.cycle_depth = Some(CycleDepth::new(3));
         stage_journal
-            .append(other, None)
+            .append(other, Default::default())
             .await
             .expect("append other");
 
@@ -956,7 +966,10 @@ mod tests {
             let mut ev = ChainEventFactory::data_event(writer_id, label, serde_json::json!({}));
             ev.cycle_scc_id = Some(scc);
             ev.cycle_depth = Some(depth);
-            stage_journal.append(ev, None).await.expect("append match");
+            stage_journal
+                .append(ev, Default::default())
+                .await
+                .expect("append match");
         }
 
         let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
@@ -1015,15 +1028,15 @@ mod tests {
         );
 
         stage_journal
-            .append(parent, None)
+            .append(parent, Default::default())
             .await
             .expect("append parent");
         stage_journal
-            .append(child_1.clone(), None)
+            .append(child_1.clone(), Default::default())
             .await
             .expect("append child_1");
         stage_journal
-            .append(child_2.clone(), None)
+            .append(child_2.clone(), Default::default())
             .await
             .expect("append child_2");
 
@@ -1065,12 +1078,15 @@ mod tests {
 
         let mut ok = ChainEventFactory::data_event(writer_id, "ok", serde_json::json!({}));
         ok.processing.status = ProcessingStatus::Success;
-        stage_journal.append(ok, None).await.expect("append ok");
+        stage_journal
+            .append(ok, Default::default())
+            .await
+            .expect("append ok");
 
         let mut err = ChainEventFactory::data_event(writer_id, "err", serde_json::json!({}));
         err.processing.status = ProcessingStatus::error("boom");
         stage_journal
-            .append(err.clone(), None)
+            .append(err.clone(), Default::default())
             .await
             .expect("append err");
 
@@ -1124,7 +1140,7 @@ mod tests {
                 stage_journal
                     .append(
                         ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                        None,
+                        Default::default(),
                     )
                     .await
                     .expect("append data at boundary");
@@ -1169,7 +1185,7 @@ mod tests {
                     stage_journal
                         .append(
                             ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                            None,
+                            Default::default(),
                         )
                         .await
                         .expect("append chained data");
@@ -1217,7 +1233,7 @@ mod tests {
                             "data",
                             serde_json::json!({"payload": payload}),
                         ),
-                        None,
+                        Default::default(),
                     )
                     .await
                     .expect("append");

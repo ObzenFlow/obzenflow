@@ -3,10 +3,10 @@
 // https://obzenflow.dev
 
 use super::ChainEventFactory;
-use crate::event::context::ExecutionAccounting;
 use crate::event::payloads::execution_payload::{
     ExecutionPayload, MetricsCoordinationFact, StageLifecycleFact,
 };
+use crate::event::provenance::ExecutionAccounting;
 use crate::event::{ChainEvent, ChainPayload};
 use crate::{StageId, WriterId};
 

@@ -4,8 +4,8 @@
 
 use super::journal_error::JournalError;
 use super::journal_owner::JournalOwner;
-use super::journal_reader::JournalReader;
-use super::{JournalCapture, ObservabilityPolicy};
+use super::reader::JournalReader;
+use super::{AppendOptions, JournalConfig, ObservabilityPolicy};
 use crate::event::journal_record::JournalRecord;
 use crate::event::types::EventId;
 use crate::event::vector_clock::CausalOrderingService;
@@ -35,8 +35,8 @@ where
 
     /// Configure this journal before publication starts. Handles of the same
     /// journal share the policy and allowance; other journals are independent.
-    fn configure_observability(&self, policy: ObservabilityPolicy) -> Result<(), JournalError> {
-        match policy {
+    fn configure(&self, config: JournalConfig) -> Result<(), JournalError> {
+        match config.observability {
             ObservabilityPolicy::EveryRecord => Ok(()),
             ObservabilityPolicy::Periodic { .. } => Err(JournalError::Implementation {
                 message: "This journal does not support sparse observability".into(),
@@ -45,45 +45,16 @@ where
         }
     }
 
-    /// Construct optional diagnostics only after journal admission. Ordinary
-    /// append calls must enforce the same policy on inherited attachments.
-    async fn append_with_capture(
-        &self,
-        mut event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
-        capture: JournalCapture<T>,
-    ) -> Result<JournalRecord<T::Payload>, JournalError> {
-        if let JournalCapture::Live(Some(mut capture)) = capture {
-            event = capture(0, event);
-        }
-        self.append(event, parent).await
-    }
-
-    async fn append_group_with_capture(
-        &self,
-        group_id: &str,
-        events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
-        capture: JournalCapture<T>,
-    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        let events = match capture {
-            JournalCapture::Live(Some(mut capture)) => events
-                .into_iter()
-                .enumerate()
-                .map(|(index, event)| capture(index, event))
-                .collect(),
-            _ => events,
-        };
-        self.append_group(group_id, events, parent).await
-    }
-
     /// Append an event to the journal
     ///
     /// The implementation MUST:
     /// 1. Generate appropriate vector clock based on writer and parent
     /// 2. Ensure atomic append operation
-    /// 3. Return the complete EventEnvelope with causal information
-    /// 4. Retain an initiated physical commit through storage bookkeeping if
+    /// 3. Return the complete JournalRecord with causal information
+    /// 4. Apply journal policy to inherited and deferred optional attachments.
+    ///    Invoke deferred capture only after admission, and preserve historical
+    ///    attachments exactly. Payload and provenance are never sampled.
+    /// 5. Retain an initiated physical commit through storage bookkeeping if
     ///    the caller stops waiting. Cancellation is not rollback.
     ///
     /// An error certifies non-commit, except `JournalError::CommitIndeterminate`.
@@ -91,7 +62,7 @@ where
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError>;
 
     /// Atomically append a logical group of events.
@@ -103,19 +74,18 @@ where
     /// The single-append cancellation and indeterminate-error contract applies
     /// to the complete group.
     ///
-    /// The default is deliberately fail-closed for multi-event groups. This
-    /// preserves source compatibility for lightweight journals without
-    /// pretending that a sequence of ordinary appends is atomic.
+    /// The default rejects multi-event groups. Lightweight journals can rely
+    /// on this default until they support atomic groups.
     async fn append_group(
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         match events.len() {
             0 => Ok(Vec::new()),
             1 => Ok(vec![
-                self.append(events.into_iter().next().expect("one event"), parent)
+                self.append(events.into_iter().next().expect("one event"), options)
                     .await?,
             ]),
             count => Err(JournalError::AtomicAppendUnsupported {

@@ -9,7 +9,7 @@
 //! polled. The fixture compares the framework evidence and domain effect fact
 //! identities emitted by both runs.
 
-use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::observability::ObservationRecord;
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
 #[path = "../examples/hn_ai_digest_demo/decoder.rs"]

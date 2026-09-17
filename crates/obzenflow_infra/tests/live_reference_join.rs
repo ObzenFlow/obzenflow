@@ -8,8 +8,7 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::types::SeqNo;
-use obzenflow_core::event::ChainPayload;
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{ChainPayload, SystemEvent};
 use obzenflow_core::event::{StageFatalCode, StageFatalReason, StageFatalRecorded};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
@@ -23,8 +22,7 @@ use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHa
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, JoinReferenceMode, JoinState};
 use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_runtime::supervised_base::SupervisorBuilder;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
+use obzenflow_runtime::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
 
@@ -166,7 +164,7 @@ async fn live_join_processes_stream_without_reference_eof() {
                 value: "v1".into(),
             }
             .to_event(reference_writer),
-            None,
+            Default::default(),
         )
         .await
         .expect("append reference data");
@@ -174,11 +172,14 @@ async fn live_join_processes_stream_without_reference_eof() {
     // Stream emits one matching record and EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -544,13 +545,19 @@ where
     let reference_writer = WriterId::from(reference_stage);
     if reference_data {
         reference_journal
-            .append(RefEvent { id: 0 }.to_event(reference_writer), None)
+            .append(
+                RefEvent { id: 0 }.to_event(reference_writer),
+                Default::default(),
+            )
             .await
             .expect("reference data");
     }
     if let Some(kind) = reference_eof_kind {
         reference_journal
-            .append(make_eof_event_with_kind(reference_writer, 1, kind), None)
+            .append(
+                make_eof_event_with_kind(reference_writer, 1, kind),
+                Default::default(),
+            )
             .await
             .expect("reference eof");
     }
@@ -558,13 +565,19 @@ where
     let stream_writer = WriterId::from(stream_stage);
     if stream_data {
         stream_journal
-            .append(StreamEvent { id: 1 }.to_event(stream_writer), None)
+            .append(
+                StreamEvent { id: 1 }.to_event(stream_writer),
+                Default::default(),
+            )
             .await
             .expect("stream data");
     }
     if let Some(kind) = stream_eof_kind {
         stream_journal
-            .append(make_eof_event_with_kind(stream_writer, 1, kind), None)
+            .append(
+                make_eof_event_with_kind(stream_writer, 1, kind),
+                Default::default(),
+            )
             .await
             .expect("stream eof");
     }
@@ -985,7 +998,10 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
     let reference_writer = WriterId::from(reference_stage);
     for i in 0..2u64 {
         reference_journal
-            .append(RefEvent { id: i }.to_event(reference_writer), None)
+            .append(
+                RefEvent { id: i }.to_event(reference_writer),
+                Default::default(),
+            )
             .await
             .expect("append reference data");
     }
@@ -993,11 +1009,14 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
     // Stream emits one record + EOF. Handler emits only during on_source_eof().
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamEvent { id: 1 }.to_event(stream_writer), None)
+        .append(
+            StreamEvent { id: 1 }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -1175,7 +1194,10 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
     let reference_writer = WriterId::from(reference_stage);
     for i in 0..10u64 {
         reference_journal
-            .append(RefEvent { id: i }.to_event(reference_writer), None)
+            .append(
+                RefEvent { id: i }.to_event(reference_writer),
+                Default::default(),
+            )
             .await
             .expect("append reference data");
     }
@@ -1183,11 +1205,14 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
     // Stream emits one record + EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamEvent { id: 1 }.to_event(stream_writer), None)
+        .append(
+            StreamEvent { id: 1 }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -1347,23 +1372,26 @@ async fn live_join_forwards_reference_eof() {
                 value: "v1".into(),
             }
             .to_event(reference_writer),
-            None,
+            Default::default(),
         )
         .await
         .expect("append reference data");
     reference_journal
-        .append(make_eof_event(reference_writer, 1), None)
+        .append(make_eof_event(reference_writer, 1), Default::default())
         .await
         .expect("append reference eof");
 
     // Stream emits one matching record and EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -1596,7 +1624,7 @@ async fn live_join_reference_errors_are_per_record() {
                 value: "v1".into(),
             }
             .to_event(reference_writer),
-            None,
+            Default::default(),
         )
         .await
         .expect("append reference data");
@@ -1604,11 +1632,14 @@ async fn live_join_reference_errors_are_per_record() {
     // Stream emits one record + EOF (must still be processed).
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 

@@ -5,18 +5,19 @@
 //! JSON payloads and event names for Studio's `/api/flow/events` stream.
 
 use super::contracts::ContractBoundaryAlias;
-use obzenflow_core::event::context::{
-    CircuitBreakerMeasurements, ExecutionAccounting, RateLimiterMeasurements,
+use obzenflow_core::event::observability::{
+    CaptureStamp, CircuitBreakerMeasurements, EdgeLivenessState, RateLimiterMeasurements,
 };
-use obzenflow_core::event::observation::CaptureStamp;
+use obzenflow_core::event::payloads::execution_payload::CircuitBreakerOpenTrigger;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::payloads::system_payload::{
+    ContractName, ContractResultStatusLabel, MiddlewareEventOrigin, PipelineStopAdmission,
+    SystemFeedRole,
+};
+use obzenflow_core::event::provenance::ExecutionAccounting;
+use obzenflow_core::event::types::{Count, DurationMs, EventType, SeqNo, ViolationCause};
+use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
-    payloads::{execution_payload::CircuitBreakerOpenTrigger, flow_control_payload::EofKind},
-    system_event::{
-        ContractName, ContractResultStatusLabel, EdgeLivenessState, MiddlewareEventOrigin,
-        PipelineStopAdmission, SystemFeedRole,
-    },
-    types::{Count, DurationMs, EventType, SeqNo, ViolationCause},
-    vector_clock::VectorClock,
     CommandDiscardDisposition, PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
 };
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};

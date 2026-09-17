@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::event::context::CompositeActivationContext;
+use crate::event::provenance::CompositeActivationContext;
 use serde_json::{Map, Value};
 
 pub const AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V1: &str =
@@ -71,7 +71,7 @@ fn sort_objects(value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::context::CompositeActivationContext;
+    use crate::event::provenance::CompositeActivationContext;
     use crate::id::CompositeId;
     use crate::EventId;
     use serde_json::json;

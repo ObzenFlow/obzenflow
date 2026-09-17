@@ -11,7 +11,7 @@
 
 use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
-use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use std::sync::OnceLock;
 

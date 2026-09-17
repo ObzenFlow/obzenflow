@@ -14,7 +14,6 @@ use super::{
     supervisor::PipelineSupervisor,
     PipelineState,
 };
-use crate::journal::RunSubstrateState;
 use crate::metrics::observations::ObservationHub;
 use crate::{
     backpressure::BackpressureRegistry,
@@ -24,9 +23,10 @@ use crate::{
     stages::LivenessSnapshots,
     supervised_base::{BuilderError, ChannelBuilder, HandleBuilder, SupervisorTaskBuilder},
 };
-use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
+use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsSnapshotExporter;
 use obzenflow_core::{DeliveryContract, SourceContract, StageId, TransportContract};

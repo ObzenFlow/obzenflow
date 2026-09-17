@@ -14,11 +14,11 @@ use crate::contracts::ContractChain;
 use crate::control_plane::NoControlPlane;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     DeliveryContract, EventType, JournalRecord, Result, StageId, TransportContract,

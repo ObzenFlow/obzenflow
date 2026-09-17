@@ -18,16 +18,15 @@ use crate::journal::observability::JournalObservability;
 use async_trait::async_trait;
 use chrono::Utc;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
-use obzenflow_core::event::provenance::JournalProvenance;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::{
-    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
-};
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::journal::{Journal, JournalCapture, ObservabilityPolicy};
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::{AppendOptions, Journal, JournalConfig};
 use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::io::{BufReader, SeekFrom};
@@ -799,25 +798,16 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Some(&self.observations)
     }
 
-    fn configure_observability(&self, policy: ObservabilityPolicy) -> Result<(), JournalError> {
-        self.observability.configure(policy)
+    fn configure(&self, config: JournalConfig) -> Result<(), JournalError> {
+        self.observability.configure(config.observability)
     }
 
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
-        self.append_with_capture(event, parent, JournalCapture::default())
-            .await
-    }
-
-    async fn append_with_capture(
-        &self,
-        event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
-        capture: JournalCapture<T>,
-    ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let AppendOptions { parent, capture } = options;
         let journal = self.clone();
         let parent = parent.cloned();
         retain_commit(self.poisoned.clone(), async move {
@@ -836,19 +826,9 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.append_group_with_capture(group_id, events, parent, JournalCapture::default())
-            .await
-    }
-
-    async fn append_group_with_capture(
-        &self,
-        group_id: &str,
-        events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
-        capture: JournalCapture<T>,
-    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        let AppendOptions { parent, capture } = options;
         let journal = self.clone();
         let parent = parent.cloned();
         let group_id = group_id.to_owned();
@@ -1129,6 +1109,7 @@ mod tests {
     use obzenflow_core::event::provenance::JournalProvenance;
     use obzenflow_core::event::JournalRecord;
     use obzenflow_core::id::StageId;
+    use obzenflow_core::journal::ObservabilityPolicy;
     use obzenflow_core::JournalWriterId;
     use tokio::sync::Barrier;
 
@@ -1148,8 +1129,10 @@ mod tests {
             )
             .unwrap();
             journal
-                .configure_observability(ObservabilityPolicy::Periodic {
-                    interval: std::time::Duration::from_secs(60),
+                .configure(JournalConfig {
+                    observability: ObservabilityPolicy::Periodic {
+                        interval: std::time::Duration::from_secs(60),
+                    },
                 })
                 .unwrap();
             // Hold metadata publication after the physical frame is written.
@@ -1161,11 +1144,14 @@ mod tests {
             let mut receipt = Box::pin(async move {
                 if grouped {
                     pending_journal
-                        .append_group("retained", vec![first, second], None)
+                        .append_group("retained", vec![first, second], Default::default())
                         .await
                         .map(|_| ())
                 } else {
-                    pending_journal.append(first, None).await.map(|_| ())
+                    pending_journal
+                        .append(first, Default::default())
+                        .await
+                        .map(|_| ())
                 }
             });
             assert!(futures::poll!(receipt.as_mut()).is_pending());
@@ -1178,7 +1164,7 @@ mod tests {
             .unwrap();
             drop(receipt);
             let next = crate::journal::observability::tests::event(stage, 3);
-            let mut next_receipt = Box::pin(journal.append(next, None));
+            let mut next_receipt = Box::pin(journal.append(next, Default::default()));
             assert!(next_receipt.as_mut().now_or_never().is_none());
             assert!(journal.read_write_lock.try_read().is_err());
             drop(index_guard);
@@ -1225,7 +1211,7 @@ mod tests {
         );
 
         // Append event
-        let envelope = log.append(event.clone(), None).await.unwrap();
+        let envelope = log.append(event.clone(), Default::default()).await.unwrap();
 
         // Read back
         let events = log.read_causally_ordered().await.unwrap();
@@ -1269,7 +1255,7 @@ mod tests {
         let ids: Vec<_> = events.iter().map(|event| event.id).collect();
 
         let written = log
-            .append_group("effect-outcome:test", events, None)
+            .append_group("effect-outcome:test", events, Default::default())
             .await
             .expect("atomic group append");
         assert_eq!(written.len(), 3);
@@ -1367,12 +1353,15 @@ mod tests {
         // First event from writer1
         let event1 =
             ChainEventFactory::data_event(writer1, "event.1", serde_json::json!({"seq": 1}));
-        let envelope1 = log.append(event1, None).await.unwrap();
+        let envelope1 = log.append(event1, Default::default()).await.unwrap();
 
         // Second event from writer2, causally dependent on event1
         let event2 =
             ChainEventFactory::data_event(writer2, "event.2", serde_json::json!({"seq": 2}));
-        let envelope2 = log.append(event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = log
+            .append(event2, AppendOptions::new(Some(&envelope1)))
+            .await
+            .unwrap();
 
         // Verify vector clocks show causal relationship
         assert!(CausalOrderingService::happened_before(
@@ -1423,7 +1412,7 @@ mod tests {
                     "concurrent.event",
                     serde_json::json!({"writer": i}),
                 );
-                log_clone.append(event, None).await
+                log_clone.append(event, Default::default()).await
             });
             handles.push(handle);
         }
@@ -1478,7 +1467,7 @@ mod tests {
                     "concurrent.same_writer",
                     serde_json::json!({ "i": i }),
                 );
-                log_clone.append(event, None).await
+                log_clone.append(event, Default::default()).await
             });
             handles.push(handle);
         }
@@ -1522,9 +1511,11 @@ mod tests {
             )
             .unwrap();
             let e1 = ChainEventFactory::data_event(writer_id, "a", serde_json::json!({"n": 1}));
-            let env1 = log.append(e1, None).await.unwrap();
+            let env1 = log.append(e1, Default::default()).await.unwrap();
             let e2 = ChainEventFactory::data_event(writer_id, "b", serde_json::json!({"n": 2}));
-            log.append(e2, Some(&env1)).await.unwrap();
+            log.append(e2, AppendOptions::new(Some(&env1)))
+                .await
+                .unwrap();
             kept_id = env1.envelope.provenance.event.id;
         }
 
@@ -1541,7 +1532,7 @@ mod tests {
         assert_eq!(reopened.read_causally_ordered().await.unwrap().len(), 2);
 
         let e3 = ChainEventFactory::data_event(writer_id, "c", serde_json::json!({"n": 3}));
-        let env3 = reopened.append(e3, None).await.unwrap();
+        let env3 = reopened.append(e3, Default::default()).await.unwrap();
         assert!(
             env3.envelope
                 .provenance
@@ -1573,7 +1564,7 @@ mod tests {
         .unwrap();
         for i in 0..3 {
             let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
-            log.append(e, None).await.unwrap();
+            log.append(e, Default::default()).await.unwrap();
         }
 
         // Flip a byte inside the first record's body (mid-file): its CRC no
@@ -1618,7 +1609,7 @@ mod tests {
                     "tail.event",
                     serde_json::json!({"i": i}),
                 );
-                writer_log.append(e, None).await.unwrap();
+                writer_log.append(e, Default::default()).await.unwrap();
                 tokio::task::yield_now().await;
             }
         });
@@ -1663,7 +1654,7 @@ mod tests {
         .unwrap();
         for i in 0..3 {
             let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
-            log.append(e, None).await.unwrap();
+            log.append(e, Default::default()).await.unwrap();
         }
 
         // Flip a byte inside the second record's body so its CRC no longer matches: committed corruption
@@ -1722,7 +1713,7 @@ mod tests {
         let env = log
             .append(
                 ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 1})),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();
@@ -1760,7 +1751,7 @@ mod tests {
         .unwrap();
         for i in 0..4 {
             let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
-            log.append(e, None).await.unwrap();
+            log.append(e, Default::default()).await.unwrap();
         }
 
         // Flip a byte in the second record's body so its CRC fails: mid-file
@@ -1799,7 +1790,7 @@ mod tests {
         .unwrap();
         for i in 0..3 {
             let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
-            log.append(e, None).await.unwrap();
+            log.append(e, Default::default()).await.unwrap();
         }
 
         // Drop the final commit-marker byte: the last record becomes a torn tail.
@@ -1987,7 +1978,7 @@ mod tests {
         .unwrap();
         log.append(
             ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 0})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -1998,7 +1989,7 @@ mod tests {
         assert!(
             log.append(
                 ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 1})),
-                None,
+                Default::default(),
             )
             .await
             .is_err(),

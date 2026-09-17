@@ -5,10 +5,10 @@
 //! Record-boundary capture, split into protected accounting and optional diagnostics.
 
 use super::StageInstrumentation;
-use obzenflow_core::event::context::{
-    ExecutionAccounting, ExecutionProgress, RuntimeProvenance, RuntimeSnapshot,
+use obzenflow_core::event::observability::{
+    CaptureReason, ExecutionProgress, ObservabilityContext, RuntimeSnapshot,
 };
-use obzenflow_core::event::observation::{CaptureReason, ObservabilityContext};
+use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -89,12 +89,13 @@ impl StageInstrumentation {
         }
         let instrumentation = self.clone();
         let projections: Vec<CaptureProjection> = projections.into_iter().map(Into::into).collect();
-        JournalCapture::Live(Some(Box::new(move |index, mut event| {
+        JournalCapture::Live(Some(Box::new(move |index, event| {
             let projection = &projections[index];
+            let mut packet = event.envelope.observability.clone();
             if projection.measurements {
-                let packet = instrumentation.capture_for_record_in_scope(scope);
-                if event.envelope.observability.is_none() {
-                    event.envelope.observability = packet;
+                let captured = instrumentation.capture_for_record_in_scope(scope);
+                if packet.is_none() {
+                    packet = captured;
                 }
             }
             let capture = instrumentation.capture_runtime_in_scope(scope);
@@ -110,9 +111,12 @@ impl StageInstrumentation {
                     snapshot.progress.last_emitted_event_id = Some(id);
                     snapshot.progress.last_emitted_writer = Some(writer);
                 }
-                event = event.with_runtime_snapshot(snapshot);
+                let stamp = snapshot.capture;
+                packet
+                    .get_or_insert_with(|| ObservabilityContext::new(stamp))
+                    .runtime_snapshot = Some(snapshot);
             }
-            event
+            packet
         })))
     }
 
@@ -180,8 +184,9 @@ impl StageInstrumentation {
 mod tests {
     use super::*;
     use crate::execution::{RuntimeExecution, RuntimeMode};
-    use obzenflow_core::event::context::RuntimeObservability;
-    use obzenflow_core::event::observation::{CaptureSeq, ObservationSource};
+    use obzenflow_core::event::observability::{
+        CaptureSeq, ObservationSource, RuntimeObservability,
+    };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{FlowId, StageId};
     use std::sync::Arc;

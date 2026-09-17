@@ -10,7 +10,7 @@ use super::traits::{
 };
 use crate::stages::common::handler_error::StageFatal;
 use async_trait::async_trait;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::{ChainEvent, WriterId};
 use std::sync::Arc;

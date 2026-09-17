@@ -9,7 +9,7 @@ use crate::__private::lifecycle;
 use crate::metrics::observations::ObservationHub;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
-use obzenflow_core::event::observation::NoObservations;
+use obzenflow_core::event::observability::NoObservations;
 use obzenflow_core::event::types::ViolationCause;
 use std::error::Error;
 use tokio::sync::mpsc::error::TryRecvError;

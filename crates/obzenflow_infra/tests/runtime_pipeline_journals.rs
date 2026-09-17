@@ -6,9 +6,9 @@
 //! collector conformance also exercises the canonical disk backend.
 //! Every scenario remains a separately discovered test with its original name.
 
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::FlowId;
 use obzenflow_infra::journal::MemoryJournalFactory;
-use obzenflow_runtime::journal::FlowJournalFactory;
 use obzenflow_runtime::testing::pipeline;
 
 fn journals() -> Box<dyn FlowJournalFactory> {

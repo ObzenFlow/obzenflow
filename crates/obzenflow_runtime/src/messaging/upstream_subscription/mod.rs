@@ -39,7 +39,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, JournalEvent, JournalRecord};
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::{AdmissionSeq, EventId, EventType, ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -578,7 +578,7 @@ where
         stage_id: StageId,
     ) -> (
         Option<obzenflow_core::EventType>,
-        Option<obzenflow_core::event::system_event::SystemFeedRole>,
+        Option<obzenflow_core::event::payloads::system_payload::SystemFeedRole>,
     ) {
         let Some(feeds) = self.selected_feeds_by_stage.get(&stage_id) else {
             return (None, None);

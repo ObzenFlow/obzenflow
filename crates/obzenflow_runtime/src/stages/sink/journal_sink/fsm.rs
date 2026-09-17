@@ -23,11 +23,13 @@ use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageF
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::observer::{StageLifecyclePhase, StageObserverBundle};
 use crate::stages::resources_builder::BoundSubscriptionFactory;
-use obzenflow_core::event::context::causality_context::CausalityContext;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::provenance::causality_context::CausalityContext;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainPayload, JournalRecord, SinkOperationPhase, SystemEvent};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -584,7 +586,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         crate::supervised_base::publication::append(
                             &ctx.system_journal,
                             event,
-                            None,
+                            Default::default(),
                         )
                         .await
                         .map_err(|error| {
@@ -705,11 +707,12 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             .with_flow_context(flow_ctx);
                             let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                            crate::supervised_base::publication::append_with_capture(
+                            crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 evt,
-                                None,
-                                ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                                AppendOptions::new(None).with_capture(
+                                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                                ),
                             )
                             .await
                             .map_err(|e| {
@@ -904,7 +907,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 .with_flow_context(flow_ctx);
                         let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                        crate::supervised_base::publication::append_with_capture(&ctx.data_journal, evt, None, ctx.instrumentation.journal_capture(None, vec![(0, false)])).await.map_err(|e| {
+                        crate::supervised_base::publication::append(&ctx.data_journal, evt, AppendOptions::new(None).with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to write delivery receipt: {e}"
                             ))
@@ -1025,10 +1028,10 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     let settlement = crate::supervised_base::publication::commit(async move {
         let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
         let written = data_journal
-            .append_with_capture(
+            .append(
                 event,
-                Some(&parent),
-                instrumentation.journal_capture(None, vec![(1, false)]),
+                AppendOptions::new(Some(&parent))
+                    .with_capture(instrumentation.journal_capture(None, vec![(1, false)])),
             )
             .await?;
         instrumentation.record_output_event(&written.authored());

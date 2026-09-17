@@ -25,7 +25,7 @@
 //! namespace evidence, and identity comparison over zero deterministic-id
 //! rows is vacuous, so positional mode loses nothing there.
 
-use obzenflow_core::journal::run_manifest::RunManifest;
+use obzenflow_core::journal::archive::manifest::RunManifest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityMode {

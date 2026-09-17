@@ -30,6 +30,7 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::StageId;
 use obzenflow_fsm::StateVariant;
 use std::collections::HashMap;
@@ -395,7 +396,7 @@ pub(super) async fn dispatch_draining<
                             crate::supervised_base::publication::append(
                                 &ctx.error_journal,
                                 error_event,
-                                Some(&envelope),
+                                AppendOptions::new(Some(&envelope)),
                             )
                             .await
                             .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;
@@ -404,11 +405,12 @@ pub(super) async fn dispatch_draining<
                                 .instrumentation
                                 .capture_accounting()
                                 .attach_to(error_event.with_flow_context(flow_context.clone()));
-                            crate::supervised_base::publication::append_with_capture(
+                            crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,
-                                Some(&envelope),
-                                ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                                AppendOptions::new(Some(&envelope)).with_capture(
+                                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                                ),
                             )
                             .await
                             .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;

@@ -9,7 +9,7 @@
 use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventType, WriterId};

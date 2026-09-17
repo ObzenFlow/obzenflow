@@ -10,7 +10,6 @@ use super::support::{
     TestPipelineStageHandle,
 };
 use crate::feed_plan::{FeedKey, FeedRole};
-use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{
     build_pipeline_fsm_with_initial, PipelineAction as A, PipelineDeadline, PipelineFsmEvent as E,
     PipelineFsmState as S,
@@ -20,11 +19,13 @@ use crate::pipeline::termination::{ExecutionOutcome, PublishedTermination};
 use crate::pipeline::tests::support::new_system_journal;
 use crate::pipeline::FlowStopMode;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::system_event::SystemFeedRole;
+use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{
     PipelineLifecycleEvent, SystemEvent, SystemEventFactory, SystemPayload,
 };
+use obzenflow_core::journal::factory::FlowJournalFactory;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{StageId, SystemId};
 use std::time::{Duration, Instant};
 
@@ -60,12 +61,18 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
     assert_eq!(journal.owner(), inner.owner());
 
     let parent = inner
-        .append(SystemEvent::stage_running(StageId::new()), None)
+        .append(
+            SystemEvent::stage_running(StageId::new()),
+            Default::default(),
+        )
         .await
         .unwrap();
     let writer = StageId::new();
     let child = journal
-        .append(SystemEvent::stage_running(writer), Some(&parent))
+        .append(
+            SystemEvent::stage_running(writer),
+            AppendOptions::new(Some(&parent)),
+        )
         .await
         .unwrap();
     assert_happens_before(&parent, &child).unwrap();
@@ -76,7 +83,7 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
                 SystemEvent::stage_running(writer),
                 SystemEvent::stage_running(writer),
             ],
-            Some(&child),
+            AppendOptions::new(Some(&child)),
         )
         .await
         .unwrap();
@@ -139,7 +146,10 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
     assert!(reader.next().await.unwrap().is_none());
     assert!(reader.is_at_end());
     let later = inner
-        .append(SystemEvent::stage_running(writer), Some(&group[1]))
+        .append(
+            SystemEvent::stage_running(writer),
+            AppendOptions::new(Some(&group[1])),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -350,7 +360,10 @@ pub async fn finished_has_no_outgoing_inputs_including_controls_and_journal_rows
     assert!(matches!(finished, S::Finished { .. }));
     let row = ctx
         .system_journal
-        .append(SystemEvent::stage_running(StageId::new()), None)
+        .append(
+            SystemEvent::stage_running(StageId::new()),
+            Default::default(),
+        )
         .await
         .unwrap();
     for event in [
@@ -475,7 +488,11 @@ pub async fn unrelated_rows_only_advance_observation_in_every_live_phase(
         ] {
             let id = event.id;
             ctx.resources.producer_tail = ProducerTail::Through(id);
-            let row = ctx.system_journal.append(event, None).await.unwrap();
+            let row = ctx
+                .system_journal
+                .append(event, Default::default())
+                .await
+                .unwrap();
             assert!(machine
                 .handle(E::Journal(Box::new(row)), &mut ctx)
                 .await
@@ -519,7 +536,11 @@ pub async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role
         contract_row(upstream, reader, None, Some(SystemFeedRole::Stream), false),
         contract_row(reader, upstream, None, None, false),
     ] {
-        let row = ctx.system_journal.append(row, None).await.unwrap();
+        let row = ctx
+            .system_journal
+            .append(row, Default::default())
+            .await
+            .unwrap();
         assert!(machine
             .handle(E::Journal(Box::new(row)), &mut ctx)
             .await
@@ -539,7 +560,7 @@ pub async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role
                 Some(SystemFeedRole::Input),
                 false,
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -579,7 +600,11 @@ pub async fn empty_topology_cannot_announce_or_consume_all_stage_completion(
             SystemEvent::stage_running(StageId::new()),
             SystemEventFactory::new(id).pipeline_all_stages_completed(),
         ] {
-            let row = ctx.system_journal.append(event, None).await.unwrap();
+            let row = ctx
+                .system_journal
+                .append(event, Default::default())
+                .await
+                .unwrap();
             assert!(machine
                 .handle(E::Journal(Box::new(row)), &mut ctx)
                 .await
@@ -611,7 +636,7 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
         let mut machine = build_pipeline_fsm_with_initial(phase.clone());
         let upstream_row = ctx
             .system_journal
-            .append(SystemEvent::stage_completed(upstream), None)
+            .append(SystemEvent::stage_completed(upstream), Default::default())
             .await
             .unwrap();
         assert!(machine
@@ -621,7 +646,7 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
             .is_empty());
         let row = ctx
             .system_journal
-            .append(SystemEvent::stage_completed(stage), None)
+            .append(SystemEvent::stage_completed(stage), Default::default())
             .await
             .unwrap();
         let actions = machine
@@ -639,7 +664,7 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
         assert!(ctx.flow_start_time.is_none());
         let row = ctx
             .system_journal
-            .append(event.as_ref().clone(), None)
+            .append(event.as_ref().clone(), Default::default())
             .await
             .unwrap();
         let actions = machine
@@ -697,7 +722,7 @@ pub async fn graceful_stop_during_startup_preserves_running_then_drain_authority
         );
         let row = ctx
             .system_journal
-            .append(running.as_ref().clone(), None)
+            .append(running.as_ref().clone(), Default::default())
             .await
             .unwrap();
         let actions = machine
@@ -708,7 +733,11 @@ pub async fn graceful_stop_during_startup_preserves_running_then_drain_authority
             actions.iter().any(|a| matches!(a, A::StartSources)),
             !cancel
         );
-        let row = ctx.system_journal.append(admission, None).await.unwrap();
+        let row = ctx
+            .system_journal
+            .append(admission, Default::default())
+            .await
+            .unwrap();
         let actions = machine
             .handle(E::Journal(Box::new(row)), &mut ctx)
             .await
@@ -730,7 +759,11 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
         SystemEventFactory::new(ctx.system_id).pipeline_not_started(),
         wrong_writer,
     ] {
-        let row = ctx.system_journal.append(event, None).await.unwrap();
+        let row = ctx
+            .system_journal
+            .append(event, Default::default())
+            .await
+            .unwrap();
         assert!(machine
             .handle(E::Journal(Box::new(row)), &mut ctx)
             .await
@@ -738,7 +771,11 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
             .is_empty());
         assert_eq!(machine.state(), &S::PublishingTerminal);
     }
-    let row = ctx.system_journal.append(selected, None).await.unwrap();
+    let row = ctx
+        .system_journal
+        .append(selected, Default::default())
+        .await
+        .unwrap();
     assert!(matches!(
         machine
             .handle(E::Journal(Box::new(row)), &mut ctx)
@@ -755,7 +792,7 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
         .system_journal
         .append(
             SystemEventFactory::new(ctx.system_id).pipeline_drained(),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -768,7 +805,11 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
         .handle(E::PhysicalSettlementSatisfied, &mut ctx)
         .await
         .is_err());
-    let row = ctx.system_journal.append(marker, None).await.unwrap();
+    let row = ctx
+        .system_journal
+        .append(marker, Default::default())
+        .await
+        .unwrap();
     machine
         .handle(E::Journal(Box::new(row)), &mut ctx)
         .await

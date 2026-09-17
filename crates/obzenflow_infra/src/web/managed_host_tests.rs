@@ -354,7 +354,7 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
                 WriterId::from(system),
                 SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();

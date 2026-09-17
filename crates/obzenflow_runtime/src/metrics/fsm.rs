@@ -9,15 +9,15 @@
 //! Event processing happens directly without FSM state tracking
 
 use obzenflow_core::event::chain_event::ChainPayload;
-use obzenflow_core::event::context::{
-    MeasurementWindow, RuntimeObservability, RuntimeProvenance, StageType,
-};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::{
     HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
 };
+use obzenflow_core::event::observability::{MeasurementWindow, RuntimeObservability};
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitState, ExecutionPayload, HttpPullStateFact,
 };
+use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationFailed, SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
@@ -345,7 +345,7 @@ impl StageMetrics {
 
     pub(super) fn merge_accounting(
         &mut self,
-        accounting: &obzenflow_core::event::context::ExecutionAccounting,
+        accounting: &obzenflow_core::event::provenance::ExecutionAccounting,
     ) {
         self.last_failures_total = Some(
             self.last_failures_total
@@ -427,7 +427,7 @@ impl BoundaryMetricsView for MetricsStore {
 /// position, so prefix and tail form one gap-free projection input.
 #[cfg(test)]
 async fn fold_composite_duration_prefix(
-    reader: &mut dyn obzenflow_core::journal::journal_reader::JournalReader<ChainEvent>,
+    reader: &mut dyn obzenflow_core::journal::reader::JournalReader<ChainEvent>,
     journal_stage: StageId,
     boundaries: &[obzenflow_core::metrics::CompositeBoundary],
     accumulator: &mut CompositeDurationAccumulator,
@@ -454,7 +454,7 @@ fn observe_live_composite_duration(
 
 impl MetricsAggregatorContext {
     fn refresh_measurements(&mut self) {
-        use obzenflow_core::event::observation::ObservationSource;
+        use obzenflow_core::event::observability::ObservationSource;
 
         self.metrics_store.refresh_measurements();
         for packet in self.metrics_store.observations.snapshot() {
@@ -1075,7 +1075,7 @@ impl MetricsStore {
     }
 
     fn refresh_measurements(&mut self) {
-        use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+        use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
         for packet in self.observations.snapshot() {
             for record in &packet.records {
                 if let ObservationRecord::HttpSurface { snapshot } = record {
@@ -1643,7 +1643,7 @@ impl FsmAction for MetricsAggregatorAction {
                 crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     export_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
@@ -1676,14 +1676,18 @@ impl FsmAction for MetricsAggregatorAction {
                 );
 
                 // Publish to system journal
-                crate::supervised_base::publication::append(&ctx.system_journal, drain_event, None)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish drain complete event: {e}"
-                        ))
-                    })?;
+                crate::supervised_base::publication::append(
+                    &ctx.system_journal,
+                    drain_event,
+                    Default::default(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to publish drain complete event: {e}"
+                    ))
+                })?;
 
                 tracing::info!(
                     "Published metrics drain complete event (last_event_id={:?})",
@@ -2016,23 +2020,24 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::context::{CircuitBreakerMeasurements, RuntimeObservability};
-    use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
-    use obzenflow_core::event::observation::CaptureScope;
+    use obzenflow_core::event::observability::{
+        CaptureScope, CircuitBreakerMeasurements, HttpPullTelemetry, RuntimeObservability,
+    };
     use obzenflow_core::event::payloads::execution_payload::{CircuitState, HttpPullStateFact};
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::FlowId;
 
     use async_trait::async_trait;
-    use obzenflow_core::event::context::{CompositeActivationContext, StageType};
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::provenance::CompositeActivationContext;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::metrics::StageMetadata;
     use obzenflow_core::{JournalId, JournalRecord};
@@ -2041,9 +2046,10 @@ mod tests {
 
     #[test]
     fn retained_timing_population_is_independent_of_accounting_and_empty_replaces_it() {
-        use obzenflow_core::event::context::{
-            MeasurementWindow, RuntimeObservability, RuntimeProvenance, TimingMeasurements,
+        use obzenflow_core::event::observability::{
+            MeasurementWindow, RuntimeObservability, TimingMeasurements,
         };
+        use obzenflow_core::event::provenance::RuntimeProvenance;
         let mut metrics = StageMetrics::default();
         let mut facts = RuntimeProvenance::default();
         facts.accounting.events_processed_total = 1000;
@@ -2182,7 +2188,7 @@ mod tests {
                     last_success_unix_secs: telemetry.last_success_unix_secs,
                 },
             );
-            use obzenflow_core::event::observation::*;
+            use obzenflow_core::event::observability::*;
             let mut packet = ObservabilityContext::new(CaptureStamp {
                 capture_scope: scope,
                 observer: stage_id.into(),
@@ -2524,7 +2530,7 @@ mod tests {
             async fn append(
                 &self,
                 _event: T,
-                _parent: Option<&JournalRecord<T::Payload>>,
+                _options: obzenflow_core::journal::AppendOptions<'_, T>,
             ) -> Result<JournalRecord<T::Payload>, JournalError> {
                 Err(JournalError::Implementation {
                     message: "noop journal".to_string(),

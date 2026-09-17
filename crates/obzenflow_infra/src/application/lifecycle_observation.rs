@@ -287,7 +287,7 @@ mod tests {
             &journal
                 .append(
                     SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
-                    None,
+                    Default::default(),
                 )
                 .await
                 .unwrap(),
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(projection.outcome, None);
         projection.fold(
             &journal
-                .append(factory.pipeline_running(), None)
+                .append(factory.pipeline_running(), Default::default())
                 .await
                 .unwrap(),
         );
@@ -310,7 +310,10 @@ mod tests {
         ] {
             projection.fold(
                 &journal
-                    .append(factory.pipeline_stop_admitted(admission), None)
+                    .append(
+                        factory.pipeline_stop_admitted(admission),
+                        Default::default(),
+                    )
                     .await
                     .unwrap(),
             );
@@ -318,7 +321,7 @@ mod tests {
         assert_eq!(projection.progress, Progress::Running);
         assert_eq!(projection.admission, Some(cancel));
         let terminal = journal
-            .append(factory.pipeline_not_started(), None)
+            .append(factory.pipeline_not_started(), Default::default())
             .await
             .unwrap();
         projection.fold(&terminal);
@@ -326,14 +329,14 @@ mod tests {
         assert!(!matches!(projection.health, Health::Failed(_)));
         projection.fold(
             &journal
-                .append(factory.pipeline_drained(), None)
+                .append(factory.pipeline_drained(), Default::default())
                 .await
                 .unwrap(),
         );
         assert_eq!(projection.progress, Progress::Settled);
         projection.fold(
             &journal
-                .append(factory.pipeline_not_started(), None)
+                .append(factory.pipeline_not_started(), Default::default())
                 .await
                 .unwrap(),
         );
@@ -357,7 +360,7 @@ mod tests {
         let factory = SystemEventFactory::new(writer);
         for _ in 0..300 {
             journal
-                .append(factory.pipeline_running(), None)
+                .append(factory.pipeline_running(), Default::default())
                 .await
                 .unwrap();
         }
@@ -369,7 +372,7 @@ mod tests {
         let (feed, task) = Feed::spawn(journal.clone(), writer.into());
         assert_eq!(feed.settled().await.outcome, None);
         journal
-            .append(factory.pipeline_not_started(), None)
+            .append(factory.pipeline_not_started(), Default::default())
             .await
             .unwrap();
         assert!(reader.catch_up().await);
@@ -399,7 +402,10 @@ mod tests {
         let journal =
             crate::journal::MemoryJournal::with_owner(obzenflow_core::JournalOwner::system(writer));
         let terminal = journal
-            .append(SystemEventFactory::new(writer).pipeline_not_started(), None)
+            .append(
+                SystemEventFactory::new(writer).pipeline_not_started(),
+                Default::default(),
+            )
             .await
             .unwrap();
         let mut reader = Reader::from_reader(

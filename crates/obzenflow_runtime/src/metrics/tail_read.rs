@@ -7,7 +7,8 @@
 //! Collector accounting comes from its sequential fold, not these helpers.
 //! Optional measurements use the committed-attachment index independently.
 
-use obzenflow_core::event::context::{RuntimeProvenance, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::id::StageId;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetadata, StageMetricsSnapshot};
@@ -115,7 +116,7 @@ pub async fn read_stage_metrics_from_tail(
     error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     stage_id: StageId,
 ) -> Option<StageMetricsSnapshot> {
-    use obzenflow_core::event::observation::ObservationSource;
+    use obzenflow_core::event::observability::ObservationSource;
     let mut metrics = super::fsm::StageMetrics::default();
     let observations = super::observations::ObservationHub::default();
     for journal in std::iter::once(data_journal).chain(error_journal) {
@@ -201,15 +202,15 @@ pub async fn read_flow_metrics_from_tails(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::context::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::{ChainEvent, WriterId};
     use std::sync::{Arc, Mutex};
 
@@ -257,8 +258,9 @@ mod tests {
         async fn append(
             &self,
             event: ChainEvent,
-            _parent: Option<&JournalRecord<ChainPayload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, ChainEvent>,
         ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(envelope.clone());

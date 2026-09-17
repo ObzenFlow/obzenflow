@@ -17,7 +17,7 @@
 use crate::testing::probe::JournalProbeError;
 use crate::testing::FlowTestHarness;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::journal_record::JournalPayload;
+use obzenflow_core::event::payloads::JournalPayload;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{JournalEvent, JournalRecord, SystemPayload, WriterId};
@@ -609,14 +609,14 @@ mod tests {
     use super::*;
     use obzenflow_core::chrono::Utc;
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent;
     use obzenflow_core::event::provenance::JournalProvenance;
-    use obzenflow_core::event::system_event::PipelineLifecycleEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent, SystemPayload};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::{JournalWriterId, StageId, SystemId};
     use std::sync::{Arc, Mutex};
 
@@ -683,8 +683,9 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             guard.push(envelope.clone());
@@ -740,14 +741,14 @@ mod tests {
         journal
             .append(
                 ChainEventFactory::data_event(writer, "a", serde_json::json!({})),
-                None,
+                Default::default(),
             )
             .await
             .expect("append a");
         journal
             .append(
                 ChainEventFactory::data_event(writer, "b", serde_json::json!({})),
-                None,
+                Default::default(),
             )
             .await
             .expect("append b");
@@ -759,7 +760,7 @@ mod tests {
         journal
             .append(
                 ChainEventFactory::data_event(writer, "c", serde_json::json!({})),
-                None,
+                Default::default(),
             )
             .await
             .expect("append c");
@@ -888,7 +889,10 @@ mod tests {
         let mut parent =
             ChainEventFactory::data_event(writer, "parent", serde_json::json!({ "k": "v" }));
         parent.set_single_correlation(corr, None);
-        let parent_env = journal.append(parent, None).await.expect("append parent");
+        let parent_env = journal
+            .append(parent, Default::default())
+            .await
+            .expect("append parent");
 
         let child_a = ChainEventFactory::derived_data_event(
             writer,
@@ -906,11 +910,17 @@ mod tests {
         );
 
         let child_a_env = journal
-            .append(child_a, Some(&parent_env))
+            .append(
+                child_a,
+                obzenflow_core::journal::AppendOptions::new(Some(&parent_env)),
+            )
             .await
             .expect("append child.a");
         let child_b_env = journal
-            .append(child_b, Some(&parent_env))
+            .append(
+                child_b,
+                obzenflow_core::journal::AppendOptions::new(Some(&parent_env)),
+            )
             .await
             .expect("append child.b");
 

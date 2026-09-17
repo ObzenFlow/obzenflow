@@ -9,6 +9,7 @@ use obzenflow_core::event::system_event::SystemEventFactory;
 use obzenflow_core::event::types::EventId;
 use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, SystemPayload};
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::Journal;
 use obzenflow_core::{StageId, SystemId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
@@ -41,20 +42,26 @@ async fn test_journal_parity() {
     // Test both journals with identical operations
     for journal in [&disk_journal, &memory_journal] {
         // Event 1: No parent
-        let envelope1 = journal.append(event1.clone(), None).await.unwrap();
+        let envelope1 = journal
+            .append(event1.clone(), Default::default())
+            .await
+            .unwrap();
 
         // Event 2: Child of event 1
         let envelope2 = journal
-            .append(event2.clone(), Some(&envelope1))
+            .append(event2.clone(), AppendOptions::new(Some(&envelope1)))
             .await
             .unwrap();
 
         // Event 3: From different writer, no parent
-        let _envelope3 = journal.append(event3.clone(), None).await.unwrap();
+        let _envelope3 = journal
+            .append(event3.clone(), Default::default())
+            .await
+            .unwrap();
 
         // Event 4: Child of event 2
         journal
-            .append(event4.clone(), Some(&envelope2))
+            .append(event4.clone(), AppendOptions::new(Some(&envelope2)))
             .await
             .unwrap();
     }
@@ -154,9 +161,15 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
         // Append in the opposite order of the desired causal-tie-break order.
         // If timestamps were used as the concurrent tie-break, this would tend to sort as:
         //   high (earlier append) then low (later append).
-        journal.append(high.clone(), None).await.unwrap();
+        journal
+            .append(high.clone(), Default::default())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
-        journal.append(low.clone(), None).await.unwrap();
+        journal
+            .append(low.clone(), Default::default())
+            .await
+            .unwrap();
 
         let ordered = journal.read_causally_ordered().await.unwrap();
         let ordered_ids: Vec<_> = ordered
@@ -207,9 +220,18 @@ async fn test_read_causally_after_matches_slice_with_concurrent_events() {
     let event_c = ChainEventFactory::data_event(writer_a, "test.c", json!({ "seq": "c" }));
 
     for journal in [&disk_journal, &memory_journal] {
-        let env_a = journal.append(event_a.clone(), None).await.unwrap();
-        let _env_b = journal.append(event_b.clone(), None).await.unwrap();
-        let _env_c = journal.append(event_c.clone(), Some(&env_a)).await.unwrap();
+        let env_a = journal
+            .append(event_a.clone(), Default::default())
+            .await
+            .unwrap();
+        let _env_b = journal
+            .append(event_b.clone(), Default::default())
+            .await
+            .unwrap();
+        let _env_c = journal
+            .append(event_c.clone(), AppendOptions::new(Some(&env_a)))
+            .await
+            .unwrap();
 
         let ordered = journal.read_causally_ordered().await.unwrap();
         assert_eq!(ordered.len(), 3);
@@ -264,21 +286,27 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
     join.id = EventId::from_string("33333333333333333333333333").unwrap();
 
     for journal in [&disk_journal, &memory_journal] {
-        let env_root = journal.append(root.clone(), None).await.unwrap();
+        let env_root = journal
+            .append(root.clone(), Default::default())
+            .await
+            .unwrap();
 
         let env_right = journal
-            .append(right.clone(), Some(&env_root))
+            .append(right.clone(), AppendOptions::new(Some(&env_root)))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let env_left = journal.append(left.clone(), Some(&env_root)).await.unwrap();
+        let env_left = journal
+            .append(left.clone(), AppendOptions::new(Some(&env_root)))
+            .await
+            .unwrap();
 
         let env_merge_left = journal
-            .append(merge_left.clone(), Some(&env_left))
+            .append(merge_left.clone(), AppendOptions::new(Some(&env_left)))
             .await
             .unwrap();
         let env_join = journal
-            .append(join.clone(), Some(&env_right))
+            .append(join.clone(), AppendOptions::new(Some(&env_right)))
             .await
             .unwrap();
 
@@ -365,23 +393,32 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
     join.id = EventId::from_string("33333333333333333333333333").unwrap();
 
     for journal in [&disk_journal, &memory_journal] {
-        let env_root = journal.append(root.clone(), None).await.unwrap();
+        let env_root = journal
+            .append(root.clone(), Default::default())
+            .await
+            .unwrap();
 
         // Append the higher EventId sibling first, then the lower EventId sibling.
         // If wall-clock timestamps were used as a concurrent tie-break, this would tend to order
         // right then left.
         journal
-            .append(right.clone(), Some(&env_root))
+            .append(right.clone(), AppendOptions::new(Some(&env_root)))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let env_left = journal.append(left.clone(), Some(&env_root)).await.unwrap();
-
-        journal
-            .append(merge_left.clone(), Some(&env_left))
+        let env_left = journal
+            .append(left.clone(), AppendOptions::new(Some(&env_root)))
             .await
             .unwrap();
-        journal.append(join.clone(), Some(&env_left)).await.unwrap();
+
+        journal
+            .append(merge_left.clone(), AppendOptions::new(Some(&env_left)))
+            .await
+            .unwrap();
+        journal
+            .append(join.clone(), AppendOptions::new(Some(&env_left)))
+            .await
+            .unwrap();
 
         let ordered = journal.read_causally_ordered().await.unwrap();
         let ordered_ids: Vec<_> = ordered
@@ -422,7 +459,7 @@ async fn test_reader_surface_parity() {
         let mut parent = None;
         for event in &events {
             let env = journal
-                .append(event.clone(), parent.as_ref())
+                .append(event.clone(), AppendOptions::new(parent.as_ref()))
                 .await
                 .unwrap();
             parent = Some(env);
@@ -517,7 +554,7 @@ async fn test_system_event_parity() {
         let mut parent = None;
         for event in &events {
             let env = journal
-                .append(event.clone(), parent.as_ref())
+                .append(event.clone(), AppendOptions::new(parent.as_ref()))
                 .await
                 .unwrap();
             parent = Some(env);
@@ -604,8 +641,10 @@ async fn discarded_command_facts_survive_disk_reopen_and_json_round_trip() {
                 error: error.map(str::to_owned),
             },
         );
-        disk.append(event.clone(), None).await.unwrap();
-        memory.append(event, None).await.unwrap();
+        disk.append(event.clone(), Default::default())
+            .await
+            .unwrap();
+        memory.append(event, Default::default()).await.unwrap();
     }
     drop(disk);
     let reopened = DiskJournal::<SystemEvent>::with_owner(path, owner).unwrap();

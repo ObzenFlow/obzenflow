@@ -3,14 +3,14 @@
 // https://obzenflow.dev
 
 use super::factory::ChainEventFactory;
-use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::{FlowContext, RuntimeProvenance, RuntimeSnapshot};
-use crate::event::journal_record::JournalPayload;
-use crate::event::observation::ObservabilityContext;
+use crate::event::envelope::AuthoredEnvelope;
+use crate::event::observability::{ObservabilityContext, RuntimeSnapshot};
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::effect_payload::EffectProvenance;
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
-use crate::event::provenance::{AuthoredEnvelope, ChainEventProvenance};
+use crate::event::payloads::JournalPayload;
+use crate::event::provenance::causality_context::CausalityContext;
+use crate::event::provenance::{ChainEventProvenance, FlowContext, RuntimeProvenance};
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::CorrelationId;
 use crate::ingress::IngressContext;

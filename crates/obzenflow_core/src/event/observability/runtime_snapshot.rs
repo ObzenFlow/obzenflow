@@ -4,7 +4,7 @@
 
 //! Diagnostic copies of runtime positions and state, not recovery authority.
 
-use crate::event::observation::CaptureStamp;
+use crate::event::observability::CaptureStamp;
 use crate::event::vector_clock::VectorClock;
 use crate::{EventId, JournalWriterId, WriterId};
 use serde::{Deserialize, Serialize};

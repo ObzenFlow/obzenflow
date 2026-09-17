@@ -8,6 +8,7 @@
 
 use super::*;
 use obzenflow_core::event::{ChainEvent, ChainPayload};
+use obzenflow_core::journal::JournalConfig;
 use obzenflow_core::{Journal, JournalOwner, StageId};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::time::Instant;
@@ -44,8 +45,10 @@ async fn periodic_capture_reduces_representative_storage_without_changing_protec
             )
             .unwrap();
             journal
-                .configure_observability(ObservabilityPolicy::Periodic {
-                    interval: Duration::from_millis(250),
+                .configure(JournalConfig {
+                    observability: ObservabilityPolicy::Periodic {
+                        interval: Duration::from_millis(250),
+                    },
                 })
                 .unwrap();
             sparse.insert(stage, journal);
@@ -58,14 +61,20 @@ async fn periodic_capture_reduces_representative_storage_without_changing_protec
         event.id = obzenflow_core::EventId::new();
         if let Some(packet) = event.envelope.observability.as_mut() {
             packet.capture.capture_seq =
-                obzenflow_core::event::observation::CaptureSeq(index as u64 + 1);
+                obzenflow_core::event::observability::CaptureSeq(index as u64 + 1);
             if let Some(snapshot) = packet.runtime_snapshot.as_mut() {
                 snapshot.capture.capture_seq = packet.capture.capture_seq;
             }
         }
         let stage = *event.writer_id.as_stage().unwrap();
-        let control = dense[&stage].append(event.clone(), None).await.unwrap();
-        let treatment = sparse[&stage].append(event, None).await.unwrap();
+        let control = dense[&stage]
+            .append(event.clone(), Default::default())
+            .await
+            .unwrap();
+        let treatment = sparse[&stage]
+            .append(event, Default::default())
+            .await
+            .unwrap();
         dense_packets += usize::from(control.envelope.observability.is_some());
         sparse_packets += usize::from(treatment.envelope.observability.is_some());
         assert_eq!(

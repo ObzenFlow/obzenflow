@@ -3,10 +3,11 @@
 // https://obzenflow.dev
 
 use crate::control_plane::ControlPlaneProvider;
-use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::system_event::{SystemEvent, SystemFeedRole};
+use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
+use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };

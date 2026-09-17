@@ -4,7 +4,6 @@
 
 use obzenflow_core::event::{JournalEvent, JournalRecord};
 use obzenflow_core::journal::{JournalCapture, JournalError, ObservabilityPolicy};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
@@ -46,19 +45,20 @@ impl JournalObservability {
     pub(super) fn prepare<T: JournalEvent>(
         &self,
         events: Vec<T>,
-        capture: JournalCapture<T>,
+        mut capture: JournalCapture<T>,
     ) -> (Vec<T>, Reservation) {
         let mut reservation = Reservation(None);
-        let JournalCapture::Live(mut capture) = capture else {
+        if matches!(capture, JournalCapture::Historical) {
             return (events, reservation);
-        };
+        }
         let mut selected = false;
         let events = events
             .into_iter()
             .enumerate()
             .map(|(index, event)| {
                 let (mut envelope, payload) = event.into_parts();
-                if envelope.observability.is_none() && capture.is_none() {
+                if envelope.observability.is_none() && matches!(capture, JournalCapture::Live(None))
+                {
                     return T::from_parts(envelope, payload);
                 }
                 let admitted = {
@@ -83,11 +83,7 @@ impl JournalObservability {
                 }
                 let event = T::from_parts(envelope, payload);
                 if admitted {
-                    if let Some(capture) = capture.as_mut() {
-                        // Optional diagnostic construction cannot fail a fact.
-                        return catch_unwind(AssertUnwindSafe(|| capture(index, event.clone())))
-                            .unwrap_or(event);
-                    }
+                    return capture.prepare(index, event);
                 }
                 event
             })
@@ -125,12 +121,11 @@ impl Reservation {
 pub(crate) mod tests {
     use super::*;
     use crate::journal::{DiskJournal, MemoryJournal};
-    use obzenflow_core::event::context::{
-        ExecutionAccounting, RuntimeObservability, RuntimeProvenance,
-    };
-    use obzenflow_core::event::observation::{
+    use obzenflow_core::event::observability::{
         CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ObservabilityContext,
+        RuntimeObservability,
     };
+    use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -172,21 +167,66 @@ pub(crate) mod tests {
         // Default is dense, even without advancing time.
         for seq in 1..=3 {
             assert!(journal
-                .append(event(stage, seq), None)
+                .append(event(stage, seq), Default::default())
                 .await
                 .unwrap()
                 .envelope
                 .observability
                 .is_some());
         }
-        journal.configure_observability(policy).unwrap();
-        independent.configure_observability(policy).unwrap();
+        // Preparation may replace the packet while the authored fact and its
+        // accounting pass unchanged through both providers' ordinary append.
+        let authored = event(stage, 0);
+        let prepared = journal
+            .append(
+                authored.clone(),
+                obzenflow_core::journal::AppendOptions::default().with_capture(
+                    JournalCapture::Live(Some(Box::new(|_, event: &ChainEvent| {
+                        let mut packet = event.envelope.observability.clone().unwrap();
+                        packet.runtime.as_mut().unwrap().in_flight = Some(99);
+                        Some(packet)
+                    }))),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&prepared.payload).unwrap(),
+            serde_json::to_value(&authored.payload).unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&prepared.envelope.provenance.event).unwrap(),
+            serde_json::to_value(&authored.envelope.provenance.event).unwrap(),
+        );
+        assert_eq!(
+            prepared
+                .envelope
+                .observability
+                .unwrap()
+                .runtime
+                .unwrap()
+                .in_flight,
+            Some(99),
+        );
+        journal
+            .configure(obzenflow_core::journal::JournalConfig {
+                observability: policy,
+            })
+            .unwrap();
+        independent
+            .configure(obzenflow_core::journal::JournalConfig {
+                observability: policy,
+            })
+            .unwrap();
         let original = event(stage, 4);
-        let selected = journal.append(original.clone(), None).await.unwrap();
+        let selected = journal
+            .append(original.clone(), Default::default())
+            .await
+            .unwrap();
         assert!(selected.envelope.observability.is_some());
         let denied = journal
             .clone()
-            .append(original.clone(), None)
+            .append(original.clone(), Default::default())
             .await
             .unwrap();
         assert!(
@@ -202,7 +242,7 @@ pub(crate) mod tests {
             serde_json::to_value(&denied.envelope.provenance.event).unwrap()
         );
         assert!(independent
-            .append(original.clone(), None)
+            .append(original.clone(), Default::default())
             .await
             .unwrap()
             .envelope
@@ -211,19 +251,23 @@ pub(crate) mod tests {
 
         let captures = Arc::new(AtomicUsize::new(0));
         let capture = |count: Arc<AtomicUsize>| {
-            JournalCapture::Live(Some(Box::new(move |_, event| {
+            JournalCapture::Live(Some(Box::new(move |_, event: &ChainEvent| {
                 count.fetch_add(1, Ordering::SeqCst);
-                event
+                event.envelope.observability.clone()
             })))
         };
         journal
-            .append_with_capture(original.clone(), None, capture(captures.clone()))
+            .append(
+                original.clone(),
+                obzenflow_core::journal::AppendOptions::new(None)
+                    .with_capture(capture(captures.clone())),
+            )
             .await
             .unwrap();
         assert_eq!(captures.load(Ordering::SeqCst), 0);
         tokio::time::advance(Duration::from_millis(249)).await;
         assert!(journal
-            .append(original.clone(), None)
+            .append(original.clone(), Default::default())
             .await
             .unwrap()
             .envelope
@@ -231,7 +275,11 @@ pub(crate) mod tests {
             .is_none());
         tokio::time::advance(Duration::from_millis(1)).await;
         journal
-            .append_with_capture(original.clone(), None, capture(captures.clone()))
+            .append(
+                original.clone(),
+                obzenflow_core::journal::AppendOptions::new(None)
+                    .with_capture(capture(captures.clone())),
+            )
             .await
             .unwrap();
         assert_eq!(captures.load(Ordering::SeqCst), 1);
@@ -239,11 +287,11 @@ pub(crate) mod tests {
         for _ in 0..4 {
             tokio::time::advance(Duration::from_millis(250)).await;
             let records = journal
-                .append_group_with_capture(
+                .append_group(
                     "atomic",
                     vec![original.clone(); 3],
-                    None,
-                    capture(captures.clone()),
+                    obzenflow_core::journal::AppendOptions::new(None)
+                        .with_capture(capture(captures.clone())),
                 )
                 .await
                 .unwrap();
@@ -260,14 +308,14 @@ pub(crate) mod tests {
         tokio::time::advance(Duration::from_secs(60)).await;
         // Idle time gives one allowance, not a burst of accumulated credit.
         assert!(journal
-            .append(original.clone(), None)
+            .append(original.clone(), Default::default())
             .await
             .unwrap()
             .envelope
             .observability
             .is_some());
         assert!(journal
-            .append(original.clone(), None)
+            .append(original.clone(), Default::default())
             .await
             .unwrap()
             .envelope
@@ -276,7 +324,7 @@ pub(crate) mod tests {
         for _ in 0..3 {
             tokio::time::advance(Duration::from_secs(1)).await;
             assert!(journal
-                .append(original.clone(), None)
+                .append(original.clone(), Default::default())
                 .await
                 .unwrap()
                 .envelope
@@ -284,7 +332,11 @@ pub(crate) mod tests {
                 .is_some());
         }
         let historical = journal
-            .append_with_capture(original.clone(), None, JournalCapture::Historical)
+            .append(
+                original.clone(),
+                obzenflow_core::journal::AppendOptions::new(None)
+                    .with_capture(JournalCapture::Historical),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -292,7 +344,7 @@ pub(crate) mod tests {
             serde_json::to_value(&original.envelope.observability).unwrap()
         );
         assert!(journal
-            .append(original.clone(), None)
+            .append(original.clone(), Default::default())
             .await
             .unwrap()
             .envelope
@@ -300,12 +352,12 @@ pub(crate) mod tests {
             .is_none());
         tokio::time::advance(Duration::from_millis(250)).await;
         assert!(journal
-            .append_group("", vec![original.clone()], None)
+            .append_group("", vec![original.clone()], Default::default())
             .await
             .is_err());
         assert!(
             journal
-                .append(original, None)
+                .append(original, Default::default())
                 .await
                 .unwrap()
                 .envelope
@@ -363,7 +415,9 @@ pub(crate) mod tests {
         let (denied, _) = gate.prepare(vec![event(stage, 2)], JournalCapture::default());
         assert!(denied[0].envelope.observability.is_none());
         let journal = MemoryJournal::with_owner(JournalOwner::stage(stage));
-        let result = journal.append_group("commit", events, None).await;
+        let result = journal
+            .append_group("commit", events, Default::default())
+            .await;
         reservation.finish::<ChainEvent>(&result);
         let (denied, _) = gate.prepare(vec![event(stage, 3)], JournalCapture::default());
         assert!(denied[0].envelope.observability.is_none());
@@ -383,10 +437,11 @@ pub(crate) mod tests {
         let journal = MemoryJournal::with_owner(JournalOwner::stage(stage));
         let original = event(stage, 1);
         let record = journal
-            .append_with_capture(
+            .append(
                 original.clone(),
-                None,
-                JournalCapture::Live(Some(Box::new(|_, _| panic!("diagnostic failure")))),
+                obzenflow_core::journal::AppendOptions::new(None).with_capture(
+                    JournalCapture::Live(Some(Box::new(|_, _| panic!("diagnostic failure")))),
+                ),
             )
             .await
             .unwrap();

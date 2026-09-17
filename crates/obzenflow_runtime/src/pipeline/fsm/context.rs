@@ -13,7 +13,7 @@ use crate::pipeline::resources::PipelineResources;
 use crate::pipeline::termination::{ExecutionOutcome, TerminationState};
 use crate::pipeline::FlowStopMode;
 use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
-use obzenflow_core::event::context::ExecutionAccounting;
+use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::types::{SeqNo, ViolationCause};
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};

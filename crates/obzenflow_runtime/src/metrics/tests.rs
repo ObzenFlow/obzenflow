@@ -10,15 +10,16 @@ use super::fsm::{
 };
 use super::subscription::{MetricsSubscription, IDLE_BACKOFF};
 use super::supervisor::MetricsAggregatorSupervisor;
-use crate::journal::FlowJournalFactory;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::observation::ObservationSource;
+use obzenflow_core::event::observability::ObservationSource;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, JournalEvent, SystemEvent, SystemEventFactory,
 };
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::journal::{
     JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
@@ -115,7 +116,7 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if event.event_type_name() == "system.metrics.exported" {
             let gate = self.probe.export_gate.lock().unwrap().take();
@@ -124,15 +125,15 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
                 gate.release.notified().await;
             }
         }
-        self.inner.append(event, parent).await
+        self.inner.append(event, options).await
     }
     async fn append_group(
         &self,
         id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.inner.append_group(id, events, parent).await
+        self.inner.append_group(id, events, options).await
     }
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
@@ -246,9 +247,9 @@ fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent 
             ..Default::default()
         },
     });
-    use obzenflow_core::event::{
-        context::*, observation::*, payloads::execution_payload::CircuitState,
-    };
+    use obzenflow_core::event::observability::*;
+    use obzenflow_core::event::payloads::execution_payload::CircuitState;
+    use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     let mut packet = ObservabilityContext::new(CaptureStamp {
         capture_scope: CaptureScope {
             flow_id: "00000000000000000000000001".parse().unwrap(),
@@ -375,7 +376,11 @@ pub async fn metrics_index_reports_absence_without_tail_search(
     for count in [0, 1000] {
         if count > 0 {
             journal
-                .append_group("noise", (0..count).map(|_| noise(stage)).collect(), None)
+                .append_group(
+                    "noise",
+                    (0..count).map(|_| noise(stage)).collect(),
+                    Default::default(),
+                )
                 .await
                 .unwrap();
         }
@@ -400,11 +405,11 @@ pub async fn metrics_accounting_folds_sequentially_while_measurement_failures_re
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "data");
     let older = data
-        .append(fact(stage, stage.into(), 1, 9), None)
+        .append(fact(stage, stage.into(), 1, 9), Default::default())
         .await
         .unwrap();
     let newer = data
-        .append(fact(stage, stage.into(), 2, 4), None)
+        .append(fact(stage, stage.into(), 2, 4), Default::default())
         .await
         .unwrap();
     let (mut ctx, _, _, exports) =
@@ -433,7 +438,7 @@ pub async fn metrics_accounting_folds_sequentially_while_measurement_failures_re
     Action::ExportMetrics.execute(&mut ctx).await.unwrap();
     assert_values(&ctx, stage, 2, 4);
     let latest = data
-        .append(fact(stage, stage.into(), 3, 1), None)
+        .append(fact(stage, stage.into(), 3, 1), Default::default())
         .await
         .unwrap();
     fold(&mut ctx, stage, Rail::Data, latest).await;
@@ -451,14 +456,14 @@ pub async fn metrics_index_finds_sparse_families_beyond_the_old_tail_cap(
 ) {
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "sparse");
-    data.append(fact(stage, stage.into(), 1, 6), None)
+    data.append(fact(stage, stage.into(), 1, 6), Default::default())
         .await
         .unwrap();
     for group in 0..51 {
         data.append_group(
             &format!("sparse-{group}"),
             (0..1000).map(|_| noise(stage)).collect(),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -510,10 +515,12 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     let data = stage_journal(&mut *factory, stage, "data");
     let errors = stage_journal(&mut *factory, stage, "errors");
     for _ in 0..4 {
-        data.append(noise(archived), None).await.unwrap();
+        data.append(noise(archived), Default::default())
+            .await
+            .unwrap();
     }
     let a = data
-        .append(fact(stage, archived.into(), 1, 8), None)
+        .append(fact(stage, archived.into(), 1, 8), Default::default())
         .await
         .unwrap();
     let mut b = fact(stage, stage.into(), 2, 5);
@@ -521,7 +528,7 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     let mut c = fact(stage, stage.into(), 3, 2);
     c.id = a.envelope.provenance.event.id;
     let group = data
-        .append_group("repeated-event-id", vec![b, c], None)
+        .append_group("repeated-event-id", vec![b, c], Default::default())
         .await
         .unwrap();
     let (mut ctx, _, _, _) = context(
@@ -545,11 +552,11 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     }
     fold(&mut ctx, stage, Rail::Data, group[1].clone()).await;
     let error = errors
-        .append(fact(stage, archived.into(), 2, 7), None)
+        .append(fact(stage, archived.into(), 2, 7), Default::default())
         .await
         .unwrap();
     errors
-        .append(fact(archived, archived.into(), 99, 99), None)
+        .append(fact(archived, archived.into(), 99, 99), Default::default())
         .await
         .unwrap();
     fold(&mut ctx, stage, Rail::Error, error).await;
@@ -573,7 +580,7 @@ pub async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_e
     assert!(sub.poll_batch().await.unwrap().is_none());
     assert_eq!(data.probe.next_calls.load(Ordering::SeqCst), calls);
     for _ in 0..3 {
-        data.append(noise(stage), None).await.unwrap();
+        data.append(noise(stage), Default::default()).await.unwrap();
     }
     let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
     // Terminal invalidates the live-empty cooldown before the next read.
@@ -638,18 +645,21 @@ pub async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_pub
     let data = stage_journal(&mut *factory, stage, "data");
     let errors = stage_journal(&mut *factory, stage, "errors");
     for _ in 0..200 {
-        data.append(noise(stage), None).await.unwrap();
-        errors.append(noise(stage), None).await.unwrap();
+        data.append(noise(stage), Default::default()).await.unwrap();
+        errors
+            .append(noise(stage), Default::default())
+            .await
+            .unwrap();
     }
     let (mut ctx, io, system, _) =
         context(&mut *factory, vec![(stage, data)], vec![(stage, errors)]).await;
     let events = SystemEventFactory::new(ctx.system_id);
     system
-        .append(events.pipeline_draining(), None)
+        .append(events.pipeline_draining(), Default::default())
         .await
         .unwrap();
     system
-        .append(events.pipeline_all_stages_completed(), None)
+        .append(events.pipeline_all_stages_completed(), Default::default())
         .await
         .unwrap();
     let mut supervisor = supervisor(&ctx, io);
@@ -736,11 +746,14 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
         let journal = stage_journal(&mut *factory, stage, "data");
         let error = stage_journal(&mut *factory, stage, "errors");
         journal
-            .append(fact(stage, stage.into(), 1, 0), None)
+            .append(fact(stage, stage.into(), 1, 0), Default::default())
             .await
             .unwrap();
         if index == 0 {
-            error.append(noise(stage), None).await.unwrap();
+            error
+                .append(noise(stage), Default::default())
+                .await
+                .unwrap();
         }
         probes.push((journal.probe.clone(), 1));
         probes.push((error.probe.clone(), u64::from(index == 0)));
@@ -753,19 +766,19 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
     let old = SystemEventFactory::new(SystemId::new());
     let current = SystemEventFactory::new(pipeline);
     system
-        .append(old.pipeline_not_started(), None)
+        .append(old.pipeline_not_started(), Default::default())
         .await
         .unwrap();
     system
-        .append(current.pipeline_all_stages_completed(), None)
+        .append(current.pipeline_all_stages_completed(), Default::default())
         .await
         .unwrap();
     system
-        .append(current.pipeline_not_started(), None)
+        .append(current.pipeline_not_started(), Default::default())
         .await
         .unwrap();
     system
-        .append(current.pipeline_drained(), None)
+        .append(current.pipeline_drained(), Default::default())
         .await
         .unwrap();
     let supervisor = supervisor(&ctx, io);
@@ -798,7 +811,7 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
 pub async fn metrics_terminal_accounting_covers_filtering_without_optional_packets(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
-    use obzenflow_core::event::context::ExecutionAccounting;
+    use obzenflow_core::event::provenance::ExecutionAccounting;
     use obzenflow_core::event::{StageLifecycleEvent, SystemPayload};
     let stage = StageId::new();
     let (mut ctx, _, system, _) = context(&mut *factory, vec![], vec![]).await;
@@ -846,7 +859,7 @@ pub async fn metrics_terminal_accounting_covers_filtering_without_optional_packe
                         event,
                     },
                 ),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();
@@ -884,7 +897,7 @@ pub async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not
 ) {
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "pending_batch");
-    data.append(noise(stage), None).await.unwrap();
+    data.append(noise(stage), Default::default()).await.unwrap();
     let mut sub = MetricsSubscription::new(&[(stage, data.clone())])
         .await
         .unwrap();
@@ -977,7 +990,7 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
         (transform, &transform_data),
     ] {
         let row = journal
-            .append(fact(stage, stage.into(), 1, 0), None)
+            .append(fact(stage, stage.into(), 1, 0), Default::default())
             .await
             .unwrap();
         fold(&mut ctx, stage, Rail::Data, row).await;
@@ -986,7 +999,7 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
     for _ in 0..3 {
         let mut eof = ChainEventFactory::eof_event(source.into(), true);
         eof.flow_context.stage_id = counter;
-        let row = counter_data.append(eof, None).await.unwrap();
+        let row = counter_data.append(eof, Default::default()).await.unwrap();
         fold(&mut ctx, counter, Rail::Data, row).await;
     }
     assert_eq!(ctx.metrics_store.stage_vector_clocks[&counter], 1);
@@ -1007,7 +1020,10 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
             },
         );
         contract.flow_context.stage_id = summary;
-        let row = summary_data.append(contract, None).await.unwrap();
+        let row = summary_data
+            .append(contract, Default::default())
+            .await
+            .unwrap();
         fold(&mut ctx, summary, Rail::Data, row).await;
     }
     assert_eq!(ctx.metrics_store.stage_vector_clocks[&summary], 1);
@@ -1019,7 +1035,7 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
         let row = transform_errors
             .append(
                 fact(source, source.into(), total, 0).mark_as_error("expected", ErrorKind::Unknown),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();
@@ -1032,7 +1048,10 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
     assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&source));
     for total in 1..=3 {
         let row = transform_errors
-            .append(fact(transform, transform.into(), total, 0), None)
+            .append(
+                fact(transform, transform.into(), total, 0),
+                Default::default(),
+            )
             .await
             .unwrap();
         fold(&mut ctx, transform, Rail::Error, row).await;

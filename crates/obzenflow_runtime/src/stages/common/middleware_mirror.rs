@@ -39,7 +39,7 @@ pub async fn mirror_middleware_event_to_system_journal(
     }
 
     let writer_key = envelope.envelope.provenance.event.writer_id.to_string();
-    let origin = obzenflow_core::event::system_event::MiddlewareEventOrigin {
+    let origin = obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin {
         event_id: envelope.envelope.provenance.event.id,
         writer_key: writer_key.clone(),
         seq: SeqNo(
@@ -90,7 +90,7 @@ pub async fn mirror_middleware_event_to_system_journal(
 
     let system_journal = system_journal.clone();
     let mirror = crate::supervised_base::publication::commit(async move {
-        if let Err(error) = system_journal.append(event, None).await {
+        if let Err(error) = system_journal.append(event, Default::default()).await {
             if crate::supervised_base::publication::is_indeterminate(&error) {
                 return Err(Box::new(error) as crate::supervised_base::publication::BoxError);
             }

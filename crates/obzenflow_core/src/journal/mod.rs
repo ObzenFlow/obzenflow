@@ -7,28 +7,26 @@
 //! Pure domain types and traits for event journaling.
 //! No infrastructure concerns or I/O operations here!
 
+pub mod append;
 pub mod archive;
+pub mod config;
+pub mod factory;
 pub mod journal_error;
 pub mod journal_name;
 pub mod journal_owner;
-pub mod journal_reader;
 pub mod journal_trait;
-pub mod observability;
-pub mod observation_reader;
-pub mod run_manifest;
+pub mod reader;
 
-// Re-export commonly used types
-pub use archive::{ArchiveStatus, StatusDerivation};
-pub use journal_error::JournalError;
-pub use journal_reader::JournalReader;
-pub use journal_trait::Journal;
-pub use observability::{JournalCapture, ObservabilityPolicy, ObservationCapture};
-pub use observation_reader::{
-    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+pub use append::{AppendOptions, JournalCapture, ObservationCapture};
+pub use archive::{
+    ArchiveStatus, RunManifest, RunManifestReplayConfig, RunManifestStage, StatusDerivation,
+    JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
-pub use run_manifest::{
-    RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_FORMAT_VERSION,
-    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+pub use config::{JournalConfig, ObservabilityPolicy};
+pub use journal_error::JournalError;
+pub use journal_trait::Journal;
+pub use reader::{
+    JournalObservationReader, JournalReader, LocatedObservation, ObservationKey, ObservationLookup,
 };
 
 // Type aliases for clarity

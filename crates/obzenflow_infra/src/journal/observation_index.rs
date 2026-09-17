@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::observation::{CaptureSeq, ObservabilityContext};
-use obzenflow_core::event::observation_families::observation_families;
+use obzenflow_core::event::observability::families::observation_families;
+use obzenflow_core::event::observability::{CaptureSeq, ObservabilityContext};
 use obzenflow_core::journal::{JournalError, LocatedObservation, ObservationKey};
 use std::collections::{HashMap, VecDeque};
 
@@ -99,7 +99,7 @@ pub(super) fn locate(
 mod tests {
     use super::*;
     use crate::journal::observability::tests::event;
-    use obzenflow_core::event::observation_families::ObservationKind;
+    use obzenflow_core::event::observability::families::ObservationKind;
     use obzenflow_core::StageId;
 
     #[test]

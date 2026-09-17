@@ -14,7 +14,7 @@ use crate::stages::common::handler_error::StageFatal;
 use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
-use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::ChainPayload;
 
 use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
@@ -78,7 +78,7 @@ fn http_pull_evidence(
     snapshot: HttpPullTelemetry,
     recorder: &dyn ObservationRecorder,
 ) -> ChainEvent {
-    use obzenflow_core::event::observation::ObservationRecord;
+    use obzenflow_core::event::observability::ObservationRecord;
     use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, HttpPullStateFact};
     recorder.observe(ObservationRecord::HttpPull(HttpPullMeasurements {
         requests_total: snapshot.requests_total,
@@ -1068,7 +1068,7 @@ mod tests {
             &observations[0].payload,
             ChainPayload::Execution(ExecutionPayload::HttpPullState(_))
         ));
-        use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+        use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
         assert!(execution.observations().snapshot().iter().flat_map(|packet| &packet.records)
             .any(|record| matches!(record, ObservationRecord::HttpPull(snapshot) if snapshot.requests_total == 3)));
     }

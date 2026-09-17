@@ -6,12 +6,12 @@
 //! has no journal, publication scope, credit, or settlement capability.
 
 use crate::execution::RuntimeExecution;
-#[cfg(test)]
-use obzenflow_core::event::context::RuntimeObservability;
-use obzenflow_core::event::observation::*;
-use obzenflow_core::event::observation_families::{
+use obzenflow_core::event::observability::families::{
     observation_families as split, ObservationKind as Kind,
 };
+#[cfg(test)]
+use obzenflow_core::event::observability::RuntimeObservability;
+use obzenflow_core::event::observability::*;
 use obzenflow_core::{FlowId, MiddlewareExecutionScope, WriterId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -321,7 +321,7 @@ mod tests {
     use super::*;
     use crate::execution::RuntimeMode;
     use crate::metrics::instrumentation::StageInstrumentation;
-    use obzenflow_core::event::context::{MeasurementWindow, TimingMeasurements};
+    use obzenflow_core::event::observability::{MeasurementWindow, TimingMeasurements};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ReaderGeneration, StageId};
     use std::time::Duration;
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn runtime_snapshot_uses_its_own_stamp_and_replaces_the_whole_family() {
-        use obzenflow_core::event::context::{ExecutionProgress, RuntimeSnapshot};
+        use obzenflow_core::event::observability::{ExecutionProgress, RuntimeSnapshot};
 
         let hub = ObservationHub::default();
         let scope = CaptureScope {

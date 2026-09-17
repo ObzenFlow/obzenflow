@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::run_mode::RunMode;
-use obzenflow_runtime::journal::CurrentRunLocator;
+use obzenflow_core::journal::factory::CurrentRunLocator;
 use std::fmt::Display;
 use std::io::IsTerminal;
 

@@ -6,7 +6,11 @@
 //!
 //! No more two-level closures. Just a simple factory that works.
 
-use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME};
+use obzenflow_core::journal::archive::manifest::{RunManifest, RUN_MANIFEST_FILENAME};
+use obzenflow_core::journal::archive::ReplayArchive;
+use obzenflow_core::journal::factory::{
+    CurrentRunLocator, FlowJournalFactory, RunResourcePlan, RunSubstrateState,
+};
 use obzenflow_core::{
     event::{ChainEvent, SystemEvent},
     journal::{
@@ -15,10 +19,6 @@ use obzenflow_core::{
     },
     FlowId,
 };
-use obzenflow_runtime::journal::{
-    CurrentRunLocator, FlowJournalFactory, RunResourcePlan, RunSubstrateState,
-};
-use obzenflow_runtime::replay::ReplayArchive;
 use obzenflow_runtime::runtime_resource_limits::{
     env_try_raise_nofile, estimate_disk_journal_fds, preflight_nofile_for_disk_journals,
 };

@@ -22,8 +22,7 @@ use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHa
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig};
 use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
-use obzenflow_runtime::supervised_base::SupervisorBuilder;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
+use obzenflow_runtime::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
 use serde::{Deserialize, Serialize};
 
@@ -301,11 +300,14 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
     // Reference side: one row + EOF so the supervisor hydrates and observes reference ancestry.
     let reference_writer = WriterId::from(reference_stage);
     reference_journal
-        .append(RefRow { key: "k1".into() }.to_event(reference_writer), None)
+        .append(
+            RefRow { key: "k1".into() }.to_event(reference_writer),
+            Default::default(),
+        )
         .await
         .expect("append reference data");
     reference_journal
-        .append(make_eof_event(reference_writer, 1), None)
+        .append(make_eof_event(reference_writer, 1), Default::default())
         .await
         .expect("append reference eof");
 
@@ -317,12 +319,12 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
                 key: "missing".into(),
             }
             .to_event(stream_writer),
-            None,
+            Default::default(),
         )
         .await
         .expect("append stream data");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -503,30 +505,33 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
     reference_journal
         .append(
             RefRow { key: "k1".into() }.to_event(reference_writer_a),
-            None,
+            Default::default(),
         )
         .await
         .expect("append reference a");
     reference_journal
         .append(
             RefRow { key: "k2".into() }.to_event(reference_writer_b),
-            None,
+            Default::default(),
         )
         .await
         .expect("append reference b");
     reference_journal
-        .append(make_eof_event(reference_writer_a, 1), None)
+        .append(make_eof_event(reference_writer_a, 1), Default::default())
         .await
         .expect("append reference eof");
 
     // Stream side: match only the first reference key.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -714,22 +719,28 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
     // Reference side: one key + EOF.
     let reference_writer = WriterId::from(reference_stage);
     reference_journal
-        .append(RefRow { key: "k1".into() }.to_event(reference_writer), None)
+        .append(
+            RefRow { key: "k1".into() }.to_event(reference_writer),
+            Default::default(),
+        )
         .await
         .expect("append reference");
     reference_journal
-        .append(make_eof_event(reference_writer, 1), None)
+        .append(make_eof_event(reference_writer, 1), Default::default())
         .await
         .expect("append reference eof");
 
     // Stream side: one hit + EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 
@@ -929,22 +940,28 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
     // Reference side: one key + EOF.
     let reference_writer = WriterId::from(reference_stage);
     reference_journal
-        .append(RefRow { key: "k1".into() }.to_event(reference_writer), None)
+        .append(
+            RefRow { key: "k1".into() }.to_event(reference_writer),
+            Default::default(),
+        )
         .await
         .expect("append reference");
     reference_journal
-        .append(make_eof_event(reference_writer, 1), None)
+        .append(make_eof_event(reference_writer, 1), Default::default())
         .await
         .expect("append reference eof");
 
     // Stream side: one record triggers a handler error, then EOF.
     let stream_writer = WriterId::from(stream_stage);
     stream_journal
-        .append(StreamRow { key: "k1".into() }.to_event(stream_writer), None)
+        .append(
+            StreamRow { key: "k1".into() }.to_event(stream_writer),
+            Default::default(),
+        )
         .await
         .expect("append stream");
     stream_journal
-        .append(make_eof_event(stream_writer, 1), None)
+        .append(make_eof_event(stream_writer, 1), Default::default())
         .await
         .expect("append stream eof");
 

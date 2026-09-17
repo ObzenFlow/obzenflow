@@ -329,15 +329,14 @@ mod tests {
     use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
     use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload};
-    use obzenflow_core::id::JournalId;
-    use obzenflow_core::id::SystemId;
+    use obzenflow_core::id::{JournalId, SystemId};
     use obzenflow_core::ingress::{
         FilledHostedIngress, IngressAttemptSeq, IngressBoundaryMiddleware, IngressRefusalReason,
     };
+    use obzenflow_core::journal::archive::manifest::RUN_MANIFEST_FILENAME;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::journal::run_manifest::RUN_MANIFEST_FILENAME;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
     use obzenflow_core::StageId;
@@ -606,7 +605,7 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            _options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "forced append failure".to_string(),

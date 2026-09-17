@@ -15,7 +15,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::ChainEvent;
-use obzenflow_core::journal::run_manifest::{
+use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };

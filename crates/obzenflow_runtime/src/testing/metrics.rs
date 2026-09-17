@@ -5,10 +5,10 @@
 //! Metrics journal scenarios supplied with real journals by outer tests.
 
 pub use crate::metrics::tests::*;
-use obzenflow_core::event::context::ExecutionAccounting;
+use obzenflow_core::event::provenance::ExecutionAccounting;
 
-use crate::journal::FlowJournalFactory;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
 use obzenflow_fsm::FsmAction;
@@ -37,8 +37,9 @@ pub async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding(
         MetricsAggregatorAction, MetricsAggregatorContext, MetricsJournalKind,
     };
     use crate::metrics::MetricsInputs;
+    use obzenflow_core::event::provenance::RuntimeProvenance;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{context::RuntimeProvenance, ChainEventFactory};
+    use obzenflow_core::event::ChainEventFactory;
 
     let mut journals = make_journals();
     let system_id = SystemId::new();
@@ -84,7 +85,10 @@ pub async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding(
                 },
             })
             .mark_as_error("expected", ErrorKind::Unknown);
-        rows.push((kind, target.append(event, None).await.unwrap()));
+        rows.push((
+            kind,
+            target.append(event, Default::default()).await.unwrap(),
+        ));
     }
     let exporter = Arc::new(RecordingSnapshots::default());
     let (mut context, mut io) = MetricsAggregatorContext::new(

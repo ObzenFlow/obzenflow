@@ -12,16 +12,16 @@ use crate::journal::observation_index::{locate, unavailable, ObservationIndex};
 use async_trait::async_trait;
 use chrono::Utc;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
-use obzenflow_core::event::provenance::JournalProvenance;
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
 use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
-use obzenflow_core::event::{
-    event_envelope::JournalGroupMember, journal_record::JournalRecord, JournalEvent,
-};
+use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::journal::{Journal, JournalCapture, ObservabilityPolicy};
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::Journal;
+use obzenflow_core::journal::{AppendOptions, JournalConfig};
 use obzenflow_core::journal::{
     JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
 };
@@ -241,25 +241,16 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Some(self)
     }
 
-    fn configure_observability(&self, policy: ObservabilityPolicy) -> Result<(), JournalError> {
-        self.observability.configure(policy)
+    fn configure(&self, config: JournalConfig) -> Result<(), JournalError> {
+        self.observability.configure(config.observability)
     }
 
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
-        self.append_with_capture(event, parent, JournalCapture::default())
-            .await
-    }
-
-    async fn append_with_capture(
-        &self,
-        event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
-        capture: JournalCapture<T>,
-    ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let AppendOptions { parent, capture } = options;
         let (mut events, reservation) = self.observability.prepare(vec![event], capture);
         let result = self
             .append_record(events.pop().expect("one event"), parent)
@@ -272,19 +263,9 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.append_group_with_capture(group_id, events, parent, JournalCapture::default())
-            .await
-    }
-
-    async fn append_group_with_capture(
-        &self,
-        group_id: &str,
-        events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
-        capture: JournalCapture<T>,
-    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        let AppendOptions { parent, capture } = options;
         let (events, reservation) = self.observability.prepare(events, capture);
         let result = self.append_records(group_id, events, parent);
         reservation.finish::<T>(&result);
@@ -445,14 +426,17 @@ mod tests {
         let stage = StageId::new();
         let journal = MemoryJournal::with_owner(JournalOwner::stage(stage));
         let event = crate::journal::observability::tests::event(stage, 1);
-        journal.append(event.clone(), None).await.unwrap();
+        journal
+            .append(event.clone(), Default::default())
+            .await
+            .unwrap();
         assert!(journal
             .state
             .lock()
             .unwrap()
             .lookup::<()>(|_| panic!("optional lookup failure"))
             .is_err());
-        journal.append(event, None).await.unwrap();
+        journal.append(event, Default::default()).await.unwrap();
         assert!(matches!(
             journal.latest_observations(stage.into()).await.unwrap(),
             ObservationLookup::Ready {
@@ -474,12 +458,15 @@ mod tests {
         // First event from writer1
         let event1 =
             ChainEventFactory::data_event(writer1, "test.event.1", json!({"data": "first"}));
-        let envelope1 = journal.append(event1, None).await.unwrap();
+        let envelope1 = journal.append(event1, Default::default()).await.unwrap();
 
         // Second event from writer2, with parent
         let event2 =
             ChainEventFactory::data_event(writer2, "test.event.2", json!({"data": "second"}));
-        let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = journal
+            .append(event2, AppendOptions::new(Some(&envelope1)))
+            .await
+            .unwrap();
 
         // Verify causal relationship
         assert!(CausalOrderingService::happened_before(
@@ -538,13 +525,19 @@ mod tests {
 
         // Create a chain of events
         let event1 = ChainEventFactory::data_event(writer, "event.1", json!({"seq": 1}));
-        let envelope1 = journal.append(event1, None).await.unwrap();
+        let envelope1 = journal.append(event1, Default::default()).await.unwrap();
 
         let event2 = ChainEventFactory::data_event(writer, "event.2", json!({"seq": 2}));
-        let envelope2 = journal.append(event2, Some(&envelope1)).await.unwrap();
+        let envelope2 = journal
+            .append(event2, AppendOptions::new(Some(&envelope1)))
+            .await
+            .unwrap();
 
         let event3 = ChainEventFactory::data_event(writer, "event.3", json!({"seq": 3}));
-        journal.append(event3, Some(&envelope2)).await.unwrap();
+        journal
+            .append(event3, AppendOptions::new(Some(&envelope2)))
+            .await
+            .unwrap();
 
         // Verify causal ordering
         let ordered = journal.read_causally_ordered().await.unwrap();
@@ -565,8 +558,8 @@ mod tests {
         // Append a small sequence of events
         let e1 = ChainEventFactory::data_event(writer, "reader.test.1", json!({"seq": 1}));
         let e2 = ChainEventFactory::data_event(writer, "reader.test.2", json!({"seq": 2}));
-        journal.append(e1, None).await.unwrap();
-        journal.append(e2, None).await.unwrap();
+        journal.append(e1, Default::default()).await.unwrap();
+        journal.append(e2, Default::default()).await.unwrap();
 
         // Read via reader() and compare with read_causally_ordered()
         let all = journal.read_causally_ordered().await.unwrap();

@@ -25,3 +25,11 @@ pub struct StatusDerivation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
+
+pub mod manifest;
+pub mod replay;
+pub use manifest::{
+    RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_FORMAT_VERSION,
+    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+};
+pub use replay::{ReplayArchive, ReplayError};

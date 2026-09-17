@@ -14,17 +14,16 @@
 //! method: `run_state` is required with no default, so a factory cannot compile
 //! without declaring its substrate arm.
 
-use obzenflow_core::event::{ChainEvent, SystemEvent};
-use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_name::JournalName;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::journal::RunManifest;
+use crate::event::{ChainEvent, SystemEvent};
+use crate::journal::journal_error::JournalError;
+use crate::journal::journal_name::JournalName;
+use crate::journal::journal_owner::JournalOwner;
+use crate::journal::{Journal, RunManifest};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::replay::ReplayArchive;
+use crate::journal::archive::ReplayArchive;
 
 /// Erased substrate fact for consumers outside the build (FLOWIP-120u).
 ///

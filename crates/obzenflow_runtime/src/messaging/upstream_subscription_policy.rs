@@ -115,7 +115,7 @@ pub fn build_policy_stack_for_upstream(_upstream_stage: StageId) -> ContractPoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::system_event::ContractName;
+    use obzenflow_core::event::payloads::system_payload::ContractName;
     use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::{
         ContractEvidence, ContractResult, ContractViolation, StageId, ViolationCause,

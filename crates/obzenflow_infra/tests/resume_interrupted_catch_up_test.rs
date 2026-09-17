@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainPayload, JournalRecord};
-use obzenflow_core::journal::run_manifest::RunManifest;
+use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
