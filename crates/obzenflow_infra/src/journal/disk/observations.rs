@@ -20,13 +20,38 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError, Weak};
 
 const REBUILD_FRAMES: usize = 256;
 const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
-type SharedIndexes = Mutex<HashMap<PathBuf, Weak<Mutex<State>>>>;
+const NO_WRITER: u64 = u64::MAX;
+type SharedIndexes = Mutex<HashMap<PathBuf, Weak<Shared>>>;
 static INDEXES: OnceLock<SharedIndexes> = OnceLock::new();
+
+struct Shared {
+    state: Mutex<State>,
+    // Commitment is independent of the disposable index, including its mutex.
+    // NO_WRITER permits read-only archive inspection until a writer takes over.
+    committed_end: AtomicU64,
+    opening: Mutex<()>,
+    maintenance: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    io_hook: Mutex<Option<IoHook>>,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            committed_end: AtomicU64::new(NO_WRITER),
+            opening: Mutex::default(),
+            maintenance: Arc::default(),
+            #[cfg(test)]
+            io_hook: Mutex::default(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct Anchor {
@@ -46,11 +71,15 @@ impl Anchor {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct State {
     loaded: bool,
+    // EOF-derived state must be discarded when a writable handle appears.
+    confirmed: bool,
     index: ObservationIndex,
     offset: u64,
+    // Finish this captured prefix before chasing subsequent appends.
+    rebuild_end: Option<u64>,
     first: Option<Anchor>,
     last: Option<Anchor>,
     checkpointed: u64,
@@ -80,8 +109,7 @@ struct CheckedCheckpoint {
 #[derive(Clone)]
 pub struct DiskObservationReader<T: JournalEvent> {
     path: PathBuf,
-    state: Arc<Mutex<State>>,
-    lock: Arc<RwLock<()>>,
+    shared: Arc<Shared>,
     writable: bool,
     _event: std::marker::PhantomData<T>,
 }
@@ -102,28 +130,73 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         Ok(Self::new(path, false))
     }
 
-    pub(super) fn new(path: PathBuf, writable: bool) -> Self {
+    fn new(path: PathBuf, writable: bool) -> Self {
         let key = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
         let mut registry = INDEXES
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let state = registry
+        let shared = registry
             .get(&key)
             .and_then(Weak::upgrade)
             .unwrap_or_else(|| {
-                let state = Arc::new(Mutex::new(State::default()));
+                let state = Arc::new(Shared::default());
                 registry.retain(|_, state| state.strong_count() > 0);
                 registry.insert(key, Arc::downgrade(&state));
                 state
             });
         Self {
-            lock: super::journal::shared_state_for_path(&path).0,
             path,
-            state,
+            shared,
             writable,
             _event: std::marker::PhantomData,
         }
+    }
+
+    pub(super) fn open_writer<R>(
+        path: PathBuf,
+        recover: impl FnOnce(Option<u64>) -> Result<(R, u64), JournalError>,
+    ) -> Result<(Self, R), JournalError> {
+        let reader = Self::new(path, true);
+        // Only constructors acquire this lock. Readers and append completion
+        // never wait for it. First-open recovery is serialized; subsequent
+        // openers can use the confirmed prefix while an append is in flight.
+        let guard = reader
+            .shared
+            .opening
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let journal_lock = super::journal::shared_state_for_path(&reader.path).0;
+        let exclusive = journal_lock.try_write();
+        let end = if exclusive.is_ok() {
+            // This is protected journal recovery, not observation maintenance.
+            // Recover a failed/torn append even if an old reader still exists.
+            None
+        } else {
+            Some(reader.confirmed_end().ok_or_else(|| {
+                JournalError::Implementation {
+                    message:
+                        "Cannot recover a journal in use before its committed prefix is established"
+                            .into(),
+                    source: "journal is busy".into(),
+                }
+            })?)
+        };
+        let (recovered, committed_end) = recover(end)?;
+        if end.is_none() {
+            reader
+                .shared
+                .committed_end
+                .store(committed_end, Ordering::Release);
+        }
+        drop(exclusive);
+        drop(guard);
+        Ok((reader, recovered))
+    }
+
+    fn confirmed_end(&self) -> Option<u64> {
+        let end = self.shared.committed_end.load(Ordering::Acquire);
+        (end != NO_WRITER).then_some(end)
     }
 
     pub(super) fn committed(
@@ -133,7 +206,23 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         next_offset: u64,
         crc: u32,
     ) {
+        if self
+            .shared
+            .committed_end
+            .compare_exchange(offset, next_offset, Ordering::Release, Ordering::Relaxed)
+            .is_err()
+        {
+            // Another handle's indeterminate suffix needs journal recovery.
+            // A later successful append cannot certify the intervening bytes.
+            return;
+        }
         self.maintain(|state| {
+            if !state.confirmed {
+                *state = State {
+                    confirmed: true,
+                    ..Default::default()
+                };
+            }
             if offset == 0 && !state.loaded {
                 state.loaded = true;
             }
@@ -160,7 +249,11 @@ impl<T: JournalEvent> DiskObservationReader<T> {
     }
 
     fn maintain(&self, operation: impl FnOnce(&mut State) -> Result<(), JournalError>) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = match self.shared.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return,
+            Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        };
         if !matches!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&mut state))),
             Ok(Ok(()))
@@ -171,56 +264,77 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         }
     }
 
-    pub(super) fn checkpoint(&self) {
-        if self.writable {
-            self.maintain(|state| {
-                if state.loaded && state.offset != state.checkpointed {
-                    // Checkpoint write failure needs no reset of the valid live index.
-                    if write_checkpoint(&self.path, state).is_ok() {
-                        state.checkpointed = state.offset;
-                    }
-                }
-                Ok(())
-            });
-        }
-    }
-
     async fn lookup(
         &self,
         key: Option<ObservationKey>,
         observer: WriterId,
     ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
         let this = self.clone();
-        let recovery = this.state.clone();
-        let guard = this.lock.clone().read_owned().await;
-        let result = tokio::task::spawn_blocking(move || {
+        // Wait asynchronously, before occupying a blocking worker. The worker
+        // owns this guard even if its caller cancels the lookup.
+        let guard = this.shared.maintenance.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            let mut state = this.state.lock().unwrap_or_else(|error| error.into_inner());
-            if !state.loaded {
-                *state = load_checkpoint(&this.path).unwrap_or_default();
-                state.loaded = true;
+            let mut state = this
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let original = (state.offset, state.confirmed);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                this.lookup_blocking(&mut state, key, observer)
+            }))
+            .unwrap_or_else(|_| Err(unavailable("observation maintenance panicked")));
+            if result.is_err() {
+                let mut live = this.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                // Do not erase append-side progress made during failed I/O.
+                if (live.offset, live.confirmed) == original {
+                    *live = State::default();
+                }
             }
-            let end = std::fs::metadata(&this.path)
+            result
+        })
+        .await
+        .unwrap_or_else(|error| Err(unavailable(error.to_string())))
+    }
+
+    fn lookup_blocking(
+        &self,
+        state: &mut State,
+        key: Option<ObservationKey>,
+        observer: WriterId,
+    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
+        let confirmed_end = self.confirmed_end();
+        let confirmed = confirmed_end.is_some();
+        let end = match confirmed_end {
+            Some(end) => end,
+            None => std::fs::metadata(&self.path)
                 .map_err(|error| unavailable(error.to_string()))?
-                .len();
-            if state.offset > end {
-                *state = State {
-                    loaded: true,
-                    ..Default::default()
-                };
-            }
-            let progress = if state.offset == end {
-                RebuildProgress::AtCommittedEnd
-            } else {
-                rebuild::<T>(&this.path, &mut state, end)?
-            };
-            if matches!(progress, RebuildProgress::BudgetExhausted) {
-                return Ok(ObservationLookup::Rebuilding {
-                    examined_through: state.index.examined_through,
-                    committed_len: None,
-                });
-            }
-            let mut observation = Vec::new();
+                .len(),
+        };
+        if state.confirmed != confirmed || state.offset > end {
+            *state = State::default();
+        }
+        if !state.loaded {
+            #[cfg(test)]
+            self.pause_io(IoPhase::CheckpointLoad);
+            *state = load_checkpoint(&self.path, end).unwrap_or_default();
+            state.loaded = true;
+            state.confirmed = confirmed;
+        }
+        let target = state.rebuild_end.unwrap_or(end).max(state.offset).min(end);
+        #[cfg(test)]
+        self.pause_io(IoPhase::Rebuild);
+        let progress = if state.offset == target {
+            RebuildProgress::AtCommittedEnd
+        } else {
+            rebuild::<T>(&self.path, state, target)?
+        };
+        let rebuilding = matches!(progress, RebuildProgress::BudgetExhausted);
+        state.rebuild_end = rebuilding.then_some(target);
+        let mut observation = Vec::new();
+        if !rebuilding {
             // Decode each selected physical carrier once, even when it owns
             // several families. Locators themselves never retain packets.
             let mut carriers = HashMap::new();
@@ -240,11 +354,14 @@ impl<T: JournalEvent> DiskObservationReader<T> {
                 let records = match carriers.entry(locator.frame_offset) {
                     std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        let (bytes, termination) = read_at(&this.path, locator.frame_offset)?;
+                        #[cfg(test)]
+                        self.pause_io(IoPhase::CarrierRead);
+                        let (bytes, termination) =
+                            read_at(&self.path, locator.frame_offset, state.offset)?;
                         let frame = dispose(
                             classify_frame::<T>(
                                 &bytes,
-                                &mut Decoder::new(&this.path),
+                                &mut Decoder::new(&self.path),
                                 locator.frame_offset,
                             ),
                             termination,
@@ -264,23 +381,69 @@ impl<T: JournalEvent> DiskObservationReader<T> {
                     .ok_or_else(|| unavailable("missing attachment carrier member"))?;
                 observation.push(locate(family, locator, packet)?);
             }
-            let committed_len = state.index.examined_through;
-            drop(state);
-            this.checkpoint();
-            Ok(ObservationLookup::Ready {
-                committed_len,
-                observation,
-            })
-        })
-        .await
-        .unwrap_or_else(|error| Err(unavailable(error.to_string())));
-        if result.is_err() {
-            *recovery.lock().unwrap_or_else(|error| error.into_inner()) = State {
-                loaded: true,
-                ..Default::default()
-            };
         }
-        result
+        #[cfg(test)]
+        self.pause_io(IoPhase::Publish);
+        // A read-only scan may have overlapped the first writable opener. Its
+        // EOF-derived work is speculative across that transition; retry using
+        // the writer's boundary, even if the byte counts happen to agree.
+        {
+            let mut live = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !confirmed && self.confirmed_end().is_some() {
+                return Ok(ObservationLookup::Rebuilding {
+                    examined_through: 0,
+                    committed_len: None,
+                });
+            }
+            if live.confirmed != confirmed || live.offset <= state.offset {
+                *live = state.clone();
+            }
+        }
+        if rebuilding {
+            return Ok(ObservationLookup::Rebuilding {
+                examined_through: state.index.examined_through,
+                committed_len: None,
+            });
+        }
+        if self.writable && state.offset != state.checkpointed {
+            #[cfg(test)]
+            self.pause_io(IoPhase::CheckpointWrite);
+            // Serialization, manifest reads, and persistence all use the owned
+            // snapshot, outside the index mutex and the fact writer's locks.
+            if write_checkpoint(&self.path, state).is_ok() {
+                let mut live = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                if live.confirmed == confirmed && live.offset >= state.offset {
+                    live.checkpointed = state.offset;
+                }
+            }
+        }
+        Ok(ObservationLookup::Ready {
+            committed_len: state.index.examined_through,
+            observation,
+        })
+    }
+}
+
+#[cfg(test)]
+type IoHook = Arc<dyn Fn(IoPhase) + Send + Sync>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IoPhase {
+    CheckpointLoad,
+    Rebuild,
+    CarrierRead,
+    Publish,
+    CheckpointWrite,
+}
+
+#[cfg(test)]
+impl<T: JournalEvent> DiskObservationReader<T> {
+    fn pause_io(&self, phase: IoPhase) {
+        let hook = self.shared.io_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(phase);
+        }
     }
 }
 
@@ -318,12 +481,16 @@ impl<T: JournalEvent> JournalObservationReader for DiskObservationReader<T> {
 fn read_at(
     path: &Path,
     offset: u64,
+    end: u64,
 ) -> Result<(Vec<u8>, super::scanner::FrameTermination), JournalError> {
     let mut file = File::open(path).map_err(|error| unavailable(error.to_string()))?;
     file.seek(SeekFrom::Start(offset))
         .map_err(|error| unavailable(error.to_string()))?;
     let mut bytes = Vec::new();
-    let (_, termination) = read_frame_sync(&mut BufReader::new(file), &mut bytes)
+    let remaining = end
+        .checked_sub(offset)
+        .ok_or_else(|| unavailable("carrier exceeds committed prefix"))?;
+    let (_, termination) = read_frame_sync(&mut BufReader::new(file.take(remaining)), &mut bytes)
         .map_err(|error| unavailable(error.to_string()))?
         .ok_or_else(|| unavailable("missing committed frame"))?;
     Ok((bytes, termination))
@@ -360,7 +527,13 @@ fn rebuild<T: JournalEvent>(
         let frame = dispose(
             classify_frame::<T>(&bytes, &mut decoder, state.offset),
             termination,
-            ReadPolicy::LiveTail,
+            if state.confirmed {
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: false,
+                }
+            } else {
+                ReadPolicy::LiveTail
+            },
         );
         let records = match frame {
             Disposition::Yield(frame) => frame.into_records(),
@@ -448,7 +621,7 @@ fn write_checkpoint(path: &Path, state: &State) -> Result<(), JournalError> {
         .map_err(|error| unavailable(error.to_string()))
 }
 
-fn load_checkpoint(path: &Path) -> Option<State> {
+fn load_checkpoint(path: &Path, committed_end: u64) -> Option<State> {
     let checkpoint_path = checkpoint_path(path);
     if std::fs::metadata(&checkpoint_path).ok()?.len() > MAX_CHECKPOINT_BYTES {
         return None;
@@ -463,14 +636,14 @@ fn load_checkpoint(path: &Path) -> Option<State> {
     if checkpoint.format != obzenflow_core::journal::JOURNAL_FORMAT_VERSION
         || checkpoint.archive != archive_id(path)
         || checkpoint.journal != path.file_name()?.to_str()?
-        || end > std::fs::metadata(path).ok()?.len()
+        || end > committed_end
         || checkpoint.first.offset != 0
         || checkpoint.entries.len() > MAX_KEYS
     {
         return None;
     }
     for anchor in [&checkpoint.first, &checkpoint.last] {
-        let (bytes, _) = read_at(path, anchor.offset).ok()?;
+        let (bytes, _) = read_at(path, anchor.offset, end).ok()?;
         frame::validate(&bytes).ok()?;
         if Anchor::of(anchor.offset, &bytes) != *anchor {
             return None;
@@ -505,8 +678,7 @@ fn load_checkpoint(path: &Path) -> Option<State> {
         first: Some(checkpoint.first),
         last: Some(checkpoint.last),
         checkpointed: end,
-        #[cfg(test)]
-        rebuilt_frames: 0,
+        ..Default::default()
     })
 }
 
@@ -515,9 +687,467 @@ mod tests {
     use super::*;
     use crate::journal::observability::tests::event;
     use crate::journal::{DiskJournal, MemoryJournal};
+    use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::observability::families::ObservationFamily;
     use obzenflow_core::event::observability::{CaptureSeq, ExecutionProgress, RuntimeSnapshot};
     use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
+    use std::sync::{atomic::AtomicBool, Condvar};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct IoLatch {
+        entered: tokio::sync::Notify,
+        released: Mutex<bool>,
+        resume: Condvar,
+    }
+
+    impl IoLatch {
+        fn wait(&self) {
+            self.entered.notify_one();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.resume.wait(released).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.resume.notify_all();
+        }
+    }
+
+    // Release the blocking worker even if a timeout assertion fails.
+    struct ReleaseOnDrop(Arc<IoLatch>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    fn stall(reader: &DiskObservationReader<ChainEvent>, phase: IoPhase) -> ReleaseOnDrop {
+        let latch = Arc::new(IoLatch::default());
+        let hook_latch = latch.clone();
+        let once = AtomicBool::new(false);
+        *reader.shared.io_hook.lock().unwrap() = Some(Arc::new(move |at| {
+            if at == phase && !once.swap(true, Ordering::SeqCst) {
+                hook_latch.wait();
+            }
+        }));
+        ReleaseOnDrop(latch)
+    }
+
+    async fn completes<F: std::future::Future>(future: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .expect("operation must finish while the optional work is still stalled")
+    }
+
+    fn recapture(original: &ChainEvent, seq: u64) -> ChainEvent {
+        let mut next = original.clone();
+        next.envelope
+            .observability
+            .as_mut()
+            .unwrap()
+            .capture
+            .capture_seq = CaptureSeq(seq);
+        next
+    }
+
+    #[tokio::test]
+    async fn stalled_observation_io_does_not_block_facts_terminal_groups_or_destruction() {
+        for phase in [
+            IoPhase::CheckpointLoad,
+            IoPhase::Rebuild,
+            IoPhase::CarrierRead,
+            IoPhase::CheckpointWrite,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("stalled.log");
+            let stage = StageId::new();
+            let journal =
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+            let observed = event(stage, 1);
+            let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+            let mut expected = vec![journal
+                .append(observed.clone(), Default::default())
+                .await
+                .unwrap()];
+            let first_end = std::fs::metadata(&path).unwrap().len();
+            let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
+            if matches!(phase, IoPhase::CheckpointLoad | IoPhase::Rebuild) {
+                *reader.shared.state.lock().unwrap() = State::default();
+            }
+            let latch = stall(&reader, phase);
+            let query_reader = reader.clone();
+            let query_key = key.clone();
+            let lookup =
+                tokio::spawn(async move { query_reader.latest_observation(&query_key).await });
+            completes(latch.0.entered.notified()).await;
+
+            expected.push(
+                completes(journal.append(recapture(&observed, 2), Default::default()))
+                    .await
+                    .unwrap(),
+            );
+            let eof = ChainEventFactory::eof_event(stage.into(), true).with_observability_context(
+                recapture(&observed, 3).envelope.observability.unwrap(),
+            );
+            expected.extend(
+                completes(journal.append_group(
+                    "terminal",
+                    vec![ChainEventFactory::drain_event(stage.into()), eof],
+                    Default::default(),
+                ))
+                .await
+                .unwrap(),
+            );
+            let records = completes(journal.read_all_unordered()).await.unwrap();
+            assert_eq!(
+                serde_json::to_value(&records).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            for (member, record) in records[2..].iter().enumerate() {
+                assert_eq!(
+                    record
+                        .envelope
+                        .provenance
+                        .journal
+                        .journal_group_id
+                        .as_deref(),
+                    Some("terminal")
+                );
+                assert_eq!(
+                    record.envelope.provenance.journal.journal_group_member,
+                    Some(obzenflow_core::event::provenance::JournalGroupMember {
+                        index: member as u32,
+                        size: 2
+                    })
+                );
+            }
+            assert_eq!(
+                reader.confirmed_end(),
+                Some(std::fs::metadata(&path).unwrap().len())
+            );
+            assert!(reader.shared.maintenance.try_lock().is_err());
+            if matches!(phase, IoPhase::CarrierRead | IoPhase::CheckpointWrite) {
+                assert_eq!(
+                    reader.shared.state.lock().unwrap().index.examined_through,
+                    4
+                );
+            }
+
+            // Cancellation must not release maintenance serialization while the
+            // blocking checkpoint writer still owns the temporary file.
+            let lookup = if phase == IoPhase::CheckpointWrite {
+                lookup.abort();
+                assert!(lookup.await.unwrap_err().is_cancelled());
+                assert!(reader.shared.maintenance.try_lock().is_err());
+                let mut waiting = Box::pin(reader.latest_observation(&key));
+                assert!(futures::poll!(waiting.as_mut()).is_pending());
+                None
+            } else {
+                Some(lookup)
+            };
+            // This is the last writable journal handle, while optional I/O is paused.
+            completes(tokio::task::spawn_blocking(move || drop(journal)))
+                .await
+                .unwrap();
+            latch.0.release();
+            if let Some(lookup) = lookup {
+                assert!(matches!(
+                    completes(lookup).await.unwrap().unwrap(),
+                    ObservationLookup::Ready {
+                        committed_len: 1,
+                        ..
+                    }
+                ));
+            }
+            // Also wait for a cancelled lookup's retained blocking worker.
+            drop(completes(reader.shared.maintenance.lock()).await);
+            let checkpoint = load_checkpoint(&path, reader.confirmed_end().unwrap()).unwrap();
+            assert_eq!(checkpoint.index.examined_through, 1);
+            assert_eq!(reader.shared.state.lock().unwrap().checkpointed, first_end);
+            if matches!(phase, IoPhase::CarrierRead | IoPhase::CheckpointWrite) {
+                assert_eq!(
+                    reader.shared.state.lock().unwrap().index.examined_through,
+                    4,
+                    "an older maintenance snapshot must not replace newer append progress"
+                );
+            }
+            drop(reader);
+            let cold = DiskObservationReader::<ChainEvent>::open(path).unwrap();
+            let ObservationLookup::Ready {
+                committed_len,
+                observation,
+            } = cold.latest_observation(&key).await.unwrap()
+            else {
+                panic!("the suffix after the checkpoint must be recoverable");
+            };
+            assert_eq!(committed_len, 4);
+            let observation = observation.unwrap();
+            assert_eq!(observation.position, 3);
+            assert_eq!(observation.observation.capture.capture_seq, CaptureSeq(3));
+            assert_eq!(cold.shared.state.lock().unwrap().rebuilt_frames, 2);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // The held optional mutex is the injected failure.
+    async fn held_index_mutex_skips_updates_and_cancelled_appends_still_commit() {
+        for grouped in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("held-index.log");
+            let stage = StageId::new();
+            let journal =
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+            let observed = event(stage, 1);
+            let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+            let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
+            let guard = reader.shared.state.lock().unwrap();
+            let append_journal = journal.clone();
+            let fact = observed.clone();
+            let mut receipt = Box::pin(async move {
+                if grouped {
+                    append_journal
+                        .append_group(
+                            "cancelled",
+                            vec![fact.clone(), recapture(&fact, 2)],
+                            Default::default(),
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    append_journal
+                        .append(fact, Default::default())
+                        .await
+                        .map(|_| ())
+                }
+            });
+            assert!(futures::poll!(receipt.as_mut()).is_pending());
+            drop(receipt);
+            completes(async {
+                while reader.confirmed_end() == Some(0) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            completes(journal.append(recapture(&observed, 3), Default::default()))
+                .await
+                .unwrap();
+            completes(journal.append_group(
+                "terminal",
+                vec![
+                    ChainEventFactory::drain_event(stage.into()),
+                    ChainEventFactory::eof_event(stage.into(), true),
+                ],
+                Default::default(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(
+                guard.offset, 0,
+                "all append-side index updates were skipped"
+            );
+            let records = completes(journal.read_all_unordered()).await.unwrap();
+            assert_eq!(records.len(), if grouped { 5 } else { 4 });
+            completes(tokio::task::spawn_blocking(move || drop(journal)))
+                .await
+                .unwrap();
+            assert!(
+                !checkpoint_path(&path).exists(),
+                "destruction must not persist an index"
+            );
+            drop(guard);
+            let ObservationLookup::Ready {
+                committed_len,
+                observation,
+            } = reader.latest_observation(&key).await.unwrap()
+            else {
+                panic!("skipped updates must be recovered from the committed journal");
+            };
+            assert_eq!(committed_len, records.len() as u64);
+            assert_eq!(
+                observation.unwrap().observation.capture.capture_seq,
+                CaptureSeq(3)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn suffix_recovery_finishes_its_captured_prefix_while_appends_continue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("moving-tail.log");
+        let stage = StageId::new();
+        let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+        let observed = event(stage, 1);
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        for seq in 1..=600 {
+            journal
+                .append(recapture(&observed, seq), Default::default())
+                .await
+                .unwrap();
+        }
+        let reader = DiskObservationReader::<ChainEvent>::new(path, true);
+        *reader.shared.state.lock().unwrap() = State::default();
+        for examined in [256, 512] {
+            assert!(matches!(reader.latest_observation(&key).await.unwrap(),
+                ObservationLookup::Rebuilding { examined_through, committed_len: None } if examined_through == examined));
+            // Each interval adds more frames than one lookup can examine.
+            for seq in 0..300 {
+                journal
+                    .append(
+                        recapture(&observed, 1000 + examined + seq),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let ObservationLookup::Ready {
+            committed_len,
+            observation,
+        } = reader.latest_observation(&key).await.unwrap()
+        else {
+            panic!("new appends must not move the captured rebuild target");
+        };
+        assert_eq!(committed_len, 600);
+        assert_eq!(
+            observation.unwrap().observation.capture.capture_seq,
+            CaptureSeq(600)
+        );
+        assert_eq!(reader.shared.state.lock().unwrap().rebuilt_frames, 600);
+        for examined in [856, 1112] {
+            assert!(matches!(reader.latest_observation(&key).await.unwrap(),
+                ObservationLookup::Rebuilding { examined_through, .. } if examined_through == examined));
+        }
+        let ObservationLookup::Ready {
+            committed_len,
+            observation,
+        } = reader.latest_observation(&key).await.unwrap()
+        else {
+            panic!("the next captured suffix must also be recoverable");
+        };
+        assert_eq!(committed_len, 1200);
+        assert_eq!(
+            observation.unwrap().observation.capture.capture_seq,
+            CaptureSeq(1811)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_bootstrap_discards_work_when_a_writer_appears() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bootstrap.log");
+        let stage = StageId::new();
+        let original = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+        let observed = event(stage, 1);
+        original
+            .append(observed.clone(), Default::default())
+            .await
+            .unwrap();
+        drop(original);
+        let reader = DiskObservationReader::<ChainEvent>::open(path.clone()).unwrap();
+        assert_eq!(reader.confirmed_end(), None);
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        let latch = stall(&reader, IoPhase::Publish);
+        let query_reader = reader.clone();
+        let query_key = key.clone();
+        let lookup = tokio::spawn(async move { query_reader.latest_observation(&query_key).await });
+        completes(latch.0.entered.notified()).await;
+        let journal = DiskJournal::with_owner(path, JournalOwner::stage(stage)).unwrap();
+        completes(journal.append(recapture(&observed, 2), Default::default()))
+            .await
+            .unwrap();
+        latch.0.release();
+        assert!(matches!(
+            completes(lookup).await.unwrap().unwrap(),
+            ObservationLookup::Rebuilding {
+                examined_through: 0,
+                committed_len: None
+            }
+        ));
+        assert_eq!(
+            ready(&reader, &key).await.observation.capture.capture_seq,
+            CaptureSeq(2)
+        );
+        assert_eq!(
+            reader.shared.state.lock().unwrap().index.examined_through,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_panic_does_not_erase_newer_append_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("panic.log");
+        let stage = StageId::new();
+        let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+        let observed = event(stage, 1);
+        journal
+            .append(observed.clone(), Default::default())
+            .await
+            .unwrap();
+        let reader = DiskObservationReader::<ChainEvent>::new(path, true);
+        let latch = ReleaseOnDrop(Arc::new(IoLatch::default()));
+        let hook_latch = latch.0.clone();
+        *reader.shared.io_hook.lock().unwrap() = Some(Arc::new(move |phase| {
+            if phase == IoPhase::CarrierRead {
+                hook_latch.wait();
+                panic!("optional carrier decoder fault");
+            }
+        }));
+        let query_reader = reader.clone();
+        let lookup =
+            tokio::spawn(async move { query_reader.latest_observations(stage.into()).await });
+        completes(latch.0.entered.notified()).await;
+        completes(journal.append(recapture(&observed, 2), Default::default()))
+            .await
+            .unwrap();
+        latch.0.release();
+        assert!(completes(lookup).await.unwrap().is_err());
+        assert_eq!(
+            reader.shared.state.lock().unwrap().index.examined_through,
+            2
+        );
+        *reader.shared.io_hook.lock().unwrap() = None;
+        completes(journal.append(recapture(&observed, 3), Default::default()))
+            .await
+            .unwrap();
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        assert_eq!(ready(&reader, &key).await.position, 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoints_and_group_rebuilds_respect_the_confirmed_byte_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boundary.log");
+        let (observed, bytes, tail_offset) = archive_with_tail(&path, 1, 2).await;
+        assert!(load_checkpoint(&path, bytes.len() as u64).is_some());
+        assert!(
+            load_checkpoint(&path, tail_offset as u64).is_none(),
+            "a valid checkpoint at physical EOF must not certify unconfirmed bytes"
+        );
+        let mut state = State {
+            confirmed: true,
+            ..Default::default()
+        };
+        assert!(rebuild::<ChainEvent>(&path, &mut state, bytes.len() as u64 - 1).is_err());
+        assert_eq!(
+            state.index.examined_through, 1,
+            "a partial group contributes no positions"
+        );
+        assert_eq!(state.offset, tail_offset as u64);
+        let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), false);
+        // Inject a published boundary before a complete-looking, unconfirmed group.
+        reader
+            .shared
+            .committed_end
+            .store(tail_offset as u64, Ordering::Release);
+        let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
+        assert!(matches!(reader.latest_observation(&key).await.unwrap(),
+            ObservationLookup::Ready { committed_len: 1, observation: Some(observation) } if observation.position == 0));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes.len() as u64);
+    }
 
     fn key(event: &ChainEvent, kind: ObservationFamily) -> ObservationKey {
         let stamp = event.envelope.observability.as_ref().unwrap().capture;
@@ -580,6 +1210,12 @@ mod tests {
                 .await
                 .unwrap();
         }
+        journal
+            .observation_reader()
+            .unwrap()
+            .latest_observations(stage.into())
+            .await
+            .unwrap();
         drop(journal);
         (observed, std::fs::read(path).unwrap(), tail_offset)
     }
@@ -708,7 +1344,10 @@ mod tests {
         };
         assert_eq!(committed_len, REBUILD_FRAMES as u64);
         assert_eq!(observation.unwrap().position, 0);
-        assert_eq!(first.state.lock().unwrap().rebuilt_frames, REBUILD_FRAMES);
+        assert_eq!(
+            first.shared.state.lock().unwrap().rebuilt_frames,
+            REBUILD_FRAMES
+        );
     }
 
     #[tokio::test]
@@ -814,6 +1453,7 @@ mod tests {
                 .await
                 .unwrap();
         }
+        ready(journal.observation_reader().unwrap(), &key).await;
         drop(journal);
         let reader = DiskObservationReader::<ChainEvent>::open(path).unwrap();
         let ObservationLookup::Ready {
@@ -826,7 +1466,7 @@ mod tests {
         assert_eq!(committed_len, 1_000_001);
         assert_eq!(observation.unwrap().position, 0);
         assert_eq!(
-            reader.state.lock().unwrap().rebuilt_frames,
+            reader.shared.state.lock().unwrap().rebuilt_frames,
             0,
             "no EventId index or journal scan on checkpoint lookup"
         );
@@ -867,6 +1507,7 @@ mod tests {
             .envelope
             .observability
             .is_none());
+        ready(first.observation_reader().unwrap(), &key).await;
         drop(first);
         drop(second);
         let checkpoint = std::fs::read(checkpoint_path(&path)).unwrap();
@@ -888,11 +1529,14 @@ mod tests {
             .observability
             .is_some());
         drop(reopened);
-        // Simulate interruption after the append, before checkpoint maintenance.
-        std::fs::write(checkpoint_path(&path), checkpoint).unwrap();
+        assert_eq!(
+            std::fs::read(checkpoint_path(&path)).unwrap(),
+            checkpoint,
+            "closing a writer must leave persistence to observation maintenance"
+        );
         let reader = DiskObservationReader::<ChainEvent>::open(path).unwrap();
         assert_eq!(ready(&reader, &key).await.position, 2);
-        assert_eq!(reader.state.lock().unwrap().rebuilt_frames, 1);
+        assert_eq!(reader.shared.state.lock().unwrap().rebuilt_frames, 1);
     }
 
     #[tokio::test]
@@ -912,6 +1556,7 @@ mod tests {
                 .await
                 .unwrap();
         }
+        ready(journal.observation_reader().unwrap(), &key).await;
         drop(journal);
         let valid = std::fs::read(checkpoint_path(&path)).unwrap();
         // Old enum keys must rebuild through the existing recovery path, even
@@ -928,6 +1573,12 @@ mod tests {
             DiskJournal::with_owner(foreign_path.clone(), JournalOwner::stage(stage)).unwrap();
         foreign
             .append(event(stage, 1), Default::default())
+            .await
+            .unwrap();
+        foreign
+            .observation_reader()
+            .unwrap()
+            .latest_observations(stage.into())
             .await
             .unwrap();
         drop(foreign);
@@ -959,7 +1610,7 @@ mod tests {
                 }
             ));
             assert_eq!(ready(&first, &key).await.position, 0);
-            assert_eq!(first.state.lock().unwrap().rebuilt_frames, 601);
+            assert_eq!(first.shared.state.lock().unwrap().rebuilt_frames, 601);
             drop(first);
             drop(second);
             std::fs::write(checkpoint_path(&path), &valid).unwrap();
@@ -986,7 +1637,6 @@ mod tests {
             .unwrap();
         std::fs::create_dir(checkpoint_path(&path)).unwrap();
         assert_eq!(ready(&reader, &key).await.position, 0);
-        reader.checkpoint();
         journal
             .append(observation, Default::default())
             .await

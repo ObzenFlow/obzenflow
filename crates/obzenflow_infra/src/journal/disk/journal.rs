@@ -29,7 +29,7 @@ use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::{AppendOptions, Journal, JournalConfig};
 use std::collections::HashMap;
 use std::fs::File as StdFile;
-use std::io::{BufReader, SeekFrom};
+use std::io::{BufReader, Read, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -200,25 +200,19 @@ impl<T: JournalEvent> DiskJournal<T> {
 
         // Build index and writer clocks from the framed log (FLOWIP-120q): one
         // shared rebuild helper, so `new` and `with_owner` cannot drift.
-        let (index, writer_clocks, committed_end) = rebuild_index_from_path::<T>(&log_path)?;
-
-        // Open a single shared file handle for appends
-        let std_file = StdFile::options()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| JournalError::Implementation {
-                message: format!("Failed to open log file for append: {}", log_path.display()),
-                source: Box::new(e),
+        let (observations, (write_file, index, writer_clocks)) =
+            super::observations::DiskObservationReader::open_writer(log_path.clone(), |end| {
+                let (index, writer_clocks, committed_end) =
+                    rebuild_index_from_path::<T>(&log_path, end)?;
+                let file = open_append_file(&log_path, end, committed_end)?;
+                Ok(((file, index, writer_clocks), committed_end))
             })?;
-        recover_torn_tail(&std_file, &log_path, committed_end)?;
-        let write_file = std_file;
 
         Ok(Self {
             owner: None,
             definitions: DefinitionStore::default(),
             journal_id: JournalId::new(),
-            observations: super::observations::DiskObservationReader::new(log_path.clone(), true),
+            observations,
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
             last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
@@ -245,25 +239,19 @@ impl<T: JournalEvent> DiskJournal<T> {
         // FLOWIP-120q P3 fix: rebuild via the framed parser through the same
         // shared helper as `new`, not raw `serde_json::from_str` (which fails on
         // framed records and used to leave the index and writer clocks empty).
-        let (index, writer_clocks, committed_end) = rebuild_index_from_path::<T>(&log_path)?;
-
-        // Open a single shared file handle for appends
-        let std_file = StdFile::options()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| JournalError::Implementation {
-                message: format!("Failed to open log file for append: {}", log_path.display()),
-                source: Box::new(e),
+        let (observations, (write_file, index, writer_clocks)) =
+            super::observations::DiskObservationReader::open_writer(log_path.clone(), |end| {
+                let (index, writer_clocks, committed_end) =
+                    rebuild_index_from_path::<T>(&log_path, end)?;
+                let file = open_append_file(&log_path, end, committed_end)?;
+                Ok(((file, index, writer_clocks), committed_end))
             })?;
-        recover_torn_tail(&std_file, &log_path, committed_end)?;
-        let write_file = std_file;
 
         Ok(Self {
             owner: Some(owner),
             definitions: DefinitionStore::for_archive(&log_path),
             journal_id: JournalId::new(),
-            observations: super::observations::DiskObservationReader::new(log_path.clone(), true),
+            observations,
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
             last_frame: Arc::new(AtomicU64::new(index.values().copied().max().unwrap_or(0))),
@@ -287,6 +275,25 @@ impl<T: JournalEvent> DiskJournal<T> {
 /// In-memory index (`event_id -> byte offset`) plus per-writer vector clocks
 /// rebuilt from a journal file.
 type RebuiltIndex = (HashMap<Ulid, u64>, HashMap<WriterId, VectorClock>, u64);
+
+fn open_append_file(
+    path: &Path,
+    shared_end: Option<u64>,
+    recovered_end: u64,
+) -> Result<StdFile, JournalError> {
+    let file = StdFile::options()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| JournalError::Implementation {
+            message: format!("Failed to open log file for append: {}", path.display()),
+            source: Box::new(e),
+        })?;
+    if shared_end.is_none() {
+        recover_torn_tail(&file, path, recovered_end)?;
+    }
+    Ok(file)
+}
 
 fn recover_torn_tail(file: &StdFile, path: &Path, committed_end: u64) -> Result<(), JournalError> {
     let physical_len = file
@@ -323,7 +330,10 @@ fn recover_torn_tail(file: &StdFile, path: &Path, committed_end: u64) -> Result<
 /// `DiskJournal::with_owner` so the two constructors cannot diverge. Uses the
 /// sealed full-scan policy: fail loud on committed corruption, tolerate only a
 /// final torn tail (a crash mid-append leaves an unterminated last record).
-fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIndex, JournalError> {
+fn rebuild_index_from_path<T: JournalEvent>(
+    log_path: &Path,
+    confirmed_end: Option<u64>,
+) -> Result<RebuiltIndex, JournalError> {
     let mut index = HashMap::with_capacity(10000);
     let mut writer_clocks = HashMap::new();
 
@@ -335,7 +345,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
         message: "Failed to open log file".to_string(),
         source: Box::new(e),
     })?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(confirmed_end.unwrap_or(u64::MAX)));
     let mut buf = Vec::new();
     let mut offset = 0u64;
     let mut committed_end = 0u64;
@@ -353,7 +363,7 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
             classify_frame::<T>(&buf, &mut decoder, record_offset),
             termination,
             ReadPolicy::SealedScan {
-                tolerate_torn_tail: true,
+                tolerate_torn_tail: confirmed_end.is_none(),
             },
         ) {
             Disposition::Yield(frame) => {
@@ -383,6 +393,12 @@ fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIn
         }
     }
 
+    if confirmed_end.is_some_and(|end| committed_end != end) {
+        return Err(JournalError::Implementation {
+            message: "Journal ended before its confirmed boundary".into(),
+            source: "missing committed records".into(),
+        });
+    }
     Ok((index, writer_clocks, committed_end))
 }
 
@@ -776,14 +792,6 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
     }
 }
 
-impl<T: JournalEvent> Drop for DiskJournal<T> {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.write_file) == 1 {
-            self.observations.checkpoint();
-        }
-    }
-}
-
 #[async_trait]
 impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
     fn id(&self) -> &JournalId {
@@ -1139,6 +1147,9 @@ mod tests {
             let index_guard = journal.index.write().await;
             let first = crate::journal::observability::tests::event(stage, 1);
             let second = crate::journal::observability::tests::event(stage, 2);
+            let observation_reader =
+                super::super::observations::DiskObservationReader::<ChainEvent>::open(path.clone())
+                    .unwrap();
             let first_id = first.id;
             let pending_journal = journal.clone();
             let mut receipt = Box::pin(async move {
@@ -1162,6 +1173,27 @@ mod tests {
             })
             .await
             .unwrap();
+            // Bytes are present, but the retained commit has not published its
+            // protected metadata. Neither lookup nor a second writable opener
+            // may promote this frame (or individual group members) into view.
+            let reopened =
+                DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                    .unwrap();
+            let physical_len = std::fs::metadata(&path).unwrap().len();
+            for reader in [
+                &observation_reader as &dyn obzenflow_core::journal::JournalObservationReader,
+                reopened.observation_reader().unwrap(),
+            ] {
+                assert!(matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), reader.latest_observations(writer)).await.unwrap().unwrap(),
+                    obzenflow_core::journal::ObservationLookup::Ready { committed_len: 0, observation } if observation.is_empty()
+                ));
+            }
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                physical_len,
+                "opening another handle must not truncate an unsettled append"
+            );
             drop(receipt);
             let next = crate::journal::observability::tests::event(stage, 3);
             let mut next_receipt = Box::pin(journal.append(next, Default::default()));
@@ -1187,7 +1219,180 @@ mod tests {
                 journal.read_all_unordered().await.unwrap().len(),
                 if grouped { 3 } else { 2 }
             );
+            for reader in [
+                &observation_reader as &dyn obzenflow_core::journal::JournalObservationReader,
+                reopened.observation_reader().unwrap(),
+            ] {
+                let obzenflow_core::journal::ObservationLookup::Ready {
+                    committed_len,
+                    observation,
+                } = reader.latest_observations(writer).await.unwrap()
+                else {
+                    panic!("the confirmed boundary must be shared across handles");
+                };
+                assert_eq!(committed_len, if grouped { 3 } else { 2 });
+                assert_eq!(
+                    observation.len(),
+                    1,
+                    "the periodic gate selects one packet for the whole group"
+                );
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn failed_appends_do_not_publish_observations_and_reopen_recovers_with_a_surviving_reader(
+    ) {
+        use obzenflow_core::journal::{JournalObservationReader, ObservationLookup};
+        use std::io::Write;
+
+        for grouped in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("failed.log");
+            let stage = StageId::new();
+            let journal =
+                DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                    .unwrap();
+            let observed = crate::journal::observability::tests::event(stage, 1);
+            let expected = journal
+                .append(observed.clone(), Default::default())
+                .await
+                .unwrap();
+            let reader =
+                super::super::observations::DiskObservationReader::<ChainEvent>::open(path.clone())
+                    .unwrap();
+            let committed_end = std::fs::metadata(&path).unwrap().len();
+            // A read-only descriptor makes both writing and rollback fail through
+            // the real append path, including retained commitment and poisoning.
+            *journal.write_file.lock().unwrap() = StdFile::open(&path).unwrap();
+            let failed = if grouped {
+                journal
+                    .append_group(
+                        "failed",
+                        vec![observed.clone(), observed.clone()],
+                        Default::default(),
+                    )
+                    .await
+                    .map(|_| ())
+            } else {
+                journal
+                    .append(observed.clone(), Default::default())
+                    .await
+                    .map(|_| ())
+            };
+            assert!(matches!(
+                failed,
+                Err(JournalError::CommitIndeterminate { .. })
+            ));
+            assert!(journal.poisoned.load(Ordering::SeqCst));
+            assert!(
+                matches!(reader.latest_observations(stage.into()).await.unwrap(),
+                ObservationLookup::Ready { committed_len: 1, observation } if observation.len() == 1)
+            );
+            drop(journal);
+
+            // Simulate an indeterminate append's torn bytes. The observation
+            // handle outlives the writer; it must not disable recovery on reopen.
+            Write::write_all(
+                &mut StdFile::options().append(true).open(&path).unwrap(),
+                b"OJF4",
+            )
+            .unwrap();
+            assert!(matches!(
+                reader.latest_observations(stage.into()).await.unwrap(),
+                ObservationLookup::Ready {
+                    committed_len: 1,
+                    ..
+                }
+            ));
+            let reopened =
+                DiskJournal::<ChainEvent>::new(directory.path().to_owned(), "failed").unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().len(), committed_end);
+            assert_eq!(
+                serde_json::to_value(reopened.read_all_unordered().await.unwrap()).unwrap(),
+                serde_json::to_value(vec![expected]).unwrap()
+            );
+            let writable = DiskJournal::with_owner(path, JournalOwner::stage(stage)).unwrap();
+            writable.append(observed, Default::default()).await.unwrap();
+            assert!(matches!(
+                reader.latest_observations(stage.into()).await.unwrap(),
+                ObservationLookup::Ready {
+                    committed_len: 2,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_observation_prefix_does_not_cross_an_indeterminate_frame() {
+        use obzenflow_core::journal::ObservationLookup;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("indeterminate.log");
+        let stage = StageId::new();
+        let first = DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+            .unwrap();
+        first
+            .append(
+                crate::journal::observability::tests::event(stage, 1),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let second =
+            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                .unwrap();
+        let complete_frame = std::fs::read(&path).unwrap();
+        let failing = first.clone();
+        // Retain a complete frame, then panic before commitment bookkeeping.
+        let result = retain_commit::<()>(first.poisoned.clone(), async move {
+            let _guard = failing.read_write_lock.write().await;
+            let mut file = failing.write_file.lock().unwrap();
+            FrameSink::write_all(&mut *file, &complete_frame).unwrap();
+            FrameSink::flush(&mut *file).unwrap();
+            panic!("commit bookkeeping fault after complete frame write");
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(JournalError::CommitIndeterminate { .. })
+        ));
+        // An already-open handle does not recover the unknown intervening frame.
+        second
+            .append(
+                crate::journal::observability::tests::event(stage, 2),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            second
+                .observation_reader()
+                .unwrap()
+                .latest_observations(stage.into())
+                .await
+                .unwrap(),
+            ObservationLookup::Ready {
+                committed_len: 1,
+                ..
+            }
+        ));
+        let recovered =
+            DiskJournal::<ChainEvent>::with_owner(path, JournalOwner::stage(stage)).unwrap();
+        assert_eq!(recovered.read_all_unordered().await.unwrap().len(), 3);
+        assert!(matches!(
+            second
+                .observation_reader()
+                .unwrap()
+                .latest_observations(stage.into())
+                .await
+                .unwrap(),
+            ObservationLookup::Ready {
+                committed_len: 3,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
