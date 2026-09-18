@@ -18,7 +18,7 @@ pub(crate) async fn retain_journal_observations<T: JournalEvent>(
     match reader.latest_observations(observer).await {
         Ok(ObservationLookup::Ready { observation, .. }) => {
             for located in observation {
-                retained.offer_recorded(located.observation);
+                retained.offer_recorded(&located.observation);
             }
         }
         Ok(ObservationLookup::Rebuilding { .. }) => {}

@@ -77,7 +77,7 @@ pub enum MetricsAggregatorEvent {
 
     /// Process a batch of events
     ProcessBatch {
-        events: Vec<JournalRecord<ChainPayload>>,
+        events: Arc<[JournalRecord<ChainPayload>]>,
         journal_kind: MetricsJournalKind,
         journal_stage: StageId,
     },
@@ -128,9 +128,9 @@ pub enum MetricsAggregatorAction {
     /// Initialize metrics collection
     Initialize,
 
-    /// Update metrics from an event
+    /// Fold a shared immutable batch in journal order.
     UpdateMetrics {
-        envelope: Box<JournalRecord<ChainPayload>>,
+        events: Arc<[JournalRecord<ChainPayload>]>,
         journal_kind: MetricsJournalKind,
         journal_stage: StageId,
     },
@@ -436,7 +436,7 @@ async fn fold_composite_duration_prefix(
 ) -> Result<u64, obzenflow_core::journal::journal_error::JournalError> {
     let mut position = 0;
     while let Some(envelope) = reader.next().await? {
-        accumulator.observe_event(boundaries, journal_stage, &envelope.authored());
+        accumulator.observe_record(boundaries, journal_stage, &envelope);
         position += 1;
     }
     Ok(position)
@@ -447,10 +447,10 @@ fn observe_live_composite_duration(
     accumulator: &mut CompositeDurationAccumulator,
     boundaries: &[obzenflow_core::metrics::CompositeBoundary],
     journal_stage: StageId,
-    event: &ChainEvent,
+    event: &JournalRecord<ChainPayload>,
 ) {
     if journal_kind == MetricsJournalKind::Data {
-        accumulator.observe_event(boundaries, journal_stage, event);
+        accumulator.observe_record(boundaries, journal_stage, event);
     }
 }
 
@@ -1222,10 +1222,7 @@ impl FsmAction for MetricsAggregatorAction {
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
                 if let Some(observation) = &envelope.envelope.observability {
-                    store
-                        .observations
-                        .latest()
-                        .offer_recorded(observation.clone());
+                    store.observations.latest().offer_recorded(observation);
                 }
 
                 // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
@@ -1451,173 +1448,184 @@ impl FsmAction for MetricsAggregatorAction {
             }
 
             MetricsAggregatorAction::UpdateMetrics {
-                envelope,
+                events,
                 journal_kind,
                 journal_stage,
             } => {
-                tracing::trace!(
-                    event_id = %envelope.id(),
-                    event_type = envelope.event_type(),
-                    "Metrics aggregator UpdateMetrics action"
-                );
-                let event = &envelope.authored();
-                let stage_id = event.flow_context.stage_id;
-
-                observe_live_composite_duration(
-                    *journal_kind,
-                    &mut ctx.composite_durations,
-                    &ctx.composite_boundaries,
-                    *journal_stage,
-                    event,
-                );
-
-                let store = &mut ctx.metrics_store;
-                if let Some(accounting) = event.runtime.as_ref().map(|runtime| &runtime.accounting)
-                {
-                    store
-                        .stage_metrics
-                        .entry(stage_id)
-                        .or_default()
-                        .merge_accounting(accounting);
+                // Measurements may coalesce across unread intermediate captures.
+                // Facts below still fold in physical journal order.
+                for envelope in events.iter().rev() {
+                    if let Some(observation) = &envelope.envelope.observability {
+                        ctx.metrics_store
+                            .observations
+                            .latest()
+                            .offer_recorded(observation);
+                    }
                 }
-                // Update last event ID
-                store.last_event_id = Some(event.id);
+                for envelope in events.iter() {
+                    tracing::trace!(
+                        event_id = %envelope.id(),
+                        event_type = envelope.event_type(),
+                        "Metrics aggregator UpdateMetrics action"
+                    );
+                    let event = &envelope.envelope.provenance.event;
+                    let stage_id = event.flow_context.stage_id;
 
-                // Physical data coverage belongs only to this journal's bound
-                // stage writer. Forwarded and error-rail clocks prove no such coverage.
-                if *journal_kind == MetricsJournalKind::Data
-                    && event.writer_id == WriterId::from(*journal_stage)
-                {
-                    if let Some(seq) = envelope
-                        .envelope
-                        .provenance
-                        .journal
-                        .vector_clock
-                        .clocks
-                        .get(&event.writer_id.to_string())
+                    observe_live_composite_duration(
+                        *journal_kind,
+                        &mut ctx.composite_durations,
+                        &ctx.composite_boundaries,
+                        *journal_stage,
+                        envelope,
+                    );
+
+                    let store = &mut ctx.metrics_store;
+                    if let Some(accounting) =
+                        event.runtime.as_ref().map(|runtime| &runtime.accounting)
                     {
-                        let entry = store.stage_vector_clocks.entry(*journal_stage).or_insert(0);
-                        *entry = (*entry).max(*seq);
+                        store
+                            .stage_metrics
+                            .entry(stage_id)
+                            .or_default()
+                            .merge_accounting(accounting);
                     }
-                }
+                    // Update last event ID
+                    store.last_event_id = Some(event.id);
 
-                if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
-                    &event.payload
-                {
-                    store.fold_http_pull_state(stage_id, state);
-                }
-
-                // Capture flow_id for joinability (FLOWIP-059a) when it becomes available.
-                if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
-                    if meta.flow_id.is_none() {
-                        if let Ok(flow_id) = FlowId::from_str(event.flow_context.flow_id.as_str()) {
-                            meta.flow_id = Some(flow_id);
+                    // Physical data coverage belongs only to this journal's bound
+                    // stage writer. Forwarded and error-rail clocks prove no such coverage.
+                    if *journal_kind == MetricsJournalKind::Data
+                        && event.writer_id == WriterId::from(*journal_stage)
+                    {
+                        if let Some(seq) = envelope
+                            .envelope
+                            .provenance
+                            .journal
+                            .vector_clock
+                            .clocks
+                            .get(&event.writer_id.to_string())
+                        {
+                            let entry =
+                                store.stage_vector_clocks.entry(*journal_stage).or_insert(0);
+                            *entry = (*entry).max(*seq);
                         }
                     }
-                }
 
-                // Skip system events entirely; they are not part of per-stage wide metrics.
-                if event.is_system() {
-                    return Ok(());
-                }
+                    if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
+                        &envelope.payload
+                    {
+                        store.fold_http_pull_state(stage_id, state);
+                    }
 
-                use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
-                if let Some(observation) = &envelope.envelope.observability {
-                    store
-                        .observations
-                        .latest()
-                        .offer_recorded(observation.clone());
-                }
-                // Count a committed plan only at its originating writer, never
-                // when a manifest is forwarded through an internal feed.
-                if event.writer_id == WriterId::from(*journal_stage)
-                    && *journal_kind == MetricsJournalKind::Data
-                {
-                    let plan = match &event.payload {
-                        ChainPayload::CompositeData(CompositeDataPayload::PlanningManifest(
-                            plan,
-                        )) => Some((&plan.planning, plan.chunk_count)),
-                        ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(plan)) => {
-                            Some((&plan.planning, plan.chunk_count))
+                    // Capture flow_id for joinability (FLOWIP-059a) when it becomes available.
+                    if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
+                        if meta.flow_id.is_none() {
+                            if let Ok(flow_id) =
+                                FlowId::from_str(event.flow_context.flow_id.as_str())
+                            {
+                                meta.flow_id = Some(flow_id);
+                            }
                         }
-                        _ => None,
-                    };
-                    if let Some((plan, chunks)) = plan {
-                        let metrics = store.ai_chunking_metrics.entry(stage_id).or_default();
-                        metrics.jobs_total = metrics.jobs_total.saturating_add(1);
-                        metrics.input_items_total = metrics
-                            .input_items_total
-                            .saturating_add(plan.input_items_total as u64);
-                        metrics.planned_items_total = metrics
-                            .planned_items_total
-                            .saturating_add(plan.planned_items_total as u64);
-                        metrics.excluded_items_total = metrics
-                            .excluded_items_total
-                            .saturating_add(plan.excluded_items_total as u64);
-                        metrics.chunks_emitted_total =
-                            metrics.chunks_emitted_total.saturating_add(chunks as u64);
                     }
-                }
-                if let Some(failure) = SinkOperationFailed::from_event(event) {
-                    store.fold_sink_operation_failure(&failure);
-                }
-                if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) =
-                    &event.payload
-                {
-                    let state = match fact {
-                        CircuitBreakerFact::Opened { .. } => Some(("open", 1.0)),
-                        CircuitBreakerFact::Closed { .. } => Some(("closed", 0.0)),
-                        CircuitBreakerFact::HalfOpen { .. } => Some(("half_open", 0.5)),
-                        CircuitBreakerFact::StateChanged { to_state, .. } => Some(match to_state {
-                            CircuitState::Closed => ("closed", 0.0),
-                            CircuitState::Open => ("open", 1.0),
-                            CircuitState::HalfOpen => ("half_open", 0.5),
-                        }),
-                        _ => None,
-                    };
-                    if let Some((label, gauge)) = state {
-                        store.record_circuit_breaker_transition(stage_id, label);
-                        store.circuit_breaker_state.insert(stage_id, gauge);
+
+                    use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
+                    // Count a committed plan only at its originating writer, never
+                    // when a manifest is forwarded through an internal feed.
+                    if event.writer_id == WriterId::from(*journal_stage)
+                        && *journal_kind == MetricsJournalKind::Data
+                    {
+                        let plan = match &envelope.payload {
+                            ChainPayload::CompositeData(
+                                CompositeDataPayload::PlanningManifest(plan),
+                            ) => Some((&plan.planning, plan.chunk_count)),
+                            ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(plan)) => {
+                                Some((&plan.planning, plan.chunk_count))
+                            }
+                            _ => None,
+                        };
+                        if let Some((plan, chunks)) = plan {
+                            let metrics = store.ai_chunking_metrics.entry(stage_id).or_default();
+                            metrics.jobs_total = metrics.jobs_total.saturating_add(1);
+                            metrics.input_items_total = metrics
+                                .input_items_total
+                                .saturating_add(plan.input_items_total as u64);
+                            metrics.planned_items_total = metrics
+                                .planned_items_total
+                                .saturating_add(plan.planned_items_total as u64);
+                            metrics.excluded_items_total = metrics
+                                .excluded_items_total
+                                .saturating_add(plan.excluded_items_total as u64);
+                            metrics.chunks_emitted_total =
+                                metrics.chunks_emitted_total.saturating_add(chunks as u64);
+                        }
                     }
-                }
+                    if let ChainPayload::Fact(payload) = &envelope.payload {
+                        if SinkOperationFailed::event_type_matches(&event.event_type) {
+                            if let Ok(failure) = serde_json::from_value(payload.clone()) {
+                                store.fold_sink_operation_failure(&failure);
+                            }
+                        }
+                    }
+                    if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) =
+                        &envelope.payload
+                    {
+                        let state = match fact {
+                            CircuitBreakerFact::Opened { .. } => Some(("open", 1.0)),
+                            CircuitBreakerFact::Closed { .. } => Some(("closed", 0.0)),
+                            CircuitBreakerFact::HalfOpen { .. } => Some(("half_open", 0.5)),
+                            CircuitBreakerFact::StateChanged { to_state, .. } => {
+                                Some(match to_state {
+                                    CircuitState::Closed => ("closed", 0.0),
+                                    CircuitState::Open => ("open", 1.0),
+                                    CircuitState::HalfOpen => ("half_open", 0.5),
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Some((label, gauge)) = state {
+                            store.record_circuit_breaker_transition(stage_id, label);
+                            store.circuit_breaker_state.insert(stage_id, gauge);
+                        }
+                    }
 
-                // Track flow timing for rate calculation based on any non-system event.
-                let now = std::time::Instant::now();
-                if store.first_event_time.is_none() {
-                    store.first_event_time = Some(now);
-                    store.flow_start_time = Some(now);
-                }
-                store.last_event_time = Some(now);
-
-                // Only count data/delivery events towards total_events_processed; control
-                // events (EOF, consumption_final, etc.) carry snapshots but must not bump
-                // the processed count. This keeps totals aligned with stage-wide metrics.
-                if event.consumes_data_credit() || event.is_delivery() {
-                    store.total_events_processed += 1;
-                }
-
-                // Process data and delivery events using runtime_context snapshots only
-                let stage_id = event.flow_context.stage_id;
-
-                // First handle stage metrics (data + control wide events)
-                {
-                    let metrics = store.stage_metrics.entry(stage_id).or_default();
-
-                    // Track stage timing
+                    // Track flow timing for rate calculation based on any non-system event.
                     let now = std::time::Instant::now();
-                    if metrics.first_event_time.is_none() {
-                        metrics.first_event_time = Some(now);
+                    if store.first_event_time.is_none() {
+                        store.first_event_time = Some(now);
+                        store.flow_start_time = Some(now);
                     }
-                    metrics.last_event_time = Some(now);
+                    store.last_event_time = Some(now);
 
-                    // Error totals and kinds come from the same cumulative
-                    // snapshot. Counting error-marked rows again would duplicate
-                    // errors across forwarded rows and tail refreshes.
-                } // metrics reference dropped here
+                    // Only count data/delivery events towards total_events_processed; control
+                    // events (EOF, consumption_final, etc.) carry snapshots but must not bump
+                    // the processed count. This keeps totals aligned with stage-wide metrics.
+                    if envelope.consumes_data_credit() || envelope.is_delivery() {
+                        store.total_events_processed += 1;
+                    }
 
-                // Retain captures while folding, then project their latest values
-                // at export. Rebuilding every stage's measurement view for each
-                // journal record makes catch-up depend on observation cardinality.
+                    // Process data and delivery events using runtime_context snapshots only
+                    let stage_id = event.flow_context.stage_id;
+
+                    // First handle stage metrics (data + control wide events)
+                    {
+                        let metrics = store.stage_metrics.entry(stage_id).or_default();
+
+                        // Track stage timing
+                        let now = std::time::Instant::now();
+                        if metrics.first_event_time.is_none() {
+                            metrics.first_event_time = Some(now);
+                        }
+                        metrics.last_event_time = Some(now);
+
+                        // Error totals and kinds come from the same cumulative
+                        // snapshot. Counting error-marked rows again would duplicate
+                        // errors across forwarded rows and tail refreshes.
+                    } // metrics reference dropped here
+
+                    // Retain captures while folding, then project their latest values
+                    // at export. Rebuilding every stage's measurement view for each
+                    // journal record makes catch-up depend on observation cardinality.
+                }
                 Ok(())
             }
 
@@ -1873,15 +1881,11 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                             journal_kind,
                             journal_stage,
                         } => {
-                            let actions = events
-                                .iter()
-                                .cloned()
-                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
-                                    envelope: Box::new(envelope),
-                                    journal_kind,
-                                    journal_stage,
-                                })
-                                .collect::<Vec<_>>();
+                            let actions = vec![MetricsAggregatorAction::UpdateMetrics {
+                                events,
+                                journal_kind,
+                                journal_stage,
+                            }];
                             Ok(Transition {
                                 next_state: MetricsAggregatorState::Running,
                                 actions,
@@ -2002,15 +2006,11 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
                             journal_kind,
                             journal_stage,
                         } => {
-                            let actions = events
-                                .iter()
-                                .cloned()
-                                .map(|envelope| MetricsAggregatorAction::UpdateMetrics {
-                                    envelope: Box::new(envelope),
-                                    journal_kind,
-                                    journal_stage,
-                                })
-                                .collect::<Vec<_>>();
+                            let actions = vec![MetricsAggregatorAction::UpdateMetrics {
+                                events,
+                                journal_kind,
+                                journal_stage,
+                            }];
                             Ok(Transition {
                                 next_state: MetricsAggregatorState::Draining,
                                 actions,
@@ -2446,16 +2446,16 @@ mod tests {
             )])
             .unwrap();
         let mut error_rail = CompositeDurationAccumulator::new(vec![0.1, 0.25, 1.0]);
+        let envelope = JournalRecord::new(JournalWriterId::from(JournalId::new()), output);
         observe_live_composite_duration(
             MetricsJournalKind::Error,
             &mut error_rail,
             std::slice::from_ref(&boundary),
             exit,
-            &output,
+            &envelope,
         );
         assert!(error_rail.histograms().is_empty());
 
-        let envelope = JournalRecord::new(JournalWriterId::from(JournalId::new()), output);
         // A duplicate row identity is harmless to the replay projection.
         let mut reader = VecReader {
             events: VecDeque::from([envelope.clone(), envelope]),

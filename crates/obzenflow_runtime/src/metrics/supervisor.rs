@@ -191,7 +191,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 Ok(Some(batch)) => {
                                     return Ok(EventLoopDirective::Transition(
                                         MetricsAggregatorEvent::ProcessBatch {
-                                            events: batch.events,
+                                            events: batch.events.into(),
                                             journal_kind,
                                             journal_stage: batch.stage,
                                         },

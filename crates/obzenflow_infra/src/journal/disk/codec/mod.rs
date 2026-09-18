@@ -158,17 +158,30 @@ impl Decoder {
         body: &[u8],
         offset: u64,
     ) -> Result<LogFrame<T>> {
-        self.decode_measured(body, offset).map(|(frame, _)| frame)
+        self.decode_inner::<T, false>(body, offset)
+            .map(|(frame, _)| frame)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn decode_measured<T: JournalEvent>(
+        &mut self,
+        body: &[u8],
+        offset: u64,
+    ) -> Result<(LogFrame<T>, FrameSizes)> {
+        self.decode_inner::<T, true>(body, offset)
+    }
+
+    // Both modes use identical parsing and validation. Byte attribution is a
+    // diagnostic cost, not part of a normal journal read.
+    fn decode_inner<T: JournalEvent, const MEASURE: bool>(
         &mut self,
         body: &[u8],
         offset: u64,
     ) -> Result<(LogFrame<T>, FrameSizes)> {
         let mut sizes = FrameSizes::default();
         let mut input = Cursor::new(body);
-        let mut definitions = ReadTable::new(&mut input, &self.store, &self.path, offset)?;
+        let mut definitions =
+            ReadTable::<MEASURE>::new(&mut input, &self.store, &self.path, offset)?;
         let (group, count) = match input.byte()? {
             0 => (None, 1),
             1 => {
@@ -180,7 +193,9 @@ impl Decoder {
         let mut records = Vec::new();
         for _ in 0..count {
             definitions.begin_record();
-            sizes.records += 1;
+            if MEASURE {
+                sizes.records += 1;
+            }
             let start = input.position();
             definitions.section(1);
             let mut provenance_input = Cursor::new(input.bytes()?);
@@ -194,13 +209,17 @@ impl Decoder {
                 &mut definitions,
             )?;
             provenance_input.finish()?;
-            sizes.provenance += input.position() - start;
+            if MEASURE {
+                sizes.provenance += input.position() - start;
+            }
             let start = input.position();
             definitions.section(2);
             let observability = match input.byte()? {
                 0 | 1 => None,
                 2 => {
-                    sizes.packets += 1;
+                    if MEASURE {
+                        sizes.packets += 1;
+                    }
                     let mut observation_input = Cursor::new(input.bytes()?);
                     let observation = deserialize::read(
                         Kind::Struct(Layout::Observation),
@@ -212,12 +231,14 @@ impl Decoder {
                 }
                 _ => return Err(invalid("unknown observation presence tag")),
             };
-            if observability.is_some() {
+            if MEASURE && observability.is_some() {
                 sizes.observability += input.position() - start;
             }
             let start = input.position();
             let payload: serde_json::Value = serde_json::from_slice(input.bytes()?)?;
-            sizes.payload += input.position() - start;
+            if MEASURE {
+                sizes.payload += input.position() - start;
+            }
             let payload = T::Payload::decode(&provenance.event, payload)?;
             payload.validate(&provenance.event)?;
             let record: LogRecord<T> = JournalRecord {
@@ -230,18 +251,20 @@ impl Decoder {
             records.push(record);
         }
         input.finish()?;
-        let (provenance, observations) = definitions.attributed_bytes();
-        (
-            sizes.inline_definition_counts,
-            sizes.inline_definition_bytes,
-            sizes.definition_reference_bytes,
-        ) = definitions.definition_costs();
-        sizes.provenance += provenance;
-        sizes.observability += observations;
-        sizes.shared = body.len() + frame::HEADER_LEN + frame::TRAILER_LEN
-            - sizes.provenance
-            - sizes.observability
-            - sizes.payload;
+        if MEASURE {
+            let (provenance, observations) = definitions.attributed_bytes();
+            (
+                sizes.inline_definition_counts,
+                sizes.inline_definition_bytes,
+                sizes.definition_reference_bytes,
+            ) = definitions.definition_costs();
+            sizes.provenance += provenance;
+            sizes.observability += observations;
+            sizes.shared = body.len() + frame::HEADER_LEN + frame::TRAILER_LEN
+                - sizes.provenance
+                - sizes.observability
+                - sizes.payload;
+        }
         validate_membership(&records, group.as_deref())?;
         Ok((
             match group {

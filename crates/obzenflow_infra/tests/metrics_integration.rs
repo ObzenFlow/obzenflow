@@ -201,7 +201,7 @@ async fn running_state_process_batch_transitions() {
     let actions = fsm
         .handle(
             MetricsAggregatorEvent::ProcessBatch {
-                events: vec![envelope],
+                events: vec![envelope].into(),
                 journal_kind: MetricsJournalKind::Data,
                 journal_stage: stage_id,
             },

@@ -136,7 +136,7 @@ pub async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding(
     for _ in 0..2 {
         for (kind, row) in &rows {
             MetricsAggregatorAction::UpdateMetrics {
-                envelope: Box::new(row.clone()),
+                events: vec![row.clone()].into(),
                 journal_kind: *kind,
                 journal_stage: stage,
             }

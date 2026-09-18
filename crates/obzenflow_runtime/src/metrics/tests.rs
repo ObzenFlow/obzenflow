@@ -341,7 +341,7 @@ async fn context(
 
 async fn fold(ctx: &mut Context, stage: StageId, rail: Rail, row: JournalRecord<ChainPayload>) {
     Action::UpdateMetrics {
-        envelope: Box::new(row),
+        events: vec![row].into(),
         journal_kind: rail,
         journal_stage: stage,
     }
@@ -400,6 +400,114 @@ pub async fn metrics_index_reports_absence_without_tail_search(
         }
     }
     assert!(journal.probe.tail_requests.lock().unwrap().is_empty());
+}
+
+pub async fn metrics_batch_coalesces_measurements_without_reordering_facts(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    use obzenflow_core::event::payloads::execution_payload::{
+        CircuitBreakerFact, CircuitState, ExecutionPayload,
+    };
+
+    let stage = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "batch");
+    let mut rows = Vec::new();
+    for (index, (from_state, to_state)) in [
+        (CircuitState::Closed, CircuitState::Open),
+        (CircuitState::Open, CircuitState::HalfOpen),
+        (CircuitState::HalfOpen, CircuitState::Closed),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut event = fact(stage, stage.into(), index as u64 + 1, index as u32 + 4);
+        if index == 0 {
+            event
+                .envelope
+                .observability
+                .as_mut()
+                .unwrap()
+                .runtime
+                .as_mut()
+                .unwrap()
+                .event_loops_total = Some(42);
+        }
+        rows.push(data.append(event, Default::default()).await.unwrap());
+        let mut transition = ChainEventFactory::execution_event(
+            stage.into(),
+            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                from_state,
+                to_state,
+                timestamp: index as u64,
+            }),
+        );
+        transition.flow_context.stage_id = stage;
+        rows.push(data.append(transition, Default::default()).await.unwrap());
+    }
+    let committed_max = rows
+        .last()
+        .unwrap()
+        .envelope
+        .provenance
+        .journal
+        .vector_clock
+        .get(&WriterId::from(stage).to_string());
+    let last_id = *rows.last().unwrap().id();
+    let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    // A missing optional index must not prevent the batch from retaining its own families.
+    data.probe.fail_tail.store(true, Ordering::SeqCst);
+    let events: Arc<[JournalRecord<ChainPayload>]> = rows.into();
+    let mut machine = super::fsm::build_metrics_aggregator_fsm();
+    for action in machine.handle(Event::StartRunning, &mut ctx).await.unwrap() {
+        action.execute(&mut ctx).await.unwrap();
+    }
+    let actions = machine
+        .handle(
+            Event::ProcessBatch {
+                events: events.clone(),
+                journal_kind: Rail::Data,
+                journal_stage: stage,
+            },
+            &mut ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&actions[..], [Action::UpdateMetrics { events: shared, .. }] if Arc::ptr_eq(shared, &events))
+    );
+    for action in actions {
+        action.execute(&mut ctx).await.unwrap();
+    }
+    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
+    let store = &ctx.metrics_store;
+    assert_eq!(store.total_events_processed, 3);
+    assert_eq!(
+        store.stage_metrics[&stage].latest_events_processed_total,
+        Some(3)
+    );
+    assert_eq!(store.stage_metrics[&stage].last_in_flight, Some(6));
+    assert_eq!(store.last_event_id, Some(last_id));
+    assert_eq!(store.stage_vector_clocks[&stage], committed_max);
+    assert_eq!(store.circuit_breaker_state[&stage], 0.0);
+    for (from, to) in [
+        ("closed", "open"),
+        ("open", "half_open"),
+        ("half_open", "closed"),
+    ] {
+        assert_eq!(
+            store.circuit_breaker_state_transitions_total[&(stage, from.into(), to.into())],
+            1
+        );
+    }
+    assert!(
+        store.observations.snapshot().iter().any(|packet| {
+            packet
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.event_loops_total == Some(42))
+        }),
+        "an older family absent from the latest packet is still retained"
+    );
 }
 
 pub async fn metrics_accounting_folds_sequentially_while_measurement_failures_retain_values(

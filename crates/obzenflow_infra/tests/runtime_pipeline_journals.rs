@@ -354,6 +354,11 @@ async fn metrics_index_reports_absence_without_tail_search() {
 }
 
 #[tokio::test]
+async fn metrics_batch_coalesces_measurements_without_reordering_facts() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_batch_coalesces_measurements_without_reordering_facts).await;
+}
+
+#[tokio::test]
 async fn metrics_accounting_folds_sequentially_while_measurement_failures_retain_values() {
     metrics_backends(obzenflow_runtime::testing::metrics::metrics_accounting_folds_sequentially_while_measurement_failures_retain_values).await;
 }
