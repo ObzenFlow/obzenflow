@@ -641,7 +641,11 @@ mod managed_lifecycle_regressions {
                         assert_eq!(payload["checkpoint_event_id"].as_str(), frame.id.as_deref());
                         return frame.id.unwrap();
                     }
-                    Some("stage_lifecycle" | "composite_status") => assert!(frame.id.is_none()),
+                    // Fresh and unknown-cursor recovery send factual snapshots
+                    // before bootstrap publishes their checkpoint cursor.
+                    Some("stage_lifecycle" | "composite_status" | "middleware_state_snapshot") => {
+                        assert!(frame.id.is_none())
+                    }
                     other => panic!("unexpected bootstrap frame {other:?}"),
                 }
             }
