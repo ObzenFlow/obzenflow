@@ -10,7 +10,6 @@ use super::{
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
 use obzenflow_core::chrono::Utc;
-use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -18,8 +17,10 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectProvenance};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::system_payload::{ContractResultStatusLabel, SystemPayload};
+use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::JournalProvenance;
-use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent, SystemPayload};
+use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -28,7 +29,8 @@ use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::id::{CompositeId, JournalId};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     AdmissionSeq, ContractResult, DeliveryContract, EventId, EventType, ReaderGeneration, StageId,
@@ -55,7 +57,7 @@ fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecor
     .unwrap()
 }
 
-fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::context::FlowContext {
+fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::provenance::FlowContext {
     crate::stages::common::supervision::flow_context_factory::make_flow_context(
         "contract_flow",
         "contract_run",
@@ -65,7 +67,10 @@ fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::context::F
     )
 }
 
-fn assert_contract_owner(event: &ChainEvent, owner: &obzenflow_core::event::context::FlowContext) {
+fn assert_contract_owner(
+    event: &ChainEvent,
+    owner: &obzenflow_core::event::provenance::FlowContext,
+) {
     assert_eq!(event.writer_id, WriterId::from(owner.stage_id));
     assert_eq!(
         serde_json::to_value(&event.flow_context).unwrap(),
@@ -241,8 +246,9 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&JournalRecord<T::Payload>>,
+        mut options: AppendOptions<'_, T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
         guard.push(envelope.clone());
@@ -299,8 +305,9 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&JournalRecord<T::Payload>>,
+        mut options: AppendOptions<'_, T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         let call_index = self.append_calls.fetch_add(1, Ordering::Relaxed);
         if (self.should_fail)(&event, call_index) {
             return Err(JournalError::Implementation {
@@ -407,7 +414,7 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
     async fn append(
         &self,
         _event: T,
-        _parent: Option<&JournalRecord<T::Payload>>,
+        _options: AppendOptions<'_, T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         Err(JournalError::Implementation {
             message: "append not supported".to_string(),
@@ -1297,7 +1304,10 @@ async fn build_upstream_with_seq_divergence(
     // One data event followed by EOF that advertises more events than read.
     let writer_id = WriterId::Stage(upstream_stage);
     let data_event = ChainEventFactory::data_event(writer_id, "test.event", json!({}));
-    upstream_journal.append(data_event, None).await.unwrap();
+    upstream_journal
+        .append(data_event, Default::default())
+        .await
+        .unwrap();
 
     let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
     if let ChainPayload::FlowControl(FlowControlPayload::Eof {
@@ -1309,7 +1319,10 @@ async fn build_upstream_with_seq_divergence(
         *writer_id_field = Some(writer_id);
         *writer_seq = Some(SeqNo(3));
     }
-    upstream_journal.append(eof_event, None).await.unwrap();
+    upstream_journal
+        .append(eof_event, Default::default())
+        .await
+        .unwrap();
 
     let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
 
@@ -1498,14 +1511,14 @@ async fn transport_only_skips_observability_events() {
     upstream_journal
         .append(
             ChainEventFactory::stage_running(writer_id, upstream_stage),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
             ChainEventFactory::stage_running(writer_id, upstream_stage),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -1513,7 +1526,7 @@ async fn transport_only_skips_observability_events() {
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -1521,13 +1534,16 @@ async fn transport_only_skips_observability_events() {
     upstream_journal
         .append(
             ChainEventFactory::stage_running(writer_id, upstream_stage),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
 
     upstream_journal
-        .append(ChainEventFactory::eof_event(writer_id, true), None)
+        .append(
+            ChainEventFactory::eof_event(writer_id, true),
+            Default::default(),
+        )
         .await
         .unwrap();
 
@@ -1618,14 +1634,14 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.ignored.v1", json!({"n": 1})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.selected.v1", json!({"n": 2})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -1633,7 +1649,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .append(
             // One semantic selected feed may span compatible physical keys.
             ChainEventFactory::data_event(writer_id, "test.selected", json!({"n": 3})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -1650,7 +1666,10 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         writer_seq_by_event_type.insert("test.selected.v1".into(), SeqNo(1));
         writer_seq_by_event_type.insert("test.selected".into(), SeqNo(1));
     }
-    upstream_journal.append(eof_event, None).await.unwrap();
+    upstream_journal
+        .append(eof_event, Default::default())
+        .await
+        .unwrap();
 
     let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
     let mut selected_feeds = HashMap::new();
@@ -1797,8 +1816,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 
 #[tokio::test]
 async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symmetrically() {
-    use obzenflow_core::event::context::replay_context::ReplayContext;
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::event::provenance::replay_context::ReplayContext;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
 
     let upstream_stage = StageId::new();
@@ -1822,7 +1841,10 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             original_flow_id: "flow_parent".to_string(),
             original_stage_id: archived_upstream_stage,
         });
-        upstream_journal.append(replayed, None).await.unwrap();
+        upstream_journal
+            .append(replayed, Default::default())
+            .await
+            .unwrap();
     }
 
     let mut forwarded_error = ChainEventFactory::data_event(
@@ -1832,7 +1854,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     );
     forwarded_error.processing.status = ProcessingStatus::error("forwarded pre-error row");
     upstream_journal
-        .append(forwarded_error, None)
+        .append(forwarded_error, Default::default())
         .await
         .unwrap();
 
@@ -1843,7 +1865,10 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     {
         *writer_seq = Some(SeqNo(3));
     }
-    upstream_journal.append(forwarded_eof, None).await.unwrap();
+    upstream_journal
+        .append(forwarded_eof, Default::default())
+        .await
+        .unwrap();
 
     let mut local_terminal =
         ChainEventFactory::eof_event_with_kind(WriterId::Stage(upstream_stage), EofKind::Poison);
@@ -1856,7 +1881,10 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
         *writer_seq = Some(SeqNo(2));
         writer_seq_by_event_type.insert("test.joined.v1".into(), SeqNo(2));
     }
-    upstream_journal.append(local_terminal, None).await.unwrap();
+    upstream_journal
+        .append(local_terminal, Default::default())
+        .await
+        .unwrap();
 
     let upstreams = [(upstream_stage, "join".to_string(), upstream_journal)];
     let mut selected_feeds = HashMap::new();
@@ -1962,12 +1990,18 @@ async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
 
     let mut ignored = ChainEventFactory::data_event(writer_id, "checkout.other.v1", json!({}));
     ignored.processing.event_time = 100;
-    upstream_journal.append(ignored, None).await.unwrap();
+    upstream_journal
+        .append(ignored, Default::default())
+        .await
+        .unwrap();
 
     let mut admitted = ChainEventFactory::data_event(writer_id, "checkout.command.v1", json!({}));
     admitted.processing.event_time = 123;
     let admitted_id = admitted.id;
-    upstream_journal.append(admitted, None).await.unwrap();
+    upstream_journal
+        .append(admitted, Default::default())
+        .await
+        .unwrap();
 
     let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
     let mut entries = HashMap::new();
@@ -2022,14 +2056,14 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2047,7 +2081,10 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
         writer_seq_by_event_type.insert("test.first.v1".into(), SeqNo(2));
         writer_seq_by_event_type.insert("test.second.v1".into(), SeqNo(0));
     }
-    upstream_journal.append(eof_event, None).await.unwrap();
+    upstream_journal
+        .append(eof_event, Default::default())
+        .await
+        .unwrap();
 
     let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
     let mut selected_feeds = HashMap::new();
@@ -2174,14 +2211,14 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2402,7 +2439,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
                 &effect_record,
                 EffectFactOwner::Framework,
             )),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2410,7 +2447,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2481,7 +2518,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
     upstream_journal
         .append(
             ChainEventFactory::data_event(upstream_writer_id, "test.event", json!({"n": 1})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -2493,20 +2530,26 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         *writer_id = None;
     }
 
-    upstream_journal.append(forwarded_eof, None).await.unwrap();
+    upstream_journal
+        .append(forwarded_eof, Default::default())
+        .await
+        .unwrap();
 
     // If the forwarded EOF were treated as terminal, this would never be observed.
     upstream_journal
         .append(
             ChainEventFactory::data_event(upstream_writer_id, "test.event", json!({"n": 2})),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
 
     // The authoritative EOF for this upstream.
     upstream_journal
-        .append(ChainEventFactory::eof_event(upstream_writer_id, true), None)
+        .append(
+            ChainEventFactory::eof_event(upstream_writer_id, true),
+            Default::default(),
+        )
         .await
         .unwrap();
 
@@ -2661,8 +2704,9 @@ impl Journal<ChainEvent> for SharedTestJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> std::result::Result<JournalRecord<ChainPayload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         self.events.lock().unwrap().push(envelope.clone());
         Ok(envelope)
@@ -3589,7 +3633,7 @@ async fn delivered_upstream_identity_ignores_event_writer() {
                 "test.forwarded",
                 json!({"n": 1}),
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();

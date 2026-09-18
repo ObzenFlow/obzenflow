@@ -7,6 +7,7 @@ use crate::supervised_base::with_external_events::record_terminal_commands;
 use obzenflow_core::event::{
     CommandDiscardDisposition, JournalRecord, JournalWriterId, SystemEvent, SystemPayload,
 };
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{journal_owner::JournalOwner, Journal, JournalError, JournalReader};
 use obzenflow_core::{EventId, JournalId};
 use std::sync::Mutex;
@@ -34,8 +35,9 @@ impl Journal<SystemEvent> for TestJournal {
     async fn append(
         &self,
         event: SystemEvent,
-        _parent: Option<&JournalRecord<SystemPayload>>,
+        mut options: AppendOptions<'_, SystemEvent>,
     ) -> Result<JournalRecord<SystemPayload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
             if let Some((entered, release)) = &self.first_append_gate {

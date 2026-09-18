@@ -7,8 +7,8 @@
 use super::*;
 #[cfg(test)]
 use crate::feed_plan::{FactVisibility, FeedRole, LogicalFeed, PayloadTypeDescriptor};
-use crate::journal::FlowJournalFactory;
 use crate::pipeline::tests::support::{new_system_journal, ControlledJournal};
+use obzenflow_core::journal::factory::FlowJournalFactory;
 #[cfg(test)]
 use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, StageType, TypeHintInfo};
 

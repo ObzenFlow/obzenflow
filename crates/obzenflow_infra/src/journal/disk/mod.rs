@@ -10,9 +10,11 @@ pub mod inspect;
 pub mod journal;
 pub mod log_record;
 pub(crate) mod manifest_gate;
+pub mod observations;
 pub mod reader;
 pub mod replay_archive;
 mod reverse_reader;
 pub(crate) mod scanner;
 
 pub use journal::DiskJournal;
+pub use observations::DiskObservationReader;

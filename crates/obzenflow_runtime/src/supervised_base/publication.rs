@@ -488,13 +488,17 @@ pub(crate) fn commit_in<T: Send + 'static>(
 pub(crate) fn append<T: JournalEvent + 'static>(
     journal: &Arc<dyn Journal<T>>,
     event: T,
-    parent: Option<&JournalRecord<T::Payload>>,
+    options: obzenflow_core::journal::AppendOptions<'_, T>,
 ) -> BoxFuture<'static, Result<JournalRecord<T::Payload>, BoxError>> {
+    let obzenflow_core::journal::AppendOptions { parent, capture } = options;
     let journal = journal.clone();
     let parent = parent.cloned();
     commit(async move {
         journal
-            .append(event, parent.as_ref())
+            .append(
+                event,
+                obzenflow_core::journal::AppendOptions::new(parent.as_ref()).with_capture(capture),
+            )
             .await
             .map_err(Into::into)
     })

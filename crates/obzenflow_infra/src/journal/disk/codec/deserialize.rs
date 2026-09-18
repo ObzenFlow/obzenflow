@@ -5,8 +5,8 @@
 //! Feed positional framework structures straight into their Core deserializers.
 //! Immutable definitions and uncommon dynamic values retain the shared decoder.
 
+use super::layout::{Field, Kind};
 use super::primitives::Cursor;
-use super::schema::{Field, Kind};
 use super::values::{self, ReadDefinitions};
 use super::{invalid, Error, Result};
 use serde::de::{

@@ -4,7 +4,7 @@
 
 //! Shared raw-JSON archive epoch gate.
 
-use obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION;
+use obzenflow_core::journal::archive::manifest::RUN_MANIFEST_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unsupported provenance schema version: {found}")]
@@ -34,6 +34,19 @@ pub(crate) fn require_current_manifest_version(
         None => Err(UnsupportedManifestVersion {
             found: "<missing>".to_string(),
         }),
+    }
+}
+
+pub(crate) fn require_observability_capture(manifest: &serde_json::Value) -> Result<(), String> {
+    use obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY;
+    let found = manifest
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get(OBSERVABILITY_CAPTURE_CAPABILITY))
+        .and_then(serde_json::Value::as_u64);
+    if found == Some(1) {
+        Ok(())
+    } else {
+        Err(format!("unsupported archive capability {OBSERVABILITY_CAPTURE_CAPABILITY}={found:?} (supported: 1); re-record the archive"))
     }
 }
 

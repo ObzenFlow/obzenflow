@@ -23,7 +23,7 @@ use obzenflow_core::ai::{
     AiMapReducePlanningManifest, AiMapReduceReduceInput, AiMapReduceTaggedPartial,
     ChunkPlanningSummary,
 };
-use obzenflow_core::event::context::CompositeActivationContext;
+use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, EventId, TypedFact, TypedPayload};
 use serde::{de::DeserializeOwned, Serialize};

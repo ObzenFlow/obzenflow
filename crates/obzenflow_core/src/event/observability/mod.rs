@@ -4,9 +4,8 @@
 
 //! Optional observation packets shared by live handoff and committed attachments.
 
-use super::context::measurement_snapshots::{MetricsSnapshot, SliSnapshot};
-use super::context::{RuntimeObservability, RuntimeSnapshot};
 use super::payloads::execution_payload::CircuitState;
+use super::types::DurationMs;
 use crate::ai::LlmObservability;
 use crate::id::FlowId;
 use crate::time::MetricsDuration;
@@ -105,7 +104,8 @@ impl ObservabilityContext {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, strum_macros::IntoStaticStr)]
+#[strum(prefix = "records.")]
 #[serde(
     tag = "observation_type",
     rename_all = "snake_case",
@@ -160,7 +160,7 @@ pub enum ObservationRecord {
         memory_bytes: u64,
         thread_count: Option<u32>,
     },
-    HttpPull(super::observability::HttpPullMeasurements),
+    HttpPull(self::http::HttpPullMeasurements),
     AiChunkingWork {
         rerender_attempts_total: u64,
         max_decomposition_depth_reached: u32,
@@ -168,22 +168,58 @@ pub enum ObservationRecord {
         excluded_items: Vec<usize>,
     },
     StageHeartbeat {
-        activity: super::system_event::StageActivity,
-        handler_blocked_ms: Option<super::types::DurationMs>,
+        activity: StageActivity,
+        handler_blocked_ms: Option<DurationMs>,
         last_consumed_event_id: Option<EventId>,
         last_output_event_id: Option<EventId>,
     },
     EdgeLiveness {
         upstream: StageId,
         reader: StageId,
-        state: super::system_event::EdgeLivenessState,
-        idle_ms: super::types::DurationMs,
+        state: EdgeLivenessState,
+        idle_ms: DurationMs,
         last_reader_seq: Option<super::types::SeqNo>,
         last_event_id: Option<EventId>,
     },
     HttpSurface {
-        snapshot: super::observability::HttpSurfaceMetricsSnapshot,
+        snapshot: self::http::HttpSurfaceMetricsSnapshot,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StageActivity {
+    /// Supervisor is polling for events (dispatch loop is running normally).
+    Polling,
+    /// Handler is processing an event.
+    Processing {
+        event_id: EventId,
+        elapsed_ms: DurationMs,
+    },
+    /// The canonical deterministic merge is waiting on a quiet input
+    /// (FLOWIP-095d). This is idle-by-rule, never hung: an ordered fan-in
+    /// delivers nothing while any non-exhausted input has no head. `upstream`
+    /// names an input being waited on so operators can debug rate coupling.
+    WaitingOnQuietInput { upstream: Option<StageId> },
+    /// Stage is draining.
+    Draining,
+    /// Stage has completed.
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeLivenessState {
+    /// Edge is healthy: data is flowing or the edge is idle within expected bounds.
+    Healthy,
+    /// Edge is idle: no data observed recently, but the stage is alive.
+    Idle,
+    /// Edge is suspect: no data and no heartbeat response within the warning threshold.
+    Suspect,
+    /// Edge appears stalled: handler may be hung or upstream may be down.
+    Stalled,
+    /// Edge has recovered from a previous non-healthy state.
+    Recovered,
 }
 
 /// Offering a sample has no journal, acknowledgement, or publication capability.
@@ -218,3 +254,18 @@ pub trait ObservationSource: Send + Sync {
     }
     fn snapshot(&self) -> Vec<ObservabilityContext>;
 }
+
+pub mod families;
+pub mod http;
+pub mod measurement_snapshots;
+pub mod runtime_observability;
+pub mod runtime_snapshot;
+
+pub use families::{observation_families, ObservationFamily, ObservationSubject};
+pub use http::*;
+pub use measurement_snapshots::{MetricsSnapshot, SliSnapshot};
+pub use runtime_observability::{
+    CircuitBreakerMeasurements, EffectCircuitBreakerContext, EffectRateLimiterContext,
+    MeasurementWindow, RateLimiterMeasurements, RuntimeObservability, TimingMeasurements,
+};
+pub use runtime_snapshot::{ExecutionProgress, RuntimeSnapshot};

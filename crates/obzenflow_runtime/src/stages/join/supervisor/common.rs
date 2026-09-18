@@ -25,6 +25,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, JournalRecord};
@@ -393,7 +394,7 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         return Ok(());
     }
 
-    let runtime_context = ctx.instrumentation.capture_runtime();
+    let runtime_context = ctx.instrumentation.capture_accounting();
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -411,7 +412,13 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
         ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
     let heartbeat = runtime_context.attach_to(heartbeat);
 
-    crate::supervised_base::publication::append(&ctx.data_journal, heartbeat, None).await?;
+    crate::supervised_base::publication::append(
+        &ctx.data_journal,
+        heartbeat,
+        AppendOptions::new(None)
+            .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
+    )
+    .await?;
     ctx.events_since_last_heartbeat = 0;
     Ok(())
 }

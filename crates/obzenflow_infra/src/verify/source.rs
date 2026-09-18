@@ -15,7 +15,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::ChainEvent;
-use obzenflow_core::journal::run_manifest::{
+use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
@@ -120,6 +120,14 @@ impl DiskRunSource {
                 ),
             }));
         }
+        crate::journal::disk::manifest_gate::require_observability_capture(&value).map_err(
+            |message| {
+                SourceOpenError::Failed(VerifyError::Parse {
+                    path: manifest_path.clone(),
+                    message,
+                })
+            },
+        )?;
         let manifest: RunManifest = serde_json::from_value(value).map_err(|e| {
             SourceOpenError::Failed(VerifyError::Parse {
                 path: manifest_path.clone(),

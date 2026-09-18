@@ -2,229 +2,27 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Execution-local snapshot selection and tail-search knowledge (FLOWIP-130b).
-//! Neither is evidence that the sequential collector has covered a journal.
+//! Refresh optional measurements independently of factual accounting and coverage.
+use obzenflow_core::event::JournalEvent;
+use obzenflow_core::journal::{Journal, ObservationLookup};
+use obzenflow_core::WriterId;
 
-use super::fsm::MetricsJournalKind;
-use obzenflow_core::event::context::RuntimeProvenance;
-use obzenflow_core::event::observation::ObservabilityContext;
-use obzenflow_core::event::ChainPayload;
-use obzenflow_core::journal::JournalError;
-use obzenflow_core::{ChainEvent, EventId, Journal, JournalId, JournalRecord, StageId, WriterId};
-
-pub(super) const SEARCH_WINDOWS: [usize; 8] = [1, 5, 20, 100, 500, 2_000, 10_000, 50_000];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct JournalBinding {
-    pub(crate) journal: JournalId,
-    pub(crate) stage: StageId,
-    pub(crate) kind: MetricsJournalKind,
-}
-
-/// Equality within one physical journal only. Mixed writers have no total
-/// vector-clock order, and forwarding/replay can repeat an EventId.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RecordIdentity {
-    event: EventId,
-    writer: WriterId,
-    sequence: u64,
-}
-
-impl RecordIdentity {
-    fn of(row: &JournalRecord<ChainPayload>) -> Result<Self, JournalError> {
-        let writer = row.envelope.provenance.event.writer_id;
-        let sequence = row
-            .envelope
-            .provenance
-            .journal
-            .vector_clock
-            .clocks
-            .get(&writer.to_string())
-            .copied()
-            .ok_or_else(|| JournalError::Implementation {
-                message: "Metrics observation lacks its journal writer component".into(),
-                source: Box::new(std::io::Error::other("missing writer sequence")),
-            })?;
-        Ok(Self {
-            event: row.envelope.provenance.event.id,
-            writer,
-            sequence,
-        })
-    }
-}
-
-struct SnapshotFact {
-    record: RecordIdentity,
-    context: RuntimeProvenance,
-}
-
-#[derive(Default)]
-enum SnapshotSelection {
-    #[default]
-    Unseen,
-    Folded(Box<SnapshotFact>),
-    AheadOfFold(Box<SnapshotFact>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LookupOutcome {
-    Snapshot,
-    Absent,
-    Capped,
-}
-
-struct TailSearch {
-    // None is observed empty, distinct from no TailSearch (unchecked).
-    head: Option<RecordIdentity>,
-    outcome: LookupOutcome,
-}
-
-#[derive(Default)]
-pub(crate) struct SnapshotObservation {
-    search: Option<TailSearch>,
-    selection: SnapshotSelection,
-    measurements: super::observations::ObservationHub,
-}
-
-impl SnapshotObservation {
-    pub(crate) fn measurements(&self) -> Vec<ObservabilityContext> {
-        use obzenflow_core::event::observation::ObservationSource;
-        self.measurements.snapshot()
-    }
-
-    fn retain_measurements(&self, row: &JournalRecord<ChainPayload>, stage: StageId) {
-        if let Some(packet) = &row.envelope.observability {
-            if let Some(packet) = packet.for_observer(WriterId::from(stage)) {
-                self.measurements.offer_recorded(packet);
+pub(crate) async fn retain_journal_observations<T: JournalEvent>(
+    journal: &dyn Journal<T>,
+    observer: WriterId,
+    retained: &super::observations::ObservationHub,
+) {
+    let Some(reader) = journal.observation_reader() else {
+        return;
+    };
+    match reader.latest_observations(observer).await {
+        Ok(ObservationLookup::Ready { observation, .. }) => {
+            for located in observation {
+                retained.offer_recorded(located.observation);
             }
         }
-    }
-
-    pub(crate) fn selected(&self) -> Option<&RuntimeProvenance> {
-        match &self.selection {
-            SnapshotSelection::Unseen => None,
-            SnapshotSelection::Folded(fact) | SnapshotSelection::AheadOfFold(fact) => {
-                Some(&fact.context)
-            }
-        }
-    }
-
-    pub(crate) fn is_ahead_of_fold(&self) -> bool {
-        matches!(self.selection, SnapshotSelection::AheadOfFold(_))
-    }
-
-    pub(crate) fn fold(
-        &mut self,
-        row: &JournalRecord<ChainPayload>,
-        stage: StageId,
-    ) -> Result<(), JournalError> {
-        self.retain_measurements(row, stage);
-        if row.envelope.provenance.event.flow_context.stage_id != stage {
-            return Ok(());
-        }
-        let Some(context) = &row.envelope.provenance.event.runtime else {
-            return Ok(());
-        };
-        let record = RecordIdentity::of(row)?;
-        match &mut self.selection {
-            SnapshotSelection::AheadOfFold(fact) if fact.record != record => {}
-            SnapshotSelection::AheadOfFold(_) => {
-                let SnapshotSelection::AheadOfFold(fact) = std::mem::take(&mut self.selection)
-                else {
-                    unreachable!()
-                };
-                self.selection = SnapshotSelection::Folded(fact);
-            }
-            _ => {
-                self.selection = SnapshotSelection::Folded(Box::new(SnapshotFact {
-                    record,
-                    context: context.clone(),
-                }));
-            }
-        }
-        Ok(())
-    }
-
-    /// Search results are committed only after a successful examined window.
-    /// A cached boundary or fallback never reselects an older snapshot.
-    pub(crate) async fn refresh(
-        &mut self,
-        journal: &dyn Journal<ChainEvent>,
-        stage: StageId,
-    ) -> Result<(), JournalError> {
-        let mut rows = journal.read_last_n(1).await?;
-        let head = rows.first().map(RecordIdentity::of).transpose()?;
-        if self
-            .search
-            .as_ref()
-            .is_some_and(|search| search.head == head)
-        {
-            return Ok(());
-        }
-        for (index, count) in SEARCH_WINDOWS.into_iter().enumerate() {
-            if index != 0 {
-                rows = journal.read_last_n(count).await?;
-            }
-            let head = rows.first().map(RecordIdentity::of).transpose()?;
-            for row in &rows {
-                self.retain_measurements(row, stage);
-            }
-            for row in &rows {
-                let record = RecordIdentity::of(row)?;
-                if self
-                    .search
-                    .as_ref()
-                    .is_some_and(|search| search.head == Some(record))
-                {
-                    let outcome = self
-                        .search
-                        .as_ref()
-                        .expect("matched search boundary")
-                        .outcome;
-                    self.search = Some(TailSearch { head, outcome });
-                    return Ok(());
-                }
-                if row.envelope.provenance.event.flow_context.stage_id == stage {
-                    if let Some(context) = &row.envelope.provenance.event.runtime {
-                        // With serial folding and append-order journals, this fresh
-                        // newest snapshot is either the latest fold or ahead of it.
-                        let folded = matches!(&self.selection, SnapshotSelection::Folded(fact) if fact.record == record);
-                        let fact = Box::new(SnapshotFact {
-                            record,
-                            context: context.clone(),
-                        });
-                        self.selection = if folded {
-                            SnapshotSelection::Folded(fact)
-                        } else {
-                            SnapshotSelection::AheadOfFold(fact)
-                        };
-                        self.search = Some(TailSearch {
-                            head,
-                            outcome: LookupOutcome::Snapshot,
-                        });
-                        return Ok(());
-                    }
-                }
-            }
-            if rows.len() < count {
-                self.search = Some(TailSearch {
-                    head,
-                    outcome: LookupOutcome::Absent,
-                });
-                return Ok(());
-            }
-            if index == SEARCH_WINDOWS.len() - 1 {
-                self.search = Some(TailSearch {
-                    head,
-                    outcome: LookupOutcome::Capped,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "test-support")]
-    pub(crate) fn lookup_outcome(&self) -> Option<LookupOutcome> {
-        self.search.as_ref().map(|search| search.outcome)
+        Ok(ObservationLookup::Rebuilding { .. }) => {}
+        Err(error) => tracing::debug!(journal_id = %journal.id(), %error,
+            "Optional observation lookup unavailable; retaining prior measurements"),
     }
 }

@@ -5,7 +5,6 @@
 //! FSM admission rules, state projection, stop intent and contract matching.
 
 use crate::feed_plan::{FeedKey, FeedRole};
-use crate::journal::FlowJournalFactory;
 #[cfg(test)]
 use crate::pipeline::fsm::context::{record_stage_completion, StopIntent, StopRequestOutcome};
 use crate::pipeline::fsm::{
@@ -19,6 +18,7 @@ use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
 #[cfg(test)]
 use crate::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_core::event::SystemEventFactory;
+use obzenflow_core::journal::factory::FlowJournalFactory;
 #[cfg(test)]
 use obzenflow_core::StageId;
 use obzenflow_core::SystemId;
@@ -376,7 +376,11 @@ pub async fn readiness_and_start_consume_committed_pipeline_facts(
     ));
     ctx.progress.ready_announced = true;
     let event = SystemEventFactory::new(ctx.system_id).pipeline_ready_for_run(None);
-    let envelope = ctx.system_journal.append(event, None).await.unwrap();
+    let envelope = ctx
+        .system_journal
+        .append(event, Default::default())
+        .await
+        .unwrap();
     fsm.handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut ctx)
         .await
         .unwrap();
@@ -388,7 +392,11 @@ pub async fn readiness_and_start_consume_committed_pipeline_facts(
         .all(|action| matches!(action, PipelineAction::Publish { .. })));
     assert!(!ctx.progress.sources_authorised);
     let running = SystemEventFactory::new(ctx.system_id).pipeline_running();
-    let envelope = ctx.system_journal.append(running, None).await.unwrap();
+    let envelope = ctx
+        .system_journal
+        .append(running, Default::default())
+        .await
+        .unwrap();
     let actions = fsm
         .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut ctx)
         .await

@@ -5,38 +5,14 @@
 //! The manifest-4 record contract. Payload interpretation follows the descriptor;
 //! arbitrary application JSON is never used as an untagged decoder fallback.
 
+use super::envelope::{AuthoredEnvelope, EventEnvelope};
 use super::journal_event::JournalEvent;
-use super::payloads::chain_payload::{ChainPayload, EventKind};
-use super::provenance::{
-    AuthoredEnvelope, AuthoredProvenance, ChainEventProvenance, EventEnvelope, JournalProvenance,
-    Provenance, RecordProvenance, SystemEventProvenance,
-};
-use super::system_event::SystemPayload;
+use super::payloads::{ChainPayload, JournalPayload, SystemPayload};
+use super::provenance::{AuthoredProvenance, JournalProvenance, Provenance, RecordProvenance};
 use crate::event::CorrelationId;
 use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// Only Core's closed chain/system families can define journal decoding.
-pub trait JournalPayload:
-    sealed::Sealed + 'static + Clone + std::fmt::Debug + Serialize + Send + Sync
-{
-    type Event: JournalEvent<Payload = Self>;
-    type Provenance: 'static
-        + RecordProvenance
-        + Clone
-        + std::fmt::Debug
-        + Serialize
-        + DeserializeOwned
-        + Send
-        + Sync;
-    fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error>;
-    fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error>;
-}
 
 #[derive(Debug, Clone)]
 pub struct JournalRecord<P: JournalPayload> {
@@ -151,63 +127,6 @@ impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
     }
 }
 
-impl sealed::Sealed for ChainPayload {}
-impl JournalPayload for ChainPayload {
-    type Event = super::ChainEvent;
-    type Provenance = ChainEventProvenance;
-
-    fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error> {
-        ChainPayload::decode(provenance.event_kind, &provenance.event_type, payload)
-    }
-
-    fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
-        if self.kind() != provenance.event_kind
-            || self
-                .framework_event_type()
-                .is_some_and(|expected| expected != provenance.event_type)
-        {
-            return Err(descriptor_mismatch());
-        }
-        if let ChainPayload::Execution(
-            super::payloads::execution_payload::ExecutionPayload::SourcePollError(failure),
-        ) = self
-        {
-            use super::status::processing_status::ProcessingStatus;
-            match &provenance.processing.status {
-                ProcessingStatus::Error { kind, .. }
-                    if *kind == Some(failure.error_type.processing_error_kind()) => {}
-                _ => return Err(descriptor_mismatch()),
-            }
-        }
-        Ok(())
-    }
-}
-
-impl sealed::Sealed for SystemPayload {}
-impl JournalPayload for SystemPayload {
-    type Event = super::SystemEvent;
-    type Provenance = SystemEventProvenance;
-
-    fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error> {
-        if provenance.event_kind != EventKind::System {
-            return Err(descriptor_mismatch());
-        }
-        serde_json::from_value(payload)
-    }
-
-    fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error> {
-        if provenance.event_kind != EventKind::System || self.event_type() != provenance.event_type
-        {
-            return Err(descriptor_mismatch());
-        }
-        Ok(())
-    }
-}
-
-fn descriptor_mismatch() -> serde_json::Error {
-    <serde_json::Error as serde::de::Error>::custom("event descriptor does not match payload")
-}
-
 #[cfg(test)]
 mod tests;
 
@@ -247,7 +166,7 @@ impl JournalRecord<ChainPayload> {
     pub fn is_lifecycle(&self) -> bool {
         matches!(&self.payload, ChainPayload::Execution(execution) if !execution.consumes_data_credit())
     }
-    pub fn composite_activations(&self) -> &[super::context::CompositeActivationContext] {
+    pub fn composite_activations(&self) -> &[super::provenance::CompositeActivationContext] {
         &self.envelope.provenance.event.composite_activations
     }
     pub fn correlation_ids(&self) -> Option<&[CorrelationId]> {

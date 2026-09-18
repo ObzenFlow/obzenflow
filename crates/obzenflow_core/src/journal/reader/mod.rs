@@ -51,3 +51,8 @@ where
         false
     }
 }
+
+pub mod observations;
+pub use observations::{
+    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+};

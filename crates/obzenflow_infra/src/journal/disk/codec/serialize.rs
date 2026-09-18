@@ -5,8 +5,8 @@
 //! Stream hot framework structures without building a JSON object tree first.
 //! Both paths use the same field table, defaults and scalar wire encodings.
 
+use super::layout::{DefaultValue, Field, Kind};
 use super::primitives::{text, unsigned};
-use super::schema::{DefaultValue, Field, Kind};
 use super::values::{self, WriteDefinitions};
 use super::{invalid, Error, Result};
 use serde::ser::{Impossible, SerializeSeq, SerializeStruct, SerializeTuple, SerializeTupleStruct};

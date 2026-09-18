@@ -14,7 +14,9 @@ use obzenflow_core::ai::{
     AiMapReducePlanningManifest, ChunkEnvelope, ChunkPlanningConfig, ChunkPlanningError,
     ChunkPlanningSummary, ChunkRenderContext, OversizePolicy, TokenCount, TokenEstimator,
 };
-use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::event::observability::{
+    NoObservations, ObservationRecord, ObservationRecorder,
+};
 use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
 use obzenflow_core::event::payloads::execution_payload::{AiChunkingPlannedFact, ExecutionPayload};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -488,10 +490,10 @@ mod tests {
     use super::*;
     use crate::stages::common::handlers::TypedTransformHandlerAdapter;
     use obzenflow_core::ai::{ChatRequest, EstimateSource, OversizeExhaustion, TokenEstimate};
-    use obzenflow_core::event::context::CompositeActivationContext;
     use obzenflow_core::event::payloads::execution_payload::{
         AiChunkingPlannedFact, ExecutionPayload,
     };
+    use obzenflow_core::event::provenance::CompositeActivationContext;
     use obzenflow_core::{EventId, StageId, WriterId};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -5,17 +5,17 @@
 //! Metrics journal scenarios supplied with real journals by outer tests.
 
 pub use crate::metrics::tests::*;
-use obzenflow_core::event::context::ExecutionAccounting;
+use obzenflow_core::event::provenance::ExecutionAccounting;
 
-use crate::journal::FlowJournalFactory;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
 use obzenflow_fsm::FsmAction;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_coverage(
+pub async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::{MetricsCoordinationEvent, SystemEvent, SystemPayload};
@@ -37,8 +37,9 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
         MetricsAggregatorAction, MetricsAggregatorContext, MetricsJournalKind,
     };
     use crate::metrics::MetricsInputs;
+    use obzenflow_core::event::provenance::RuntimeProvenance;
     use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::{context::RuntimeProvenance, ChainEventFactory};
+    use obzenflow_core::event::ChainEventFactory;
 
     let mut journals = make_journals();
     let system_id = SystemId::new();
@@ -84,7 +85,10 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
                 },
             })
             .mark_as_error("expected", ErrorKind::Unknown);
-        rows.push((kind, target.append(event, None).await.unwrap()));
+        rows.push((
+            kind,
+            target.append(event, Default::default()).await.unwrap(),
+        ));
     }
     let exporter = Arc::new(RecordingSnapshots::default());
     let (mut context, mut io) = MetricsAggregatorContext::new(
@@ -106,12 +110,8 @@ pub async fn metrics_tail_refresh_keeps_counts_current_without_advancing_input_c
     {
         let snapshots = exporter.0.lock().unwrap();
         let snapshot = snapshots.last().unwrap();
-        assert_eq!(snapshot.event_counts[&stage], 2);
-        assert_eq!(snapshot.error_counts[&stage], 2);
-        assert_eq!(
-            snapshot.error_counts_by_kind[&stage][&ErrorKind::Unknown],
-            2
-        );
+        assert!(!snapshot.event_counts.contains_key(&stage));
+        assert!(!snapshot.error_counts.contains_key(&stage));
         assert!(snapshot.stage_vector_clocks.is_empty());
     }
     assert!(context.metrics_store.last_event_id.is_none());

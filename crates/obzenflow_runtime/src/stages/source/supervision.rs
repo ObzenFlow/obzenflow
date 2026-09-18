@@ -26,9 +26,11 @@ use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::context::MiddlewareExecutionScope;
 use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::SystemPayload;
+use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -125,7 +127,7 @@ pub(crate) async fn record_source_cleanup_failed(
             error: error.to_string(),
         },
     );
-    crate::supervised_base::publication::append(system_journal, event, None).await?;
+    crate::supervised_base::publication::append(system_journal, event, Default::default()).await?;
     Ok(())
 }
 
@@ -332,10 +334,18 @@ pub(crate) async fn drain_pending_outputs_sync(
             pending.event.processing.status,
             ProcessingStatus::Error { .. }
         ) {
-            let event = instrumentation.capture_runtime().attach_to(pending.event);
-            crate::supervised_base::publication::append(error_journal, event, None)
-                .await
-                .map_err(|e| format!("Failed to write event: {e}"))?;
+            let event = instrumentation
+                .capture_accounting()
+                .attach_to(pending.event);
+            crate::supervised_base::publication::append(
+                error_journal,
+                event,
+                AppendOptions::new(None).with_capture(
+                    instrumentation.journal_capture(Some(pending.scope), vec![(0, false)]),
+                ),
+            )
+            .await
+            .map_err(|e| format!("Failed to write event: {e}"))?;
             continue;
         }
 
@@ -393,10 +403,18 @@ where
             pending.event.processing.status,
             ProcessingStatus::Error { .. }
         ) {
-            let event = instrumentation.capture_runtime().attach_to(pending.event);
-            crate::supervised_base::publication::append(error_journal, event, None)
-                .await
-                .map_err(|e| format!("Failed to write event: {e}"))?;
+            let event = instrumentation
+                .capture_accounting()
+                .attach_to(pending.event);
+            crate::supervised_base::publication::append(
+                error_journal,
+                event,
+                AppendOptions::new(None).with_capture(
+                    instrumentation.journal_capture(Some(pending.scope), vec![(0, false)]),
+                ),
+            )
+            .await
+            .map_err(|e| format!("Failed to write event: {e}"))?;
             continue;
         }
 
@@ -533,8 +551,9 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             Ok(JournalRecord::new(JournalWriterId::new(), event))
         }
 
@@ -602,8 +621,9 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::new(), event);
             self.events
                 .lock()
@@ -924,7 +944,7 @@ mod tests {
             .read_all_unordered()
             .await
             .expect("read data journal");
-        use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+        use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
         assert!(
             appended.is_empty(),
             "waiting must not append measurement rows"

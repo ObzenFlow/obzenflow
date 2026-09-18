@@ -537,7 +537,7 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             if let Err(e) = crate::supervised_base::publication::append(
                                 &self.system_journal,
                                 started_event,
-                                None,
+                                Default::default(),
                             )
                             .await
                             {

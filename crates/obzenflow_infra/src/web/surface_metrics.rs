@@ -7,10 +7,10 @@
 //! The hosting layer maintains in-memory counters for low-overhead request accounting,
 //! The runtime capture owner offers bounded samples to its retained view for `/metrics`.
 
+use obzenflow_core::event::observability::{CaptureReason, ObservationRecord, ObservationRecorder};
 use obzenflow_core::event::observability::{
     HttpSurfaceMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
 };
-use obzenflow_core::event::observation::{CaptureReason, ObservationRecord, ObservationRecorder};
 use obzenflow_core::web::HttpMethod;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn emitter_skips_unchanged_samples_and_final_contention_is_optional() {
-        use obzenflow_core::event::observation::{
+        use obzenflow_core::event::observability::{
             CaptureReason, ObservationRecord, ObservationSource,
         };
         use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};

@@ -35,7 +35,8 @@ use obzenflow_core::event::{
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, TypedPayload, WriterId};
 use obzenflow_fsm::FsmAction;
@@ -226,8 +227,11 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        mut options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let event = options.capture.prepare(0, event);
+        let parent = options.parent;
+
         let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
 
         if let Some(parent) = parent {
@@ -601,7 +605,10 @@ async fn forwarding_uses_stage_name_in_running_and_draining_without_reauthoring(
             .with_runtime_provenance(
                 crate::metrics::instrumentation::StageInstrumentation::new().snapshot(),
             );
-        upstream.append(original.clone(), None).await.unwrap();
+        upstream
+            .append(original.clone(), Default::default())
+            .await
+            .unwrap();
         supervisor.dispatch_state(&state, &mut ctx).await.unwrap();
         let rows = data.read_causally_ordered().await.unwrap();
         let forwarded = rows
@@ -624,7 +631,10 @@ async fn forwarding_fan_out_keeps_independent_local_contexts() {
     let (right, right_ctx, _, _, right_id, _, _, right_data) =
         build_transform_harness(|_| FilterHandler, 1, 1).await;
     let original = ChainEventFactory::eof_event(WriterId::from(s), true);
-    let envelope = upstream.append(original.clone(), None).await.unwrap();
+    let envelope = upstream
+        .append(original.clone(), Default::default())
+        .await
+        .unwrap();
     left.forward_control_event(&envelope, &left_ctx.stage_name)
         .await
         .unwrap();
@@ -670,7 +680,7 @@ async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
 
     let input = ChainEventFactory::data_event(WriterId::from(s), "bp_test.in", json!({}));
     upstream_journal
-        .append(input, None)
+        .append(input, Default::default())
         .await
         .expect("append input");
 
@@ -732,7 +742,7 @@ async fn filter_transform_acks_upstream_even_with_zero_outputs() {
 
     let input = ChainEventFactory::data_event(WriterId::from(s), "bp_test.in", json!({}));
     upstream_journal
-        .append(input, None)
+        .append(input, Default::default())
         .await
         .expect("append input");
 
@@ -780,7 +790,7 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
                     FallibleTypedValue::versioned_event_type(),
                     json!({ "index": 0 }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append typed try-map input");
@@ -886,7 +896,7 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
                     "test.binding_fatal_input",
                     json!({ "value": 1 }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append binding-fatal input");
@@ -971,7 +981,7 @@ async fn transport_filtered_data_completes_one_physical_credit_without_handler_d
     upstream_journal
         .append(
             ChainEventFactory::data_event(WriterId::from(s), "bp_test.unselected", json!({})),
-            None,
+            Default::default(),
         )
         .await
         .expect("append unselected input");
@@ -1018,7 +1028,7 @@ async fn backpressure_ack_uses_subscription_upstream_stage_not_event_writer_id()
     // upstream journal produced the event.
     let input = ChainEventFactory::data_event(WriterId::from(t), "bp_test.in", json!({}));
     upstream_journal
-        .append(input, None)
+        .append(input, Default::default())
         .await
         .expect("append input");
 
@@ -1364,7 +1374,10 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
     u_writer.reserve(1).expect("reserve").commit(1);
 
     upstream_journal
-        .append(ChainEventFactory::eof_event(WriterId::from(s), true), None)
+        .append(
+            ChainEventFactory::eof_event(WriterId::from(s), true),
+            Default::default(),
+        )
         .await
         .expect("append eof");
 
@@ -1435,7 +1448,10 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
     u_writer.reserve(1).expect("reserve").commit(1);
 
     upstream_journal
-        .append(ChainEventFactory::drain_event(WriterId::from(s)), None)
+        .append(
+            ChainEventFactory::drain_event(WriterId::from(s)),
+            Default::default(),
+        )
         .await
         .expect("append drain");
 
@@ -1519,7 +1535,10 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
     let u_writer = registry.writer(u);
     u_writer.reserve(1).expect("reserve").commit(1);
     upstream_journal
-        .append(ChainEventFactory::eof_event(WriterId::from(s), true), None)
+        .append(
+            ChainEventFactory::eof_event(WriterId::from(s), true),
+            Default::default(),
+        )
         .await
         .expect("append eof");
     let running = TransformState::<FilterHandler>::Running;

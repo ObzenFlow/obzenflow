@@ -42,6 +42,26 @@ durable output, independently of metrics reporting output, and must report zero 
 
 Terminal lifecycle snapshots remain journaled when reporting is disabled. Studio receives final
 In/Out/Errors and duration through lifecycle SSE; detailed measurements come from `/metrics`.
+
+For storage-sensitive workloads, optional journal diagnostics can be throttled:
+
+```toml
+[runtime.observability]
+mode = "periodic"
+interval_ms = 250
+```
+
+The default is `mode = "every_record"`. Each data, error and system journal has its
+own allowance. At 250 ms, a journal carries at most four observability packets per
+second; slow journals can attach a packet to every record, and idle journals emit
+nothing. There is no freshness guarantee. Payloads, provenance, accounting and
+delivery receipts remain complete.
+
+Use `[runtime.observability.flow]` for flow overrides and
+`[runtime.observability.stages.<stage>]` for a stage's `mode` override. The interval
+is flow-wide. Environment equivalents are `OBZENFLOW_RUNTIME_OBSERVABILITY_MODE`
+and `OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS`. Changes apply on restart.
+
 Set `[metrics] enabled = true` or `false`; there is no provider selector. The retired
 `metrics.exporter` and `OBZENFLOW_METRICS_EXPORTER` settings are rejected, including Prometheus,
 noop, and console values. Console metrics reporting is removed. The `tokio-console` Cargo feature

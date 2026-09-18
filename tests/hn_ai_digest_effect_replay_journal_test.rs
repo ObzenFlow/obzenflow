@@ -9,7 +9,7 @@
 //! polled. The fixture compares the framework evidence and domain effect fact
 //! identities emitted by both runs.
 
-use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::observability::ObservationRecord;
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
 #[path = "../examples/hn_ai_digest_demo/decoder.rs"]
@@ -2691,6 +2691,21 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     };
     let config_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hn_ai_digest_demo/obzenflow.toml");
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config
+        .get_mut("runtime")
+        .unwrap()
+        .as_table_mut()
+        .unwrap()
+        .insert(
+            "observability".into(),
+            toml::toml! { mode = "periodic"
+            interval_ms = 250 }
+            .into(),
+        );
+    let config_path = temp.path().join("periodic-obzenflow.toml");
+    std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
     let production_provider = AiProvider::new("ollama");
     let production_target = ChatTarget::with_binding_fingerprint(
         production_provider.clone(),
@@ -2825,6 +2840,19 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
         "strict replay may start a fresh host fixture but must not poll it"
     );
     let replay_archive = latest_run_dir(&journal_base);
+    // Archived source attachments keep their original selection and stamps;
+    // replay speed cannot recapture or resample them.
+    let source_packets = |rows: Vec<JournalRecord<ChainPayload>>| {
+        rows.into_iter()
+            .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
+            .map(|row| serde_json::to_value(row.envelope.observability).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let live_packets = source_packets(stage_envelopes(&live_archive, "hn_stories").await);
+    let replay_packets = source_packets(stage_envelopes(&replay_archive, "hn_stories").await);
+    assert!(live_packets.iter().any(|packet| !packet.is_null()));
+    assert!(live_packets.iter().any(serde_json::Value::is_null));
+    assert_eq!(replay_packets, live_packets);
     let replay_map = stage_envelopes(&replay_archive, "digest__map").await;
     let replay_finalise = stage_envelopes(&replay_archive, "digest__finalize").await;
     let replay_digest_summary = stage_envelopes(&replay_archive, "digest_summary").await;

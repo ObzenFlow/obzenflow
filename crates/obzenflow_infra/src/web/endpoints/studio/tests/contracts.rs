@@ -7,7 +7,7 @@ use super::super::*;
 use super::stream::{collect_closing, frame_payload, frames};
 use crate::journal::MemoryJournal;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
-use obzenflow_core::event::system_event::{
+use obzenflow_core::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, MetricsCoordinationEvent, PipelineLifecycleEvent,
     SystemFeedRole,
 };
@@ -101,7 +101,7 @@ async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemJ
                     advertised_writer_seq: Some(SeqNo(9)),
                 },
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap()
@@ -164,7 +164,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                 writer,
                 SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Ready),
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -184,7 +184,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                     advertised_writer_seq: Some(SeqNo(9)),
                 },
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -194,7 +194,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                 writer,
                 SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
             ),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();

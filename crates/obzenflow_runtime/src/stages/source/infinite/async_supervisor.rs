@@ -587,7 +587,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                             if let Err(e) = crate::supervised_base::publication::append(
                                 &self.system_journal,
                                 started_event,
-                                None,
+                                Default::default(),
                             )
                             .await
                             {
@@ -748,7 +748,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                                     if let Err(e) = crate::supervised_base::publication::append(
                                         &self.system_journal,
                                         resumed_live,
-                                        None,
+                                        Default::default(),
                                     )
                                     .await
                                     {

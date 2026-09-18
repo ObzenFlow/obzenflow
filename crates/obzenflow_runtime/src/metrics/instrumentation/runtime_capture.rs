@@ -5,17 +5,34 @@
 //! Record-boundary capture, split into protected accounting and optional diagnostics.
 
 use super::StageInstrumentation;
-use obzenflow_core::event::context::{
-    ExecutionAccounting, ExecutionProgress, RuntimeProvenance, RuntimeSnapshot,
+use obzenflow_core::event::observability::{
+    CaptureReason, ExecutionProgress, ObservabilityContext, RuntimeSnapshot,
 };
-use obzenflow_core::event::observation::{CaptureReason, ObservabilityContext};
+use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeCapture {
     pub accounting: ExecutionAccounting,
     pub observation: Option<RuntimeSnapshot>,
+}
+
+pub(crate) struct CaptureProjection {
+    pub emitted: u64,
+    pub measurements: bool,
+    pub last_emission: Option<(obzenflow_core::EventId, obzenflow_core::WriterId)>,
+}
+
+impl From<(u64, bool)> for CaptureProjection {
+    fn from((emitted, measurements): (u64, bool)) -> Self {
+        Self {
+            emitted,
+            measurements,
+            last_emission: None,
+        }
+    }
 }
 
 impl RuntimeCapture {
@@ -38,26 +55,74 @@ impl RuntimeCapture {
             None => event,
         }
     }
-
-    pub fn for_group_member(
-        &self,
-        instrumentation: &StageInstrumentation,
-        scope: MiddlewareExecutionScope,
-    ) -> Self {
-        let mut member = self.clone();
-        member.observation = member.observation.and_then(|mut snapshot| {
-            let owner = instrumentation.observation_owner.get()?;
-            let packet = owner.capture_in_scope(CaptureReason::Record, scope)?;
-            snapshot.capture.capture_seq = packet.capture.capture_seq;
-            Some(snapshot)
-        });
-        member
-    }
 }
 
 impl StageInstrumentation {
+    pub(crate) fn capture_accounting(&self) -> RuntimeCapture {
+        RuntimeCapture {
+            accounting: self.snapshot().accounting,
+            observation: None,
+        }
+    }
+
+    /// The journal invokes this only for admitted attachments. Accounting was
+    /// already stamped at the publication boundary and is never sampled.
+    pub(crate) fn journal_capture<P: Into<CaptureProjection>>(
+        self: &Arc<Self>,
+        scope: Option<MiddlewareExecutionScope>,
+        projections: Vec<P>,
+    ) -> obzenflow_core::journal::JournalCapture<ChainEvent> {
+        use obzenflow_core::journal::JournalCapture;
+        let scope = scope.unwrap_or_else(|| {
+            if self
+                .observation_owner
+                .get()
+                .is_some_and(|owner| !owner.measurements_allowed())
+            {
+                MiddlewareExecutionScope::StrictReplayHandler
+            } else {
+                MiddlewareExecutionScope::LiveHandler
+            }
+        });
+        if scope.is_deterministic_replay() {
+            return JournalCapture::Historical;
+        }
+        let instrumentation = self.clone();
+        let projections: Vec<CaptureProjection> = projections.into_iter().map(Into::into).collect();
+        JournalCapture::Live(Some(Box::new(move |index, event| {
+            let projection = &projections[index];
+            let mut packet = event.envelope.observability.clone();
+            if projection.measurements {
+                let captured = instrumentation.capture_for_record_in_scope(scope);
+                if packet.is_none() {
+                    packet = captured;
+                }
+            }
+            let capture = instrumentation.capture_runtime_in_scope(scope);
+            if let Some(mut snapshot) = capture.observation {
+                if projection.emitted > 0 {
+                    snapshot.progress.writer_seq = snapshot
+                        .progress
+                        .writer_seq
+                        .saturating_add(projection.emitted);
+                    let (id, writer) = projection
+                        .last_emission
+                        .unwrap_or((event.id, event.writer_id));
+                    snapshot.progress.last_emitted_event_id = Some(id);
+                    snapshot.progress.last_emitted_writer = Some(writer);
+                }
+                let stamp = snapshot.capture;
+                packet
+                    .get_or_insert_with(|| ObservabilityContext::new(stamp))
+                    .runtime_snapshot = Some(snapshot);
+            }
+            packet
+        })))
+    }
+
     /// Preserve the existing per-record capture boundary. Missing observation
     /// ownership or contended diagnostic locks cannot hide factual accounting.
+    #[cfg(test)]
     pub(crate) fn capture_runtime(&self) -> RuntimeCapture {
         let packet = self
             .observation_owner
@@ -119,8 +184,9 @@ impl StageInstrumentation {
 mod tests {
     use super::*;
     use crate::execution::{RuntimeExecution, RuntimeMode};
-    use obzenflow_core::event::context::RuntimeObservability;
-    use obzenflow_core::event::observation::{CaptureSeq, ObservationSource};
+    use obzenflow_core::event::observability::{
+        CaptureSeq, ObservationSource, RuntimeObservability,
+    };
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{FlowId, StageId};
     use std::sync::Arc;

@@ -6,7 +6,7 @@ use crate::ai::{
     AiProvider, TokenEstimate, TokenEstimatorResolutionInfo, Usage, LLM_HASH_VERSION_SHA256_V1,
 };
 use crate::event::chain_event::ChainEvent;
-use crate::event::observation::{CaptureStamp, ObservabilityContext, ObservationRecord};
+use crate::event::observability::{CaptureStamp, ObservabilityContext, ObservationRecord};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,7 +143,7 @@ mod tests {
     }
 
     fn capture(observer: WriterId) -> CaptureStamp {
-        use crate::event::observation::{CaptureReason, CaptureScope, CaptureSeq};
+        use crate::event::observability::{CaptureReason, CaptureScope, CaptureSeq};
         CaptureStamp {
             capture_scope: CaptureScope {
                 flow_id: FlowId::new(),

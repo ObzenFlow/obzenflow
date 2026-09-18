@@ -192,6 +192,21 @@ impl CandidateSet {
             });
         }
 
+        if key_path == "runtime.observability.interval_ms" {
+            if let ConfigValue::U64(milliseconds) = &value {
+                if std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(*milliseconds))
+                    .is_none()
+                {
+                    return Err(ConfigResolveError::InvalidValue {
+                        key_path,
+                        address,
+                        message: "interval exceeds the monotonic timer range".into(),
+                    });
+                }
+            }
+        }
+
         let slots = self
             .by_knob
             .entry(key_path.clone())
@@ -266,6 +281,7 @@ pub fn address_admitted(target: KnobTarget, address: &ConfigAddress) -> bool {
         KnobTarget::Global => 0,
         KnobTarget::Flow => 1,
         KnobTarget::Stage
+        | KnobTarget::FlowAndStage
         | KnobTarget::StageConsumer
         | KnobTarget::Effect
         | KnobTarget::StageOrEffect => 2,

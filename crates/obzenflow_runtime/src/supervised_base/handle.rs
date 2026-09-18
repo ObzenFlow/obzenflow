@@ -275,7 +275,7 @@ where
             .supervisor_abort
             .publications
             .enqueue_control(async move {
-                journal.append(event, None).await?;
+                journal.append(event, Default::default()).await?;
                 Ok(())
             }) {
             Err(error) if error.is::<super::publication::AdmissionClosed>() => Ok(()),

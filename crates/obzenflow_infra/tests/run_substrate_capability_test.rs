@@ -12,12 +12,12 @@ use obzenflow_adapters::middleware::{
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
 };
+use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_core::{FlowId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::{
     disk_journals, memory_journals, DiskJournalFactory, MemoryJournalFactory,
 };
-use obzenflow_runtime::journal::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
 use obzenflow_runtime::stages::observer::StageLifecycleObserver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

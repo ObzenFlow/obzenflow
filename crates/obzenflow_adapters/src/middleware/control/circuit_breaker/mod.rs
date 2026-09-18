@@ -13,7 +13,7 @@ use crate::middleware::{
     MiddlewareAbortCause, MiddlewareContext,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::observability::ObservationRecord;
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitBreakerRejectionReason, ExecutionPayload,
 };

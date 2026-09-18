@@ -10,7 +10,7 @@
 use super::subscription_poller::{PollResult, SubscriptionPoller};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent};
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::JournalRecord;
 use std::any::Any;
 

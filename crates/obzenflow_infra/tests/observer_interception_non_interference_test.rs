@@ -11,8 +11,8 @@ mod fixture;
 
 use fixture::{build_flow, ObserverTreatment, Probe, ProbeSnapshot, ORDER_COUNT};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
+use obzenflow_core::journal::archive::manifest::{RunManifest, RUN_MANIFEST_FILENAME};
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::run_manifest::{RunManifest, RUN_MANIFEST_FILENAME};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_infra::application::FlowApplication;

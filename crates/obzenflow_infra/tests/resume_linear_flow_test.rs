@@ -25,8 +25,8 @@ use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{
     ChainPayload, JournalRecord, ReplayLifecycleEvent, SystemEvent, SystemPayload,
 };
+use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{SystemId, TypedPayload};
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
@@ -309,7 +309,7 @@ async fn run_memory_replay_to_completion(first_n: u64, count: u64, expected: u64
     assert!(
         matches!(
             handle.run_substrate(),
-            obzenflow_runtime::journal::RunSubstrateState::Ephemeral
+            obzenflow_core::journal::factory::RunSubstrateState::Ephemeral
         ),
         "a memory run must report Ephemeral"
     );

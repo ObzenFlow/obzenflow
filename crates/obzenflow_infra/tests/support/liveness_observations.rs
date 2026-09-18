@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
 use obzenflow_core::event::EdgeLivenessState;
 use obzenflow_core::StageId;
 use std::sync::{Arc, Mutex};

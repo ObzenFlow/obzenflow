@@ -11,10 +11,11 @@
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
 use crate::stages::common::supervision::suspension::suspend_until;
-use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::{ChainEventFactory, JournalRecord};
 use obzenflow_core::journal::Journal;
@@ -459,9 +460,16 @@ async fn emit_stalled_fact(
         }),
     )
     .with_flow_context(flow_context.clone());
-    let event = instrumentation.capture_runtime().attach_to(event);
+    let event = instrumentation.capture_accounting().attach_to(event);
 
-    if let Err(e) = crate::supervised_base::publication::append(data_journal, event, None).await {
+    if let Err(e) = crate::supervised_base::publication::append(
+        data_journal,
+        event,
+        AppendOptions::new(None)
+            .with_capture(instrumentation.journal_capture(None, vec![(0, false)])),
+    )
+    .await
+    {
         tracing::warn!(
             journal_error = %e,
             "Failed to append backpressure.stalled fact"

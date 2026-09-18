@@ -405,7 +405,7 @@ mod tests {
             });
         let mut adapter = adapted(handler).await;
         let mut replayed = event(1);
-        replayed.replay_context = Some(obzenflow_core::event::context::ReplayContext {
+        replayed.replay_context = Some(obzenflow_core::event::provenance::ReplayContext {
             original_event_id: obzenflow_core::EventId::new(),
             original_flow_id: "flow_01SOURCE".to_string(),
             original_stage_id: StageId::new(),

@@ -28,12 +28,12 @@ use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetric
 #[cfg(feature = "warp-server")]
 use crate::web::RuntimeInstanceId;
 use obzenflow_adapters::monitoring::MetricsReadModel;
+use obzenflow_core::journal::factory::CurrentRunLocator;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
-use obzenflow_runtime::journal::CurrentRunLocator;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;

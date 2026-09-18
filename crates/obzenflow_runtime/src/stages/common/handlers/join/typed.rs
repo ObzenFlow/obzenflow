@@ -9,8 +9,8 @@ use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use async_trait::async_trait;
 use obzenflow_core::config::LineagePolicy;
-use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, OneFactStageOutput, StageId, TypedPayload, WriterId};
 use std::collections::HashMap;
@@ -362,7 +362,7 @@ where
 mod tests {
     use super::*;
     use crate::stages::join::StrictJoinBuilder;
-    use obzenflow_core::event::context::CompositeActivationContext;
+    use obzenflow_core::event::provenance::CompositeActivationContext;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::id::CompositeId;
     use obzenflow_core::{OneFactStageOutput, StageOutputFacts};

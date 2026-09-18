@@ -28,7 +28,8 @@ use obzenflow_core::event::{
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{FlowId, JournalRecord, MiddlewareExecutionScope, SccId, StageId, WriterId};
 use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
@@ -586,8 +587,13 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+        let events = events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| options.capture.prepare(index, event))
+            .collect::<Vec<_>>();
         assert_eq!(
             self.writer.min_downstream_credit(),
             self.expected_credit_at_append
@@ -602,8 +608,9 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         let credit = self.writer.min_downstream_credit();
         assert_eq!(credit, self.expected_credit_at_append);
 
@@ -710,8 +717,9 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&JournalRecord<T::Payload>>,
+        mut options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         if let Some(gate) = &self.append_gate {
             gate.entered.notify_one();
             gate.release.notified().await;
@@ -765,8 +773,8 @@ async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_a
     use super::output_committer::{CommitOptions, OutputCommitter};
     use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::metrics::instrumentation::snapshot_stage_accounting;
-    use obzenflow_core::event::context::RuntimeObservability;
-    use obzenflow_core::event::observation::*;
+    use obzenflow_core::event::observability::RuntimeObservability;
+    use obzenflow_core::event::observability::*;
 
     let stage = StageId::new();
     let flow = FlowId::new();
@@ -970,7 +978,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     };
     use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::supervised_base::publication::PublicationScope;
-    use obzenflow_core::event::observation::ObservationSource;
+    use obzenflow_core::event::observability::ObservationSource;
 
     use std::sync::atomic::Ordering;
     let (stage, writer) = make_writer_with_window(NonZeroU64::new(2).unwrap());
@@ -1038,6 +1046,11 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
                         intent: StageAppendIntent::NormalStageData,
                     });
                 }
+                entries.push(AtomicCommitEntry {
+                    event: ChainEventFactory::eof_event(stage.into(), true),
+                    options: CommitOptions::default(),
+                    intent: StageAppendIntent::NonDataStageFact,
+                });
                 committer
                     .commit_atomic_group("atomic-accounting", entries, None)
                     .await
@@ -1047,23 +1060,26 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
         .await
         .unwrap();
-    assert_eq!(journal.appended().len(), 3);
+    assert_eq!(journal.appended().len(), 4);
     let rows = journal.appended();
     let selected = crate::metrics::observations::ObservationHub::default();
     let mut previous_capture = None;
     for (index, row) in rows.iter().enumerate() {
         let packet = row.envelope.observability.as_ref().unwrap();
         let snapshot = packet.runtime_snapshot.as_ref().unwrap();
-        assert_eq!(snapshot.progress.writer_seq, index as u64);
+        assert_eq!(snapshot.progress.writer_seq, index.min(2) as u64);
         if index > 0 {
-            assert_eq!(snapshot.progress.last_emitted_event_id, Some(row.id));
+            assert_eq!(
+                snapshot.progress.last_emitted_event_id,
+                Some(rows[index.min(2)].id)
+            );
         }
         if let Some(previous) = previous_capture {
             assert!(snapshot.capture.capture_seq > previous);
         }
         previous_capture = Some(snapshot.capture.capture_seq);
         let accounting = &row.runtime.as_ref().unwrap().accounting;
-        assert_eq!(accounting.events_emitted_total, index as u64);
+        assert_eq!(accounting.events_emitted_total, index.min(2) as u64);
         selected.select_recorded(packet.clone()).unwrap();
     }
     let snapshot = selected
@@ -1102,7 +1118,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
 async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
     use crate::execution::{RuntimeExecution, RuntimeMode};
     use crate::supervised_base::publication::{is_indeterminate, PublicationScope};
-    use obzenflow_core::event::observation::ObservationSource;
+    use obzenflow_core::event::observability::ObservationSource;
     use std::sync::atomic::Ordering;
     for result in [
         CommitResult::Committed,

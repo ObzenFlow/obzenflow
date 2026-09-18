@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use obzenflow_core::journal::run_manifest::RunManifest;
+use obzenflow_core::journal::archive::manifest::RunManifest;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageCertification {
@@ -96,7 +96,7 @@ fn collect_blocking(
 mod tests {
     use super::*;
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::journal::run_manifest::RunManifestStage;
+    use obzenflow_core::journal::archive::manifest::RunManifestStage;
     use std::collections::HashMap as StdHashMap;
 
     fn manifest(stages: &[(&str, &[&str], bool)]) -> RunManifest {
@@ -117,9 +117,10 @@ mod tests {
             );
         }
         RunManifest {
-            manifest_version: obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION
+            manifest_version: obzenflow_core::journal::archive::manifest::RUN_MANIFEST_VERSION
                 .to_string(),
-            journal_format_version: obzenflow_core::journal::run_manifest::JOURNAL_FORMAT_VERSION,
+            journal_format_version:
+                obzenflow_core::journal::archive::manifest::JOURNAL_FORMAT_VERSION,
             obzenflow_version: "0.1.2".to_string(),
             flow_id: "flow_test".to_string(),
             flow_name: "test".to_string(),

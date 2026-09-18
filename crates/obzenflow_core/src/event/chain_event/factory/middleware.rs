@@ -7,12 +7,12 @@ use crate::event::chain_event::{
     ChainEvent, CircuitBreakerAttemptSettledEventParams, CircuitBreakerOpenedEventParams,
     CircuitBreakerRecoveryCompletedEventParams,
 };
-use crate::event::context::causality_context::CausalityContext;
 use crate::event::payloads::effect_payload::EffectCursor;
 use crate::event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload};
 use crate::event::payloads::execution_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
 };
+use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::types::{EventId, WriterId};
 
 impl ChainEventFactory {

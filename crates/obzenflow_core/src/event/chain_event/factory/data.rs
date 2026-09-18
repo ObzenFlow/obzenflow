@@ -4,7 +4,7 @@
 
 use super::ChainEventFactory;
 use crate::config::LineagePolicy;
-use crate::event::context::causality_context::CausalityContext;
+use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::types::WriterId;
 use crate::event::{ChainEvent, ChainPayload};
 use serde_json::Value;

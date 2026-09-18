@@ -15,7 +15,7 @@
 //! and the catch-up-to-live transition is announced on the `ReplayLifecycle`
 //! system-event channel rather than by mutating this value mid-run.
 
-use obzenflow_core::journal::run_manifest::RUN_MANIFEST_FILENAME;
+use obzenflow_core::journal::archive::manifest::RUN_MANIFEST_FILENAME;
 use std::path::{Path, PathBuf};
 
 /// How this process is executing the flow, resolved once at startup.

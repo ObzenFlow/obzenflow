@@ -15,7 +15,7 @@
 //! handle, without changing the read-only query trait below.
 
 use crate::metrics::observations::ObservationHub;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::{FlowId, WriterId};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,7 @@ use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::{MiddlewareExecutionScope, ReaderGeneration, StageId};
 
 use crate::messaging::upstream_subscription::StageInputPosition;
-use crate::replay::ReplayArchive;
+use obzenflow_core::journal::archive::ReplayArchive;
 
 /// The operator's run verb. This is the only input that picks a strategy.
 ///

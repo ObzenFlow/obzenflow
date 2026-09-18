@@ -27,7 +27,7 @@ async fn debug_flight_delays_issue() {
     let writer_id = WriterId::from(StageId::new());
     let event = ChainEventFactory::data_event(writer_id, "test.event", json!({"test": "data"}));
 
-    match journal.append(event, None).await {
+    match journal.append(event, Default::default()).await {
         Ok(_) => println!("✅ Journal append successful!"),
         Err(e) => {
             println!("❌ Journal append failed: {e}");
@@ -53,7 +53,7 @@ async fn debug_flight_delays_issue() {
                     "test": "concurrent_write"
                 }),
             );
-            journal_clone.append(event, None).await
+            journal_clone.append(event, Default::default()).await
         });
         handles.push(handle);
     }

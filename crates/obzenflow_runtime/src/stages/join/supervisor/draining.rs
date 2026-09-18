@@ -11,6 +11,7 @@ use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -423,7 +424,7 @@ pub(super) async fn dispatch_draining<
                                 crate::supervised_base::publication::append(
                                     &ctx.error_journal,
                                     error_event,
-                                    Some(&merged_parent),
+                                    AppendOptions::new(Some(&merged_parent)),
                                 )
                                 .await
                                 .map_err(|e| {

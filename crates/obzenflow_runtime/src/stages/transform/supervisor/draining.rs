@@ -21,8 +21,10 @@ use crate::stages::observer::dispatch::{
     run_after_handler_observers, run_before_handler_observers,
 };
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 
@@ -381,7 +383,7 @@ async fn dispatch_draining_inner<
                     crate::supervised_base::publication::append(
                         &ctx.error_journal,
                         event,
-                        Some(&envelope),
+                        AppendOptions::new(Some(&envelope)),
                     )
                     .await
                     .map_err(|e| format!("Failed to write error event during drain: {e}"))?;

@@ -10,7 +10,7 @@ use crate::effects::{EffectBoundary, EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use async_trait::async_trait;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::{TypedFact, TypedPayload};
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{ChainEvent, JournalRecord, OneFactStageOutput, WriterId};

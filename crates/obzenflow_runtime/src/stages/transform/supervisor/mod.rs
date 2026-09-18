@@ -24,7 +24,7 @@ use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, JournalRecord, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
@@ -442,14 +442,22 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
                 let error_event = ctx
                     .instrumentation
-                    .capture_runtime()
+                    .capture_accounting()
                     .attach_to((*error_event).with_flow_context(flow_context));
 
                 let journal = ctx.error_journal.clone();
                 let parent = envelope.clone();
                 let instrumentation = ctx.instrumentation.clone();
                 crate::supervised_base::publication::commit(async move {
-                    journal.append(error_event, Some(&parent)).await?;
+                    journal
+                        .append(
+                            error_event,
+                            obzenflow_core::journal::AppendOptions::new(Some(&parent))
+                                .with_capture(
+                                    instrumentation.journal_capture(None, vec![(0, false)]),
+                                ),
+                        )
+                        .await?;
                     instrumentation.record_error(
                         obzenflow_core::event::status::processing_status::ErrorKind::Unknown,
                     );

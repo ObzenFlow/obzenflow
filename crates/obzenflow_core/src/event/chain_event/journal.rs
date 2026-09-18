@@ -3,8 +3,9 @@
 // https://obzenflow.dev
 
 use super::ChainEvent;
+use crate::event::envelope::AuthoredEnvelope;
 use crate::event::journal_event::{JournalEvent, Sealed};
-use crate::event::provenance::{AuthoredEnvelope, ChainEventProvenance};
+use crate::event::provenance::ChainEventProvenance;
 use crate::event::types::{AdmissionSeq, EventId, WriterId};
 use crate::event::ChainPayload;
 

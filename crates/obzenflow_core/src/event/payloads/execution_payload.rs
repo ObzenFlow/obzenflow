@@ -9,8 +9,8 @@ use super::effect_payload::{
 };
 
 use crate::ai::{ChunkExclusionReason, ChunkPlanningSummary, OversizePolicy};
-use crate::event::context::ExecutionAccounting;
 use crate::event::observability::{HttpPullState, WaitReason};
+use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::StageId;
 use serde::{Deserialize, Serialize};

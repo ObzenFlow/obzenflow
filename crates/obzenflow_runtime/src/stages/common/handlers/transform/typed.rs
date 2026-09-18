@@ -8,7 +8,9 @@ use super::traits::TransformHandler;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::observation::{NoObservations, ObservationRecord, ObservationRecorder};
+use obzenflow_core::event::observability::{
+    NoObservations, ObservationRecord, ObservationRecorder,
+};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason};

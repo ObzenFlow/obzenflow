@@ -65,7 +65,7 @@ pub(crate) async fn record_terminal_commands<E: ExternalControlEvent>(
                     error,
                 },
             );
-            system_journal.append(fact, None).await?;
+            system_journal.append(fact, Default::default()).await?;
         }
         Ok(())
     })

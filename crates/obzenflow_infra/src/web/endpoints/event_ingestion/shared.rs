@@ -259,7 +259,7 @@ impl IngestionState {
         );
         writer
             .journal
-            .append(event, None)
+            .append(event, Default::default())
             .await
             .map(|_| ())
             .map_err(|e| {

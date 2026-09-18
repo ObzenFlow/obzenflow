@@ -9,12 +9,14 @@
 //! start emitting events until the pipeline is ready.
 
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::Count;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, ConsumptionFinalEventParams, SystemEvent,
 };
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
@@ -474,7 +476,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
-                let runtime_context = ctx.instrumentation.capture_runtime();
+                let runtime_context = ctx.instrumentation.capture_accounting();
                 let (authored_writer_seq, writer_seq_by_event_type, authored_last_event_id) =
                     ctx.instrumentation.authored_data_frontier();
 
@@ -503,11 +505,16 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 };
                 eof_event = runtime_context.attach_to(eof_event);
 
-                crate::supervised_base::publication::append(&ctx.data_journal, eof_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
-                    })?;
+                crate::supervised_base::publication::append(
+                    &ctx.data_journal,
+                    eof_event,
+                    AppendOptions::new(None)
+                        .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!("Failed to send EOF: {e}"))
+                })?;
 
                 let mut final_event = ChainEventFactory::consumption_final_event(
                     writer_id,
@@ -530,15 +537,23 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::InfiniteSource,
                 };
-                final_event = ctx.instrumentation.capture_runtime().attach_to(final_event);
+                final_event = ctx
+                    .instrumentation
+                    .capture_accounting()
+                    .attach_to(final_event);
 
-                crate::supervised_base::publication::append(&ctx.data_journal, final_event, None)
-                    .await
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to send source consumption_final: {e}"
-                        ))
-                    })?;
+                crate::supervised_base::publication::append(
+                    &ctx.data_journal,
+                    final_event,
+                    AppendOptions::new(None)
+                        .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to send source consumption_final: {e}"
+                    ))
+                })?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -579,7 +594,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 match crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     system_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {
@@ -635,7 +650,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 if let Err(e) = crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     running_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {
@@ -684,7 +699,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 if let Err(e) = crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     completion_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {

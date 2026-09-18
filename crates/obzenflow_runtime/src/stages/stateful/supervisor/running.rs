@@ -33,6 +33,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -533,7 +534,7 @@ pub(super) async fn dispatch_accumulating<
                             crate::supervised_base::publication::append(
                                 &ctx.error_journal,
                                 error_event,
-                                Some(&envelope),
+                                AppendOptions::new(Some(&envelope)),
                             )
                             .await
                             .map_err(|e| {
@@ -550,12 +551,14 @@ pub(super) async fn dispatch_accumulating<
                             );
                             let enriched_error = ctx
                                 .instrumentation
-                                .capture_runtime()
+                                .capture_accounting()
                                 .attach_to(error_event.with_flow_context(flow_ctx));
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,
-                                Some(&envelope),
+                                AppendOptions::new(Some(&envelope)).with_capture(
+                                    ctx.instrumentation.journal_capture(None, vec![(0, false)]),
+                                ),
                             )
                             .await
                             .map_err(|e| {

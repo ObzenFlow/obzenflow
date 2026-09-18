@@ -30,9 +30,10 @@ use crate::stages::transform::fsm::{
     TransformEvent,
 };
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{ChainEvent, JournalRecord, MiddlewareExecutionScope, StageId};
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -319,7 +320,7 @@ async fn finish_success<
             if let Err(error) = crate::supervised_base::publication::append(
                 &ctx.error_journal,
                 event,
-                Some(&continuation.envelope),
+                AppendOptions::new(Some(&continuation.envelope)),
             )
             .await
             {

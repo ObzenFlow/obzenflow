@@ -402,7 +402,7 @@ mod tests {
         EffectCursor, EffectDescriptor, EffectProvenance,
     };
     use obzenflow_core::event::ChainEvent;
-    use obzenflow_core::journal::run_manifest::{
+    use obzenflow_core::journal::archive::manifest::{
         RunManifest, RunManifestReplayConfig, RunManifestStage, RUN_MANIFEST_VERSION,
     };
     use obzenflow_core::journal::ArchiveStatus;
@@ -460,7 +460,8 @@ mod tests {
         }
         RunManifest {
             manifest_version: RUN_MANIFEST_VERSION.to_string(),
-            journal_format_version: obzenflow_core::journal::run_manifest::JOURNAL_FORMAT_VERSION,
+            journal_format_version:
+                obzenflow_core::journal::archive::manifest::JOURNAL_FORMAT_VERSION,
             obzenflow_version: "0.1.2".to_string(),
             flow_id: flow_id.to_string(),
             flow_name: "test_flow".to_string(),

@@ -4,20 +4,21 @@
 
 use super::*;
 use crate::ai::{AiProvider, LlmHashes, LlmObservability};
-use crate::event::context::causality_context::CausalityContext;
-use crate::event::context::{
-    CompositeActivationContext, ExecutionProgress, FlowContext, RuntimeObservability,
-    RuntimeProvenance, RuntimeSnapshot,
-};
-use crate::event::event_envelope::JournalGroupMember;
-use crate::event::observation::{
-    CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ObservabilityContext,
+use crate::event::observability::{
+    CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ExecutionProgress, ObservabilityContext,
+    RuntimeObservability, RuntimeSnapshot,
 };
 use crate::event::payloads::execution_payload::ExecutionPayload;
+use crate::event::payloads::system_payload::StageLifecycleEvent;
+use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::provenance::{AuthoredProvenance, ProcessingProvenance};
+use crate::event::provenance::{ChainEventProvenance, SystemEventProvenance};
+use crate::event::provenance::{
+    CompositeActivationContext, FlowContext, JournalGroupMember, RuntimeProvenance,
+};
 use crate::event::status::processing_status::ProcessingStatus;
-use crate::event::system_event::StageLifecycleEvent;
 use crate::event::vector_clock::VectorClock;
+use crate::event::EventKind;
 use crate::id::{CompositeId, FlowId, SystemId};
 use crate::{ChainEvent, EventId, JournalWriterId, ReaderGeneration, StageId, WriterId};
 use chrono::{TimeZone, Utc};
@@ -309,7 +310,7 @@ fn unknown_observation_fields_do_not_become_unrestricted_json() {
 
 #[test]
 fn invalid_or_oversized_observations_are_omitted_without_changing_the_committed_fact() {
-    use crate::event::observation::ObservationRecord;
+    use crate::event::observability::ObservationRecord;
     for record in [
         ObservationRecord::ResourceUsage {
             cpu_percent: f64::NAN,
@@ -350,7 +351,7 @@ fn invalid_or_oversized_observations_are_omitted_without_changing_the_committed_
 
 #[test]
 fn malformed_timing_omits_only_its_family_and_measured_zero_remains_present() {
-    use crate::event::context::{MeasurementWindow, TimingMeasurements};
+    use crate::event::observability::{MeasurementWindow, TimingMeasurements};
     let original = chain_record(ChainPayload::Fact(Value::Null), "example.null");
     let journal = original.envelope.provenance.journal.clone();
     let mut authored = original.into_authored();

@@ -266,7 +266,7 @@ mod tests {
         journal
             .append(
                 SystemEvent::new(writer_id, SystemPayload::PipelineLifecycle(event)),
-                None,
+                Default::default(),
             )
             .await
             .expect("append lifecycle event");

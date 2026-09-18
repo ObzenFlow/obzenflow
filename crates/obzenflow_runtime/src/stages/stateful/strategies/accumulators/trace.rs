@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::context::causality_context::CausalityContext;
-use obzenflow_core::event::context::composite_activation_context::union_composite_activations;
-use obzenflow_core::event::context::{CompositeActivationContext, ReplayContext};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
+use obzenflow_core::event::provenance::causality_context::CausalityContext;
+use obzenflow_core::event::provenance::composite_activation_context::union_composite_activations;
+use obzenflow_core::event::provenance::{CompositeActivationContext, ReplayContext};
 use obzenflow_core::event::types::{CorrelationId, EventId};
 use obzenflow_core::ChainEvent;
 use serde::{Deserialize, Serialize};

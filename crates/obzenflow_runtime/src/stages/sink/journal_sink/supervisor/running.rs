@@ -29,14 +29,15 @@ use crate::stages::observer::dispatch::run_sink_delivery_observers;
 use crate::stages::observer::{SinkDeliveryAttemptResult, SinkDeliveryObserverOutcome};
 use crate::supervised_base::EventLoopDirective;
 use futures::FutureExt;
-use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryPayload, DeliveryResult,
 };
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, MiddlewareFact};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
@@ -778,6 +779,7 @@ async fn journal_policy_evidence<
     ctx: &mut JournalSinkContext<H>,
     parent: &JournalRecord<ChainPayload>,
     batch: SinkPolicyEvidenceBatch,
+    scope: MiddlewareExecutionScope,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
         .writer_id
@@ -802,10 +804,16 @@ async fn journal_policy_evidence<
                 .with_correlation_from(&parent.authored())
                 .with_cycle_state_from(&parent.authored());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
-        event = ctx.instrumentation.capture_runtime().attach_to(event);
-        let written =
-            crate::supervised_base::publication::append(&ctx.data_journal, event, Some(parent))
-                .await?;
+        event = ctx.instrumentation.capture_accounting().attach_to(event);
+        let written = crate::supervised_base::publication::append(
+            &ctx.data_journal,
+            event,
+            AppendOptions::new(Some(parent)).with_capture(
+                ctx.instrumentation
+                    .journal_capture(Some(scope), vec![(0, false)]),
+            ),
+        )
+        .await?;
         crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
             &written,
             &ctx.system_journal,
@@ -830,7 +838,8 @@ async fn journal_poisoned_lifecycle<
         causal_event_id,
     );
     let written =
-        crate::supervised_base::publication::append(&ctx.system_journal, event, None).await?;
+        crate::supervised_base::publication::append(&ctx.system_journal, event, Default::default())
+            .await?;
     ctx.failure_lifecycle_recorded = true;
     ctx.failure_causal_event_id = Some(causal_event_id);
     Ok(written.envelope.provenance.event.id)
@@ -1072,7 +1081,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
     let mut retained_receipts = Vec::with_capacity(plan.len());
     for (parent, payload) in plan {
         retained_receipts
-            .push(journal_delivery_receipt(ctx, subscription, &parent, payload).await?);
+            .push(journal_delivery_receipt(ctx, subscription, &parent, payload, scope).await?);
     }
     let current_receipt = retained_receipts
         .first()
@@ -1211,7 +1220,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
         }
     }
 
-    journal_policy_evidence(ctx, envelope, policy_evidence).await?;
+    journal_policy_evidence(ctx, envelope, policy_evidence, scope).await?;
     if let Some(state) = &heartbeat_state {
         state.record_last_consumed(event_id);
     }
@@ -1247,6 +1256,7 @@ async fn journal_delivery_receipt<
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     parent_envelope: &JournalRecord<ChainPayload>,
     payload: DeliveryPayload,
+    scope: MiddlewareExecutionScope,
 ) -> Result<JournalRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
@@ -1275,7 +1285,13 @@ async fn journal_delivery_receipt<
     let mut settlement = subscription.take_receipt_settlement(&mut ctx.contract_state);
     let (written, settlement) = crate::supervised_base::publication::commit(async move {
         let event = super::super::with_committed_receipt_snapshot(delivery_event, &instrumentation);
-        let written = data_journal.append(event, Some(&parent)).await?;
+        let written = data_journal
+            .append(
+                event,
+                AppendOptions::new(Some(&parent))
+                    .with_capture(instrumentation.journal_capture(Some(scope), vec![(1, false)])),
+            )
+            .await?;
         instrumentation.record_output_event(&written.authored());
         if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {
             instrumentation.record_receipted_position(seq.0, event_id, vector_clock);

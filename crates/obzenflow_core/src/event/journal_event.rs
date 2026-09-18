@@ -23,19 +23,19 @@ mod private {
 pub trait JournalEvent:
     private::Sealed + 'static + Debug + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>
 {
-    type Payload: super::journal_record::JournalPayload<Event = Self>;
+    type Payload: super::payloads::JournalPayload<Event = Self>;
 
     fn into_parts(
         self,
     ) -> (
-        super::provenance::AuthoredEnvelope<
-            <Self::Payload as super::journal_record::JournalPayload>::Provenance,
+        super::envelope::AuthoredEnvelope<
+            <Self::Payload as super::payloads::JournalPayload>::Provenance,
         >,
         Self::Payload,
     );
     fn from_parts(
-        envelope: super::provenance::AuthoredEnvelope<
-            <Self::Payload as super::journal_record::JournalPayload>::Provenance,
+        envelope: super::envelope::AuthoredEnvelope<
+            <Self::Payload as super::payloads::JournalPayload>::Provenance,
         >,
         payload: Self::Payload,
     ) -> Self;

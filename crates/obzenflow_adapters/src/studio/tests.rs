@@ -3,17 +3,15 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::context::ExecutionAccounting;
-use obzenflow_core::event::{
-    journal_record::JournalRecord,
-    payloads::execution_payload::{
-        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact,
-        RateLimiterFact, RateLimiterMode,
-    },
-    system_event::MiddlewareEventOrigin,
-    types::{SeqNo, WriterId},
-    StageLifecycleEvent, SystemEvent,
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact, RateLimiterFact,
+    RateLimiterMode,
 };
+use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
+use obzenflow_core::event::provenance::ExecutionAccounting;
+use obzenflow_core::event::types::{SeqNo, WriterId};
+use obzenflow_core::event::{StageLifecycleEvent, SystemEvent};
 use obzenflow_core::FlowId;
 use obzenflow_core::{
     id::{JournalId, SystemId},
@@ -388,7 +386,7 @@ fn discarded_commands_remain_visible_as_journal_backed_studio_facts() {
 
 #[test]
 fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() {
-    use obzenflow_core::event::observation::*;
+    use obzenflow_core::event::observability::*;
     let stage = StageId::new();
     let capture_scope = CaptureScope {
         flow_id: FlowId::new(),

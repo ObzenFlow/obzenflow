@@ -8,10 +8,10 @@
 mod definitions;
 mod deserialize;
 pub(crate) mod frame;
+mod layout;
 #[cfg(test)]
 mod performance_tests;
 mod primitives;
-mod schema;
 mod serialize;
 #[cfg(test)]
 mod test_data;
@@ -21,11 +21,12 @@ mod values;
 
 pub(crate) use definitions::DefinitionStore;
 use definitions::{ReadTable, WriteTable};
-use obzenflow_core::event::event_envelope::JournalGroupMember;
-use obzenflow_core::event::journal_record::{JournalPayload, JournalRecord};
+use layout::{Kind, Layout};
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::JournalPayload;
+use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::JournalEvent;
 use primitives::{bytes, text, unsigned, Cursor};
-use schema::{Kind, Shape};
 use std::path::{Path, PathBuf};
 
 use super::log_record::{LogFrame, LogRecord};
@@ -79,7 +80,7 @@ pub(crate) fn prepare<P: JournalPayload>(
         record.payload.validate(&record.envelope.provenance.event)?;
         let mut provenance = Vec::new();
         serialize::write(
-            Kind::Struct(Shape::Provenance),
+            Kind::Struct(Layout::Provenance),
             &record.envelope.provenance,
             None,
             &mut provenance,
@@ -92,7 +93,7 @@ pub(crate) fn prepare<P: JournalPayload>(
                 content.push(2);
                 let mut encoded = Vec::new();
                 serialize::write(
-                    Kind::Struct(Shape::Observation),
+                    Kind::Struct(Layout::Observation),
                     observation,
                     None,
                     &mut encoded,
@@ -188,7 +189,7 @@ impl Decoder {
                     <T::Payload as JournalPayload>::Provenance,
                 >,
             >(
-                Kind::Struct(Shape::Provenance),
+                Kind::Struct(Layout::Provenance),
                 &mut provenance_input,
                 &mut definitions,
             )?;
@@ -202,7 +203,7 @@ impl Decoder {
                     sizes.packets += 1;
                     let mut observation_input = Cursor::new(input.bytes()?);
                     let observation = deserialize::read(
-                        Kind::Struct(Shape::Observation),
+                        Kind::Struct(Layout::Observation),
                         &mut observation_input,
                         &mut definitions,
                     )?;
@@ -220,7 +221,7 @@ impl Decoder {
             let payload = T::Payload::decode(&provenance.event, payload)?;
             payload.validate(&provenance.event)?;
             let record: LogRecord<T> = JournalRecord {
-                envelope: obzenflow_core::event::provenance::EventEnvelope {
+                envelope: obzenflow_core::event::envelope::EventEnvelope {
                     provenance,
                     observability,
                 },

@@ -264,6 +264,45 @@ fn admit_file_candidates(
         );
     }
 
+    let observability = &runtime.observability;
+    file_text!(
+        set,
+        "runtime.observability.mode",
+        ConfigScope::Global,
+        &observability.mode,
+        "runtime.observability.mode"
+    );
+    file_u64!(
+        set,
+        "runtime.observability.interval_ms",
+        ConfigScope::Global,
+        observability.interval_ms,
+        "runtime.observability.interval_ms"
+    );
+    file_text!(
+        set,
+        "runtime.observability.mode",
+        ConfigScope::Flow,
+        &observability.flow.mode,
+        "runtime.observability.flow.mode"
+    );
+    file_u64!(
+        set,
+        "runtime.observability.interval_ms",
+        ConfigScope::Flow,
+        observability.flow.interval_ms,
+        "runtime.observability.flow.interval_ms"
+    );
+    for (stage, entry) in &observability.stages {
+        file_text!(
+            set,
+            "runtime.observability.mode",
+            ConfigScope::stage(stage.as_str()),
+            &entry.mode,
+            &format!("runtime.observability.stages.{stage}.mode")
+        );
+    }
+
     // [runtime.backpressure] with the §4c nested edge layout. Mode, window,
     // and stall timeout ride every rung (FLOWIP-115e).
     let backpressure = &runtime.backpressure;
@@ -666,6 +705,20 @@ fn admit_effects_fields(
 /// Env acquisition: the canonical spellings (§2 environment-tier lock) plus
 /// the named 010h spellings kept by the runtime.resume view. Global-only.
 fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if name.starts_with("OBZENFLOW_RUNTIME_OBSERVABILITY_")
+                && !matches!(
+                    name,
+                    "OBZENFLOW_RUNTIME_OBSERVABILITY_MODE"
+                        | "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS"
+                )
+            {
+                return Err(ConfigError::at(name, "unknown observability knob; use MODE and INTERVAL_MS, with scoped overrides in the config file"));
+            }
+        }
+    }
+
     for spec in knob_registry() {
         let Some(name) = spec.env_name() else {
             continue;
@@ -796,6 +849,96 @@ mod tests {
 
     fn snapshot(toml: &str, args: &[&str]) -> ResolvedRuntimeConfig {
         build_runtime_config_snapshot(&cli(args), &parse_file(toml)).expect("snapshot builds")
+    }
+
+    #[test]
+    fn observability_is_opt_in_with_flow_interval_and_stage_mode_overrides() {
+        use obzenflow_core::journal::ObservabilityPolicy;
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_MODE",
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS",
+        ]);
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_MODE");
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS");
+        let ctx = FlowResolutionContext {
+            stages: BTreeSet::from([StageKey::from("source"), StageKey::from("sink")]),
+            ..Default::default()
+        };
+        let defaults = materialize_flow_config(&snapshot("", &[]), ctx.clone()).unwrap();
+        assert_eq!(
+            defaults.observability_policy_for(None),
+            ObservabilityPolicy::EveryRecord
+        );
+        assert_eq!(
+            defaults.observability_policy_for(Some(&StageKey::from("source"))),
+            ObservabilityPolicy::EveryRecord
+        );
+        let configured = snapshot(
+            r#"
+            [runtime.observability]
+            mode = "periodic"
+            interval_ms = 1000
+            [runtime.observability.flow]
+            interval_ms = 250
+            [runtime.observability.stages.sink]
+            mode = "every_record"
+        "#,
+            &[],
+        );
+        let effective = materialize_flow_config(&configured, ctx.clone()).unwrap();
+        let periodic = ObservabilityPolicy::Periodic {
+            interval: std::time::Duration::from_millis(250),
+        };
+        assert_eq!(effective.observability_policy_for(None), periodic);
+        assert_eq!(
+            effective.observability_policy_for(Some(&StageKey::from("source"))),
+            periodic
+        );
+        assert_eq!(
+            effective.observability_policy_for(Some(&StageKey::from("sink"))),
+            ObservabilityPolicy::EveryRecord
+        );
+        guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_MODE", "periodic");
+        guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS", "250");
+        let environment = materialize_flow_config(&snapshot("", &[]), ctx.clone()).unwrap();
+        assert_eq!(environment.observability_policy_for(None), periodic);
+    }
+
+    #[test]
+    fn observability_rejects_invalid_values_retired_hz_and_wrong_scopes() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_MODE",
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS",
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_HZ",
+        ]);
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_MODE");
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS");
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_HZ");
+        for body in [
+            "[runtime.observability]\nmode = 'sometimes'",
+            "[runtime.observability]\ninterval_ms = 0",
+            "[runtime.observability]\ninterval_ms = -1",
+            "[runtime.observability]\ninterval_ms = 0.5",
+            "[runtime.observability]\nhz = 4",
+            "[runtime.observability.stages.source]\ninterval_ms = 250",
+            "[runtime.observability.stages.source.edges.sink]\nmode = 'periodic'",
+        ] {
+            if let Ok(file) = toml::from_str::<RawFileStartupConfig>(body) {
+                assert!(
+                    build_runtime_config_snapshot(&cli(&[]), &file).is_err(),
+                    "accepted {body}"
+                );
+            }
+        }
+        for value in ["0", "-1", "1.5", "18446744073709551616"] {
+            guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS", value);
+            assert!(build_runtime_config_snapshot(&cli(&[]), &parse_file("")).is_err());
+        }
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS");
+        guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_HZ", "4");
+        assert!(build_runtime_config_snapshot(&cli(&[]), &parse_file("")).is_err());
     }
 
     #[test]

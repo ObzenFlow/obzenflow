@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
 use std::sync::{Arc, Mutex};
 
 use super::journal::MemoryJournalState;

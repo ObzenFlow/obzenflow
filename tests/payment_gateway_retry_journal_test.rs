@@ -14,7 +14,7 @@ use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
 };
 use obzenflow_core::event::{ChainEvent, ChainPayload, EffectFailureCause, EffectOutcomePayload};
-use obzenflow_core::journal::run_manifest::RunManifest;
+use obzenflow_core::journal::archive::manifest::RunManifest;
 use obzenflow_runtime::effects::EffectCursor;
 use obzenflow_runtime::runtime_config::{
     RESILIENCE_BREAKER_COUNT_WINDOW_KEY, RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY,

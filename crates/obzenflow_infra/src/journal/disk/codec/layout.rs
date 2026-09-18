@@ -2,7 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Format-4 positions are explicit protocol constants, not Rust field order.
+//! Format-4 storage mappings: field positions, encodings and compression tokens.
+//! Core's Rust types and Serde implementations define the logical records.
+//! Names and ordinals here bind that representation to this version's bytes;
+//! they must not follow Rust declaration order or change without a format change.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -32,11 +35,11 @@ impl DefinitionKind {
 
     pub(super) fn body(self) -> Kind {
         match self {
-            Self::Writer => Kind::Struct(Shape::Writer),
-            Self::Context => Kind::Struct(Shape::Context),
-            Self::Origin => Kind::Struct(Shape::Origin),
+            Self::Writer => Kind::Struct(Layout::Writer),
+            Self::Context => Kind::Struct(Layout::Context),
+            Self::Origin => Kind::Struct(Layout::Origin),
             Self::Descriptor => Kind::Text,
-            Self::CaptureScope => Kind::Struct(Shape::CaptureScope),
+            Self::CaptureScope => Kind::Struct(Layout::CaptureScope),
             Self::ClockKeys => Kind::List(&Kind::ClockKey),
             Self::JournalWriter => Kind::Id,
         }
@@ -60,7 +63,7 @@ pub(super) enum Kind {
     /// Complete binary values for typed, non-hot-path framework structures.
     Value,
     Enum(&'static [&'static str]),
-    Struct(Shape),
+    Struct(Layout),
     List(&'static Kind),
     Clock,
     Definition(DefinitionKind),
@@ -98,7 +101,7 @@ const fn field(name: &'static str, kind: Kind) -> Field {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Shape {
+pub(super) enum Layout {
     Provenance,
     Event,
     Journal,
@@ -141,11 +144,11 @@ const WRITER_KINDS: &[&str] = &["Stage", "System"];
 const CAPTURE_REASONS: &[&str] = &["record", "initial", "periodic", "final"];
 const CIRCUIT_STATES: &[&str] = &["closed", "open", "half_open"];
 
-impl Shape {
+impl Layout {
     pub(super) fn fields(self) -> &'static [Field] {
         use DefinitionKind as D;
         use Kind as K;
-        use Shape as S;
+        use Layout as S;
         match self {
             S::Provenance => {
                 const {

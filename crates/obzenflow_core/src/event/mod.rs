@@ -9,11 +9,10 @@
 // Core modules
 pub mod chain_event;
 pub mod constants;
-pub mod event_envelope;
+pub mod envelope;
 pub mod journal_event;
 pub mod journal_record;
 pub mod observability;
-pub mod observation;
 pub mod system_event;
 pub mod types;
 pub mod vector_clock;
@@ -35,9 +34,10 @@ pub use chain_event::{
     CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
     CorrelationContext, SourceContractEventParams,
 };
-pub use event_envelope::EventEnvelope;
+pub use envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
 pub use journal_record::JournalRecord;
+pub use observability::{EdgeLivenessState, StageActivity};
 pub use payloads::effect_payload::{
     effect_escape_controls_group_id, CanonicalInputHash, EffectAttemptOrdinal,
     EffectAttemptStarted, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
@@ -55,11 +55,12 @@ pub use payloads::sink_operation_payload::{
 pub use payloads::stage_fatal_payload::{
     StageFatalCode, StageFatalReason, StageFatalRecorded, StageFatalSeverity,
 };
-pub use system_event::{
-    CommandDiscardDisposition, EdgeLivenessState, MetricsCoordinationEvent,
-    PipelineCancellationCause, PipelineLifecycleEvent, PipelineStopAdmission, ReplayLifecycleEvent,
-    StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory, SystemPayload,
+pub use payloads::system_payload::{
+    CommandDiscardDisposition, MetricsCoordinationEvent, PipelineCancellationCause,
+    PipelineLifecycleEvent, PipelineStopAdmission, ReplayLifecycleEvent, StageLifecycleEvent,
+    SystemPayload,
 };
+pub use system_event::{SystemEvent, SystemEventFactory};
 pub use types::{
     AdmissionSeq, CorrelationId, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId,
 };

@@ -9,9 +9,10 @@
 
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};

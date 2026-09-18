@@ -17,13 +17,13 @@ use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::id::JournalId;
-use obzenflow_core::journal::run_manifest::{
+use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
     RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
+use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -122,6 +122,16 @@ impl DiskReplayArchive {
                 supported: 1,
             });
         }
+        super::manifest_gate::require_observability_capture(&manifest_value).map_err(|_| {
+            ReplayError::UnsupportedArchiveCapability {
+                capability:
+                    obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY,
+                found: manifest_value["capabilities"]
+                    [obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY]
+                    .as_u64(),
+                supported: 1,
+            }
+        })?;
         let manifest: RunManifest =
             serde_json::from_value(manifest_value).map_err(|e| ReplayError::Parse {
                 message: format!(
@@ -387,7 +397,7 @@ impl ReplayArchive for DiskReplayArchive {
 
     fn bounded_direct_fact_admission(
         &self,
-    ) -> &[obzenflow_core::journal::run_manifest::RunManifestDirectFactAdmission] {
+    ) -> &[obzenflow_core::journal::archive::manifest::RunManifestDirectFactAdmission] {
         &self.manifest.bounded_direct_fact_admission
     }
 

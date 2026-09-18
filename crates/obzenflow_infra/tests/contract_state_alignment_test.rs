@@ -115,15 +115,15 @@ async fn contract_state_tracks_seq_and_emits_final() {
 
     // Append two data events then EOF to the upstream journal
     upstream_journal
-        .append(make_data_event(upstream_writer, 1), None)
+        .append(make_data_event(upstream_writer, 1), Default::default())
         .await
         .expect("append data 1");
     upstream_journal
-        .append(make_data_event(upstream_writer, 2), None)
+        .append(make_data_event(upstream_writer, 2), Default::default())
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer, 2), None)
+        .append(make_eof_event(upstream_writer, 2), Default::default())
         .await
         .expect("append eof");
 
@@ -214,15 +214,15 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
 
     // Append two data events, but EOF advertises 3 events (missing one).
     upstream_journal
-        .append(make_data_event(upstream_writer, 1), None)
+        .append(make_data_event(upstream_writer, 1), Default::default())
         .await
         .expect("append data 1");
     upstream_journal
-        .append(make_data_event(upstream_writer, 2), None)
+        .append(make_data_event(upstream_writer, 2), Default::default())
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer, 3), None)
+        .append(make_eof_event(upstream_writer, 3), Default::default())
         .await
         .expect("append eof");
 
@@ -377,15 +377,15 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
     // This simulates an over-consumption divergence where the reader
     // has observed more data events than the upstream claims via EOF.
     upstream_journal
-        .append(make_data_event(upstream_writer, 1), None)
+        .append(make_data_event(upstream_writer, 1), Default::default())
         .await
         .expect("append data 1");
     upstream_journal
-        .append(make_data_event(upstream_writer, 2), None)
+        .append(make_data_event(upstream_writer, 2), Default::default())
         .await
         .expect("append data 2");
     upstream_journal
-        .append(make_eof_event(upstream_writer, 1), None)
+        .append(make_eof_event(upstream_writer, 1), Default::default())
         .await
         .expect("append eof");
 

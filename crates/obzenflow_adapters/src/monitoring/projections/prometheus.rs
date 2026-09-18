@@ -26,8 +26,10 @@ fn edge_liveness_state_gauge_value(state: &obzenflow_core::event::EdgeLivenessSt
     }
 }
 
-fn stage_activity_gauge_value(activity: &obzenflow_core::event::system_event::StageActivity) -> u8 {
-    use obzenflow_core::event::system_event::StageActivity;
+fn stage_activity_gauge_value(
+    activity: &obzenflow_core::event::observability::StageActivity,
+) -> u8 {
+    use obzenflow_core::event::observability::StageActivity;
     match activity {
         StageActivity::Polling => 0,
         StageActivity::Processing { .. } => 1,
@@ -2774,7 +2776,7 @@ mod tests {
         HttpPullMetricsSnapshot, HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot,
         WaitReason,
     };
-    use obzenflow_core::event::system_event::{
+    use obzenflow_core::event::payloads::system_payload::{
         ContractName, ContractResultStatusLabel, SystemFeedRole,
     };
     use obzenflow_core::metrics::{
@@ -2925,7 +2927,7 @@ mod tests {
 
     #[test]
     fn semantic_liveness_states_preserve_prometheus_wire_values() {
-        use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity};
+        use obzenflow_core::event::observability::{EdgeLivenessState, StageActivity};
         use obzenflow_core::event::types::{DurationMs, EventId};
 
         let upstream = StageId::new();
@@ -3003,7 +3005,7 @@ mod tests {
             .insert(downstream, 12.5);
         snapshot.liveness_metrics.stage_activity.insert(
             downstream,
-            obzenflow_core::event::system_event::StageActivity::Processing {
+            obzenflow_core::event::observability::StageActivity::Processing {
                 event_id: obzenflow_core::event::types::EventId::new(),
                 elapsed_ms: obzenflow_core::event::types::DurationMs(0),
             },

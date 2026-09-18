@@ -12,7 +12,7 @@ use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::source::{
     ErasedSourceCompletion, ErasedSourceInvocation, ErasedSourceOutcome, SourceError,
 };
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::ChainEvent;
 use std::future::Future;
 use std::pin::Pin;

@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::event_envelope::JournalGroupMember;
+use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::journal::ArchiveStatus;
 use std::collections::{BTreeMap, HashSet};
 

@@ -7,6 +7,7 @@
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
 use obzenflow_core::event::{ChainPayload, JournalRecord};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{
     BoundedBindingEvidence, FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload,
@@ -74,8 +75,9 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         if self.fail_append {
             return Err(JournalError::Implementation {
                 message: "injected transactional append failure".to_string(),
@@ -89,8 +91,13 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+        let events = events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| options.capture.prepare(index, event))
+            .collect::<Vec<_>>();
         if self.fail_append {
             return Err(JournalError::Implementation {
                 message: "injected transactional terminal-group failure".to_string(),

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::observation::ObservationRecord;
+use obzenflow_core::event::observability::ObservationRecord;
 use obzenflow_core::StageId;
 use std::time::Duration;
 use tokio::time::Instant;

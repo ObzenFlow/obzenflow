@@ -8,7 +8,8 @@
 //! value. Each helper checks the relevant composed port before constructing a
 //! context, preserving the empty-bundle fast path.
 
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::context::MiddlewareExecutionScope;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::{ChainEvent, FlowId, StageId};
 
 use super::{

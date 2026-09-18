@@ -7,6 +7,7 @@ use crate::stages::common::handler_error::StageFatal;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, JournalRecord, StageFatalRecorded, StageFatalSeverity,
 };
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
 use std::sync::Arc;
@@ -57,7 +58,11 @@ pub(crate) async fn record_stage_fatal(
             payload,
         ),
     };
-    crate::supervised_base::publication::append(commit.error_journal, event, commit.parent)
-        .await
-        .map_err(|error| error.to_string().into())
+    crate::supervised_base::publication::append(
+        commit.error_journal,
+        event,
+        AppendOptions::new(commit.parent),
+    )
+    .await
+    .map_err(|error| error.to_string().into())
 }

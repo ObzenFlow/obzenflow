@@ -18,7 +18,7 @@
 
 use crate::testing::FlowTestHarness;
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::system_event::{MetricsCoordinationEvent, SystemPayload};
+use obzenflow_core::event::payloads::system_payload::{MetricsCoordinationEvent, SystemPayload};
 use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -246,8 +246,8 @@ mod tests {
     use crate::pipeline::{FlowHandle, PipelineState};
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
     use obzenflow_core::event::journal_record::JournalRecord;
-    use obzenflow_core::event::observation::NoObservations;
-    use obzenflow_core::event::system_event::MetricsCoordinationEvent;
+    use obzenflow_core::event::observability::NoObservations;
+    use obzenflow_core::event::payloads::system_payload::MetricsCoordinationEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::{
         JournalEvent, JournalWriterId, SystemEvent, SystemPayload, WriterId,
@@ -255,7 +255,7 @@ mod tests {
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::StageId;
     use obzenflow_topology::TopologyBuilder;
@@ -323,8 +323,9 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
@@ -398,7 +399,7 @@ mod tests {
                 obzenflow_core::id::SystemId::new(),
             ),
             liveness_snapshots: None,
-            run_substrate: crate::journal::RunSubstrateState::Ephemeral,
+            run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
         };
 
@@ -438,7 +439,7 @@ mod tests {
                 obzenflow_core::id::SystemId::new(),
             ),
             liveness_snapshots: None,
-            run_substrate: crate::journal::RunSubstrateState::Ephemeral,
+            run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
         };
 
@@ -531,7 +532,7 @@ mod tests {
                     WriterId::from(StageId::new()),
                     SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append drained");
@@ -557,7 +558,7 @@ mod tests {
                     WriterId::from(StageId::new()),
                     SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Shutdown),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append shutdown");
@@ -596,7 +597,7 @@ mod tests {
                         watermark,
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append exported");
@@ -639,7 +640,7 @@ mod tests {
                         watermark,
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append unrelated exported");
@@ -660,7 +661,7 @@ mod tests {
                         watermark,
                     }),
                 ),
-                None,
+                Default::default(),
             )
             .await
             .expect("append covering exported");
@@ -704,7 +705,7 @@ mod tests {
                             watermark,
                         }),
                     ),
-                    None,
+                    Default::default(),
                 )
                 .await
                 .expect("append exported");

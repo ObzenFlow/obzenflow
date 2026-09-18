@@ -7,14 +7,13 @@
 //! These values are resolved once by the hosting shell (typically `FlowApplication`)
 //! and then read by lower layers during flow build and execution.
 
-use std::fmt;
-use std::mem;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
+use std::{fmt, mem};
 
-use crate::replay::ReplayArchive;
+use obzenflow_core::journal::archive::ReplayArchive;
 
 #[cfg(any(test, feature = "test-support"))]
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};

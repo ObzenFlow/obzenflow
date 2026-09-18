@@ -83,9 +83,10 @@ UTF-8 with an unsigned length. Typed IDs retain all 128 bits. Opaque JSON is a
 length-delimited JSON value; its application keys are never interpreted by the
 codec. Timestamps retain their original units and precision.
 
-The checked-in `schema.rs` assigns immutable field positions, defaults and
-contextual value types. A structure stores explicit field-presence/default
-masks followed by complete non-default values in schema order. Defaults are
+Core types and their Serde declarations define the logical records.
+The checked-in `layout.rs` maps their serialized names to immutable format-4
+field positions, defaults and contextual value types. A structure stores explicit
+field-presence/default masks followed by complete non-default values in layout order. Defaults are
 fixed literals, never values inherited from a prior record. Absent, null, empty,
 measured zero and negative zero remain distinct where the logical type permits
 them. Unknown schema IDs, fields, tags, mask bits, overflow, overlong varints and
@@ -153,7 +154,7 @@ dependency hop. Definition metadata adds no logical record, clock tick, reader
 position, transport credit, receipt or execution authority.
 
 `serialize.rs` and `deserialize.rs` stream positional structures through Core's
-Serde implementations. They share the same `schema.rs` slots and scalar rules
+Serde implementations. They share the same `layout.rs` slots and scalar rules
 with the metadata/dynamic-value codec, avoiding a second full JSON object tree.
 Payload classification and validation remain Core's `JournalPayload` methods.
 
@@ -172,3 +173,8 @@ low-cardinality workload, not the production-flow 100k archive or cache-eviction
 proof. These synthetic measurements are not directly comparable to the previous
 captured corpus. No historical archive, JSONL capture or schema projection is
 needed by the provider tests.
+
+The frozen `fixtures/*.frame` files were captured before the observation-key
+refactor. Their matching JSON records cover all observation families and absent
+attachments. Tests require byte-for-byte encoding compatibility and decode the
+original bytes through Core's existing Serde declarations.

@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemPayload};
 use obzenflow_core::journal::Journal;

@@ -20,8 +20,12 @@ pub(crate) async fn publish_running_best_effort(
 ) {
     let running_event = SystemEvent::stage_running(stage_id);
 
-    if let Err(e) =
-        crate::supervised_base::publication::append(system_journal, running_event, None).await
+    if let Err(e) = crate::supervised_base::publication::append(
+        system_journal,
+        running_event,
+        Default::default(),
+    )
+    .await
     {
         tracing::error!(
             stage_name = %stage_name,
@@ -50,8 +54,12 @@ pub(crate) async fn send_completion_best_effort(
     let metrics = snapshot_stage_accounting(instrumentation);
     let completion_event = SystemEvent::stage_completed_with_accounting(stage_id, metrics);
 
-    if let Err(e) =
-        crate::supervised_base::publication::append(system_journal, completion_event, None).await
+    if let Err(e) = crate::supervised_base::publication::append(
+        system_journal,
+        completion_event,
+        Default::default(),
+    )
+    .await
     {
         tracing::error!(
             stage_name = %stage_name,
@@ -94,7 +102,13 @@ pub(crate) async fn send_failure_best_effort(
         )
     };
 
-    match crate::supervised_base::publication::append(system_journal, system_event, None).await {
+    match crate::supervised_base::publication::append(
+        system_journal,
+        system_event,
+        Default::default(),
+    )
+    .await
+    {
         Ok(_) => {
             if let Some(reason) = cancel_reason {
                 tracing::info!(
@@ -208,7 +222,7 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _parent: Option<&JournalRecord<T::Payload>>,
+            _options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "append not supported in EmptyJournal".to_string(),
@@ -276,8 +290,9 @@ mod tests {
         async fn append(
             &self,
             event: SystemEvent,
-            _parent: Option<&JournalRecord<SystemPayload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, SystemEvent>,
         ) -> Result<JournalRecord<SystemPayload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             self.events
                 .lock()
                 .expect("lock poisoned")

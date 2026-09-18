@@ -4,8 +4,7 @@
 
 use crate::execution::{HeartbeatExecutionPolicy, RuntimeExecution};
 use crate::metrics::instrumentation::StageInstrumentation;
-use obzenflow_core::event::observation::ObservationRecord;
-use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity};
+use obzenflow_core::event::observability::{EdgeLivenessState, ObservationRecord, StageActivity};
 use obzenflow_core::event::types::{DurationMs, SeqNo};
 use obzenflow_core::event::EventId;
 use obzenflow_core::StageId;
@@ -566,7 +565,6 @@ mod tests {
     use super::*;
     use crate::execution::RuntimeMode;
     use crate::metrics::instrumentation::StageInstrumentation;
-    use crate::replay::{ReplayArchive, ReplayError};
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::identity::JournalWriterId;
@@ -575,9 +573,10 @@ mod tests {
     use obzenflow_core::event::vector_clock::CausalOrderingService;
     use obzenflow_core::event::SystemEvent;
     use obzenflow_core::id::{JournalId, SystemId};
+    use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::{ArchiveStatus, Journal, StatusDerivation};
     use obzenflow_core::{ChainEvent, ReaderGeneration};
     use std::path::{Path, PathBuf};
@@ -711,8 +710,11 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            parent: Option<&JournalRecord<T::Payload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let event = options.capture.prepare(0, event);
+            let parent = options.parent;
+
             let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
 
             if let Some(parent) = parent {

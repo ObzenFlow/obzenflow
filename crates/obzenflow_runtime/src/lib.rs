@@ -14,7 +14,6 @@ pub mod errors;
 pub mod execution;
 pub mod feed_plan;
 pub mod id_conversions;
-pub mod journal;
 pub mod message_bus;
 pub mod replay;
 pub mod run_context;

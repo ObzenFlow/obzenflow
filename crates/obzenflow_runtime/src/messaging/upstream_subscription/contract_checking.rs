@@ -4,9 +4,10 @@
 
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
-use obzenflow_core::event::system_event::{
-    ContractName, ContractResultStatusLabel, SystemEvent, SystemFeedRole, SystemPayload,
+use obzenflow_core::event::payloads::system_payload::{
+    ContractName, ContractResultStatusLabel, SystemFeedRole, SystemPayload,
 };
+use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, EventType, JournalIndex, JournalPath, SeqNo,
     ViolationCause as EventViolationCause,
@@ -191,9 +192,12 @@ where
                         advertised_writer_seq: Some(feed.advertised_writer_seq),
                     },
                 );
-                if let Err(e) =
-                    crate::supervised_base::publication::append(system_journal, result_event, None)
-                        .await
+                if let Err(e) = crate::supervised_base::publication::append(
+                    system_journal,
+                    result_event,
+                    Default::default(),
+                )
+                .await
                 {
                     append_ok = false;
                     tracing::error!(
@@ -223,9 +227,12 @@ where
                     reason: feed.reason.clone(),
                 },
             );
-            if let Err(e) =
-                crate::supervised_base::publication::append(system_journal, status_event, None)
-                    .await
+            if let Err(e) = crate::supervised_base::publication::append(
+                system_journal,
+                status_event,
+                Default::default(),
+            )
+            .await
             {
                 append_ok = false;
                 tracing::error!(
@@ -329,9 +336,12 @@ where
                         advertised_writer_seq: feed.advertised_writer_seq,
                     },
                 );
-                if let Err(e) =
-                    crate::supervised_base::publication::append(&system_journal, result_event, None)
-                        .await
+                if let Err(e) = crate::supervised_base::publication::append(
+                    &system_journal,
+                    result_event,
+                    Default::default(),
+                )
+                .await
                 {
                     tracing::error!(
                         target: "flowip-105",
@@ -554,9 +564,12 @@ where
                         advertised_writer_seq: progress.advertised_writer_seq,
                     },
                 );
-                if let Err(e) =
-                    crate::supervised_base::publication::append(system_journal, result_event, None)
-                        .await
+                if let Err(e) = crate::supervised_base::publication::append(
+                    system_journal,
+                    result_event,
+                    Default::default(),
+                )
+                .await
                 {
                     tracing::error!(
                         target: "flowip-105",
@@ -619,7 +632,7 @@ where
                     if let Err(e) = crate::supervised_base::publication::append(
                         system_journal,
                         status_event,
-                        None,
+                        Default::default(),
                     )
                     .await
                     {
@@ -675,8 +688,12 @@ where
                 },
             ));
 
-        match crate::supervised_base::publication::append(&tracker.journal, progress_event, None)
-            .await
+        match crate::supervised_base::publication::append(
+            &tracker.journal,
+            progress_event,
+            Default::default(),
+        )
+        .await
         {
             Ok(_) => {
                 progress.last_progress_seq = progress_seq;
@@ -766,7 +783,7 @@ where
                     if let Err(e) = crate::supervised_base::publication::append(
                         system_journal,
                         result_event,
-                        None,
+                        Default::default(),
                     )
                     .await
                     {
@@ -830,7 +847,7 @@ where
                                 if let Err(e) = crate::supervised_base::publication::append(
                                     &tracker.journal,
                                     gap_event,
-                                    None,
+                                    Default::default(),
                                 )
                                 .await
                                 {
@@ -872,7 +889,7 @@ where
                     if let Err(e) = crate::supervised_base::publication::append(
                         &tracker.journal,
                         gap_event,
-                        None,
+                        Default::default(),
                     )
                     .await
                     {
@@ -937,7 +954,7 @@ where
                 if let Err(e) = crate::supervised_base::publication::append(
                     &tracker.journal,
                     violation_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {
@@ -969,23 +986,26 @@ where
             },
         ));
 
-        let final_append_ok =
-            match crate::supervised_base::publication::append(&tracker.journal, final_event, None)
-                .await
-            {
-                Ok(_) => true,
-                Err(e) => {
-                    tracing::error!(
-                        target: "flowip-105",
-                        owner = %self.owner_label,
-                        upstream = ?progress.stage_id,
-                        reader_index = index,
-                        error = %e,
-                        "Failed to append final event; skipping state update"
-                    );
-                    false
-                }
-            };
+        let final_append_ok = match crate::supervised_base::publication::append(
+            &tracker.journal,
+            final_event,
+            Default::default(),
+        )
+        .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::error!(
+                    target: "flowip-105",
+                    owner = %self.owner_label,
+                    upstream = ?progress.stage_id,
+                    reader_index = index,
+                    error = %e,
+                    "Failed to append final event; skipping state update"
+                );
+                false
+            }
+        };
 
         // Emit contract status to system journal (if available)
         let mut status_append_ok = true;
@@ -1016,9 +1036,12 @@ where
                     reason: status_reason,
                 },
             );
-            if let Err(e) =
-                crate::supervised_base::publication::append(system_journal, status_event, None)
-                    .await
+            if let Err(e) = crate::supervised_base::publication::append(
+                system_journal,
+                status_event,
+                Default::default(),
+            )
+            .await
             {
                 status_append_ok = false;
                 tracing::error!(
@@ -1088,7 +1111,7 @@ where
                 let stalled_append_ok = match crate::supervised_base::publication::append(
                     &tracker.journal,
                     stalled_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 {

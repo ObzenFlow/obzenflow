@@ -6,51 +6,25 @@
 //! has no journal, publication scope, credit, or settlement capability.
 
 use crate::execution::RuntimeExecution;
-use obzenflow_core::event::context::RuntimeObservability;
-use obzenflow_core::event::observation::*;
-use obzenflow_core::{FlowId, MiddlewareExecutionScope, StageId, WriterId};
+use obzenflow_core::event::observability::families::{
+    observation_families as split, ObservationFamily,
+};
+#[cfg(test)]
+use obzenflow_core::event::observability::RuntimeObservability;
+use obzenflow_core::event::observability::*;
+use obzenflow_core::{FlowId, MiddlewareExecutionScope, WriterId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_PACKET_FAMILIES: usize = 128;
 const MAX_KEYS: usize = 4096;
 const MAX_OWNERS: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Kind {
-    RuntimeSnapshot,
-    InFlight,
-    JoinReference,
-    StateAge,
-    EventLoops,
-    WorkLoops,
-    Timing,
-    CircuitBreaker,
-    RateLimiter,
-    EffectCircuitBreaker(String),
-    EffectRateLimiter(String),
-    ProcessingTime,
-    Metrics,
-    Sli,
-    Llm,
-    BreakerSummary(Option<String>),
-    LimiterActivity(Option<String>),
-    LimiterUtilisation(Option<String>),
-    Backpressure,
-    Resource,
-    HttpPull,
-    AiChunking,
-    HttpSurface,
-    StageHeartbeat,
-    EdgeLiveness(StageId, StageId),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Key {
     observer: WriterId,
-    kind: Kind,
+    kind: ObservationFamily,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,8 +62,8 @@ impl ObservationHub {
         }
     }
 
-    /// Use the existing metrics cadence. Sampling cannot hold the view lock or
-    /// delay a producer, and a missing/finished owner needs no flush barrier.
+    /// Explicit live-only capture. Journal-derived exports do not call this;
+    /// it neither records an attachment nor consumes a journal allowance.
     pub fn capture_registered(&self, reason: CaptureReason) {
         let stages: Vec<_> = self
             .stages
@@ -332,104 +306,6 @@ impl ObservationRecorder for ObservationOwner {
     }
 }
 
-fn split(packet: ObservabilityContext) -> Option<Vec<(Kind, ObservabilityContext)>> {
-    let mut families = Vec::new();
-    let stamp = packet.capture;
-    if let Some(snapshot) = packet.runtime_snapshot {
-        let mut part = ObservabilityContext::new(snapshot.capture);
-        part.runtime_snapshot = Some(snapshot);
-        families.push((Kind::RuntimeSnapshot, part));
-    }
-    if let Some(runtime) = packet.runtime {
-        macro_rules! field {
-            ($name:ident, $kind:ident) => {
-                if let Some(value) = runtime.$name {
-                    let mut part = ObservabilityContext::new(stamp);
-                    part.runtime = Some(RuntimeObservability {
-                        $name: Some(value),
-                        ..Default::default()
-                    });
-                    families.push((Kind::$kind, part));
-                }
-            };
-        }
-        field!(in_flight, InFlight);
-        field!(join_reference_since_last_stream, JoinReference);
-        field!(time_in_state_ms, StateAge);
-        field!(event_loops_total, EventLoops);
-        field!(event_loops_with_work_total, WorkLoops);
-        if let Some(timing) = runtime.timing {
-            if timing.is_valid() {
-                let mut part = ObservabilityContext::new(stamp);
-                part.runtime = Some(RuntimeObservability {
-                    timing: Some(timing),
-                    ..Default::default()
-                });
-                families.push((Kind::Timing, part));
-            }
-        }
-        field!(circuit_breaker, CircuitBreaker);
-        field!(rate_limiter, RateLimiter);
-        for value in runtime.effect_circuit_breakers {
-            let key = Kind::EffectCircuitBreaker(value.effect_type.clone());
-            let mut part = ObservabilityContext::new(stamp);
-            part.runtime = Some(RuntimeObservability {
-                effect_circuit_breakers: vec![value],
-                ..Default::default()
-            });
-            families.push((key, part));
-        }
-        for value in runtime.effect_rate_limiters {
-            let key = Kind::EffectRateLimiter(value.effect_type.clone());
-            let mut part = ObservabilityContext::new(stamp);
-            part.runtime = Some(RuntimeObservability {
-                effect_rate_limiters: vec![value],
-                ..Default::default()
-            });
-            families.push((key, part));
-        }
-    }
-    macro_rules! field {
-        ($name:ident, $kind:ident) => {
-            if let Some(value) = packet.$name {
-                let mut part = ObservabilityContext::new(stamp);
-                part.$name = Some(value);
-                families.push((Kind::$kind, part));
-            }
-        };
-    }
-    field!(processing_time, ProcessingTime);
-    field!(metrics, Metrics);
-    field!(sli, Sli);
-    for record in packet.records {
-        let kind = match &record {
-            ObservationRecord::Llm { .. } => Kind::Llm,
-            ObservationRecord::CircuitBreakerSummary { effect_type, .. } => {
-                Kind::BreakerSummary(effect_type.clone())
-            }
-            ObservationRecord::RateLimiterActivity { effect_type, .. } => {
-                Kind::LimiterActivity(effect_type.clone())
-            }
-            ObservationRecord::RateLimiterUtilisation { effect_type, .. } => {
-                Kind::LimiterUtilisation(effect_type.clone())
-            }
-            ObservationRecord::BackpressureActivity { .. } => Kind::Backpressure,
-            ObservationRecord::ResourceUsage { .. } => Kind::Resource,
-            ObservationRecord::HttpPull(_) => Kind::HttpPull,
-            ObservationRecord::AiChunkingWork { .. } => Kind::AiChunking,
-            ObservationRecord::HttpSurface { .. } => Kind::HttpSurface,
-            ObservationRecord::StageHeartbeat { .. } => Kind::StageHeartbeat,
-            ObservationRecord::EdgeLiveness {
-                upstream, reader, ..
-            } => Kind::EdgeLiveness(*upstream, *reader),
-        };
-        let mut part = ObservabilityContext::new(stamp);
-        part.records.push(record);
-        families.push((kind, part));
-    }
-    (families.len() <= MAX_PACKET_FAMILIES).then_some(families)
-}
-
 pub(crate) fn scope(execution: &RuntimeExecution, flow_id: FlowId) -> CaptureScope {
     CaptureScope {
         flow_id,
@@ -445,7 +321,7 @@ mod tests {
     use super::*;
     use crate::execution::RuntimeMode;
     use crate::metrics::instrumentation::StageInstrumentation;
-    use obzenflow_core::event::context::{MeasurementWindow, TimingMeasurements};
+    use obzenflow_core::event::observability::{MeasurementWindow, TimingMeasurements};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{ReaderGeneration, StageId};
     use std::time::Duration;
@@ -472,7 +348,7 @@ mod tests {
 
     #[test]
     fn runtime_snapshot_uses_its_own_stamp_and_replaces_the_whole_family() {
-        use obzenflow_core::event::context::{ExecutionProgress, RuntimeSnapshot};
+        use obzenflow_core::event::observability::{ExecutionProgress, RuntimeSnapshot};
 
         let hub = ObservationHub::default();
         let scope = CaptureScope {

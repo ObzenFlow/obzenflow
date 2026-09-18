@@ -8,7 +8,8 @@
 //! fields. This helper eliminates ~20 identical 6-line constructions in the
 //! transform supervisor alone.
 
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::StageId;
 
 /// Construct a `FlowContext` from the fields every supervisor has.

@@ -20,10 +20,10 @@ use crate::messaging::upstream_subscription::{
     SelectedFeedRole, UpstreamSubscription,
 };
 use crate::metrics::observations::ObservationHub;
-use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::archive::ReplayArchive;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventType, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;

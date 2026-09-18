@@ -5,7 +5,6 @@
 //! Cancellation, resource settlement and acknowledged terminal publication.
 
 use crate::bootstrap::{bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig};
-use crate::journal::FlowJournalFactory;
 use crate::pipeline::fsm::{
     build_pipeline_fsm_with_initial, PipelineAction, PipelineFsmEvent, PipelineFsmState,
 };
@@ -23,6 +22,7 @@ use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised}
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::{SystemEvent, SystemEventFactory};
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::SystemId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -229,7 +229,7 @@ pub async fn terminal_publication_retains_its_outcome_while_servicing_graceful_e
     let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
     for id in [upstream, stage] {
         journal
-            .append(SystemEvent::stage_completed(id), None)
+            .append(SystemEvent::stage_completed(id), Default::default())
             .await
             .unwrap();
     }
@@ -345,7 +345,7 @@ pub async fn supervisor_join_waits_for_terminal_publication_and_propagates_appen
             } else {
                 for id in [upstream, stage] {
                     journal
-                        .append(SystemEvent::stage_completed(id), None)
+                        .append(SystemEvent::stage_completed(id), Default::default())
                         .await
                         .unwrap();
                 }
@@ -579,14 +579,14 @@ pub async fn cancellation_catches_up_late_producer_failure_before_selecting_term
     );
     for _ in 0..64 {
         journal
-            .append(SystemEvent::stage_running(sink), None)
+            .append(SystemEvent::stage_running(sink), Default::default())
             .await
             .unwrap();
     }
     journal
         .append(
             SystemEvent::stage_failed(sink, "late producer failure".into(), false),
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -684,7 +684,11 @@ pub async fn final_marker_coalesces_late_controls_without_restarting_finalisatio
     assert!(ctx.termination.failure.is_none());
     let marker = SystemEventFactory::new(ctx.system_id).pipeline_drained();
     ctx.progress.final_marker = Some(marker.id);
-    let envelope = ctx.system_journal.append(marker, None).await.unwrap();
+    let envelope = ctx
+        .system_journal
+        .append(marker, Default::default())
+        .await
+        .unwrap();
     machine
         .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut ctx)
         .await

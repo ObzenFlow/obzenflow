@@ -6,7 +6,8 @@
 
 use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::handlers::SinkOperationError;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, SinkOperationFailed, SinkOperationPhase, SystemEvent,
 };
@@ -86,7 +87,7 @@ pub async fn record_sink_lifecycle_operation_failure(
             snapshot_stage_accounting(&instrumentation),
             operation.envelope.provenance.event.id,
         );
-        let lifecycle = system_journal.append(lifecycle, None).await?;
+        let lifecycle = system_journal.append(lifecycle, Default::default()).await?;
         Ok(SinkLifecycleFailureRecorded {
             operation,
             lifecycle_event_id: lifecycle.envelope.provenance.event.id,

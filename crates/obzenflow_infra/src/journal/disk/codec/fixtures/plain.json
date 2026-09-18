@@ -1,0 +1,92 @@
+{
+  "envelope": {
+    "provenance": {
+      "event": {
+        "id": "01M2R1P9BVTYM3VW6A1C977A2X",
+        "writer_id": {
+          "type": "Stage",
+          "id": "01M2R1P9BTCYETFDCV5JYHW1VZ"
+        },
+        "event_kind": "fact",
+        "event_type": "application.value",
+        "causality": {
+          "parent_ids": [
+            "01M2R1P9BW8HY0RX3NQGTKYGMG"
+          ]
+        },
+        "flow_context": {
+          "flow_name": "unknown",
+          "flow_id": "unknown",
+          "stage_name": "unknown",
+          "stage_id": "01M2R1P9BVN71QD6W0D7EABTFC",
+          "stage_type": "Transform"
+        },
+        "processing": {
+          "event_time": 1789660964219,
+          "status": "Success"
+        },
+        "correlation": {
+          "ids": [
+            "01M2R1P9BW8HY0RX3NQGTKYGMG",
+            "01M2R1P9BVTYM3VW6A1C977A2X"
+          ],
+          "payload": {
+            "entry_time_ns": 18446744073709551615,
+            "entry_event_id": "01M2R1P9BW8HY0RX3NQGTKYGMG",
+            "metadata": {
+              "id": "opaque",
+              "negative_zero": -0.0,
+              "nested": [
+                null,
+                18446744073709551615,
+                {
+                  "event_type": "custom"
+                }
+              ]
+            }
+          }
+        },
+        "runtime": {
+          "accounting": {
+            "events_processed_total": 18446744073709551615,
+            "events_accumulated_total": 0,
+            "events_emitted_total": 9007199254740993,
+            "errors_total": 0,
+            "failures_total": 0,
+            "errors_by_kind": {},
+            "data_outputs_by_event_type": [],
+            "data_inputs_by_upstream_event_type": []
+          }
+        },
+        "composite_activations": []
+      },
+      "journal": {
+        "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
+        "vector_clock": {
+          "clocks": {
+            "independent-writer": 18446744073709551615,
+            "zero-writer": 0
+          }
+        },
+        "timestamp": "2037-01-02T03:04:05.123456789Z",
+        "journal_group_id": null,
+        "journal_group_member": null
+      }
+    }
+  },
+  "payload": {
+    "float": 0.8455123990878513,
+    "integer": 18446744073709551615,
+    "nested": {
+      "envelope": {
+        "provenance": [
+          null,
+          true,
+          "🙂\n\u0000"
+        ]
+      }
+    },
+    "tiny": 2.2250738585072014e-308,
+    "zero": -0.0
+  }
+}

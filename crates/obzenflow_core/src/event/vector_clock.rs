@@ -204,7 +204,7 @@ impl CausalOrderingService {
         mut events: Vec<super::JournalRecord<P>>,
     ) -> Result<Vec<super::JournalRecord<P>>, JournalError>
     where
-        P: super::journal_record::JournalPayload,
+        P: super::payloads::JournalPayload,
     {
         // Fast path.
         if events.len() <= 1 {

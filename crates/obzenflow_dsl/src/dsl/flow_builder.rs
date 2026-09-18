@@ -11,10 +11,11 @@ use crate::dsl::backpressure_clause::BackpressureClause;
 use crate::dsl::composites::LoweringArtifacts;
 use crate::dsl::stage_descriptor::StageDescriptor;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::journal::factory::FlowJournalFactory;
+use obzenflow_core::journal::JournalConfig;
 use obzenflow_core::journal::{Journal, JournalError};
 use obzenflow_core::{FlowId, StageId};
 use obzenflow_runtime::effects::{EffectPortRegistry, EffectRegistrationCollectionError};
-use obzenflow_runtime::journal::FlowJournalFactory;
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_topology::EdgeKind;
@@ -165,7 +166,7 @@ where
     // FLOWIP-120u F2: pair the build result with the substrate state known
     // at the failure point. Set once at the factory seam; None means the
     // build failed before substrate selection, so no run directory exists.
-    let mut __run_state: Option<obzenflow_runtime::journal::RunSubstrateState> = None;
+    let mut __run_state: Option<obzenflow_core::journal::factory::RunSubstrateState> = None;
     let __build_result: Result<_, FlowBuildError> = async {
         // FLOWIP-010o: handler sets are build-only. Resolve the framework's
         // non-secret stage selection and replace each carrier with exactly one
@@ -992,11 +993,11 @@ where
         // FLOWIP-120u: capture the substrate declaration, then run the
         // provider's resource preflight before any journal is created.
         let __substrate =
-            obzenflow_runtime::journal::FlowJournalFactory::run_state(&journal_factory);
+            obzenflow_core::journal::factory::FlowJournalFactory::run_state(&journal_factory);
         __run_state = Some(__substrate.clone());
-        obzenflow_runtime::journal::FlowJournalFactory::resource_preflight(
+        obzenflow_core::journal::factory::FlowJournalFactory::resource_preflight(
             &journal_factory,
-            &obzenflow_runtime::journal::RunResourcePlan {
+            &obzenflow_core::journal::factory::RunResourcePlan {
                 stage_count: topology.stages().count(),
                 edge_count: topology.edges().len(),
                 metrics_enabled: metrics_exporter.is_some(),
@@ -1009,7 +1010,7 @@ where
         // the next resume of the original archive.
         if matches!(
             __substrate,
-            obzenflow_runtime::journal::RunSubstrateState::Ephemeral
+            obzenflow_core::journal::factory::RunSubstrateState::Ephemeral
         ) && obzenflow_runtime::bootstrap::replay_bootstrap()
             .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
         {
@@ -1020,7 +1021,7 @@ where
         use obzenflow_core::journal::journal_name::JournalName;
         use obzenflow_core::journal::journal_owner::JournalOwner;
 
-        let control_journal = obzenflow_runtime::journal::FlowJournalFactory::create_system_journal(
+        let control_journal = obzenflow_core::journal::factory::FlowJournalFactory::create_system_journal(
                 &mut journal_factory,
                 JournalName::System,
                 JournalOwner::system(pipeline_id),
@@ -1032,9 +1033,12 @@ where
                 ))
             })?;
 
+        control_journal.configure(JournalConfig { observability: __flow_effective.observability_policy_for(None) })
+            .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
+
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
-        let mut manifest_stages: HashMap<String, obzenflow_core::journal::run_manifest::RunManifestStage> = HashMap::new();
+        let mut manifest_stages: HashMap<String, obzenflow_core::journal::archive::manifest::RunManifestStage> = HashMap::new();
         let mut bounded_direct_fact_admission = Vec::new();
         // FLOWIP-095j: per-stage delivery metadata for the manifest, derived after
         // wrap_deterministic_orderers so orderer answers match the runtime.
@@ -1054,7 +1058,7 @@ where
             if let Some(plan) = descriptor.direct_fact_plan() {
                 bounded_direct_fact_admission.extend(plan.manifest_entries().map(
                     |(input_event_type, max_live_data_rows)| {
-                        obzenflow_core::journal::run_manifest::RunManifestDirectFactAdmission {
+                        obzenflow_core::journal::archive::manifest::RunManifestDirectFactAdmission {
                             stage_key: descriptor.name().to_string(),
                             input_event_type: input_event_type.to_string(),
                             max_live_data_rows,
@@ -1063,7 +1067,7 @@ where
                 ));
             }
 
-            let journal = obzenflow_runtime::journal::FlowJournalFactory::create_chain_journal(
+            let journal = obzenflow_core::journal::factory::FlowJournalFactory::create_chain_journal(
                     &mut journal_factory,
                     JournalName::Stage {
                         id: stage_id,
@@ -1078,10 +1082,14 @@ where
                         stage_id, e
                     ))
             })?;
+            let observation_policy = __flow_effective.observability_policy_for(
+                Some(&obzenflow_core::StageKey::from(name.as_str())));
+            journal.configure(JournalConfig { observability: observation_policy })
+                .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
             stage_journals.insert(stage_id, journal);
 
             // Create error journal for this stage (FLOWIP-082e)
-            let error_journal = obzenflow_runtime::journal::FlowJournalFactory::create_chain_journal(
+            let error_journal = obzenflow_core::journal::factory::FlowJournalFactory::create_chain_journal(
                     &mut journal_factory,
                     JournalName::Stage {
                         id: stage_id,
@@ -1096,6 +1104,8 @@ where
                         stage_id, e
                     ))
             })?;
+            error_journal.configure(JournalConfig { observability: observation_policy })
+                .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
             error_journals.insert(stage_id, error_journal);
 
             // Record static mapping for replay lookup (FLOWIP-095a).
@@ -1118,7 +1128,7 @@ where
                 .unwrap_or((Vec::new(), true));
             manifest_stages.insert(
                 stage_key,
-                obzenflow_core::journal::run_manifest::RunManifestStage {
+                obzenflow_core::journal::archive::manifest::RunManifestStage {
                     dsl_var: name.clone(),
                     stage_type: descriptor.stage_type(),
                     stage_id: stage_id.to_string(),
@@ -1139,10 +1149,7 @@ where
         let replay_archive = obzenflow_runtime::bootstrap::replay_archive();
         if !bounded_direct_fact_admission.is_empty() {
             if let Some(archive) = replay_archive.as_ref() {
-                use obzenflow_core::journal::run_manifest::{
-                    BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY,
-                    EFFECT_ATTEMPT_HISTORY_CAPABILITY,
-                };
+                use obzenflow_core::journal::archive::manifest::{BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY, EFFECT_ATTEMPT_HISTORY_CAPABILITY};
                 for capability in [
                     EFFECT_ATTEMPT_HISTORY_CAPABILITY,
                     BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY,
@@ -1168,7 +1175,7 @@ where
             }
         }
         if let Some(archive) = replay_archive.as_ref() {
-            obzenflow_runtime::journal::FlowJournalFactory::seed_admission_from_archive(
+            obzenflow_core::journal::factory::FlowJournalFactory::seed_admission_from_archive(
                 &journal_factory,
                 archive.as_ref(),
             );
@@ -1176,7 +1183,7 @@ where
 
         // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
         let replay_manifest = obzenflow_runtime::bootstrap::replay_bootstrap().map(|replay| {
-            obzenflow_core::journal::run_manifest::RunManifestReplayConfig {
+            obzenflow_core::journal::archive::manifest::RunManifestReplayConfig {
                 replay_from: replay.archive_path.to_string_lossy().to_string(),
                 allow_incomplete_archive: replay.allow_incomplete_archive,
             }
@@ -1188,7 +1195,7 @@ where
             .filter(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
             .zip(replay_archive.as_ref())
             .map(|(replay, archive)| {
-                obzenflow_core::journal::run_manifest::RunManifestResumeConfig {
+                obzenflow_core::journal::archive::manifest::RunManifestResumeConfig {
                     resumed_from: replay.archive_path,
                     resume_generation: archive.max_recorded_generation().0 + 1,
                     high_water_by_stage: std::collections::BTreeMap::new(),
@@ -1197,24 +1204,28 @@ where
 
         let mut manifest_capabilities = std::collections::BTreeMap::new();
         manifest_capabilities.insert(
-            obzenflow_core::journal::run_manifest::EFFECT_ATTEMPT_HISTORY_CAPABILITY.to_string(),
+            obzenflow_core::journal::archive::manifest::OBSERVABILITY_CAPTURE_CAPABILITY.to_string(),
             1,
         );
         manifest_capabilities.insert(
-            obzenflow_core::journal::run_manifest::EFFECT_BINDING_DESCRIPTOR_CAPABILITY
+            obzenflow_core::journal::archive::manifest::EFFECT_ATTEMPT_HISTORY_CAPABILITY.to_string(),
+            1,
+        );
+        manifest_capabilities.insert(
+            obzenflow_core::journal::archive::manifest::EFFECT_BINDING_DESCRIPTOR_CAPABILITY
                 .to_string(),
             1,
         );
         if !bounded_direct_fact_admission.is_empty() {
             manifest_capabilities.insert(
-                obzenflow_core::journal::run_manifest::BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY
+                obzenflow_core::journal::archive::manifest::BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY
                     .to_string(),
                 1,
             );
         }
-        let run_manifest = obzenflow_core::journal::run_manifest::RunManifest {
-            manifest_version: obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION.to_string(),
-            journal_format_version: obzenflow_core::journal::run_manifest::JOURNAL_FORMAT_VERSION,
+        let run_manifest = obzenflow_core::journal::archive::manifest::RunManifest {
+            manifest_version: obzenflow_core::journal::archive::manifest::RUN_MANIFEST_VERSION.to_string(),
+            journal_format_version: obzenflow_core::journal::archive::manifest::JOURNAL_FORMAT_VERSION,
             obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
             flow_id: flow_id.to_string(),
             flow_name: flow_name.to_string(),
@@ -1232,9 +1243,9 @@ where
         // have no location to persist it within.
         if matches!(
             __substrate,
-            obzenflow_runtime::journal::RunSubstrateState::Durable(_)
+            obzenflow_core::journal::factory::RunSubstrateState::Durable(_)
         ) {
-            obzenflow_runtime::journal::FlowJournalFactory::write_run_manifest(
+            obzenflow_core::journal::factory::FlowJournalFactory::write_run_manifest(
                 &journal_factory,
                 &run_manifest,
             )

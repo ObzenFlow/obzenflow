@@ -5,15 +5,13 @@
 //! Factual revisions and selected measurements are independent Studio updates.
 
 use super::messages::*;
-use obzenflow_core::event::{
-    journal_record::SystemJournalRecord,
-    observation::{ObservabilityContext, ObservationRecord},
-    payloads::execution_payload::{
-        CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
-    },
-    vector_clock::VectorClock,
-    SystemPayload,
+use obzenflow_core::event::journal_record::SystemJournalRecord;
+use obzenflow_core::event::observability::{ObservabilityContext, ObservationRecord};
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
 };
+use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::SystemPayload;
 use obzenflow_core::{web::SseFrame, StageId};
 use std::collections::{BTreeSet, HashMap};
 

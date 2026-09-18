@@ -8,18 +8,22 @@ use super::fsm::{
     MetricsAggregatorAction as Action, MetricsAggregatorContext as Context,
     MetricsAggregatorEvent as Event, MetricsAggregatorState as State, MetricsJournalKind as Rail,
 };
-use super::snapshot::{LookupOutcome, SnapshotObservation};
 use super::subscription::{MetricsSubscription, IDLE_BACKOFF};
 use super::supervisor::MetricsAggregatorSupervisor;
-use crate::journal::FlowJournalFactory;
 use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::observability::ObservationSource;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, JournalEvent, SystemEvent, SystemEventFactory,
 };
+use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
+use obzenflow_core::journal::{
+    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
+};
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{
     ChainEvent, EventId, Journal, JournalId, JournalOwner, JournalRecord, StageId, SystemId,
@@ -106,10 +110,13 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
     fn owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
+    fn observation_reader(&self) -> Option<&dyn JournalObservationReader> {
+        Some(self)
+    }
     async fn append(
         &self,
         event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if event.event_type_name() == "system.metrics.exported" {
             let gate = self.probe.export_gate.lock().unwrap().take();
@@ -118,15 +125,15 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
                 gate.release.notified().await;
             }
         }
-        self.inner.append(event, parent).await
+        self.inner.append(event, options).await
     }
     async fn append_group(
         &self,
         id: &str,
         events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.inner.append_group(id, events, parent).await
+        self.inner.append_group(id, events, options).await
     }
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
@@ -171,6 +178,36 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
     }
 }
 
+#[async_trait]
+impl<T: JournalEvent> JournalObservationReader for ObservedJournal<T> {
+    async fn latest_observation(
+        &self,
+        key: &ObservationKey,
+    ) -> Result<ObservationLookup, JournalError> {
+        if self.probe.fail_tail.load(Ordering::SeqCst) {
+            return Err(JournalError::Full);
+        }
+        self.inner
+            .observation_reader()
+            .expect("real indexed backend")
+            .latest_observation(key)
+            .await
+    }
+    async fn latest_observations(
+        &self,
+        observer: WriterId,
+    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
+        if self.probe.fail_tail.load(Ordering::SeqCst) {
+            return Err(JournalError::Full);
+        }
+        self.inner
+            .observation_reader()
+            .expect("real indexed backend")
+            .latest_observations(observer)
+            .await
+    }
+}
+
 #[derive(Default)]
 struct Exports(Mutex<Vec<AppMetricsSnapshot>>);
 impl MetricsSnapshotExporter for Exports {
@@ -210,9 +247,9 @@ fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent 
             ..Default::default()
         },
     });
-    use obzenflow_core::event::{
-        context::*, observation::*, payloads::execution_payload::CircuitState,
-    };
+    use obzenflow_core::event::observability::*;
+    use obzenflow_core::event::payloads::execution_payload::CircuitState;
+    use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     let mut packet = ObservabilityContext::new(CaptureStamp {
         capture_scope: CaptureScope {
             flow_id: "00000000000000000000000001".parse().unwrap(),
@@ -331,220 +368,143 @@ fn assert_values(ctx: &Context, stage: StageId, total: u64, gauge: u32) {
     assert!(store.circuit_breaker_state_transitions_total.is_empty());
 }
 
-pub async fn metrics_cache_bounds_negative_search_and_reuses_examined_heads(
+pub async fn metrics_index_reports_absence_without_tail_search(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
     let journal = stage_journal(&mut *factory, stage, "negative");
-    let mut observation = SnapshotObservation::default();
-    assert_eq!(observation.lookup_outcome(), None);
-    observation.refresh(journal.as_ref(), stage).await.unwrap();
-    assert_eq!(observation.lookup_outcome(), Some(LookupOutcome::Absent));
-    assert_eq!(*journal.probe.tail_requests.lock().unwrap(), [1]);
-    let foreign = StageId::new();
-    for _ in 0..1_000 {
-        journal.append(noise(foreign), None).await.unwrap();
+    for count in [0, 1000] {
+        if count > 0 {
+            journal
+                .append_group(
+                    "noise",
+                    (0..count).map(|_| noise(stage)).collect(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        for _ in 0..2 {
+            let ObservationLookup::Ready {
+                committed_len,
+                observation,
+            } = journal.latest_observations(stage.into()).await.unwrap()
+            else {
+                panic!("live index must be ready")
+            };
+            assert_eq!(committed_len, count);
+            assert!(observation.is_empty());
+        }
     }
-    journal.probe.tail_requests.lock().unwrap().clear();
-    journal.probe.materialised.store(0, Ordering::SeqCst);
-    observation.refresh(journal.as_ref(), stage).await.unwrap();
-    assert_eq!(
-        *journal.probe.tail_requests.lock().unwrap(),
-        [1, 5, 20, 100, 500, 2_000]
-    );
-    assert_eq!(journal.probe.materialised.load(Ordering::SeqCst), 1_626);
-    journal.probe.tail_requests.lock().unwrap().clear();
-    observation.refresh(journal.as_ref(), stage).await.unwrap();
-    assert_eq!(*journal.probe.tail_requests.lock().unwrap(), [1]);
-    for _ in 0..9 {
-        journal.append(noise(foreign), None).await.unwrap();
-    }
-    journal.probe.tail_requests.lock().unwrap().clear();
-    journal.probe.materialised.store(0, Ordering::SeqCst);
-    observation.refresh(journal.as_ref(), stage).await.unwrap();
-    assert_eq!(*journal.probe.tail_requests.lock().unwrap(), [1, 5, 20]);
-    assert_eq!(journal.probe.materialised.load(Ordering::SeqCst), 26);
-    journal
-        .append(fact(stage, stage.into(), 1, 7), None)
-        .await
-        .unwrap();
-    observation.refresh(journal.as_ref(), stage).await.unwrap();
-    assert_eq!(
-        observation
-            .measurements()
-            .into_iter()
-            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
-            .unwrap(),
-        7
-    );
-
-    // Shared lifecycle helpers also stop at a successfully examined beginning.
-    let empty = stage_journal(&mut *factory, stage, "empty");
-    let erased: Arc<dyn Journal<ChainEvent>> = empty.clone();
-    assert!(super::tail_read::read_latest_runtime_context(&erased)
-        .await
-        .is_none());
-    assert!(
-        super::tail_read::read_latest_runtime_context_for_stage(&erased, stage)
-            .await
-            .is_none()
-    );
-    assert_eq!(*empty.probe.tail_requests.lock().unwrap(), [1, 1]);
+    assert!(journal.probe.tail_requests.lock().unwrap().is_empty());
 }
 
-pub async fn metrics_snapshot_selection_survives_both_refresh_failure_orders(
+pub async fn metrics_accounting_folds_sequentially_while_measurement_failures_retain_values(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "data");
     let older = data
-        .append(fact(stage, stage.into(), 1, 9), None)
+        .append(fact(stage, stage.into(), 1, 9), Default::default())
         .await
         .unwrap();
     let newer = data
-        .append(fact(stage, stage.into(), 2, 4), None)
+        .append(fact(stage, stage.into(), 2, 4), Default::default())
         .await
         .unwrap();
-    let (mut ctx, mut io, _, exports) =
+    let (mut ctx, _, _, exports) =
         context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
     Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_values(&ctx, stage, 2, 4);
-    assert_eq!(ctx.metrics_store.total_events_processed, 0);
-    let mut prefetched = Vec::new();
-    while prefetched.len() < 2 {
-        prefetched.extend(
-            io.data_subscription
-                .poll_batch()
-                .await
-                .unwrap()
-                .expect("committed snapshot records")
-                .events,
-        );
-    }
     assert_eq!(
-        prefetched[1].envelope.provenance.event.id,
-        newer.envelope.provenance.event.id
+        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+        None
     );
-    assert!(ctx.metrics_store.ensure_snapshots_reconciled().is_err());
-    assert_eq!(ctx.metrics_store.total_events_processed, 0);
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
+        Some(4)
+    );
     fold(&mut ctx, stage, Rail::Data, older).await;
     data.probe.fail_tail.store(true, Ordering::SeqCst);
     Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_values(&ctx, stage, 2, 4);
-    assert!(ctx.metrics_store.ensure_snapshots_reconciled().is_err());
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+        Some(1)
+    );
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
+        Some(4)
+    );
     fold(&mut ctx, stage, Rail::Data, newer).await;
-    ctx.metrics_store.ensure_snapshots_reconciled().unwrap();
+    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
+    assert_values(&ctx, stage, 2, 4);
     let latest = data
-        .append(fact(stage, stage.into(), 3, 1), None)
+        .append(fact(stage, stage.into(), 3, 1), Default::default())
         .await
         .unwrap();
     fold(&mut ctx, stage, Rail::Data, latest).await;
     Action::ExportMetrics.execute(&mut ctx).await.unwrap();
     assert_values(&ctx, stage, 3, 1);
-    assert_eq!(ctx.metrics_store.total_events_processed, 3);
     assert_eq!(
         exports.0.lock().unwrap().last().unwrap().event_counts[&stage],
         3
     );
-    data.probe.fail_tail.store(false, Ordering::SeqCst);
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    ctx.metrics_store.ensure_snapshots_reconciled().unwrap();
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_values(&ctx, stage, 3, 1);
+    assert!(data.probe.tail_requests.lock().unwrap().is_empty());
 }
 
-pub async fn metrics_capped_search_keeps_sequential_selection_and_search_uncertainty(
+pub async fn metrics_index_finds_sparse_families_beyond_the_old_tail_cap(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "sparse");
-    let first = data
-        .append(fact(stage, stage.into(), 1, 6), None)
+    data.append(fact(stage, stage.into(), 1, 6), Default::default())
         .await
         .unwrap();
-    let mut warm = SnapshotObservation::default();
-    warm.refresh(data.as_ref(), stage).await.unwrap();
-    // Real atomic frames make the large sparse history economical to create.
     for group in 0..51 {
         data.append_group(
             &format!("sparse-{group}"),
-            (0..1_000).map(|_| noise(stage)).collect(),
-            None,
+            (0..1000).map(|_| noise(stage)).collect(),
+            Default::default(),
         )
         .await
         .unwrap();
     }
-    let mut cold = SnapshotObservation::default();
-    for observation in [&mut cold, &mut warm] {
-        observation.refresh(data.as_ref(), stage).await.unwrap();
-        assert_eq!(observation.lookup_outcome(), Some(LookupOutcome::Capped));
-        observation.fold(&first, stage).unwrap();
-        assert_eq!(
-            observation
-                .measurements()
-                .into_iter()
-                .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
-                .unwrap(),
-            6
-        );
-        observation.refresh(data.as_ref(), stage).await.unwrap();
-        assert_eq!(observation.lookup_outcome(), Some(LookupOutcome::Capped));
-        assert!(!observation.is_ahead_of_fold());
-    }
-    let next = data
-        .append(fact(stage, stage.into(), 2, 2), None)
-        .await
-        .unwrap();
-    cold.fold(&next, stage).unwrap();
-    data.probe.fail_tail.store(true, Ordering::SeqCst);
-    assert!(cold.refresh(data.as_ref(), stage).await.is_err());
-    assert_eq!(cold.lookup_outcome(), Some(LookupOutcome::Capped));
+    let ObservationLookup::Ready {
+        committed_len,
+        observation,
+    } = data.latest_observations(stage.into()).await.unwrap()
+    else {
+        panic!("live index must be ready")
+    };
+    assert_eq!(committed_len, 51001);
+    assert!(observation.iter().all(|located| located.position == 0));
     assert_eq!(
-        cold.measurements()
-            .into_iter()
-            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
-            .unwrap(),
-        2
+        observation.into_iter().find_map(|located| located
+            .observation
+            .runtime
+            .and_then(|runtime| runtime.in_flight)),
+        Some(6)
     );
+    assert!(data.probe.tail_requests.lock().unwrap().is_empty());
 }
 
-pub async fn metrics_tail_results_bind_to_the_window_actually_examined(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
+pub async fn metrics_exports_do_not_create_observations(mut factory: Box<dyn FlowJournalFactory>) {
     let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "moving_head");
-    data.append(fact(stage, stage.into(), 1, 8), None)
-        .await
-        .unwrap();
-    data.append(noise(stage), None).await.unwrap();
-    let gate = Arc::new(Gate::default());
-    *data.probe.tail_gate.lock().unwrap() = Some((5, gate.clone()));
-    let mut observation = SnapshotObservation::default();
-    let (result, ()) = tokio::join!(observation.refresh(data.as_ref(), stage), async {
-        gate.entered.notified().await;
-        data.append(fact(stage, stage.into(), 2, 3), None)
-            .await
-            .unwrap();
-        gate.release.notify_one();
-    });
-    result.unwrap();
+    let data = stage_journal(&mut *factory, stage, "quiet");
+    let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let execution =
+        crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
+    let instrumentation = Arc::new(super::instrumentation::StageInstrumentation::new());
+    instrumentation.bind_observations(obzenflow_core::FlowId::new(), stage.into(), &execution);
+    ctx.metrics_store.observations = execution.observations().clone();
+    let before = ctx.metrics_store.observations.snapshot();
+    for _ in 0..3 {
+        Action::ExportMetrics.execute(&mut ctx).await.unwrap();
+    }
     assert_eq!(
-        observation
-            .measurements()
-            .into_iter()
-            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
-            .unwrap(),
-        8
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(ctx.metrics_store.observations.snapshot()).unwrap()
     );
-    observation.refresh(data.as_ref(), stage).await.unwrap();
-    assert_eq!(
-        observation
-            .measurements()
-            .into_iter()
-            .find_map(|packet| packet.runtime.and_then(|runtime| runtime.in_flight))
-            .unwrap(),
-        3
-    );
+    assert!(data.read_all_unordered().await.unwrap().is_empty());
 }
 
 pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence(
@@ -555,10 +515,12 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     let data = stage_journal(&mut *factory, stage, "data");
     let errors = stage_journal(&mut *factory, stage, "errors");
     for _ in 0..4 {
-        data.append(noise(archived), None).await.unwrap();
+        data.append(noise(archived), Default::default())
+            .await
+            .unwrap();
     }
     let a = data
-        .append(fact(stage, archived.into(), 1, 8), None)
+        .append(fact(stage, archived.into(), 1, 8), Default::default())
         .await
         .unwrap();
     let mut b = fact(stage, stage.into(), 2, 5);
@@ -566,7 +528,7 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     let mut c = fact(stage, stage.into(), 3, 2);
     c.id = a.envelope.provenance.event.id;
     let group = data
-        .append_group("repeated-event-id", vec![b, c], None)
+        .append_group("repeated-event-id", vec![b, c], Default::default())
         .await
         .unwrap();
     let (mut ctx, _, _, _) = context(
@@ -576,20 +538,25 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     )
     .await;
     Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    for row in [a, group[0].clone()] {
+    for (index, row) in [a, group[0].clone()].into_iter().enumerate() {
         fold(&mut ctx, stage, Rail::Data, row).await;
         Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-        assert_values(&ctx, stage, 3, 2);
-        assert!(ctx.metrics_store.ensure_snapshots_reconciled().is_err());
+        assert_eq!(
+            ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+            Some(index as u64 + 1)
+        );
+        assert_eq!(
+            ctx.metrics_store.stage_metrics[&stage].last_in_flight,
+            Some(2)
+        );
     }
     fold(&mut ctx, stage, Rail::Data, group[1].clone()).await;
-    ctx.metrics_store.ensure_snapshots_reconciled().unwrap();
     let error = errors
-        .append(fact(stage, archived.into(), 2, 7), None)
+        .append(fact(stage, archived.into(), 2, 7), Default::default())
         .await
         .unwrap();
     errors
-        .append(fact(archived, archived.into(), 99, 99), None)
+        .append(fact(archived, archived.into(), 99, 99), Default::default())
         .await
         .unwrap();
     fold(&mut ctx, stage, Rail::Error, error).await;
@@ -598,7 +565,6 @@ pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_pre
     assert_values(&ctx, stage, 3, 2);
     assert_eq!(ctx.metrics_store.stage_vector_clocks.get(&archived), None);
     assert_eq!(ctx.metrics_store.stage_vector_clocks[&stage], 2);
-    ctx.metrics_store.ensure_snapshots_reconciled().unwrap();
 }
 
 pub async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends(
@@ -614,7 +580,7 @@ pub async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_e
     assert!(sub.poll_batch().await.unwrap().is_none());
     assert_eq!(data.probe.next_calls.load(Ordering::SeqCst), calls);
     for _ in 0..3 {
-        data.append(noise(stage), None).await.unwrap();
+        data.append(noise(stage), Default::default()).await.unwrap();
     }
     let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
     // Terminal invalidates the live-empty cooldown before the next read.
@@ -679,18 +645,21 @@ pub async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_pub
     let data = stage_journal(&mut *factory, stage, "data");
     let errors = stage_journal(&mut *factory, stage, "errors");
     for _ in 0..200 {
-        data.append(noise(stage), None).await.unwrap();
-        errors.append(noise(stage), None).await.unwrap();
+        data.append(noise(stage), Default::default()).await.unwrap();
+        errors
+            .append(noise(stage), Default::default())
+            .await
+            .unwrap();
     }
     let (mut ctx, io, system, _) =
         context(&mut *factory, vec![(stage, data)], vec![(stage, errors)]).await;
     let events = SystemEventFactory::new(ctx.system_id);
     system
-        .append(events.pipeline_draining(), None)
+        .append(events.pipeline_draining(), Default::default())
         .await
         .unwrap();
     system
-        .append(events.pipeline_all_stages_completed(), None)
+        .append(events.pipeline_all_stages_completed(), Default::default())
         .await
         .unwrap();
     let mut supervisor = supervisor(&ctx, io);
@@ -777,11 +746,14 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
         let journal = stage_journal(&mut *factory, stage, "data");
         let error = stage_journal(&mut *factory, stage, "errors");
         journal
-            .append(fact(stage, stage.into(), 1, 0), None)
+            .append(fact(stage, stage.into(), 1, 0), Default::default())
             .await
             .unwrap();
         if index == 0 {
-            error.append(noise(stage), None).await.unwrap();
+            error
+                .append(noise(stage), Default::default())
+                .await
+                .unwrap();
         }
         probes.push((journal.probe.clone(), 1));
         probes.push((error.probe.clone(), u64::from(index == 0)));
@@ -794,19 +766,19 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
     let old = SystemEventFactory::new(SystemId::new());
     let current = SystemEventFactory::new(pipeline);
     system
-        .append(old.pipeline_not_started(), None)
+        .append(old.pipeline_not_started(), Default::default())
         .await
         .unwrap();
     system
-        .append(current.pipeline_all_stages_completed(), None)
+        .append(current.pipeline_all_stages_completed(), Default::default())
         .await
         .unwrap();
     system
-        .append(current.pipeline_not_started(), None)
+        .append(current.pipeline_not_started(), Default::default())
         .await
         .unwrap();
     system
-        .append(current.pipeline_drained(), None)
+        .append(current.pipeline_drained(), Default::default())
         .await
         .unwrap();
     let supervisor = supervisor(&ctx, io);
@@ -836,37 +808,88 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
     );
 }
 
-pub async fn metrics_final_refresh_inconsistency_fails_without_successful_drained(
+pub async fn metrics_terminal_accounting_covers_filtering_without_optional_packets(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
+    use obzenflow_core::event::provenance::ExecutionAccounting;
+    use obzenflow_core::event::{StageLifecycleEvent, SystemPayload};
     let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "data");
-    let (mut ctx, _, system, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    ctx.metrics_store.inputs_covered = true;
-    data.append(fact(stage, stage.into(), 1, 1), None)
+    let (mut ctx, _, system, _) = context(&mut *factory, vec![], vec![]).await;
+    for (index, event) in [
+        StageLifecycleEvent::Completed {
+            accounting: Some(ExecutionAccounting {
+                events_processed_total: 1000,
+                events_emitted_total: 0,
+                ..Default::default()
+            }),
+        },
+        StageLifecycleEvent::Draining {
+            accounting: Some(ExecutionAccounting {
+                events_processed_total: 10,
+                ..Default::default()
+            }),
+        },
+        StageLifecycleEvent::Cancelled {
+            reason: "stop".into(),
+            accounting: Some(ExecutionAccounting {
+                events_processed_total: 1001,
+                ..Default::default()
+            }),
+        },
+        StageLifecycleEvent::Failed {
+            error: "error".into(),
+            recoverable: None,
+            causal_event_id: None,
+            accounting: Some(ExecutionAccounting {
+                events_processed_total: 999,
+                errors_total: 1,
+                ..Default::default()
+            }),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let row = system
+            .append(
+                SystemEvent::new(
+                    SystemId::new().into(),
+                    SystemPayload::StageLifecycle {
+                        stage_id: stage,
+                        event,
+                    },
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(row.envelope.observability.is_none());
+        Action::ProcessSystemEvent {
+            envelope: Box::new(row),
+        }
+        .execute(&mut ctx)
         .await
         .unwrap();
-    let mut machine = super::fsm::build_metrics_aggregator_fsm();
-    machine.handle(Event::StartRunning, &mut ctx).await.unwrap();
-    machine
-        .handle(Event::StartDraining, &mut ctx)
-        .await
-        .unwrap();
-    let actions = machine.handle(Event::FlowTerminal, &mut ctx).await.unwrap();
-    let error = actions[0].execute(&mut ctx).await.unwrap_err();
-    assert!(matches!(machine.state(), State::Drained { .. }));
-    machine
-        .handle(Event::Error(error.to_string()), &mut ctx)
-        .await
-        .unwrap();
-    assert!(matches!(machine.state(), State::Failed { .. }));
+        assert_eq!(
+            ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+            Some(if index < 2 { 1000 } else { 1001 })
+        );
+    }
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].latest_events_emitted_total,
+        Some(0)
+    );
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].latest_errors_total,
+        Some(1)
+    );
+    assert!(!ctx.metrics_store.inputs_covered);
     assert!(Action::PublishDrainComplete {
         last_event_id: None
     }
     .execute(&mut ctx)
     .await
     .is_err());
-    assert!(system.read_all_unordered().await.unwrap().is_empty());
 }
 
 pub async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not_wait_for_export(
@@ -874,7 +897,7 @@ pub async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not
 ) {
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "pending_batch");
-    data.append(noise(stage), None).await.unwrap();
+    data.append(noise(stage), Default::default()).await.unwrap();
     let mut sub = MetricsSubscription::new(&[(stage, data.clone())])
         .await
         .unwrap();
@@ -967,7 +990,7 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
         (transform, &transform_data),
     ] {
         let row = journal
-            .append(fact(stage, stage.into(), 1, 0), None)
+            .append(fact(stage, stage.into(), 1, 0), Default::default())
             .await
             .unwrap();
         fold(&mut ctx, stage, Rail::Data, row).await;
@@ -976,7 +999,7 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
     for _ in 0..3 {
         let mut eof = ChainEventFactory::eof_event(source.into(), true);
         eof.flow_context.stage_id = counter;
-        let row = counter_data.append(eof, None).await.unwrap();
+        let row = counter_data.append(eof, Default::default()).await.unwrap();
         fold(&mut ctx, counter, Rail::Data, row).await;
     }
     assert_eq!(ctx.metrics_store.stage_vector_clocks[&counter], 1);
@@ -997,7 +1020,10 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
             },
         );
         contract.flow_context.stage_id = summary;
-        let row = summary_data.append(contract, None).await.unwrap();
+        let row = summary_data
+            .append(contract, Default::default())
+            .await
+            .unwrap();
         fold(&mut ctx, summary, Rail::Data, row).await;
     }
     assert_eq!(ctx.metrics_store.stage_vector_clocks[&summary], 1);
@@ -1009,7 +1035,7 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
         let row = transform_errors
             .append(
                 fact(source, source.into(), total, 0).mark_as_error("expected", ErrorKind::Unknown),
-                None,
+                Default::default(),
             )
             .await
             .unwrap();
@@ -1022,7 +1048,10 @@ pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness
     assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&source));
     for total in 1..=3 {
         let row = transform_errors
-            .append(fact(transform, transform.into(), total, 0), None)
+            .append(
+                fact(transform, transform.into(), total, 0),
+                Default::default(),
+            )
             .await
             .unwrap();
         fold(&mut ctx, transform, Rail::Error, row).await;

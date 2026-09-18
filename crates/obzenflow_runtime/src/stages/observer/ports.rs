@@ -9,7 +9,8 @@
 //! control boundary, continuation, executor, resolver, or settlement handle.
 
 use crate::messaging::upstream_subscription::StageInputPosition;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainPayload;

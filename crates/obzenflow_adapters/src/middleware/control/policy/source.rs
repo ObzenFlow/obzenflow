@@ -9,7 +9,7 @@
 
 use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
-use obzenflow_core::event::observation::{NoObservations, ObservationRecorder};
+use obzenflow_core::event::observability::{NoObservations, ObservationRecorder};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, WriterId};

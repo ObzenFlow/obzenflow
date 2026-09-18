@@ -16,7 +16,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
-use obzenflow_core::journal::run_manifest::{
+use obzenflow_core::journal::archive::manifest::{
     RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
@@ -254,7 +254,7 @@ fn archive_policy(run_dir: &Path, manifest: &RunManifest) -> ReadPolicy {
     }
 }
 
-fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
+pub(super) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
     let manifest_path = run_dir.join(RUN_MANIFEST_FILENAME);
     let body =
         std::fs::read_to_string(&manifest_path).map_err(|source| JournalInspectError::Io {
@@ -283,6 +283,13 @@ fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
         });
     }
 
+    super::manifest_gate::require_observability_capture(&value).map_err(|message| {
+        JournalInspectError::Manifest {
+            path: manifest_path.clone(),
+            message,
+        }
+    })?;
+
     serde_json::from_value(value).map_err(|e| JournalInspectError::Manifest {
         path: manifest_path,
         message: e.to_string(),
@@ -298,13 +305,12 @@ mod tests {
         use super::super::log_record::{serialize_atomic_group, serialize_record};
         use crate::journal::DiskJournal;
         use obzenflow_core::ai::AiMapReduceTaggedPartial;
-        use obzenflow_core::event::context::{
-            ExecutionProgress, RuntimeObservability, RuntimeProvenance, RuntimeSnapshot,
-        };
-        use obzenflow_core::event::observation::{
-            CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ObservabilityContext,
+        use obzenflow_core::event::observability::{
+            CaptureReason, CaptureScope, CaptureSeq, CaptureStamp, ExecutionProgress,
+            ObservabilityContext, RuntimeObservability, RuntimeSnapshot,
         };
         use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+        use obzenflow_core::event::provenance::RuntimeProvenance;
         use obzenflow_core::event::vector_clock::VectorClock;
         use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
         use obzenflow_core::{
@@ -375,10 +381,13 @@ mod tests {
             JournalOwner::stage(stage),
         )
         .unwrap();
-        let mut original = vec![journal.append(events.remove(0), None).await.unwrap()];
+        let mut original = vec![journal
+            .append(events.remove(0), Default::default())
+            .await
+            .unwrap()];
         original.extend(
             journal
-                .append_group("omission-proof", events, None)
+                .append_group("omission-proof", events, Default::default())
                 .await
                 .unwrap(),
         );

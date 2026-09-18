@@ -23,13 +23,16 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent};
+use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
+use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::{ChainPayload, SystemPayload};
+use obzenflow_core::journal::factory::{FlowJournalFactory, RunSubstrateState};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::journal_reader::JournalReader;
+use obzenflow_core::journal::reader::JournalReader;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     CycleDepth, DivergenceContract, EventId, FlowId, JournalId, JournalRecord, StageOutputs,
@@ -38,7 +41,6 @@ use obzenflow_core::{
 use obzenflow_dsl::{effectful_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::{memory_journals, MemoryJournalFactory};
 use obzenflow_runtime::effects::{Effects, StageCompletion};
-use obzenflow_runtime::journal::{FlowJournalFactory, RunSubstrateState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -307,16 +309,16 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        options: AppendOptions<'_, ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
-        self.inner.append(self.corrupt(event), parent).await
+        self.inner.append(self.corrupt(event), options).await
     }
 
     async fn append_group(
         &self,
         group_id: &str,
         events: Vec<ChainEvent>,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        options: AppendOptions<'_, ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner
             .append_group(
@@ -325,7 +327,7 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
                     .into_iter()
                     .map(|event| self.corrupt(event))
                     .collect(),
-                parent,
+                options,
             )
             .await
     }
@@ -533,15 +535,17 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         },
     );
 
-    let pipeline_failed =
-        EventShape::<SystemEvent>::system_event_predicate("PipelineLifecycle::Failed", |ev| {
+    let pipeline_failed = EventShape::<SystemEvent>::system_event_predicate(
+        "PipelineLifecycle::Failed",
+        |ev| {
             matches!(
                 ev,
                 SystemPayload::PipelineLifecycle(
-                    obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed { .. }
+                    obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent::Failed { .. }
                 )
             )
-        });
+        },
+    );
 
     // System events are appended without explicit parent chaining, so their vector clocks
     // do not necessarily encode strict happened-before across different system writers.

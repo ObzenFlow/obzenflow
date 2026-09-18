@@ -2,19 +2,21 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Shared tail-read utilities for metrics.
+//! Explicit, best-effort inspection of protected accounting in journal tails.
 //!
-//! Stateless stage and flow lifecycle projections read wide journal snapshots
-//! through these helpers. The collector's cached refresh shares their search
-//! windows and stage qualification, retaining its own observation state.
+//! Collector accounting comes from its sequential fold, not these helpers.
+//! Optional measurements use the committed-attachment index independently.
 
-use obzenflow_core::event::context::{RuntimeProvenance, StageType};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::id::StageId;
 use obzenflow_core::metrics::{FlowLifecycleMetricsSnapshot, StageMetadata, StageMetricsSnapshot};
 use obzenflow_core::{Journal, WriterId};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const SEARCH_WINDOWS: [usize; 8] = [1, 5, 20, 100, 500, 2_000, 10_000, 50_000];
 
 type StageJournalEntry = (
     StageId,
@@ -26,9 +28,8 @@ type StageJournalEntry = (
 ///
 /// Uses a graduated search to handle cases where the very last events may not
 /// carry `runtime_context` (e.g., control/forwarded events, partial writes).
-/// In typical flows, a small tail window is enough. For stateful stages that
-/// only emit on EOF, runtime snapshots may be sparse relative to control and
-/// middleware events, so we expand the window to keep `/metrics` accurate.
+/// The search is capped and makes no completeness claim. Metrics export and
+/// terminal accounting do not use this inspection path.
 ///
 /// This relies on `Journal::read_last_n` returning events in
 /// most-recent-first order.
@@ -38,7 +39,7 @@ pub async fn read_latest_runtime_context(
     // In most flows, the last few events contain a runtime_context snapshot.
     // However, some stages can end with a large number of control or forwarded
     // events that omit runtime_context, so we expand the search window.
-    for n in super::snapshot::SEARCH_WINDOWS {
+    for n in SEARCH_WINDOWS {
         match journal.read_last_n(n).await {
             Ok(events) => {
                 let reached_beginning = events.len() < n;
@@ -75,7 +76,7 @@ pub async fn read_latest_runtime_context_for_stage(
     // See read_latest_runtime_context. The stage-filtered variant can be more
     // sensitive to "tail noise" because forwarded events often re-stamp
     // flow_context but omit runtime_context.
-    for n in super::snapshot::SEARCH_WINDOWS {
+    for n in SEARCH_WINDOWS {
         match journal.read_last_n(n).await {
             Ok(events) => {
                 let reached_beginning = events.len() < n;
@@ -115,26 +116,19 @@ pub async fn read_stage_metrics_from_tail(
     error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     stage_id: StageId,
 ) -> Option<StageMetricsSnapshot> {
-    use obzenflow_core::event::observation::ObservationSource;
+    use obzenflow_core::event::observability::ObservationSource;
     let mut metrics = super::fsm::StageMetrics::default();
     let observations = super::observations::ObservationHub::default();
     for journal in std::iter::once(data_journal).chain(error_journal) {
         if let Some(provenance) = read_latest_runtime_context_for_stage(journal, stage_id).await {
             metrics.merge_runtime_context(&provenance);
         }
-        // Existing bounded tail-search budget; 145b owns attachment indexing.
-        if let Ok(rows) = journal
-            .read_last_n(*super::snapshot::SEARCH_WINDOWS.last().unwrap())
-            .await
-        {
-            for row in rows.into_iter().rev() {
-                if let Some(observation) = row.envelope.observability {
-                    if let Some(observation) = observation.for_observer(WriterId::from(stage_id)) {
-                        observations.offer_recorded(observation);
-                    }
-                }
-            }
-        }
+        super::snapshot::retain_journal_observations(
+            journal.as_ref(),
+            WriterId::from(stage_id),
+            &observations,
+        )
+        .await;
     }
     for packet in observations.snapshot() {
         if let Some(runtime) = packet.runtime {
@@ -208,15 +202,15 @@ pub async fn read_flow_metrics_from_tails(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::context::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
     use obzenflow_core::event::journal_record::JournalRecord;
+    use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::{ChainEvent, WriterId};
     use std::sync::{Arc, Mutex};
 
@@ -264,8 +258,9 @@ mod tests {
         async fn append(
             &self,
             event: ChainEvent,
-            _parent: Option<&JournalRecord<ChainPayload>>,
+            mut options: obzenflow_core::journal::AppendOptions<'_, ChainEvent>,
         ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+            let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
             guard.push(envelope.clone());

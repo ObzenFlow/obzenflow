@@ -6,7 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use obzenflow_runtime::journal::RunSubstrateState;
+use obzenflow_core::journal::factory::RunSubstrateState;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::runtime_config::ResolvedRuntimeConfig;

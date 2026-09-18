@@ -9,6 +9,8 @@
 pub mod disk;
 pub mod factory;
 pub mod memory;
+mod observability;
+mod observation_index;
 
 // Re-export implementations
 pub use disk::DiskJournal;

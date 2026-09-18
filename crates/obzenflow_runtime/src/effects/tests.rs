@@ -10,9 +10,10 @@ use crate::stages::observer::{
     StageObserverBindings, StageObserverBundle,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::event_envelope::JournalGroupMember;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::{ChainPayload, EventKind, JournalEvent, JournalRecord};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{ArchiveStatus, JournalError, JournalReader, StatusDerivation};
 use obzenflow_core::{
     BoundedBindingEvidence, JournalId, JournalOwner, JournalWriterId, TypedPayload,
@@ -227,8 +228,9 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     async fn append(
         &self,
         event: T,
-        _parent: Option<&JournalRecord<T::Payload>>,
+        mut options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         let mut failures = self
             .fail_event_types
             .lock()
@@ -256,8 +258,13 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        _parent: Option<&JournalRecord<T::Payload>>,
+        mut options: AppendOptions<'_, T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        let events = events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| options.capture.prepare(index, event))
+            .collect::<Vec<_>>();
         let mut failures = self
             .fail_group_prefixes
             .lock()
@@ -373,8 +380,9 @@ impl Journal<ChainEvent> for FailingStartJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         self.attempted_event_types
             .lock()
             .expect("attempted event types lock poisoned")
@@ -427,8 +435,9 @@ impl Journal<ChainEvent> for InspectingFailJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        _parent: Option<&JournalRecord<ChainPayload>>,
+        mut options: AppendOptions<'_, ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+        let event = options.capture.prepare(0, event);
         assert!(event.consumes_data_credit());
         assert_eq!(
             self.registry.edge_in_flight(self.upstream, self.downstream),
@@ -1810,26 +1819,28 @@ fn named_affine_invocation_context_with_mode(
 struct ScopeMatrixArchive;
 
 #[async_trait]
-impl crate::replay::ReplayArchive for ScopeMatrixArchive {
+impl obzenflow_core::journal::archive::ReplayArchive for ScopeMatrixArchive {
     async fn open_source_reader(
         &self,
         _stage_key: &str,
         _expected_type: StageType,
-    ) -> Result<Box<dyn JournalReader<ChainEvent>>, crate::replay::ReplayError> {
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, obzenflow_core::journal::archive::ReplayError>
+    {
         unreachable!("the execution-scope fixture does not open source readers")
     }
 
     async fn open_effect_history(
         &self,
         _stage_key: &str,
-    ) -> Result<Box<dyn JournalReader<ChainEvent>>, crate::replay::ReplayError> {
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, obzenflow_core::journal::archive::ReplayError>
+    {
         unreachable!("the execution-scope fixture supplies effect history directly")
     }
 
     fn source_data_journal_path(
         &self,
         _stage_key: &str,
-    ) -> Result<PathBuf, crate::replay::ReplayError> {
+    ) -> Result<PathBuf, obzenflow_core::journal::archive::ReplayError> {
         unreachable!("the execution-scope fixture does not resolve archive paths")
     }
 
@@ -1837,7 +1848,10 @@ impl crate::replay::ReplayArchive for ScopeMatrixArchive {
         "scope-matrix-archive"
     }
 
-    fn archived_stage_id(&self, _stage_key: &str) -> Result<StageId, crate::replay::ReplayError> {
+    fn archived_stage_id(
+        &self,
+        _stage_key: &str,
+    ) -> Result<StageId, obzenflow_core::journal::archive::ReplayError> {
         unreachable!("the execution-scope fixture does not resolve archived stage ids")
     }
 

@@ -3,11 +3,11 @@
 // https://obzenflow.dev
 
 use super::{ChainEvent, CorrelationContext};
-use crate::event::context::composite_activation_context::{
+use crate::event::payloads::correlation_payload::CorrelationPayload;
+use crate::event::provenance::composite_activation_context::{
     union_composite_activations, CompositeActivationConflict,
 };
-use crate::event::context::CompositeActivationContext;
-use crate::event::payloads::correlation_payload::CorrelationPayload;
+use crate::event::provenance::CompositeActivationContext;
 use crate::event::types::CorrelationId;
 
 impl ChainEvent {
@@ -134,7 +134,7 @@ impl ChainEvent {
 mod composite_activation_tests {
     use crate::config::LineagePolicy;
     use crate::event::chain_event::ChainEventFactory;
-    use crate::event::context::CompositeActivationContext;
+    use crate::event::provenance::CompositeActivationContext;
     use crate::event::types::WriterId;
     use crate::event::ChainEvent;
     use crate::id::{CompositeId, StageId};

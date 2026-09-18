@@ -7,7 +7,7 @@
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkConsumeReport;
 use async_trait::async_trait;
-use obzenflow_core::event::observation::ObservationRecorder;
+use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, MiddlewareFact, RateLimiterFact,
 };

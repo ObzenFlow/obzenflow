@@ -8,18 +8,16 @@
 //! Initializing -> Running -> Draining -> Drained
 //! Event processing happens directly without FSM state tracking
 
-use super::snapshot::{JournalBinding, SnapshotObservation};
 use obzenflow_core::event::chain_event::ChainPayload;
-use obzenflow_core::event::context::{
-    MeasurementWindow, RuntimeObservability, RuntimeProvenance, StageType,
-};
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::{
     HttpPullMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
 };
-use obzenflow_core::event::observation::CaptureReason;
+use obzenflow_core::event::observability::{MeasurementWindow, RuntimeObservability};
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitState, ExecutionPayload, HttpPullStateFact,
 };
+use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{SinkOperationFailed, SinkOperationPhase, SystemPayload, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
@@ -154,10 +152,10 @@ pub struct MetricsAggregatorContext {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
 
-    /// Mapping of stage IDs to their data journals for tail reads.
+    /// Stage data journals for committed-observation lookup.
     pub stage_data_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
 
-    /// Mapping of stage IDs to their error journals for tail reads.
+    /// Stage error journals for committed-observation lookup.
     pub stage_error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
@@ -196,7 +194,6 @@ pub(crate) struct MetricsAggregatorIo {
 #[doc(hidden)]
 pub struct MetricsStore {
     pub(crate) observations: Arc<super::observations::ObservationHub>,
-    pub(crate) snapshot_observations: HashMap<JournalBinding, SnapshotObservation>,
     pub(crate) last_export_completed: Option<tokio::time::Instant>,
     pub(crate) inputs_covered: bool,
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
@@ -340,66 +337,59 @@ impl StageMetrics {
         }
     }
 
-    /// Merge one wide-event runtime snapshot. Counters are monotonic and use
-    /// max so tail seeding, out-of-order observation, and replay are stable.
+    /// Merge protected accounting with cumulative maxima so repeated evidence,
+    /// cross-journal ordering, and replay remain stable.
     pub(super) fn merge_runtime_context(&mut self, runtime_ctx: &RuntimeProvenance) {
+        self.merge_accounting(&runtime_ctx.accounting);
+    }
+
+    pub(super) fn merge_accounting(
+        &mut self,
+        accounting: &obzenflow_core::event::provenance::ExecutionAccounting,
+    ) {
         self.last_failures_total = Some(
             self.last_failures_total
                 .unwrap_or(0)
-                .max(runtime_ctx.accounting.failures_total),
+                .max(accounting.failures_total),
         );
         self.latest_events_processed_total = Some(
             self.latest_events_processed_total
                 .unwrap_or(0)
-                .max(runtime_ctx.accounting.events_processed_total),
+                .max(accounting.events_processed_total),
         );
         self.latest_events_accumulated_total = Some(
             self.latest_events_accumulated_total
                 .unwrap_or(0)
-                .max(runtime_ctx.accounting.events_accumulated_total),
+                .max(accounting.events_accumulated_total),
         );
         self.latest_events_emitted_total = Some(
             self.latest_events_emitted_total
                 .unwrap_or(0)
-                .max(runtime_ctx.accounting.events_emitted_total),
+                .max(accounting.events_emitted_total),
         );
         self.latest_errors_total = Some(
             self.latest_errors_total
                 .unwrap_or(0)
-                .max(runtime_ctx.accounting.errors_total),
+                .max(accounting.errors_total),
         );
-        for (kind, count) in &runtime_ctx.accounting.errors_by_kind {
+        for (kind, count) in &accounting.errors_by_kind {
             let current = self.errors_by_kind.entry(kind.clone()).or_insert(0);
             *current = (*current).max(*count);
         }
-        for count in &runtime_ctx.accounting.data_outputs_by_event_type {
+        for count in &accounting.data_outputs_by_event_type {
             let current = self
                 .latest_data_outputs_by_event_type
                 .entry(count.event_type.clone())
                 .or_insert(0);
             *current = (*current).max(count.total);
         }
-        for count in &runtime_ctx.accounting.data_inputs_by_upstream_event_type {
+        for count in &accounting.data_inputs_by_upstream_event_type {
             let current = self
                 .latest_data_inputs_by_upstream_event_type
                 .entry((count.upstream, count.event_type.clone()))
                 .or_insert(0);
             *current = (*current).max(count.total);
         }
-    }
-}
-
-impl MetricsStore {
-    pub(crate) fn ensure_snapshots_reconciled(&self) -> Result<(), obzenflow_fsm::FsmError> {
-        for (binding, observation) in &self.snapshot_observations {
-            if observation.is_ahead_of_fold() {
-                return Err(obzenflow_fsm::FsmError::HandlerError(format!(
-                    "Metrics tail snapshot was not folded at certified end: journal={}, stage={}, rail={:?}",
-                    binding.journal, binding.stage, binding.kind,
-                )));
-            }
-        }
-        Ok(())
     }
 }
 
@@ -437,7 +427,7 @@ impl BoundaryMetricsView for MetricsStore {
 /// position, so prefix and tail form one gap-free projection input.
 #[cfg(test)]
 async fn fold_composite_duration_prefix(
-    reader: &mut dyn obzenflow_core::journal::journal_reader::JournalReader<ChainEvent>,
+    reader: &mut dyn obzenflow_core::journal::reader::JournalReader<ChainEvent>,
     journal_stage: StageId,
     boundaries: &[obzenflow_core::metrics::CompositeBoundary],
     accumulator: &mut CompositeDurationAccumulator,
@@ -464,7 +454,7 @@ fn observe_live_composite_duration(
 
 impl MetricsAggregatorContext {
     fn refresh_measurements(&mut self) {
-        use obzenflow_core::event::observation::ObservationSource;
+        use obzenflow_core::event::observability::ObservationSource;
 
         self.metrics_store.refresh_measurements();
         for packet in self.metrics_store.observations.snapshot() {
@@ -1085,7 +1075,7 @@ impl MetricsStore {
     }
 
     fn refresh_measurements(&mut self) {
-        use obzenflow_core::event::observation::{ObservationRecord, ObservationSource};
+        use obzenflow_core::event::observability::{ObservationRecord, ObservationSource};
         for packet in self.observations.snapshot() {
             for record in &packet.records {
                 if let ObservationRecord::HttpSurface { snapshot } = record {
@@ -1218,6 +1208,9 @@ impl FsmAction for MetricsAggregatorAction {
                 let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
+                if let Some(observation) = &envelope.envelope.observability {
+                    store.observations.offer_recorded(observation.clone());
+                }
 
                 // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
                 // system-originated metrics (pipeline + metrics writers) in addition to stage journals.
@@ -1235,6 +1228,22 @@ impl FsmAction for MetricsAggregatorAction {
 
                 match &envelope.payload {
                     SystemPayload::StageLifecycle { stage_id, event } => {
+                        use obzenflow_core::event::StageLifecycleEvent;
+                        let accounting = match event {
+                            StageLifecycleEvent::Draining { accounting }
+                            | StageLifecycleEvent::Completed { accounting }
+                            | StageLifecycleEvent::Cancelled { accounting, .. }
+                            | StageLifecycleEvent::Failed { accounting, .. } => accounting.as_ref(),
+                            _ => None,
+                        };
+                        if let Some(accounting) = accounting {
+                            store
+                                .stage_metrics
+                                .entry(*stage_id)
+                                .or_default()
+                                .merge_accounting(accounting);
+                        }
+
                         // Track ALL states each stage has been in (never overwrite)
                         match event {
                             obzenflow_core::event::StageLifecycleEvent::Running => {
@@ -1447,25 +1456,13 @@ impl FsmAction for MetricsAggregatorAction {
                 );
 
                 let store = &mut ctx.metrics_store;
-                if event.runtime.is_some() && stage_id == *journal_stage {
-                    let journals = match journal_kind {
-                        MetricsJournalKind::Data => &ctx.stage_data_journals,
-                        MetricsJournalKind::Error => &ctx.stage_error_journals,
-                    };
-                    if let Some(journal) = journals.get(journal_stage) {
-                        store
-                            .snapshot_observations
-                            .entry(JournalBinding {
-                                journal: *journal.id(),
-                                stage: *journal_stage,
-                                kind: *journal_kind,
-                            })
-                            .or_default()
-                            .fold(envelope, *journal_stage)
-                            .map_err(|error| {
-                                obzenflow_fsm::FsmError::HandlerError(error.to_string())
-                            })?;
-                    }
+                if let Some(accounting) = event.runtime.as_ref().map(|runtime| &runtime.accounting)
+                {
+                    store
+                        .stage_metrics
+                        .entry(stage_id)
+                        .or_default()
+                        .merge_accounting(accounting);
                 }
                 // Update last event ID
                 store.last_event_id = Some(event.id);
@@ -1594,11 +1591,6 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                     metrics.last_event_time = Some(now);
 
-                    // Extract runtime context metrics if available (FLOWIP-056c / FLOWIP-059d)
-                    if let Some(runtime_ctx) = &event.runtime {
-                        metrics.merge_runtime_context(runtime_ctx);
-                    }
-
                     // Error totals and kinds come from the same cumulative
                     // snapshot. Counting error-marked rows again would duplicate
                     // errors across forwarded rows and tail refreshes.
@@ -1612,50 +1604,19 @@ impl FsmAction for MetricsAggregatorAction {
 
             MetricsAggregatorAction::ExportMetrics => {
                 tracing::debug!("ExportMetrics action triggered");
-                ctx.metrics_store
-                    .observations
-                    .capture_registered(CaptureReason::Periodic);
-                // Keep wide metrics current even when the physical cursors lag.
-                // This refresh does not advance input coverage or its watermark:
-                // only the collector's sequential reads can authorise Drained.
-                for (stage_id, journal, kind) in ctx
+                for (stage, journal) in ctx
                     .stage_data_journals
                     .iter()
-                    .map(|(stage, journal)| (stage, journal, MetricsJournalKind::Data))
-                    .chain(
-                        ctx.stage_error_journals
-                            .iter()
-                            .map(|(stage, journal)| (stage, journal, MetricsJournalKind::Error)),
-                    )
+                    .chain(ctx.stage_error_journals.iter())
                 {
-                    let observation = ctx
-                        .metrics_store
-                        .snapshot_observations
-                        .entry(JournalBinding {
-                            journal: *journal.id(),
-                            stage: *stage_id,
-                            kind,
-                        })
-                        .or_default();
-                    if let Err(error) = observation.refresh(journal.as_ref(), *stage_id).await {
-                        tracing::debug!(journal_id = %journal.id(), stage_id = %stage_id, ?kind, %error,
-                            "Failed to refresh metrics journal tail; retaining selected snapshot");
-                    }
-                    for packet in observation.measurements() {
-                        ctx.metrics_store.observations.offer_recorded(packet);
-                    }
-                    if let Some(runtime_ctx) = observation.selected().cloned() {
-                        ctx.metrics_store
-                            .stage_metrics
-                            .entry(*stage_id)
-                            .or_default()
-                            .merge_runtime_context(&runtime_ctx);
-                    }
+                    super::snapshot::retain_journal_observations(
+                        journal.as_ref(),
+                        (*stage).into(),
+                        &ctx.metrics_store.observations,
+                    )
+                    .await;
                 }
                 ctx.refresh_measurements();
-                if ctx.metrics_store.inputs_covered {
-                    ctx.metrics_store.ensure_snapshots_reconciled()?;
-                }
                 ctx.metrics_exporter
                     .publish_app_snapshot(ctx.build_app_metrics_snapshot());
 
@@ -1682,7 +1643,7 @@ impl FsmAction for MetricsAggregatorAction {
                 crate::supervised_base::publication::append(
                     &ctx.system_journal,
                     export_event,
-                    None,
+                    Default::default(),
                 )
                 .await
                 .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
@@ -1697,7 +1658,6 @@ impl FsmAction for MetricsAggregatorAction {
                         "Metrics physical inputs are not covered".into(),
                     ));
                 }
-                ctx.metrics_store.ensure_snapshots_reconciled()?;
                 // Get writer ID from context
                 let system_writer_id = WriterId::from(ctx.system_id);
 
@@ -1716,14 +1676,18 @@ impl FsmAction for MetricsAggregatorAction {
                 );
 
                 // Publish to system journal
-                crate::supervised_base::publication::append(&ctx.system_journal, drain_event, None)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to publish drain complete event: {e}"
-                        ))
-                    })?;
+                crate::supervised_base::publication::append(
+                    &ctx.system_journal,
+                    drain_event,
+                    Default::default(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to publish drain complete event: {e}"
+                    ))
+                })?;
 
                 tracing::info!(
                     "Published metrics drain complete event (last_event_id={:?})",
@@ -2056,23 +2020,24 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::context::{CircuitBreakerMeasurements, RuntimeObservability};
-    use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
-    use obzenflow_core::event::observation::CaptureScope;
+    use obzenflow_core::event::observability::{
+        CaptureScope, CircuitBreakerMeasurements, HttpPullTelemetry, RuntimeObservability,
+    };
     use obzenflow_core::event::payloads::execution_payload::{CircuitState, HttpPullStateFact};
     use obzenflow_core::event::ChainPayload;
     use obzenflow_core::FlowId;
 
     use async_trait::async_trait;
-    use obzenflow_core::event::context::{CompositeActivationContext, StageType};
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::provenance::CompositeActivationContext;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::metrics::StageMetadata;
     use obzenflow_core::{JournalId, JournalRecord};
@@ -2081,9 +2046,10 @@ mod tests {
 
     #[test]
     fn retained_timing_population_is_independent_of_accounting_and_empty_replaces_it() {
-        use obzenflow_core::event::context::{
-            MeasurementWindow, RuntimeObservability, RuntimeProvenance, TimingMeasurements,
+        use obzenflow_core::event::observability::{
+            MeasurementWindow, RuntimeObservability, TimingMeasurements,
         };
+        use obzenflow_core::event::provenance::RuntimeProvenance;
         let mut metrics = StageMetrics::default();
         let mut facts = RuntimeProvenance::default();
         facts.accounting.events_processed_total = 1000;
@@ -2222,7 +2188,7 @@ mod tests {
                     last_success_unix_secs: telemetry.last_success_unix_secs,
                 },
             );
-            use obzenflow_core::event::observation::*;
+            use obzenflow_core::event::observability::*;
             let mut packet = ObservabilityContext::new(CaptureStamp {
                 capture_scope: scope,
                 observer: stage_id.into(),
@@ -2564,7 +2530,7 @@ mod tests {
             async fn append(
                 &self,
                 _event: T,
-                _parent: Option<&JournalRecord<T::Payload>>,
+                _options: obzenflow_core::journal::AppendOptions<'_, T>,
             ) -> Result<JournalRecord<T::Payload>, JournalError> {
                 Err(JournalError::Implementation {
                     message: "noop journal".to_string(),
