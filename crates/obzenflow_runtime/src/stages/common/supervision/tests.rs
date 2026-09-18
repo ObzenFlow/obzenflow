@@ -1062,7 +1062,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
         .unwrap();
     assert_eq!(journal.appended().len(), 4);
     let rows = journal.appended();
-    let selected = crate::metrics::observations::ObservationHub::default();
+    let selected = crate::metrics::observations::LatestObservationMap::default();
     let mut previous_capture = None;
     for (index, row) in rows.iter().enumerate() {
         let packet = row.envelope.observability.as_ref().unwrap();

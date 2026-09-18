@@ -4,7 +4,7 @@
 
 //! One metrics-supervisor-owned sampler, independent of durable accounting.
 
-use super::observations::{ObservationHub, ObservationOwner};
+use super::observations::{ObservationOwner, ObservationRegistry};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::{CaptureReason, CaptureScope};
 use obzenflow_core::metrics::{StageMetadata, ThroughputMeasurement, ThroughputSnapshot};
@@ -89,11 +89,11 @@ impl ThroughputSampler {
 
     pub(crate) fn sample(
         &mut self,
-        hub: &ObservationHub,
+        observations: &ObservationRegistry,
         metadata: &HashMap<StageId, StageMetadata>,
         at: Instant,
     ) {
-        self.sample_counters(hub.live_counters(), metadata, at);
+        self.sample_counters(observations.live_counters(), metadata, at);
     }
 
     fn sample_counters(

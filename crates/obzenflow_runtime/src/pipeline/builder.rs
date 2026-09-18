@@ -14,7 +14,7 @@ use super::{
     supervisor::PipelineSupervisor,
     PipelineState,
 };
-use crate::metrics::observations::ObservationHub;
+use crate::metrics::observations::ObservationRegistry;
 use crate::{
     backpressure::BackpressureRegistry,
     feed_plan::{FeedKey, FeedPlan},
@@ -74,7 +74,7 @@ pub struct PipelineBuilder {
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
-    observations: Arc<ObservationHub>,
+    observations: Arc<ObservationRegistry>,
     host_observations: Arc<dyn ObservationRecorder>,
     feed_plan: FeedPlan,
     run_substrate: Option<RunSubstrateState>,
@@ -90,7 +90,7 @@ impl PipelineBuilder {
 
     pub fn with_observations(
         mut self,
-        observations: Arc<ObservationHub>,
+        observations: Arc<ObservationRegistry>,
         host: Arc<dyn ObservationRecorder>,
     ) -> Self {
         self.observations = observations;
@@ -117,7 +117,7 @@ impl PipelineBuilder {
             contract_attachments: None,
             backpressure_registry: None,
             liveness_snapshots: None,
-            observations: Arc::new(ObservationHub::default()),
+            observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
             feed_plan: FeedPlan::default(),
             run_substrate: None,

@@ -306,7 +306,7 @@ mod tests {
     use obzenflow_core::event::observability::ObservationRecord;
     use obzenflow_core::{FlowId, MiddlewareExecutionScope};
     use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
-    use obzenflow_runtime::metrics::observations::ObservationHub;
+    use obzenflow_runtime::metrics::observations::ObservationRegistry;
     use std::time::Duration;
 
     use obzenflow_core::event::chain_event::ChainPayload;
@@ -327,7 +327,7 @@ mod tests {
         assert!((middleware.limit_rate() - 5.0).abs() < 1e-6);
     }
 
-    fn observation_context() -> (MiddlewareContext, Arc<ObservationHub>) {
+    fn observation_context() -> (MiddlewareContext, Arc<ObservationRegistry>) {
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
         let recorder = execution.observation_recorder(FlowId::new(), StageId::new().into());
         (
@@ -337,9 +337,10 @@ mod tests {
         )
     }
 
-    fn samples(hub: &ObservationHub) -> Vec<ObservationRecord> {
+    fn samples(observations: &ObservationRegistry) -> Vec<ObservationRecord> {
         use obzenflow_core::event::observability::ObservationSource;
-        hub.snapshot()
+        observations
+            .snapshot()
             .into_iter()
             .flat_map(|packet| packet.records)
             .collect()
@@ -375,9 +376,9 @@ mod tests {
         let other = middleware.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let task = std::thread::spawn(move || {
-            let (mut ctx, hub) = observation_context();
+            let (mut ctx, observations) = observation_context();
             other.maybe_emit_summary(&mut ctx);
-            tx.send((ctx.control_events().len(), samples(&hub).len()))
+            tx.send((ctx.control_events().len(), samples(&observations).len()))
                 .unwrap();
         });
         assert_eq!(rx.recv_timeout(Duration::from_millis(100)).unwrap(), (0, 1));
@@ -403,7 +404,7 @@ mod tests {
                 stats.tokens_consumed_window = events as f64;
                 stats.last_summary = Instant::now() - Duration::from_secs(10);
             }
-            let (mut ctx, hub) = observation_context();
+            let (mut ctx, observations) = observation_context();
             middleware.maybe_emit_summary(&mut ctx);
             assert_eq!(
                 ctx.control_events().len(),
@@ -423,7 +424,7 @@ mod tests {
                 assert_eq!((*mode_from, *mode_to), (from, to));
                 assert_eq!(*limit_rate, 100.0);
             }
-            let measured = samples(&hub);
+            let measured = samples(&observations);
             let ObservationRecord::RateLimiterUtilisation {
                 utilization_percent,
                 events_in_window,
@@ -453,10 +454,10 @@ mod tests {
             stats.pulse_delay_ms_total = 450;
             stats.pulse_delay_ms_max = 200;
         }
-        let (mut ctx, hub) = observation_context();
+        let (mut ctx, observations) = observation_context();
         middleware.maybe_emit_activity_pulse(&mut ctx);
         assert!(ctx.control_events().is_empty());
-        let measured = samples(&hub);
+        let measured = samples(&observations);
         let ObservationRecord::RateLimiterActivity {
             window_ms,
             delayed_events,

@@ -33,7 +33,7 @@ use obzenflow_core::event::{
     journal_record::SystemJournalRecord, PipelineLifecycleEvent, SystemPayload,
 };
 use obzenflow_core::{web::SseFrame, EventId};
-use obzenflow_runtime::metrics::observations::ObservationHub;
+use obzenflow_runtime::metrics::observations::LatestObservationMap;
 use stages::StageLifecycleView;
 use std::sync::Arc;
 
@@ -52,9 +52,11 @@ pub struct StudioProjection {
     middleware: MiddlewareView,
     aliases: ContractBoundaryAliases,
     flow_state: ObservedFlowState,
-    measurements: ObservationHub,
+    /// Latest values already projected into this connection's SSE frames.
+    emitted_observations: LatestObservationMap,
     live_measurements: Option<Arc<dyn ObservationSource>>,
-    pending_measurements: ObservationHub,
+    /// Latest values seen, with intermediate captures overwritten per key.
+    latest_observations: LatestObservationMap,
     throughput: Option<Arc<dyn obzenflow_core::metrics::ThroughputSource>>,
     last_throughput: obzenflow_core::metrics::ThroughputSnapshot,
     middleware_snapshot_pending: bool,
@@ -68,9 +70,9 @@ impl Clone for StudioProjection {
             middleware: self.middleware.clone(),
             aliases: self.aliases.clone(),
             flow_state: self.flow_state,
-            measurements: self.measurements.retained_copy(),
+            emitted_observations: self.emitted_observations.retained_copy(),
             live_measurements: self.live_measurements.clone(),
-            pending_measurements: self.pending_measurements.retained_copy(),
+            latest_observations: self.latest_observations.retained_copy(),
             throughput: self.throughput.clone(),
             last_throughput: self.last_throughput.clone(),
             middleware_snapshot_pending: self.middleware_snapshot_pending,
@@ -91,9 +93,9 @@ impl StudioProjection {
             middleware: MiddlewareView::default(),
             aliases,
             flow_state: ObservedFlowState::Inactive,
-            measurements: Default::default(),
+            emitted_observations: Default::default(),
             live_measurements: None,
-            pending_measurements: Default::default(),
+            latest_observations: Default::default(),
             throughput: None,
             last_throughput: Default::default(),
             middleware_snapshot_pending: false,
@@ -130,7 +132,7 @@ impl StudioProjection {
 
     pub fn with_observations(mut self, source: Arc<dyn ObservationSource>) -> Self {
         if let Some(scope) = source.active_scope() {
-            self.measurements.activate_scope(scope);
+            self.emitted_observations.activate_scope(scope);
         }
         self.live_measurements = Some(source);
         self
@@ -144,14 +146,14 @@ impl StudioProjection {
         self
     }
 
-    /// Fold facts immediately, retaining attached observations for the next
-    /// connection deadline. Each subject retains at most its latest bundle.
+    /// Fold facts immediately, retaining only the latest attached observation
+    /// per key for subsequent SSE emission turns.
     pub fn project_deferred(&mut self, envelope: &SystemJournalRecord) -> Vec<SseFrame> {
         let mut frames = Vec::new();
         frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
         let composite = self.observe(envelope);
         frames.extend(composite.as_ref().and_then(composite_status_frame));
-        self.defer_measurements(envelope);
+        self.retain_latest_observations(envelope);
         if matches!(
             &envelope.payload,
             SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { .. })
@@ -163,12 +165,12 @@ impl StudioProjection {
 
     pub fn rebuild_deferred(&mut self, envelope: &SystemJournalRecord) {
         self.observe(envelope);
-        self.defer_measurements(envelope);
+        self.retain_latest_observations(envelope);
     }
 
-    fn defer_measurements(&self, envelope: &SystemJournalRecord) {
+    fn retain_latest_observations(&self, envelope: &SystemJournalRecord) {
         if let Some(packet) = &envelope.envelope.observability {
-            let _ = self.pending_measurements.select_recorded(packet.clone());
+            let _ = self.latest_observations.select_recorded(packet.clone());
         }
     }
 
@@ -177,15 +179,15 @@ impl StudioProjection {
     pub fn current_measurements(&mut self) -> Vec<SseFrame> {
         if let Some(source) = self.live_measurements.clone() {
             if let Some(scope) = source.active_scope() {
-                self.measurements.activate_scope(scope);
-                self.pending_measurements.activate_scope(scope);
+                self.emitted_observations.activate_scope(scope);
+                self.latest_observations.activate_scope(scope);
             }
             for packet in source.snapshot() {
-                let _ = self.pending_measurements.select_recorded(packet);
+                let _ = self.latest_observations.select_recorded(packet);
             }
         }
         let mut frames: Vec<_> = self
-            .pending_measurements
+            .latest_observations
             .snapshot()
             .into_iter()
             .flat_map(|packet| self.project_retained_measurements(packet))
@@ -215,7 +217,7 @@ impl StudioProjection {
         }
         if std::mem::take(&mut self.middleware_snapshot_pending) {
             let timestamp = self
-                .pending_measurements
+                .latest_observations
                 .snapshot()
                 .iter()
                 .map(|packet| packet.capture.observed_at_ms)
@@ -227,12 +229,12 @@ impl StudioProjection {
     }
 
     pub fn project_measurements(&mut self, packet: ObservabilityContext) -> Vec<SseFrame> {
-        self.measurement_frames(self.measurements.select(packet).unwrap_or_default())
+        self.measurement_frames(self.emitted_observations.select(packet).unwrap_or_default())
     }
 
     fn project_retained_measurements(&mut self, packet: ObservabilityContext) -> Vec<SseFrame> {
         self.measurement_frames(
-            self.measurements
+            self.emitted_observations
                 .select_recorded(packet)
                 .unwrap_or_default(),
         )

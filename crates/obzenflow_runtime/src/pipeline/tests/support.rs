@@ -6,7 +6,7 @@
 
 use crate::id_conversions::StageIdExt;
 use crate::messaging::SystemSubscription;
-use crate::metrics::observations::ObservationHub;
+use crate::metrics::observations::ObservationRegistry;
 use crate::pipeline::fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
@@ -213,7 +213,7 @@ pub(in crate::pipeline) fn test_context(
     completion_subscription: Option<SystemSubscription<SystemEvent>>,
 ) -> PipelineContext {
     PipelineContext {
-        observations: Arc::new(ObservationHub::default()),
+        observations: Arc::new(ObservationRegistry::default()),
         runtime_execution: None,
         observation_export_interval: std::time::Duration::from_millis(250),
         system_id,
@@ -590,7 +590,7 @@ pub(in crate::pipeline) fn make_context(
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
 ) -> PipelineContext {
     PipelineContext {
-        observations: Arc::new(ObservationHub::default()),
+        observations: Arc::new(ObservationRegistry::default()),
         runtime_execution: None,
         observation_export_interval: std::time::Duration::from_millis(250),
         system_id,

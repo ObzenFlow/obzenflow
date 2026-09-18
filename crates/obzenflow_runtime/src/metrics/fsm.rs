@@ -193,7 +193,7 @@ pub(crate) struct MetricsAggregatorIo {
 #[derive(Default)]
 #[doc(hidden)]
 pub struct MetricsStore {
-    pub(crate) observations: Arc<super::observations::ObservationHub>,
+    pub(crate) observations: Arc<super::observations::ObservationRegistry>,
     pub(crate) last_export_completed: Option<tokio::time::Instant>,
     pub(crate) next_export_at: Option<tokio::time::Instant>,
     pub(crate) throughput: super::throughput::ThroughputSampler,
@@ -1222,7 +1222,10 @@ impl FsmAction for MetricsAggregatorAction {
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
                 if let Some(observation) = &envelope.envelope.observability {
-                    store.observations.offer_recorded(observation.clone());
+                    store
+                        .observations
+                        .latest()
+                        .offer_recorded(observation.clone());
                 }
 
                 // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
@@ -1520,7 +1523,10 @@ impl FsmAction for MetricsAggregatorAction {
 
                 use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
                 if let Some(observation) = &envelope.envelope.observability {
-                    store.observations.offer_recorded(observation.clone());
+                    store
+                        .observations
+                        .latest()
+                        .offer_recorded(observation.clone());
                 }
                 // Count a committed plan only at its originating writer, never
                 // when a manifest is forwarded through an internal feed.
@@ -1631,7 +1637,7 @@ impl FsmAction for MetricsAggregatorAction {
                     super::snapshot::retain_journal_observations(
                         journal.as_ref(),
                         (*stage).into(),
-                        &ctx.metrics_store.observations,
+                        ctx.metrics_store.observations.latest(),
                     )
                     .await;
                 }

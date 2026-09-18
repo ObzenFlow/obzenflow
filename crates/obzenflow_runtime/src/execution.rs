@@ -14,7 +14,7 @@
 //! `Resume` strategy (continue-live, position-based) plus a `ResumeControl`
 //! handle, without changing the read-only query trait below.
 
-use crate::metrics::observations::ObservationHub;
+use crate::metrics::observations::ObservationRegistry;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::{FlowId, WriterId};
 use std::collections::{HashMap, HashSet};
@@ -484,7 +484,7 @@ pub struct RuntimeExecution {
     strategy: Arc<dyn ExecutionStrategy>,
     archive: Option<Arc<dyn ReplayArchive>>,
     effect_cursors: Arc<crate::effects::EffectCursorCoordinator>,
-    observations: Arc<ObservationHub>,
+    observations: Arc<ObservationRegistry>,
     /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
     resume: Option<ResumeControl>,
 }
@@ -502,7 +502,7 @@ impl std::fmt::Debug for RuntimeExecution {
 }
 
 impl RuntimeExecution {
-    pub fn observations(&self) -> &Arc<ObservationHub> {
+    pub fn observations(&self) -> &Arc<ObservationRegistry> {
         &self.observations
     }
 
@@ -535,7 +535,7 @@ impl RuntimeExecution {
             strategy,
             archive,
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
-            observations: Arc::new(ObservationHub::default()),
+            observations: Arc::new(ObservationRegistry::default()),
             resume,
         }
     }
@@ -583,7 +583,7 @@ impl RuntimeExecution {
             strategy,
             archive,
             effect_cursors: Arc::new(crate::effects::EffectCursorCoordinator::default()),
-            observations: Arc::new(ObservationHub::default()),
+            observations: Arc::new(ObservationRegistry::default()),
             resume: None,
         }
     }

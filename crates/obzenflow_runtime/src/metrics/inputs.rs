@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct MetricsInputs {
     pub(crate) execution: Option<(obzenflow_core::FlowId, crate::execution::RuntimeExecution)>,
-    pub observations: Arc<super::observations::ObservationHub>,
+    pub observations: Arc<super::observations::ObservationRegistry>,
     /// Stage data journals - normal outputs from pipeline stages
     pub stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
@@ -43,7 +43,7 @@ impl MetricsInputs {
 
     pub fn with_observations(
         mut self,
-        observations: Arc<super::observations::ObservationHub>,
+        observations: Arc<super::observations::ObservationRegistry>,
     ) -> Self {
         self.observations = observations;
         self
@@ -56,7 +56,7 @@ impl MetricsInputs {
     ) -> Self {
         Self {
             execution: None,
-            observations: Arc::new(super::observations::ObservationHub::default()),
+            observations: Arc::new(super::observations::ObservationRegistry::default()),
             stage_data_journals,
             error_journals,
             backpressure_registry: None,

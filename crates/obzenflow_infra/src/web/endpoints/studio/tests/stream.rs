@@ -88,19 +88,19 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
         AppMetricsSnapshot, MetricsSnapshotExporter, ThroughputMeasurement,
     };
     use obzenflow_core::time::MetricsDuration;
-    use obzenflow_runtime::metrics::observations::ObservationHub;
+    use obzenflow_runtime::metrics::observations::LatestObservationMap;
 
     for interval_ms in [250, 500] {
         let system = SystemId::new();
         let stage = StageId::new();
         let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)));
         let model = Arc::new(MetricsReadModel::default());
-        let hub = Arc::new(ObservationHub::default());
+        let observations = Arc::new(LatestObservationMap::default());
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: Default::default(),
         };
-        hub.activate_scope(scope);
+        observations.activate_scope(scope);
         let stamp = |sequence| CaptureStamp {
             capture_scope: scope,
             observer: system.into(),
@@ -139,7 +139,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
             journal.clone(),
             StudioProjection::new(vec![], ContractBoundaryAliases::default())
                 .unwrap()
-                .with_observations(hub.clone())
+                .with_observations(observations.clone())
                 .with_throughput(model.clone()),
             None,
             receiver,
@@ -161,7 +161,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
             assert!(frame_payload(&initial).get("capture").is_none());
         }
         publish(8);
-        hub.offer(edge(8));
+        observations.offer(edge(8));
         tokio::time::advance(Duration::from_millis(interval_ms - 1)).await;
         let fact = append(
             journal.as_ref(),
@@ -175,10 +175,10 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
         assert_eq!(fast.next().await.unwrap().id, Some(fact.id().to_string()));
         assert!(
             futures::poll!(fast.next()).is_pending(),
-            "the live hub cannot bypass the observation deadline"
+            "live observations cannot bypass the observation deadline"
         );
         publish(9);
-        hub.offer(edge(9));
+        observations.offer(edge(9));
         tokio::time::advance(Duration::from_millis(1)).await;
         for client in [&mut fast, &mut slow] {
             loop {
@@ -432,7 +432,7 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
     };
     use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
     use obzenflow_core::event::types::SeqNo;
-    use obzenflow_runtime::metrics::observations::ObservationHub;
+    use obzenflow_runtime::metrics::observations::LatestObservationMap;
 
     let system = SystemId::new();
     let stage = StageId::new();
@@ -451,7 +451,7 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
         flow_id: FlowId::new(),
         resume_generation: Default::default(),
     };
-    let source = Arc::new(ObservationHub::default());
+    let source = Arc::new(LatestObservationMap::default());
     source.activate_scope(scope);
     let sample = |seq| {
         let mut packet = ObservabilityContext::new(CaptureStamp {

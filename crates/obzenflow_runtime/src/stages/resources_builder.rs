@@ -19,7 +19,7 @@ use crate::messaging::upstream_subscription::{
     CompositeEntrySpec, ContractsWiring, ReaderSelectionPolicy, SelectedFeedMetadata,
     SelectedFeedRole, UpstreamSubscription,
 };
-use crate::metrics::observations::ObservationHub;
+use crate::metrics::observations::ObservationRegistry;
 use crate::stages::LivenessSnapshots;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::SystemEvent;
@@ -859,7 +859,7 @@ impl StageResourcesBuilder {
 /// Complete set of resources for all stages in a flow
 pub struct StageResourcesSet {
     pub runtime_execution: RuntimeExecution,
-    pub observations: Arc<ObservationHub>,
+    pub observations: Arc<ObservationRegistry>,
     pub host_observations: Arc<dyn ObservationRecorder>,
     /// Flow execution ID
     pub flow_id: FlowId,

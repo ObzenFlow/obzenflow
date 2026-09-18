@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::__private::lifecycle;
-use crate::metrics::observations::ObservationHub;
+use crate::metrics::observations::ObservationRegistry;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
 use obzenflow_core::event::observability::NoObservations;
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 fn empty_extras() -> FlowHandleExtras {
     FlowHandleExtras {
-        observations: Arc::new(ObservationHub::default()),
+        observations: Arc::new(ObservationRegistry::default()),
         host_observations: Arc::new(NoObservations),
         stage_cleanup: Vec::new(),
         published_outcome: Default::default(),
