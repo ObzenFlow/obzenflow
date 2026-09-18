@@ -33,6 +33,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AppMetricsSnapshot {
+    #[serde(default)]
+    pub throughput: super::ThroughputSnapshot,
+    #[serde(default)]
+    pub observation_export_interval: Option<std::time::Duration>,
     /// Timestamp when this snapshot was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
 
@@ -541,6 +545,8 @@ pub struct StageMetadata {
 impl Default for AppMetricsSnapshot {
     fn default() -> Self {
         Self {
+            throughput: Default::default(),
+            observation_export_interval: None,
             timestamp: chrono::Utc::now(),
             event_counts: HashMap::new(),
             events_accumulated_total: HashMap::new(),

@@ -78,6 +78,7 @@ impl LaunchParams {
 /// Application identity and shutdown ownership passed together to the host.
 #[cfg(feature = "warp-server")]
 struct HostLifecycle {
+    throughput: Option<Arc<dyn obzenflow_core::metrics::ThroughputSource>>,
     runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
     instance_id: RuntimeInstanceId,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -644,7 +645,8 @@ impl FlowApplication {
 
         // One private owner retains every resource from preparation through joined cleanup.
         let mut application = ApplicationLifecycle::new(grace_timeout, config.server.on_terminal);
-        let metrics_model = (cfg!(feature = "prometheus") && config.metrics.enabled)
+        let metrics_model = ((cfg!(feature = "prometheus") && config.metrics.enabled)
+            || (cfg!(feature = "warp-server") && config.server.enabled))
             .then(|| Arc::new(MetricsReadModel::default()));
         let metrics_exporter = metrics_model
             .as_ref()
@@ -883,10 +885,16 @@ impl FlowApplication {
                     all_extra_endpoints,
                     surface_metrics_collector,
                     #[cfg(feature = "prometheus")]
-                    metrics_model.as_ref().map(|model| {
-                        crate::web::endpoints::PrometheusMetricsEndpoint::new(model.clone())
-                    }),
+                    metrics_model
+                        .as_ref()
+                        .filter(|_| config.metrics.enabled)
+                        .map(|model| {
+                            crate::web::endpoints::PrometheusMetricsEndpoint::new(model.clone())
+                        }),
                     HostLifecycle {
+                        throughput: metrics_model.as_ref().map(|model| {
+                            model.clone() as Arc<dyn obzenflow_core::metrics::ThroughputSource>
+                        }),
                         runtime_config: config.runtime_config.clone(),
                         instance_id: runtime_instance_id.clone(),
                         shutdown: server_shutdown_tx,
@@ -1190,6 +1198,7 @@ impl FlowApplication {
 
         let handle = bind_managed_host(
             ManagedHostInput {
+                throughput: lifecycle.throughput,
                 topology,
                 contract_attachments,
                 #[cfg(feature = "prometheus")]

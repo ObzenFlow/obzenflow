@@ -13,6 +13,7 @@ pub mod instrumentation;
 pub mod observations;
 pub mod supervisor;
 pub mod tail_read;
+mod throughput;
 
 // Re-export commonly used types
 // Note: MetricsAggregatorSupervisor is intentionally NOT exported - use MetricsAggregatorBuilder

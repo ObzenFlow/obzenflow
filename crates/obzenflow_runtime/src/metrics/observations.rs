@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Bounded optional capture handoff and retained measurement view. This module
-//! has no journal, publication scope, credit, or settlement capability.
+//! Latest observation maps and registration of observation producers.
+//! This module has no journal, publication scope, credit, or settlement capability.
 
 use crate::execution::RuntimeExecution;
 use obzenflow_core::event::observability::families::{
@@ -33,21 +33,51 @@ struct View {
     latest: HashMap<Key, ObservabilityContext>,
 }
 
-/// One run-owned mailbox. A key retains only its latest coherent bundle, so a
-/// stalled consumer cannot cause unbounded pending updates.
+/// A bounded, mutex-protected hash map of the latest observation per observer
+/// and measurement family/subject. A newer capture replaces that key's value;
+/// sequence gaps are allowed and reading the map does not consume its entries.
 #[derive(Debug, Default)]
-pub struct ObservationHub {
+pub struct LatestObservationMap {
     view: Mutex<View>,
-    owners: Mutex<HashMap<(CaptureScope, WriterId), Arc<AtomicU64>>>,
     dropped: AtomicU64,
+}
+
+/// Run-owned capture-sequence and stage-instrumentation registries, together
+/// with the latest observations offered by those producers.
+#[derive(Debug, Default)]
+pub struct ObservationRegistry {
+    latest: LatestObservationMap,
+    capture_sequences: Mutex<HashMap<(CaptureScope, WriterId), Arc<AtomicU64>>>,
     stages: Mutex<HashMap<WriterId, Weak<super::instrumentation::StageInstrumentation>>>,
 }
 
-impl ObservationHub {
+impl ObservationRegistry {
+    pub fn latest(&self) -> &LatestObservationMap {
+        &self.latest
+    }
+
+    pub(crate) fn live_counters(&self) -> HashMap<obzenflow_core::StageId, (CaptureScope, u64)> {
+        let stages: Vec<_> = self
+            .stages
+            .try_lock()
+            .map(|stages| {
+                stages
+                    .iter()
+                    .map(|(writer, stage)| (*writer, stage.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        stages
+            .into_iter()
+            .filter_map(|(writer, weak)| {
+                let stage_id = *writer.as_stage()?;
+                Some((stage_id, weak.upgrade()?.live_counter_sample()?))
+            })
+            .collect()
+    }
+
     pub fn activate_scope(&self, scope: CaptureScope) {
-        if let Ok(mut view) = self.view.lock() {
-            view.active_scope = Some(scope);
-        }
+        self.latest.activate_scope(scope);
     }
 
     pub(crate) fn register_stage(
@@ -81,18 +111,46 @@ impl ObservationHub {
         observer: WriterId,
         execution: RuntimeExecution,
     ) -> ObservationOwner {
-        let sequence = self.owners.lock().ok().and_then(|mut owners| {
-            if !owners.contains_key(&(scope, observer)) && owners.len() >= MAX_OWNERS {
-                return None;
-            }
-            Some(owners.entry((scope, observer)).or_default().clone())
-        });
+        let sequence = self
+            .capture_sequences
+            .lock()
+            .ok()
+            .and_then(|mut sequences| {
+                if !sequences.contains_key(&(scope, observer)) && sequences.len() >= MAX_OWNERS {
+                    return None;
+                }
+                Some(sequences.entry((scope, observer)).or_default().clone())
+            });
         ObservationOwner {
             scope,
             observer,
             sequence,
-            hub: self.clone(),
+            registry: self.clone(),
             execution,
+        }
+    }
+}
+
+impl ObservationSink for ObservationRegistry {
+    fn offer(&self, observation: ObservabilityContext) -> ObservationOffer {
+        self.latest.offer(observation)
+    }
+}
+
+impl ObservationSource for ObservationRegistry {
+    fn active_scope(&self) -> Option<CaptureScope> {
+        self.latest.active_scope()
+    }
+
+    fn snapshot(&self) -> Vec<ObservabilityContext> {
+        self.latest.snapshot()
+    }
+}
+
+impl LatestObservationMap {
+    pub fn activate_scope(&self, scope: CaptureScope) {
+        if let Ok(mut view) = self.view.lock() {
+            view.active_scope = Some(scope);
         }
     }
 
@@ -100,16 +158,14 @@ impl ObservationHub {
         self.dropped.fetch_add(1, Ordering::Relaxed);
         ObservationOffer::Dropped
     }
-}
 
-impl ObservationHub {
     /// Restore only evidence already admitted through a consumer's journal cut.
     /// Recorded attachments never activate an execution generation.
     pub(crate) fn offer_recorded(&self, packet: ObservabilityContext) {
         let _ = self.select_recorded(packet);
     }
 
-    /// An independent projection view; capture ownership is never copied.
+    /// An independent copy of the retained values and active scope.
     pub fn retained_copy(&self) -> Self {
         let view = self
             .view
@@ -198,7 +254,7 @@ impl ObservationHub {
     }
 }
 
-impl ObservationSink for ObservationHub {
+impl ObservationSink for LatestObservationMap {
     fn offer(&self, observation: ObservabilityContext) -> ObservationOffer {
         match self.select(observation) {
             Ok(_) => ObservationOffer::Accepted,
@@ -207,7 +263,7 @@ impl ObservationSink for ObservationHub {
     }
 }
 
-impl ObservationSource for ObservationHub {
+impl ObservationSource for LatestObservationMap {
     fn active_scope(&self) -> Option<CaptureScope> {
         match self.view.try_lock() {
             Ok(view) => view.active_scope,
@@ -238,11 +294,15 @@ pub struct ObservationOwner {
     scope: CaptureScope,
     observer: WriterId,
     sequence: Option<Arc<AtomicU64>>,
-    hub: Arc<ObservationHub>,
+    registry: Arc<ObservationRegistry>,
     execution: RuntimeExecution,
 }
 
 impl ObservationOwner {
+    pub(crate) fn scope(&self) -> CaptureScope {
+        self.scope
+    }
+
     pub fn measurements_allowed(&self) -> bool {
         match self.observer.as_stage() {
             Some(stage) => !self.execution.stage_scope(*stage).is_deterministic_replay(),
@@ -290,7 +350,7 @@ impl ObservationOwner {
     }
 
     pub fn offer(&self, packet: ObservabilityContext) {
-        self.hub.offer(packet);
+        self.registry.offer(packet);
     }
 }
 
@@ -350,12 +410,12 @@ mod tests {
     fn runtime_snapshot_uses_its_own_stamp_and_replaces_the_whole_family() {
         use obzenflow_core::event::observability::{ExecutionProgress, RuntimeSnapshot};
 
-        let hub = ObservationHub::default();
+        let observations = LatestObservationMap::default();
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: ReaderGeneration(0),
         };
-        hub.activate_scope(scope);
+        observations.activate_scope(scope);
         let upstream = StageId::new().into();
         let local = StageId::new().into();
         let mut carrier = packet(scope, upstream, 100, 9);
@@ -369,8 +429,11 @@ mod tests {
             },
             fsm_state: "Running".into(),
         });
-        assert_eq!(hub.select_recorded(carrier.clone()).unwrap().len(), 2);
-        let first = hub
+        assert_eq!(
+            observations.select_recorded(carrier.clone()).unwrap().len(),
+            2
+        );
+        let first = observations
             .snapshot()
             .into_iter()
             .find_map(|packet| packet.runtime_snapshot)
@@ -386,7 +449,7 @@ mod tests {
             .capture
             .capture_seq = CaptureSeq(4);
         carrier.runtime_snapshot.as_mut().unwrap().fsm_state = "Created".into();
-        let selected = hub.select_recorded(carrier).unwrap();
+        let selected = observations.select_recorded(carrier).unwrap();
         assert_eq!(selected.len(), 1);
         assert!(selected[0].runtime_snapshot.is_none());
 
@@ -399,9 +462,15 @@ mod tests {
             progress: ExecutionProgress::default(),
             fsm_state: "Drained".into(),
         });
-        assert_eq!(hub.select_recorded(newer.clone()).unwrap().len(), 1);
-        assert!(hub.select_recorded(newer.clone()).unwrap().is_empty());
-        let latest = hub
+        assert_eq!(
+            observations.select_recorded(newer.clone()).unwrap().len(),
+            1
+        );
+        assert!(observations
+            .select_recorded(newer.clone())
+            .unwrap()
+            .is_empty());
+        let latest = observations
             .snapshot()
             .into_iter()
             .find_map(|packet| packet.runtime_snapshot)
@@ -415,13 +484,13 @@ mod tests {
             resume_generation: ReaderGeneration(1),
             ..scope
         };
-        hub.activate_scope(resumed);
-        assert!(hub.select(newer.clone()).unwrap().is_empty());
+        observations.activate_scope(resumed);
+        assert!(observations.select(newer.clone()).unwrap().is_empty());
         let snapshot = newer.runtime_snapshot.as_mut().unwrap();
         snapshot.capture.capture_scope = resumed;
         snapshot.capture.capture_seq = CaptureSeq(1);
-        assert_eq!(hub.select(newer).unwrap().len(), 1);
-        let latest = hub
+        assert_eq!(observations.select(newer).unwrap().len(), 1);
+        let latest = observations
             .snapshot()
             .into_iter()
             .find_map(|packet| packet.runtime_snapshot)
@@ -433,14 +502,14 @@ mod tests {
     #[test]
     fn owners_share_sequence_across_helper_recreation_and_drop_on_contention() {
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
-        let hub = execution.observations();
+        let observations = execution.observations();
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: ReaderGeneration(0),
         };
         let writer = WriterId::from(StageId::new());
-        let first = hub.capture_owner(scope, writer, execution.clone());
-        let restarted = hub.capture_owner(scope, writer, execution.clone());
+        let first = observations.capture_owner(scope, writer, execution.clone());
+        let restarted = observations.capture_owner(scope, writer, execution.clone());
         assert_eq!(
             first
                 .capture(CaptureReason::Initial)
@@ -457,28 +526,40 @@ mod tests {
                 .capture_seq,
             CaptureSeq(2)
         );
-        let held = hub.view.lock().unwrap();
+        let held = observations.latest.view.lock().unwrap();
         assert_eq!(
-            hub.offer(packet(scope, writer, 3, 4)),
+            observations.offer(packet(scope, writer, 3, 4)),
             ObservationOffer::Dropped
         );
         drop(held);
-        assert!(hub.snapshot().is_empty());
-        assert_eq!(hub.dropped.load(Ordering::Relaxed), 1);
+        assert!(observations.snapshot().is_empty());
+        assert_eq!(observations.latest.dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn family_freshness_and_active_generation_are_independent_of_arrival_order() {
-        let hub = ObservationHub::default();
+        let observations = LatestObservationMap::default();
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: ReaderGeneration(0),
         };
         let writer = WriterId::from(StageId::new());
-        hub.activate_scope(scope);
-        assert_eq!(hub.select(packet(scope, writer, 10, 4)).unwrap().len(), 1);
-        assert!(hub.select(packet(scope, writer, 9, 9)).unwrap().is_empty());
-        assert!(hub.select(packet(scope, writer, 10, 9)).unwrap().is_empty());
+        observations.activate_scope(scope);
+        assert_eq!(
+            observations
+                .select(packet(scope, writer, 10, 4))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(observations
+            .select(packet(scope, writer, 9, 9))
+            .unwrap()
+            .is_empty());
+        assert!(observations
+            .select(packet(scope, writer, 10, 9))
+            .unwrap()
+            .is_empty());
         let mut timing = packet(scope, writer, 3, 0);
         timing.runtime.as_mut().unwrap().in_flight = None;
         timing.runtime.as_mut().unwrap().timing = Some(TimingMeasurements {
@@ -494,37 +575,46 @@ mod tests {
                 ended_at_ms: 3,
             },
         });
-        assert_eq!(hub.select(timing).unwrap().len(), 1);
-        assert_eq!(hub.snapshot().len(), 2);
+        assert_eq!(observations.select(timing).unwrap().len(), 1);
+        assert_eq!(observations.snapshot().len(), 2);
         let resumed = CaptureScope {
             resume_generation: ReaderGeneration(1),
             ..scope
         };
         assert!(
-            hub.select(packet(resumed, StageId::new().into(), 1, 2))
+            observations
+                .select(packet(resumed, StageId::new().into(), 1, 2))
                 .unwrap()
                 .is_empty(),
             "an unknown owner cannot activate a future generation"
         );
-        assert!(hub
+        assert!(observations
             .select(packet(resumed, writer, 1, 2))
             .unwrap()
             .is_empty());
-        hub.activate_scope(resumed);
-        assert_eq!(hub.select(packet(resumed, writer, 1, 2)).unwrap().len(), 1);
-        assert!(hub
+        observations.activate_scope(resumed);
+        assert_eq!(
+            observations
+                .select(packet(resumed, writer, 1, 2))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(observations
             .select(packet(scope, writer, 100, 9))
             .unwrap()
             .is_empty());
         assert_eq!(
-            hub.snapshot()
+            observations
+                .snapshot()
                 .iter()
                 .filter_map(|packet| packet.runtime.as_ref()?.in_flight)
                 .collect::<Vec<_>>(),
             vec![2]
         );
         assert!(
-            hub.snapshot()
+            observations
+                .snapshot()
                 .iter()
                 .any(|packet| packet.capture.capture_scope == scope
                     && packet.runtime.as_ref().unwrap().timing.is_some()),
@@ -534,7 +624,7 @@ mod tests {
 
     #[test]
     fn recorded_generations_restore_without_activating_execution_or_regressing() {
-        let hub = ObservationHub::default();
+        let observations = LatestObservationMap::default();
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: ReaderGeneration(0),
@@ -544,13 +634,17 @@ mod tests {
             ..scope
         };
         let writer = StageId::new().into();
-        hub.offer_recorded(packet(resumed, writer, 1, 2));
-        hub.offer_recorded(packet(scope, writer, 1000, 9));
-        assert_eq!(hub.active_scope(), None);
-        assert_eq!(hub.snapshot()[0].capture.capture_scope, resumed);
-        assert_eq!(hub.snapshot()[0].capture.observed_at_ms, 1);
+        observations.offer_recorded(packet(resumed, writer, 1, 2));
+        observations.offer_recorded(packet(scope, writer, 1000, 9));
+        assert_eq!(observations.active_scope(), None);
+        assert_eq!(observations.snapshot()[0].capture.capture_scope, resumed);
+        assert_eq!(observations.snapshot()[0].capture.observed_at_ms, 1);
         assert_eq!(
-            hub.snapshot()[0].runtime.as_ref().unwrap().in_flight,
+            observations.snapshot()[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .in_flight,
             Some(2)
         );
     }
@@ -558,25 +652,25 @@ mod tests {
     #[test]
     fn capacity_and_unavailable_final_capture_drop_only_optional_samples() {
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
-        let hub = execution.observations();
+        let observations = execution.observations();
         let scope = CaptureScope {
             flow_id: FlowId::new(),
             resume_generation: ReaderGeneration(0),
         };
-        hub.activate_scope(scope);
+        observations.activate_scope(scope);
         for _ in 0..MAX_KEYS {
             assert_eq!(
-                hub.offer(packet(scope, StageId::new().into(), 1, 0)),
+                observations.offer(packet(scope, StageId::new().into(), 1, 0)),
                 ObservationOffer::Accepted
             );
         }
         assert_eq!(
-            hub.offer(packet(scope, StageId::new().into(), 1, 0)),
+            observations.offer(packet(scope, StageId::new().into(), 1, 0)),
             ObservationOffer::Dropped
         );
-        assert_eq!(hub.snapshot().len(), MAX_KEYS);
+        assert_eq!(observations.snapshot().len(), MAX_KEYS);
         for _ in 0..MAX_OWNERS {
-            assert!(hub
+            assert!(observations
                 .capture_owner(scope, StageId::new().into(), execution.clone())
                 .capture(CaptureReason::Initial)
                 .is_some());
@@ -597,7 +691,7 @@ mod tests {
             serde_json::to_value(instrumentation.snapshot()).unwrap(),
             serde_json::to_value(before).unwrap()
         );
-        assert_eq!(hub.snapshot().len(), MAX_KEYS);
+        assert_eq!(observations.snapshot().len(), MAX_KEYS);
     }
 
     #[test]

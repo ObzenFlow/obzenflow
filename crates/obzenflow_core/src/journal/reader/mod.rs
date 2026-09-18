@@ -37,6 +37,14 @@ where
     /// This can be used for checkpointing and resuming.
     fn position(&self) -> u64;
 
+    /// Whether all logical records committed when this reader opened have
+    /// been returned. The boundary is fixed, including every atomic-group
+    /// member, and completion stays true while this same reader tails appends.
+    /// This is independent of physical EOF and terminal drain completion.
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        Err(JournalError::InitialPrefixUnsupported)
+    }
+
     /// Check if we've reached the end of the journal
     ///
     /// This is a hint - `next()` may still return None even if this returns false

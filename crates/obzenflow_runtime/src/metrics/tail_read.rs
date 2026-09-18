@@ -118,7 +118,7 @@ pub async fn read_stage_metrics_from_tail(
 ) -> Option<StageMetricsSnapshot> {
     use obzenflow_core::event::observability::ObservationSource;
     let mut metrics = super::fsm::StageMetrics::default();
-    let observations = super::observations::ObservationHub::default();
+    let observations = super::observations::LatestObservationMap::default();
     for journal in std::iter::once(data_journal).chain(error_journal) {
         if let Some(provenance) = read_latest_runtime_context_for_stage(journal, stage_id).await {
             metrics.merge_runtime_context(&provenance);

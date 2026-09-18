@@ -483,7 +483,7 @@ impl JournalProbe {
 mod tests {
     use super::*;
     use crate::id_conversions::StageIdExt;
-    use crate::metrics::observations::ObservationHub;
+    use crate::metrics::observations::ObservationRegistry;
     use crate::pipeline::fsm::PipelineFsmEvent;
     use crate::pipeline::handle::FlowHandleExtras;
     use crate::pipeline::{FlowHandle, PipelineState};
@@ -641,7 +641,7 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
-            observations: Arc::new(ObservationHub::default()),
+            observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 
             stage_cleanup: Vec::new(),

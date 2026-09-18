@@ -192,7 +192,10 @@ impl CandidateSet {
             });
         }
 
-        if key_path == "runtime.observability.interval_ms" {
+        if matches!(
+            key_path.as_str(),
+            "runtime.observability.interval_ms" | "runtime.observability.export_interval_ms"
+        ) {
             if let ConfigValue::U64(milliseconds) = &value {
                 if std::time::Instant::now()
                     .checked_add(std::time::Duration::from_millis(*milliseconds))

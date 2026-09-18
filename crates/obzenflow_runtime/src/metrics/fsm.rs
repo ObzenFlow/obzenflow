@@ -166,7 +166,7 @@ pub struct MetricsAggregatorContext {
 
     pub metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
     pub metrics_store: MetricsStore,
-    pub export_interval_secs: u64,
+    pub export_interval: std::time::Duration,
     pub system_id: SystemId,
     #[doc(hidden)]
     pub pipeline_writer: Option<WriterId>,
@@ -193,8 +193,10 @@ pub(crate) struct MetricsAggregatorIo {
 #[derive(Default)]
 #[doc(hidden)]
 pub struct MetricsStore {
-    pub(crate) observations: Arc<super::observations::ObservationHub>,
+    pub(crate) observations: Arc<super::observations::ObservationRegistry>,
     pub(crate) last_export_completed: Option<tokio::time::Instant>,
+    pub(crate) next_export_at: Option<tokio::time::Instant>,
+    pub(crate) throughput: super::throughput::ThroughputSampler,
     pub(crate) inputs_covered: bool,
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
     pub last_event_id: Option<EventId>,
@@ -480,13 +482,22 @@ impl MetricsAggregatorContext {
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
         metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
-        export_interval_secs: u64,
+        export_interval: std::time::Duration,
         system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
         composite_boundaries: Vec<obzenflow_core::metrics::CompositeBoundary>,
     ) -> Result<(Self, MetricsAggregatorIo), String> {
         let metrics_store = MetricsStore {
             observations: inputs.observations.clone(),
+            throughput: super::throughput::ThroughputSampler::new(inputs.execution.as_ref().map(
+                |(flow, execution)| {
+                    inputs.observations.capture_owner(
+                        super::observations::scope(execution, *flow),
+                        system_id.into(),
+                        execution.clone(),
+                    )
+                },
+            )),
             ..MetricsStore::default()
         };
         let composite_durations = CompositeDurationAccumulator::default();
@@ -536,7 +547,7 @@ impl MetricsAggregatorContext {
             include_error_journals: true, // Default to true per FLOWIP-082g
             metrics_exporter,
             metrics_store,
-            export_interval_secs,
+            export_interval,
             system_id,
             pipeline_writer: None,
             stage_metadata,
@@ -729,6 +740,8 @@ impl MetricsAggregatorContext {
 
         // Add stage metadata
         snapshot.stage_metadata = self.stage_metadata.clone();
+        snapshot.throughput = store.throughput.latest.clone();
+        snapshot.observation_export_interval = Some(self.export_interval);
         snapshot.sink_operation_failures = store
             .sink_operation_failures
             .iter()
@@ -1209,7 +1222,10 @@ impl FsmAction for MetricsAggregatorAction {
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
                 if let Some(observation) = &envelope.envelope.observability {
-                    store.observations.offer_recorded(observation.clone());
+                    store
+                        .observations
+                        .latest()
+                        .offer_recorded(observation.clone());
                 }
 
                 // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
@@ -1507,7 +1523,10 @@ impl FsmAction for MetricsAggregatorAction {
 
                 use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayload;
                 if let Some(observation) = &envelope.envelope.observability {
-                    store.observations.offer_recorded(observation.clone());
+                    store
+                        .observations
+                        .latest()
+                        .offer_recorded(observation.clone());
                 }
                 // Count a committed plan only at its originating writer, never
                 // when a manifest is forwarded through an internal feed.
@@ -1603,7 +1622,13 @@ impl FsmAction for MetricsAggregatorAction {
             }
 
             MetricsAggregatorAction::ExportMetrics => {
+                let export_started = tokio::time::Instant::now();
                 tracing::debug!("ExportMetrics action triggered");
+                ctx.metrics_store.throughput.sample(
+                    &ctx.metrics_store.observations,
+                    &ctx.stage_metadata,
+                    export_started,
+                );
                 for (stage, journal) in ctx
                     .stage_data_journals
                     .iter()
@@ -1612,7 +1637,7 @@ impl FsmAction for MetricsAggregatorAction {
                     super::snapshot::retain_journal_observations(
                         journal.as_ref(),
                         (*stage).into(),
-                        &ctx.metrics_store.observations,
+                        ctx.metrics_store.observations.latest(),
                     )
                     .await;
                 }
@@ -1648,7 +1673,27 @@ impl FsmAction for MetricsAggregatorAction {
                 .await
                 .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
-                ctx.metrics_store.last_export_completed = Some(tokio::time::Instant::now());
+                let completed = tokio::time::Instant::now();
+                let due = ctx.metrics_store.next_export_at.unwrap_or(export_started);
+                // Keep the monotonic schedule and skip missed slots, including
+                // time spent publishing the export-coordination record.
+                let remainder =
+                    completed.duration_since(due).as_nanos() % ctx.export_interval.as_nanos();
+                let until_next = ctx.export_interval
+                    - std::time::Duration::new(
+                        (remainder / 1_000_000_000) as u64,
+                        (remainder % 1_000_000_000) as u32,
+                    );
+                ctx.metrics_store.next_export_at = Some(if due > completed {
+                    due
+                } else {
+                    completed + until_next
+                });
+                ctx.metrics_store.last_export_completed = Some(completed);
+                tracing::debug!(
+                    export_elapsed_us = completed.duration_since(export_started).as_micros(),
+                    "Metrics export and coordination publication completed"
+                );
                 Ok(())
             }
 
@@ -2593,7 +2638,7 @@ mod tests {
             include_error_journals: true,
             metrics_exporter: Arc::new(crate::metrics::RecordingSnapshots::default()),
             metrics_store: store,
-            export_interval_secs: 10,
+            export_interval: std::time::Duration::from_secs(10),
             system_id: obzenflow_core::SystemId::new(),
             pipeline_writer: None,
             stage_metadata,

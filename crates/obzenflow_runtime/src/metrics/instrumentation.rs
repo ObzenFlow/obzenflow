@@ -487,6 +487,21 @@ impl StageInstrumentation {
         self.offer_capture(CaptureReason::Initial);
     }
 
+    /// Read only the processing counter, after checking this stage's execution
+    /// authority. Replay reads cannot establish a live throughput baseline.
+    pub(crate) fn live_counter_sample(
+        &self,
+    ) -> Option<(obzenflow_core::event::observability::CaptureScope, u64)> {
+        let owner = self.observation_owner.get()?;
+        if !owner.measurements_allowed() {
+            return None;
+        }
+        let count = self.events_processed_total.load(Ordering::Relaxed);
+        owner
+            .measurements_allowed()
+            .then_some((owner.scope(), count))
+    }
+
     pub fn observation_recorder(&self) -> Arc<dyn ObservationRecorder> {
         self.observation_owner
             .get()

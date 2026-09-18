@@ -20,6 +20,9 @@ pub const SINK_HANDLER_KEY: &str = "sinks.handler";
 pub const RESILIENCE_BREAKER_CONSECUTIVE_FAILURES_KEY: &str =
     "effects.resilience.breaker.consecutive_failures";
 pub const RESILIENCE_BREAKER_COUNT_WINDOW_KEY: &str = "effects.resilience.breaker.count_window";
+/// Default for the registered flow observation producer and its consumers.
+pub const DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS: u64 = 250;
+
 pub const RESILIENCE_BREAKER_FAILURE_RATE_THRESHOLD_KEY: &str =
     "effects.resilience.breaker.failure_rate_threshold";
 pub const RESILIENCE_BREAKER_MINIMUM_CALLS_KEY: &str = "effects.resilience.breaker.minimum_calls";
@@ -715,6 +718,21 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 },
                 target: KnobTarget::Global,
                 default: KnobDefault::Value(ConfigValue::U64(5000)),
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: "runtime.observability.export_interval_ms",
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Flow,
+                default: KnobDefault::Value(ConfigValue::U64(
+                    DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
+                )),
                 mutability: Mutability::Restartful,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,

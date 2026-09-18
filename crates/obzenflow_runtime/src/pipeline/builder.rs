@@ -14,7 +14,7 @@ use super::{
     supervisor::PipelineSupervisor,
     PipelineState,
 };
-use crate::metrics::observations::ObservationHub;
+use crate::metrics::observations::ObservationRegistry;
 use crate::{
     backpressure::BackpressureRegistry,
     feed_plan::{FeedKey, FeedPlan},
@@ -74,17 +74,23 @@ pub struct PipelineBuilder {
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
-    observations: Arc<ObservationHub>,
+    observations: Arc<ObservationRegistry>,
     host_observations: Arc<dyn ObservationRecorder>,
     feed_plan: FeedPlan,
     run_substrate: Option<RunSubstrateState>,
     flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
+    runtime_execution: Option<crate::execution::RuntimeExecution>,
 }
 
 impl PipelineBuilder {
+    pub fn with_runtime_execution(mut self, execution: crate::execution::RuntimeExecution) -> Self {
+        self.runtime_execution = Some(execution);
+        self
+    }
+
     pub fn with_observations(
         mut self,
-        observations: Arc<ObservationHub>,
+        observations: Arc<ObservationRegistry>,
         host: Arc<dyn ObservationRecorder>,
     ) -> Self {
         self.observations = observations;
@@ -111,11 +117,12 @@ impl PipelineBuilder {
             contract_attachments: None,
             backpressure_registry: None,
             liveness_snapshots: None,
-            observations: Arc::new(ObservationHub::default()),
+            observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
             feed_plan: FeedPlan::default(),
             run_substrate: None,
             flow_effective_config: None,
+            runtime_execution: None,
         }
     }
 
@@ -354,6 +361,16 @@ impl PipelineBuilder {
             stage_error_journals: self.error_journals.unwrap_or_default(),
             backpressure_registry: self.backpressure_registry.clone(),
             observations: self.observations.clone(),
+            runtime_execution: self.runtime_execution.clone(),
+            observation_export_interval: self
+                .flow_effective_config
+                .as_ref()
+                .map(|config| config.observation_export_interval())
+                .unwrap_or_else(|| {
+                    std::time::Duration::from_millis(
+                        crate::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
+                    )
+                }),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
             resources: Default::default(),

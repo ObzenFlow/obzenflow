@@ -42,7 +42,7 @@ pub struct MetricsAggregatorBuilder {
     /// Composite boundaries for composite RED projection (FLOWIP-128a B4).
     composite_boundaries: Vec<CompositeBoundary>,
 
-    export_interval_secs: u64,
+    export_interval: std::time::Duration,
     pipeline_writer: Option<obzenflow_core::event::WriterId>,
 }
 
@@ -60,7 +60,9 @@ impl MetricsAggregatorBuilder {
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
             pipeline_writer: None,
-            export_interval_secs: 10, // Default to 10 seconds
+            export_interval: std::time::Duration::from_millis(
+                crate::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
+            ),
         }
     }
 
@@ -69,9 +71,12 @@ impl MetricsAggregatorBuilder {
         self
     }
 
-    /// Set the export interval in seconds
-    pub fn with_export_interval(mut self, seconds: u64) -> Self {
-        self.export_interval_secs = seconds;
+    /// Bind the flow's resolved runtime configuration.
+    pub(crate) fn with_observation_export_interval(
+        mut self,
+        interval: std::time::Duration,
+    ) -> Self {
+        self.export_interval = interval;
         self
     }
 
@@ -117,7 +122,7 @@ impl MetricsAggregatorBuilder {
             self.inputs.clone(),
             self.system_journal.clone(),
             self.metrics_exporter,
-            self.export_interval_secs,
+            self.export_interval,
             system_id,
             self.stage_metadata,
             self.composite_boundaries,

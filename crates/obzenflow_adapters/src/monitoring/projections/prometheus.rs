@@ -91,6 +91,67 @@ impl PrometheusProjection {
             snapshot.processing_times.len()
         );
 
+        // These retained rates are sampled once by Runtime. Rendering never
+        // differentiates counters, captures measurements or advances time.
+        if !snapshot.throughput.stages.is_empty()
+            || snapshot.throughput.flow_input.is_some()
+            || snapshot.throughput.flow_output.is_some()
+        {
+            writeln!(output, "# HELP obzenflow_throughput_events_per_second Latest observed processing throughput")?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_throughput_events_per_second gauge"
+            )?;
+            for (stage, measurement) in &snapshot.throughput.stages {
+                if let Some(metadata) = snapshot.stage_metadata.get(stage) {
+                    writeln!(
+                        output,
+                        "obzenflow_throughput_events_per_second{{{},scope=\"stage\"}} {}",
+                        format_stage_labels(stage, metadata),
+                        measurement.events_per_second
+                    )?;
+                }
+            }
+            let flow_name = snapshot
+                .stage_metadata
+                .values()
+                .next()
+                .map(|metadata| metadata.flow_name.as_str())
+                .unwrap_or("unknown");
+            for (scope, measurement) in [
+                ("flow_input", snapshot.throughput.flow_input.as_ref()),
+                ("flow_output", snapshot.throughput.flow_output.as_ref()),
+            ] {
+                if let Some(measurement) = measurement {
+                    writeln!(output, "obzenflow_throughput_events_per_second{{flow=\"{}\",flow_id=\"{}\",scope=\"{}\"}} {}", escape_label(flow_name), measurement.capture.capture_scope.flow_id, scope, measurement.events_per_second)?;
+                }
+            }
+            writeln!(output)?;
+        }
+        if let Some((interval, metadata, flow_id)) =
+            snapshot.observation_export_interval.and_then(|interval| {
+                snapshot.stage_metadata.values().find_map(|metadata| {
+                    metadata
+                        .flow_id
+                        .map(|flow_id| (interval, metadata, flow_id))
+                })
+            })
+        {
+            writeln!(output, "# HELP obzenflow_observation_export_interval_seconds Configured observation export interval")?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_observation_export_interval_seconds gauge"
+            )?;
+            writeln!(
+                output,
+                "obzenflow_observation_export_interval_seconds{{flow=\"{}\",flow_id=\"{}\"}} {}",
+                escape_label(&metadata.flow_name),
+                flow_id,
+                interval.as_secs_f64()
+            )?;
+            writeln!(output)?;
+        }
+
         // Event counts
         if !snapshot.event_counts.is_empty() {
             writeln!(

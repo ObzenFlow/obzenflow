@@ -95,7 +95,7 @@ pub async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding(
         MetricsInputs::new(vec![(stage, data)], vec![(stage, errors)]),
         system.clone(),
         exporter.clone(),
-        1,
+        std::time::Duration::from_secs(1),
         system_id,
         HashMap::new(),
         Vec::new(),

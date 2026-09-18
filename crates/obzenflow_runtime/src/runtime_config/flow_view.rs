@@ -173,6 +173,16 @@ impl FlowEffectiveConfig {
         }
     }
 
+    pub fn observation_export_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.u64_at(
+                "runtime.observability.export_interval_ms",
+                &ConfigScope::Flow,
+            )
+            .expect("registry default guarantees observation export interval"),
+        )
+    }
+
     pub fn heartbeat_interval_for(&self, stage: &StageKey) -> u64 {
         self.u64_at(
             "runtime.heartbeat_interval",

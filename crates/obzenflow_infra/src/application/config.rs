@@ -413,6 +413,7 @@ pub(crate) struct RawFileRuntimeConfig {
 pub(crate) struct RawObservabilityConfig {
     pub(crate) mode: Option<String>,
     pub(crate) interval_ms: Option<i64>,
+    pub(crate) export_interval_ms: Option<i64>,
     pub(crate) flow: RawObservabilityFlow,
     pub(crate) stages: BTreeMap<String, RawObservabilityStage>,
 }
@@ -422,6 +423,7 @@ pub(crate) struct RawObservabilityConfig {
 pub(crate) struct RawObservabilityFlow {
     pub(crate) mode: Option<String>,
     pub(crate) interval_ms: Option<i64>,
+    pub(crate) export_interval_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

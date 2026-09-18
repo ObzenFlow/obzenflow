@@ -19,7 +19,8 @@ use std::sync::Arc;
 /// centralized ErrorSink.
 #[derive(Clone)]
 pub struct MetricsInputs {
-    pub observations: Arc<super::observations::ObservationHub>,
+    pub(crate) execution: Option<(obzenflow_core::FlowId, crate::execution::RuntimeExecution)>,
+    pub observations: Arc<super::observations::ObservationRegistry>,
     /// Stage data journals - normal outputs from pipeline stages
     pub stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
@@ -31,9 +32,18 @@ pub struct MetricsInputs {
 }
 
 impl MetricsInputs {
+    pub(crate) fn with_execution(
+        mut self,
+        flow: obzenflow_core::FlowId,
+        execution: Option<crate::execution::RuntimeExecution>,
+    ) -> Self {
+        self.execution = execution.map(|execution| (flow, execution));
+        self
+    }
+
     pub fn with_observations(
         mut self,
-        observations: Arc<super::observations::ObservationHub>,
+        observations: Arc<super::observations::ObservationRegistry>,
     ) -> Self {
         self.observations = observations;
         self
@@ -45,7 +55,8 @@ impl MetricsInputs {
         error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     ) -> Self {
         Self {
-            observations: Arc::new(super::observations::ObservationHub::default()),
+            execution: None,
+            observations: Arc::new(super::observations::ObservationRegistry::default()),
             stage_data_journals,
             error_journals,
             backpressure_registry: None,

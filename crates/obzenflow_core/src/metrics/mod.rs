@@ -14,6 +14,9 @@ pub mod percentile;
 pub mod primitives;
 pub mod snapshot_exporter;
 pub mod snapshots;
+pub mod throughput;
+
+pub use throughput::{ThroughputMeasurement, ThroughputSnapshot, ThroughputSource};
 
 pub use composite::{
     BoundaryDirection, CompositeContract, CompositeDurationBucket, CompositeDurationHistogram,

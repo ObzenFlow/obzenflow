@@ -96,6 +96,9 @@ impl<T: JournalEvent + 'static> JournalReader<T> for ObservedReader<T> {
     fn position(&self) -> u64 {
         self.inner.position()
     }
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        self.inner.initial_prefix_complete()
+    }
     fn is_at_end(&self) -> bool {
         self.probe.end_checks.fetch_add(1, Ordering::SeqCst);
         !self.probe.unknown_end.load(Ordering::SeqCst) && self.inner.is_at_end()
@@ -326,7 +329,7 @@ async fn context(
         super::MetricsInputs::new(data, errors),
         system.clone(),
         exports.clone(),
-        1,
+        std::time::Duration::from_secs(1),
         system_id,
         HashMap::new(),
         vec![],
@@ -638,7 +641,7 @@ fn supervisor(ctx: &Context, io: super::fsm::MetricsAggregatorIo) -> MetricsAggr
     }
 }
 
-pub async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_publication(
+pub async fn metrics_rotation_coalesces_exports_and_skips_missed_deadlines(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
@@ -653,6 +656,7 @@ pub async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_pub
     }
     let (mut ctx, io, system, _) =
         context(&mut *factory, vec![(stage, data)], vec![(stage, errors)]).await;
+    ctx.export_interval = Duration::from_millis(250);
     let events = SystemEventFactory::new(ctx.system_id);
     system
         .append(events.pipeline_draining(), Default::default())
@@ -707,6 +711,8 @@ pub async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_pub
         }
         for action in actions {
             if matches!(action, Action::ExportMetrics) {
+                let deadline = tokio::time::Instant::now();
+                ctx.metrics_store.next_export_at = Some(deadline);
                 let gate = Arc::new(Gate::default());
                 *system.probe.export_gate.lock().unwrap() = Some(gate.clone());
                 let (result, released) = tokio::join!(action.execute(&mut ctx), async {
@@ -719,6 +725,10 @@ pub async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_pub
                 });
                 result.unwrap();
                 assert!(ctx.metrics_store.last_export_completed.unwrap() >= released);
+                let next = ctx.metrics_store.next_export_at.unwrap();
+                assert!(next > released && next <= released + ctx.export_interval);
+                assert_eq!(next.duration_since(deadline).as_nanos() % ctx.export_interval.as_nanos(), 0,
+                    "publication must retain the monotonic schedule instead of adding an interval after acknowledgement");
             } else {
                 action.execute(&mut ctx).await.unwrap();
             }
@@ -922,6 +932,7 @@ pub async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not
     let (mut ctx, io, _, _) = context(&mut *factory, vec![(stage, empty)], vec![]).await;
     ctx.metrics_store.pipeline_state = "completed".into();
     ctx.metrics_store.last_export_completed = Some(tokio::time::Instant::now());
+    ctx.metrics_store.next_export_at = Some(tokio::time::Instant::now() + ctx.export_interval);
     let mut supervisor = supervisor(&ctx, io);
     supervisor.next_input = 3;
     let event = supervisor

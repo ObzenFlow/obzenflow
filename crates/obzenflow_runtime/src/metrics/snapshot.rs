@@ -10,7 +10,7 @@ use obzenflow_core::WriterId;
 pub(crate) async fn retain_journal_observations<T: JournalEvent>(
     journal: &dyn Journal<T>,
     observer: WriterId,
-    retained: &super::observations::ObservationHub,
+    retained: &super::observations::LatestObservationMap,
 ) {
     let Some(reader) = journal.observation_reader() else {
         return;
