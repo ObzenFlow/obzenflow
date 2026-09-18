@@ -202,13 +202,16 @@ impl Connection {
         tracing::debug!(records_scanned = self.records_scanned,
             elapsed_ms = self.opened_at.elapsed().as_millis(), checkpoint = ?self.checkpoint,
             "Studio initial committed prefix complete");
-        let fresh = matches!(self.phase, Phase::Fresh);
+        let measurements = self.projection.current_measurements();
         if matches!(self.phase, Phase::Fresh | Phase::Resume(_)) {
-            if !fresh {
+            if matches!(self.phase, Phase::Resume(_)) {
                 self.pending
                     .push_back(StudioStreamError::UnknownCursor.frame());
             }
             self.pending.extend(self.projection.snapshots());
+            // Deliver all factual snapshots before advancing the resume cursor.
+            self.pending
+                .extend(self.projection.middleware_snapshot(timestamp_ms()));
             self.pending.push_back(bootstrap(
                 self.checkpoint,
                 self.runtime_instance_id
@@ -216,11 +219,6 @@ impl Connection {
                     .map(RuntimeInstanceId::as_str),
             ));
             self.phase = Phase::Live;
-        }
-        let measurements = self.projection.current_measurements();
-        if fresh {
-            self.pending
-                .extend(self.projection.middleware_snapshot(timestamp_ms()));
         }
         self.pending.extend(measurements);
         self.next_observation = Some(Instant::now() + self.observation_interval);

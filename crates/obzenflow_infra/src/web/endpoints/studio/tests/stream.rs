@@ -929,6 +929,205 @@ async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallbac
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
+    use obzenflow_core::event::payloads::execution_payload::{
+        CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
+    };
+    use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
+    use obzenflow_core::event::types::SeqNo;
+
+    for disk in [false, true] {
+        for cursor_kind in ["unknown", "fresh", "malformed", "known"] {
+            let directory = tempfile::tempdir().unwrap();
+            let system = SystemId::new();
+            let breaker = StageId::new();
+            let limiter = StageId::new();
+            let journal: Arc<dyn Journal<SystemEvent>> = if disk {
+                Arc::new(
+                    crate::journal::disk::DiskJournal::with_owner(
+                        directory.path().join("fallback.log"),
+                        JournalOwner::system(system),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)))
+            };
+            let middleware = |stage: StageId, revision, fact| SystemPayload::MiddlewareLifecycle {
+                stage_id: stage,
+                stage_name: None,
+                flow_id: None,
+                flow_name: None,
+                origin: MiddlewareEventOrigin {
+                    event_id: EventId::new(),
+                    writer_key: stage.to_string(),
+                    seq: SeqNo(revision),
+                },
+                middleware: fact,
+            };
+            let opened = append(
+                journal.as_ref(),
+                system.into(),
+                middleware(
+                    breaker,
+                    420,
+                    MiddlewareFact::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                        from_state: CircuitState::Closed,
+                        to_state: CircuitState::Open,
+                        timestamp: 420,
+                    }),
+                ),
+            )
+            .await;
+            let prefix = append(
+                journal.as_ref(),
+                system.into(),
+                middleware(
+                    limiter,
+                    7,
+                    MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+                        mode_from: RateLimiterMode::Normal,
+                        mode_to: RateLimiterMode::Limiting,
+                        limit_rate: 10.0,
+                    }),
+                ),
+            )
+            .await;
+            let cursor = match cursor_kind {
+                "unknown" => Some(EventId::new().to_string()),
+                "fresh" => None,
+                "malformed" => Some("malformed".to_string()),
+                "known" => Some(prefix.id().to_string()),
+                _ => unreachable!(),
+            };
+            let (endpoint, closing) = endpoint(journal.clone(), vec![]);
+            let mut stream = open(&endpoint, cursor.as_deref()).await;
+            let mut body = Vec::new();
+            if cursor_kind != "known" {
+                loop {
+                    let frame = stream.next().await.unwrap();
+                    let bootstrap = frame.event.as_deref() == Some("bootstrap");
+                    body.push(frame);
+                    if bootstrap {
+                        break;
+                    }
+                }
+            }
+            if cursor_kind == "unknown" {
+                // Receiving the bootstrap cursor must already establish factual
+                // middleware state, even if the client disconnects immediately.
+                drop(stream);
+                stream = open(&endpoint, Some(&prefix.id().to_string())).await;
+            }
+            // Later facts must not leak into the initial snapshot.
+            let closed = append(
+                journal.as_ref(),
+                system.into(),
+                middleware(
+                    breaker,
+                    421,
+                    MiddlewareFact::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                        from_state: CircuitState::Open,
+                        to_state: CircuitState::Closed,
+                        timestamp: 421,
+                    }),
+                ),
+            )
+            .await;
+            let terminal = append(
+                journal.as_ref(),
+                system.into(),
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+            )
+            .await;
+            closing.send(true).unwrap();
+            body.extend(
+                tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
+                    .await
+                    .expect("post-cut facts drain before shutdown"),
+            );
+            let snapshots = frames(&body, "middleware_state_snapshot");
+            assert_eq!(
+                snapshots.len(),
+                usize::from(cursor_kind != "known"),
+                "disk={disk}, cursor={cursor_kind}"
+            );
+            if let Some(snapshot) = snapshots.first() {
+                assert!(snapshot.id.is_none());
+                let payload = frame_payload(snapshot);
+                let members = payload["middleware"].as_array().unwrap();
+                assert_eq!(members.len(), 2);
+                let cb = members
+                    .iter()
+                    .find(|entry| entry["stage_id"] == breaker.to_string())
+                    .unwrap();
+                let rl = members
+                    .iter()
+                    .find(|entry| entry["stage_id"] == limiter.to_string())
+                    .unwrap();
+                assert_eq!(cb["circuit_breaker"]["state"], "open");
+                assert_eq!(cb["circuit_breaker"]["revision"], 420);
+                assert_eq!(
+                    cb["circuit_breaker"]["state_updated_at_ms"],
+                    opened.envelope.provenance.event.timestamp
+                );
+                assert_eq!(rl["rate_limiter"]["mode"], "limiting");
+                assert_eq!(rl["rate_limiter"]["revision"], 7);
+                assert_eq!(
+                    payload["vector_clock"],
+                    serde_json::to_value(&prefix.envelope.provenance.journal.vector_clock).unwrap()
+                );
+                let snapshot_index = body
+                    .iter()
+                    .position(|frame| frame.event.as_deref() == Some("middleware_state_snapshot"))
+                    .unwrap();
+                let closed_index = body
+                    .iter()
+                    .position(|frame| frame.id == Some(closed.id().to_string()))
+                    .unwrap();
+                let bootstrap_index = body
+                    .iter()
+                    .position(|frame| frame.event.as_deref() == Some("bootstrap"))
+                    .unwrap();
+                assert!(snapshot_index < bootstrap_index);
+                assert!(snapshot_index < closed_index);
+            }
+            let facts = frames(&body, "middleware_lifecycle");
+            assert_eq!(facts.len(), 1);
+            assert_eq!(frame_payload(facts[0])["state_to"], "closed");
+            assert_eq!(frame_payload(facts[0])["revision"], 421);
+            let mut expected_ids = Vec::new();
+            if cursor_kind != "known" {
+                expected_ids.push(prefix.id().to_string());
+            }
+            expected_ids.extend([closed.id().to_string(), terminal.id().to_string()]);
+            assert_eq!(
+                body.iter()
+                    .filter_map(|frame| frame.id.clone())
+                    .collect::<Vec<_>>(),
+                expected_ids
+            );
+            let errors = frames(&body, "error");
+            match cursor_kind {
+                "unknown" => assert_eq!(
+                    frame_payload(errors[0])["error_type"],
+                    "journal_resume_not_found"
+                ),
+                "malformed" => assert_eq!(
+                    frame_payload(errors[0])["error_type"],
+                    "invalid_last_event_id"
+                ),
+                _ => assert!(errors.is_empty()),
+            }
+            assert_eq!(
+                body.last().unwrap().event.as_deref(),
+                Some("server_shutdown")
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
     let mut journal = ScriptedJournal::new(SystemId::new());
