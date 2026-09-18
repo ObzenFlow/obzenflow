@@ -849,6 +849,7 @@ impl StageResourcesBuilder {
             observations: flow_runtime_execution.observations().clone(),
             host_observations: flow_runtime_execution
                 .observation_recorder(self.flow_id, self.pipeline_system_id.into()),
+            runtime_execution: flow_runtime_execution,
             message_bus,
             feed_plan: self.feed_plan,
         })
@@ -857,6 +858,7 @@ impl StageResourcesBuilder {
 
 /// Complete set of resources for all stages in a flow
 pub struct StageResourcesSet {
+    pub runtime_execution: RuntimeExecution,
     pub observations: Arc<ObservationHub>,
     pub host_observations: Arc<dyn ObservationRecorder>,
     /// Flow execution ID

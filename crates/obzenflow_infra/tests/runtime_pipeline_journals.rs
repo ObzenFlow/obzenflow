@@ -382,8 +382,8 @@ async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends(
 }
 
 #[tokio::test(start_paused = true)]
-async fn metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_publication() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_rotation_coalesces_exports_and_spaces_from_acknowledged_publication).await;
+async fn metrics_rotation_coalesces_exports_and_skips_missed_deadlines() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_rotation_coalesces_exports_and_skips_missed_deadlines).await;
 }
 
 #[tokio::test]

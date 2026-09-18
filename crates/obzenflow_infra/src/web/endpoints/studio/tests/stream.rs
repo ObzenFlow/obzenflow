@@ -23,6 +23,246 @@ fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
     )]
 }
 
+#[tokio::test]
+async fn initial_prefix_includes_every_atomic_member_and_stays_fixed_while_tailing() {
+    let directory = tempfile::tempdir().unwrap();
+    let system = SystemId::new();
+    let stage = StageId::new();
+    let journals: Vec<Arc<dyn Journal<SystemEvent>>> = vec![
+        Arc::new(MemoryJournal::with_owner(JournalOwner::system(system))),
+        Arc::new(
+            crate::journal::disk::DiskJournal::with_owner(
+                directory.path().join("prefix.log"),
+                JournalOwner::system(system),
+            )
+            .unwrap(),
+        ),
+    ];
+    for journal in journals {
+        let empty = journal.reader().await.unwrap();
+        assert!(empty.initial_prefix_complete().unwrap());
+        let event = || {
+            SystemEvent::new(
+                system.into(),
+                SystemPayload::StageLifecycle {
+                    stage_id: stage,
+                    event: StageLifecycleEvent::Running,
+                },
+            )
+        };
+        let group = journal
+            .append_group("initial", vec![event(), event()], Default::default())
+            .await
+            .unwrap();
+        let mut reader = journal.reader().await.unwrap();
+        let later = journal.append(event(), Default::default()).await.unwrap();
+        assert!(!reader.initial_prefix_complete().unwrap());
+        assert_eq!(reader.next().await.unwrap().unwrap().id(), group[0].id());
+        assert!(
+            !reader.initial_prefix_complete().unwrap(),
+            "a parsed group still has a buffered member"
+        );
+        assert_eq!(reader.next().await.unwrap().unwrap().id(), group[1].id());
+        assert!(reader.initial_prefix_complete().unwrap());
+        assert!(
+            !reader.is_at_end(),
+            "the initial cut cannot certify physical end"
+        );
+        assert_eq!(reader.next().await.unwrap().unwrap().id(), later.id());
+        assert!(reader.initial_prefix_complete().unwrap());
+        assert!(reader.next().await.unwrap().is_none());
+        assert!(reader.is_at_end());
+        let appended = journal.append(event(), Default::default()).await.unwrap();
+        assert_eq!(reader.next().await.unwrap().unwrap().id(), appended.id());
+        assert!(reader.initial_prefix_complete().unwrap());
+        assert!(empty.initial_prefix_complete().unwrap());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline_under_busy_facts()
+{
+    use obzenflow_adapters::monitoring::MetricsReadModel;
+    use obzenflow_core::event::observability::*;
+    use obzenflow_core::metrics::{
+        AppMetricsSnapshot, MetricsSnapshotExporter, ThroughputMeasurement,
+    };
+    use obzenflow_core::time::MetricsDuration;
+    use obzenflow_runtime::metrics::observations::ObservationHub;
+
+    for interval_ms in [250, 500] {
+        let system = SystemId::new();
+        let stage = StageId::new();
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)));
+        let model = Arc::new(MetricsReadModel::default());
+        let hub = Arc::new(ObservationHub::default());
+        let scope = CaptureScope {
+            flow_id: FlowId::new(),
+            resume_generation: Default::default(),
+        };
+        hub.activate_scope(scope);
+        let stamp = |sequence| CaptureStamp {
+            capture_scope: scope,
+            observer: system.into(),
+            capture_seq: CaptureSeq(sequence),
+            capture_reason: CaptureReason::Periodic,
+            observed_at_ms: sequence,
+        };
+        let publish = |sequence| {
+            let mut snapshot = AppMetricsSnapshot::default();
+            snapshot.throughput.stages.insert(
+                stage,
+                ThroughputMeasurement {
+                    capture: stamp(sequence),
+                    event_delta: 21,
+                    elapsed: MetricsDuration::from_millis(500),
+                    events_per_second: 42.0,
+                },
+            );
+            model.publish_app_snapshot(snapshot);
+        };
+        let edge = |sequence| {
+            let mut packet = ObservabilityContext::new(stamp(sequence));
+            packet.records.push(ObservationRecord::EdgeLiveness {
+                upstream: stage,
+                reader: stage,
+                state: EdgeLivenessState::Healthy,
+                idle_ms: obzenflow_core::event::types::DurationMs(0),
+                last_reader_seq: None,
+                last_event_id: None,
+            });
+            packet
+        };
+        publish(7);
+        let (closing, receiver) = watch::channel(false);
+        let endpoint = StudioUpdatesEndpoint::new(
+            journal.clone(),
+            StudioProjection::new(vec![], ContractBoundaryAliases::default())
+                .unwrap()
+                .with_observations(hub.clone())
+                .with_throughput(model.clone()),
+            None,
+            receiver,
+        )
+        .with_observation_interval(Duration::from_millis(interval_ms));
+        let mut fast = open(&endpoint, None).await;
+        let mut slow = open(&endpoint, None).await;
+        for client in [&mut fast, &mut slow] {
+            assert_eq!(
+                client.next().await.unwrap().event.as_deref(),
+                Some("bootstrap")
+            );
+            let initial = client.next().await.unwrap();
+            assert_eq!(
+                frame_payload(&initial)["stages"][0]["measurement"]["capture"]["capture_seq"],
+                7
+            );
+            assert!(initial.id.is_none());
+            assert!(frame_payload(&initial).get("capture").is_none());
+        }
+        publish(8);
+        hub.offer(edge(8));
+        tokio::time::advance(Duration::from_millis(interval_ms - 1)).await;
+        let fact = append(
+            journal.as_ref(),
+            system.into(),
+            SystemPayload::StageLifecycle {
+                stage_id: stage,
+                event: StageLifecycleEvent::Running,
+            },
+        )
+        .await;
+        assert_eq!(fast.next().await.unwrap().id, Some(fact.id().to_string()));
+        assert!(
+            futures::poll!(fast.next()).is_pending(),
+            "the live hub cannot bypass the observation deadline"
+        );
+        publish(9);
+        hub.offer(edge(9));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for client in [&mut fast, &mut slow] {
+            loop {
+                let frame = client.next().await.unwrap();
+                if frame.event.as_deref() == Some("throughput_update") {
+                    assert_eq!(
+                        frame_payload(&frame)["stages"][0]["measurement"]["capture"]["capture_seq"],
+                        9
+                    );
+                    assert!(frame.id.is_none());
+                    break;
+                }
+                if frame.event.as_deref() == Some("edge_liveness") {
+                    assert_eq!(frame_payload(&frame)["capture"]["capture_seq"], 9);
+                    assert!(frame.id.is_none());
+                }
+            }
+        }
+        let mut attached = SystemEvent::new(
+            system.into(),
+            SystemPayload::StageLifecycle {
+                stage_id: stage,
+                event: StageLifecycleEvent::Running,
+            },
+        );
+        attached.envelope.observability = Some(edge(10));
+        let attached = journal.append(attached, Default::default()).await.unwrap();
+        assert_eq!(
+            fast.next().await.unwrap().id,
+            Some(attached.id().to_string())
+        );
+        assert!(
+            futures::poll!(fast.next()).is_pending(),
+            "journal attachments cannot bypass the same deadline"
+        );
+        tokio::time::advance(Duration::from_millis(interval_ms)).await;
+        let attached = fast.next().await.unwrap();
+        assert_eq!(attached.event.as_deref(), Some("edge_liveness"));
+        assert_eq!(frame_payload(&attached)["capture"]["capture_seq"], 10);
+        assert!(attached.id.is_none());
+        // A ready prefix of records that produce no public frame must not
+        // starve a due measurement or force the reader to reach physical EOF.
+        for sequence in 0..128 {
+            append(
+                journal.as_ref(),
+                system.into(),
+                SystemPayload::IngressRefusal {
+                    ingress_key: obzenflow_core::ingress::IngressKey("busy".into()),
+                    stage_id: stage,
+                    stage_key: "busy".into(),
+                    reason: obzenflow_core::ingress::IngressRefusalReason::NotReady,
+                    attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(sequence),
+                    request_count: 1,
+                    event_count: 1,
+                    batch_count: 0,
+                    http_status: 503,
+                    retry_after_ms_bucket: None,
+                },
+            )
+            .await;
+        }
+        publish(11);
+        tokio::time::advance(Duration::from_millis(interval_ms)).await;
+        let frame = fast.next().await.unwrap();
+        assert_eq!(frame.event.as_deref(), Some("throughput_update"));
+        assert_eq!(
+            frame_payload(&frame)["stages"][0]["measurement"]["capture"]["capture_seq"],
+            11
+        );
+        append(
+            journal.as_ref(),
+            system.into(),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        )
+        .await;
+        closing.send(true).unwrap();
+        let rest: Vec<_> = fast.collect().await;
+        assert_eq!(
+            rest.last().unwrap().event.as_deref(),
+            Some("server_shutdown")
+        );
+    }
+}
+
 async fn append(
     journal: &dyn Journal<SystemEvent>,
     writer: WriterId,
@@ -424,6 +664,14 @@ impl JournalReader<SystemEvent> for ScriptedReader {
     fn position(&self) -> u64 {
         self.position as u64
     }
+
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        Ok(self.position >= self.events.len())
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.position >= self.events.len()
+    }
 }
 
 #[derive(Default)]
@@ -689,6 +937,10 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
     let reader_dropped = journal.reader_dropped.clone();
     let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
     let mut body = open(&endpoint, None).await;
+    assert_eq!(
+        body.next().await.unwrap().event.as_deref(),
+        Some("bootstrap")
+    );
     tokio::select! {
         _ = body.next() => panic!("pending read cannot produce a frame"),
         _ = probe.entered.notified() => {}

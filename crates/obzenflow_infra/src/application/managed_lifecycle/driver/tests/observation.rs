@@ -198,6 +198,9 @@ impl JournalReader<SystemEvent> for GatedReader {
     fn position(&self) -> u64 {
         self.inner.position()
     }
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        Ok(self.held.is_none() && self.inner.initial_prefix_complete()?)
+    }
 }
 
 async fn gated_observation(

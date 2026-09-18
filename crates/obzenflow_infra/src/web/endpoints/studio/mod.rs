@@ -29,6 +29,7 @@ pub(crate) struct StudioUpdatesEndpoint {
     projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
+    observation_interval: std::time::Duration,
 }
 
 impl StudioUpdatesEndpoint {
@@ -43,7 +44,15 @@ impl StudioUpdatesEndpoint {
             projection,
             runtime_instance_id,
             closing,
+            observation_interval: std::time::Duration::from_millis(
+                obzenflow_runtime::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
+            ),
         }
+    }
+
+    pub(crate) fn with_observation_interval(mut self, interval: std::time::Duration) -> Self {
+        self.observation_interval = interval;
+        self
     }
 }
 
@@ -73,6 +82,7 @@ impl HttpEndpoint for StudioUpdatesEndpoint {
             self.runtime_instance_id.clone(),
             self.closing.clone(),
             cursor,
+            self.observation_interval,
         ))))
     }
 }

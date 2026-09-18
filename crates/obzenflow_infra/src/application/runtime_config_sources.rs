@@ -265,6 +265,20 @@ fn admit_file_candidates(
     }
 
     let observability = &runtime.observability;
+    file_u64!(
+        set,
+        "runtime.observability.export_interval_ms",
+        ConfigScope::Global,
+        observability.export_interval_ms,
+        "runtime.observability.export_interval_ms"
+    );
+    file_u64!(
+        set,
+        "runtime.observability.export_interval_ms",
+        ConfigScope::Flow,
+        observability.flow.export_interval_ms,
+        "runtime.observability.flow.export_interval_ms"
+    );
     file_text!(
         set,
         "runtime.observability.mode",
@@ -712,9 +726,10 @@ fn admit_env_candidates(set: &mut CandidateSet) -> Result<(), ConfigError> {
                     name,
                     "OBZENFLOW_RUNTIME_OBSERVABILITY_MODE"
                         | "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS"
+                        | "OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS"
                 )
             {
-                return Err(ConfigError::at(name, "unknown observability knob; use MODE and INTERVAL_MS, with scoped overrides in the config file"));
+                return Err(ConfigError::at(name, "unknown observability knob; use MODE, INTERVAL_MS and EXPORT_INTERVAL_MS, with scoped overrides in the config file"));
             }
         }
     }
@@ -858,14 +873,20 @@ mod tests {
         let guard = EnvGuard::new(&[
             "OBZENFLOW_RUNTIME_OBSERVABILITY_MODE",
             "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS",
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS",
         ]);
         guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_MODE");
         guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS");
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS");
         let ctx = FlowResolutionContext {
             stages: BTreeSet::from([StageKey::from("source"), StageKey::from("sink")]),
             ..Default::default()
         };
         let defaults = materialize_flow_config(&snapshot("", &[]), ctx.clone()).unwrap();
+        assert_eq!(
+            defaults.observation_export_interval(),
+            std::time::Duration::from_millis(250)
+        );
         assert_eq!(
             defaults.observability_policy_for(None),
             ObservabilityPolicy::EveryRecord
@@ -879,14 +900,20 @@ mod tests {
             [runtime.observability]
             mode = "periodic"
             interval_ms = 1000
+            export_interval_ms = 500
             [runtime.observability.flow]
             interval_ms = 250
+            export_interval_ms = 750
             [runtime.observability.stages.sink]
             mode = "every_record"
         "#,
             &[],
         );
         let effective = materialize_flow_config(&configured, ctx.clone()).unwrap();
+        assert_eq!(
+            effective.observation_export_interval(),
+            std::time::Duration::from_millis(750)
+        );
         let periodic = ObservabilityPolicy::Periodic {
             interval: std::time::Duration::from_millis(250),
         };
@@ -901,8 +928,18 @@ mod tests {
         );
         guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_MODE", "periodic");
         guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS", "250");
+        guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS", "500");
         let environment = materialize_flow_config(&snapshot("", &[]), ctx.clone()).unwrap();
         assert_eq!(environment.observability_policy_for(None), periodic);
+        assert_eq!(
+            environment.observation_export_interval(),
+            std::time::Duration::from_millis(500)
+        );
+        let precedence = materialize_flow_config(&snapshot("[runtime.observability]\nexport_interval_ms = 1000\n[runtime.observability.flow]\nexport_interval_ms = 750", &[]), ctx).unwrap();
+        assert_eq!(
+            precedence.observation_export_interval(),
+            std::time::Duration::from_millis(750)
+        );
     }
 
     #[test]
@@ -912,15 +949,21 @@ mod tests {
             "OBZENFLOW_RUNTIME_OBSERVABILITY_MODE",
             "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS",
             "OBZENFLOW_RUNTIME_OBSERVABILITY_HZ",
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS",
         ]);
         guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_MODE");
         guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS");
         guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_HZ");
+        guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS");
         for body in [
             "[runtime.observability]\nmode = 'sometimes'",
             "[runtime.observability]\ninterval_ms = 0",
             "[runtime.observability]\ninterval_ms = -1",
             "[runtime.observability]\ninterval_ms = 0.5",
+            "[runtime.observability]\nexport_interval_ms = 0",
+            "[runtime.observability]\nexport_interval_ms = -1",
+            "[runtime.observability]\nexport_interval_ms = 0.5",
+            "[runtime.observability.stages.source]\nexport_interval_ms = 250",
             "[runtime.observability]\nhz = 4",
             "[runtime.observability.stages.source]\ninterval_ms = 250",
             "[runtime.observability.stages.source.edges.sink]\nmode = 'periodic'",
@@ -932,9 +975,15 @@ mod tests {
                 );
             }
         }
-        for value in ["0", "-1", "1.5", "18446744073709551616"] {
-            guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS", value);
-            assert!(build_runtime_config_snapshot(&cli(&[]), &parse_file("")).is_err());
+        for key in [
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS",
+            "OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS",
+        ] {
+            for value in ["0", "-1", "1.5", "18446744073709551616"] {
+                guard.set(key, value);
+                assert!(build_runtime_config_snapshot(&cli(&[]), &parse_file("")).is_err());
+            }
+            guard.remove(key);
         }
         guard.remove("OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS");
         guard.set("OBZENFLOW_RUNTIME_OBSERVABILITY_HZ", "4");

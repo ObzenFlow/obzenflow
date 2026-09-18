@@ -148,10 +148,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         subscription.observe_terminal();
                     }
                 }
-                let export_at = ctx
-                    .metrics_store
-                    .last_export_completed
-                    .map(|at| at + std::time::Duration::from_secs(ctx.export_interval_secs.max(1)));
+                let export_at = ctx.metrics_store.next_export_at;
                 // Input and export eligibility share one rotation. Each read
                 // settles before advancing; actions fold the entire batch before
                 // this supervisor is dispatched again.
@@ -418,7 +415,7 @@ mod tests {
             pipeline_writer: None,
             metrics_exporter: Arc::new(crate::metrics::RecordingSnapshots::default()),
             metrics_store: MetricsStore::default(),
-            export_interval_secs: 10,
+            export_interval: std::time::Duration::from_secs(10),
             system_id,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),

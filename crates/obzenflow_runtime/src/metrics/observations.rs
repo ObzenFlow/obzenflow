@@ -44,6 +44,26 @@ pub struct ObservationHub {
 }
 
 impl ObservationHub {
+    pub(crate) fn live_counters(&self) -> HashMap<obzenflow_core::StageId, (CaptureScope, u64)> {
+        let stages: Vec<_> = self
+            .stages
+            .try_lock()
+            .map(|stages| {
+                stages
+                    .iter()
+                    .map(|(writer, stage)| (*writer, stage.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        stages
+            .into_iter()
+            .filter_map(|(writer, weak)| {
+                let stage_id = *writer.as_stage()?;
+                Some((stage_id, weak.upgrade()?.live_counter_sample()?))
+            })
+            .collect()
+    }
+
     pub fn activate_scope(&self, scope: CaptureScope) {
         if let Ok(mut view) = self.view.lock() {
             view.active_scope = Some(scope);
@@ -243,6 +263,10 @@ pub struct ObservationOwner {
 }
 
 impl ObservationOwner {
+    pub(crate) fn scope(&self) -> CaptureScope {
+        self.scope
+    }
+
     pub fn measurements_allowed(&self) -> bool {
         match self.observer.as_stage() {
             Some(stage) => !self.execution.stage_scope(*stage).is_deterministic_replay(),

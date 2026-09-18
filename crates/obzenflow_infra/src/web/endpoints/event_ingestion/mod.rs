@@ -831,7 +831,7 @@ mod tests {
             include_error_journals: true,
             metrics_exporter: Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default()),
             metrics_store: MetricsStore::default(),
-            export_interval_secs: 60,
+            export_interval: std::time::Duration::from_secs(60),
             system_id: SystemId::new(),
             pipeline_writer: None,
             stage_metadata: HashMap::new(),

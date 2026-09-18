@@ -41,7 +41,9 @@ Replay each printed archive through the same executable and configuration by add
 durable output, independently of metrics reporting output, and must report zero differences.
 
 Terminal lifecycle snapshots remain journaled when reporting is disabled. Studio receives final
-In/Out/Errors and duration through lifecycle SSE; detailed measurements come from `/metrics`.
+In/Out/Errors and duration through lifecycle SSE. Stage and flow throughput arrive as retained
+`throughput_update` bundles on that stream; other detailed metrics still come from `/metrics`.
+Hosting Studio updates keeps the shared metrics producer active even when `[metrics] enabled = false`.
 
 For storage-sensitive workloads, optional journal diagnostics can be throttled:
 
@@ -49,18 +51,39 @@ For storage-sensitive workloads, optional journal diagnostics can be throttled:
 [runtime.observability]
 mode = "periodic"
 interval_ms = 250
+export_interval_ms = 250
 ```
 
-The default is `mode = "every_record"`. Each data, error and system journal has its
+The framework default is `mode = "every_record"`; this example's `obzenflow.toml`
+explicitly configures both intervals at 250 ms. Each data, error and system journal has its
 own allowance. At 250 ms, a journal carries at most four observability packets per
 second; slow journals can attach a packet to every record, and idle journals emit
-nothing. There is no freshness guarantee. Payloads, provenance, accounting and
+nothing. Payloads, provenance, accounting and
 delivery receipts remain complete.
+
+`export_interval_ms` independently controls backend observation publication and each SSE
+connection's observation cadence. Its default is 250 ms, and it must be positive. Rates use
+the actual monotonic time between successful counter reads. Studio and Prometheus retain
+the last complete measurement until a new one arrives, including after completion. Before
+two valid samples, throughput is unavailable. A new unchanged counter sample measures zero.
+There is no browser smoothing window or age-based replacement.
+
+Prometheus exposes `obzenflow_throughput_events_per_second` with `scope="stage"`,
+`scope="flow_input"` or `scope="flow_output"`, and the configured interval as
+`obzenflow_observation_export_interval_seconds`. These observations do not replace the
+journal-derived totals or establish delivery guarantees.
 
 Use `[runtime.observability.flow]` for flow overrides and
 `[runtime.observability.stages.<stage>]` for a stage's `mode` override. The interval
 is flow-wide. Environment equivalents are `OBZENFLOW_RUNTIME_OBSERVABILITY_MODE`
-and `OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS`. Changes apply on restart.
+and `OBZENFLOW_RUNTIME_OBSERVABILITY_INTERVAL_MS`. The export counterpart is
+`OBZENFLOW_RUNTIME_OBSERVABILITY_EXPORT_INTERVAL_MS`; both intervals accept flow overrides
+and apply on restart. The export interval is independent of journal `mode`.
+
+Known limitation: after a very large replay, such as one million events, some stage metric
+calculations may not yet reflect live-only conditions. FLOWIP-145e owns full replay/live
+measurement isolation. Existing replay suppression and the first live throughput baseline
+remain in force.
 
 Set `[metrics] enabled = true` or `false`; there is no provider selector. The retired
 `metrics.exporter` and `OBZENFLOW_METRICS_EXPORTER` settings are rejected, including Prometheus,
@@ -69,4 +92,4 @@ enables Tokio Console instrumentation independently.
 
 The backend `studio` capability supplies `prometheus` and `web-host`. Its existing connection
 configuration (`obzenflow.studio.toml`) opts in through `studio.enabled = true`; omitted host and
-metrics reporting fields receive the required defaults. No UI changes are needed for this backend refactor.
+metrics reporting fields receive the required defaults.

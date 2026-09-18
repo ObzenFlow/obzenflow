@@ -997,6 +997,12 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        // Writer-confirmed progress is independent of the optional observation
+        // index. Later appends cannot extend this connection's bootstrap cut.
+        let end = self
+            .observations
+            .confirmed_end()
+            .ok_or(JournalError::InitialPrefixUnsupported)?;
         Ok(Box::new(
             DiskJournalReader::from_position(
                 self.path.clone(),
@@ -1004,7 +1010,8 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 position,
                 self.read_write_lock.clone(),
             )
-            .await?,
+            .await?
+            .with_initial_end(end),
         ))
     }
 

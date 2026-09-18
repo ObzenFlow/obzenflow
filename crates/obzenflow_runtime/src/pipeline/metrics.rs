@@ -21,7 +21,8 @@ pub(super) async fn prepare_metrics(
         context.stage_error_journals.clone(),
     )
     .with_backpressure_registry_opt(context.backpressure_registry.clone())
-    .with_observations(context.observations.clone());
+    .with_observations(context.observations.clone())
+    .with_execution(context.flow_id, context.runtime_execution.clone());
     let metadata = context
         .stage_supervisors
         .iter()
@@ -49,7 +50,7 @@ pub(super) async fn prepare_metrics(
         .with_pipeline_writer(context.system_id.into())
         .with_stage_metadata(metadata)
         .with_composite_boundaries(composite_boundaries_from_topology(&context.topology))
-        .with_export_interval(1);
+        .with_observation_export_interval(context.observation_export_interval);
     builder.prepare().await.map(Some)
 }
 

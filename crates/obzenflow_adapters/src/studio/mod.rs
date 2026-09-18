@@ -54,6 +54,10 @@ pub struct StudioProjection {
     flow_state: ObservedFlowState,
     measurements: ObservationHub,
     live_measurements: Option<Arc<dyn ObservationSource>>,
+    pending_measurements: ObservationHub,
+    throughput: Option<Arc<dyn obzenflow_core::metrics::ThroughputSource>>,
+    last_throughput: obzenflow_core::metrics::ThroughputSnapshot,
+    middleware_snapshot_pending: bool,
 }
 
 impl Clone for StudioProjection {
@@ -66,6 +70,10 @@ impl Clone for StudioProjection {
             flow_state: self.flow_state,
             measurements: self.measurements.retained_copy(),
             live_measurements: self.live_measurements.clone(),
+            pending_measurements: self.pending_measurements.retained_copy(),
+            throughput: self.throughput.clone(),
+            last_throughput: self.last_throughput.clone(),
+            middleware_snapshot_pending: self.middleware_snapshot_pending,
         }
     }
 }
@@ -85,6 +93,10 @@ impl StudioProjection {
             flow_state: ObservedFlowState::Inactive,
             measurements: Default::default(),
             live_measurements: None,
+            pending_measurements: Default::default(),
+            throughput: None,
+            last_throughput: Default::default(),
+            middleware_snapshot_pending: false,
         })
     }
 
@@ -124,19 +136,94 @@ impl StudioProjection {
         self
     }
 
-    /// Called only after journal catch-up, on the same ordered SSE stream.
-    pub fn current_measurements(&mut self) -> Vec<SseFrame> {
-        let Some(source) = self.live_measurements.clone() else {
-            return Vec::new();
-        };
-        if let Some(scope) = source.active_scope() {
-            self.measurements.activate_scope(scope);
+    pub fn with_throughput(
+        mut self,
+        source: Arc<dyn obzenflow_core::metrics::ThroughputSource>,
+    ) -> Self {
+        self.throughput = Some(source);
+        self
+    }
+
+    /// Fold facts immediately, retaining attached observations for the next
+    /// connection deadline. Each subject retains at most its latest bundle.
+    pub fn project_deferred(&mut self, envelope: &SystemJournalRecord) -> Vec<SseFrame> {
+        let mut frames = Vec::new();
+        frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
+        let composite = self.observe(envelope);
+        frames.extend(composite.as_ref().and_then(composite_status_frame));
+        self.defer_measurements(envelope);
+        if matches!(
+            &envelope.payload,
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { .. })
+        ) {
+            self.middleware_snapshot_pending = true;
         }
-        source
+        frames
+    }
+
+    pub fn rebuild_deferred(&mut self, envelope: &SystemJournalRecord) {
+        self.observe(envelope);
+        self.defer_measurements(envelope);
+    }
+
+    fn defer_measurements(&self, envelope: &SystemJournalRecord) {
+        if let Some(packet) = &envelope.envelope.observability {
+            let _ = self.pending_measurements.select_recorded(packet.clone());
+        }
+    }
+
+    /// Called after the fixed initial prefix, at the connection's observation
+    /// deadline. Recorded and live observations share selection and cadence.
+    pub fn current_measurements(&mut self) -> Vec<SseFrame> {
+        if let Some(source) = self.live_measurements.clone() {
+            if let Some(scope) = source.active_scope() {
+                self.measurements.activate_scope(scope);
+                self.pending_measurements.activate_scope(scope);
+            }
+            for packet in source.snapshot() {
+                let _ = self.pending_measurements.select_recorded(packet);
+            }
+        }
+        let mut frames: Vec<_> = self
+            .pending_measurements
             .snapshot()
             .into_iter()
             .flat_map(|packet| self.project_retained_measurements(packet))
-            .collect()
+            .collect();
+        if let Some(source) = &self.throughput {
+            let latest = source.throughput();
+            if latest != self.last_throughput {
+                let mut stages: Vec<_> = latest
+                    .stages
+                    .iter()
+                    .map(|(stage_id, measurement)| messages::StageThroughput {
+                        stage_id: *stage_id,
+                        measurement,
+                    })
+                    .collect();
+                stages.sort_by_key(|stage| stage.stage_id);
+                frames.push(
+                    StudioMessage::ThroughputUpdate {
+                        stages,
+                        flow_input: latest.flow_input.as_ref(),
+                        flow_output: latest.flow_output.as_ref(),
+                    }
+                    .frame(None),
+                );
+                self.last_throughput = latest;
+            }
+        }
+        if std::mem::take(&mut self.middleware_snapshot_pending) {
+            let timestamp = self
+                .pending_measurements
+                .snapshot()
+                .iter()
+                .map(|packet| packet.capture.observed_at_ms)
+                .max()
+                .unwrap_or(0);
+            frames.extend(self.middleware_snapshot(timestamp));
+        }
+        frames
     }
 
     pub fn project_measurements(&mut self, packet: ObservabilityContext) -> Vec<SseFrame> {

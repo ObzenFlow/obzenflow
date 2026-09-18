@@ -194,7 +194,7 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         Ok((reader, recovered))
     }
 
-    fn confirmed_end(&self) -> Option<u64> {
+    pub(super) fn confirmed_end(&self) -> Option<u64> {
         let end = self.shared.committed_end.load(Ordering::Acquire);
         (end != NO_WRITER).then_some(end)
     }
@@ -952,6 +952,17 @@ mod tests {
             );
             let records = completes(journal.read_all_unordered()).await.unwrap();
             assert_eq!(records.len(), if grouped { 5 } else { 4 });
+            // Fixed-prefix readers must work while optional indexing is held
+            // unavailable, including the buffered terminal atomic group.
+            let mut prefix = completes(journal.reader()).await.unwrap();
+            for record in &records {
+                assert!(!prefix.initial_prefix_complete().unwrap());
+                assert_eq!(
+                    completes(prefix.next()).await.unwrap().unwrap().id(),
+                    record.id()
+                );
+            }
+            assert!(prefix.initial_prefix_complete().unwrap());
             completes(tokio::task::spawn_blocking(move || drop(journal)))
                 .await
                 .unwrap();

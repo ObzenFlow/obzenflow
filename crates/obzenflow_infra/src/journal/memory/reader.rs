@@ -21,6 +21,7 @@ use super::journal::MemoryJournalState;
 pub struct MemoryJournalReader<T: JournalEvent> {
     state: Arc<Mutex<MemoryJournalState<T>>>,
     position: u64,
+    initial_len: u64,
 }
 
 impl<T: JournalEvent> MemoryJournalReader<T> {
@@ -30,6 +31,7 @@ impl<T: JournalEvent> MemoryJournalReader<T> {
         Self {
             state,
             position: clamped,
+            initial_len: len,
         }
     }
 }
@@ -59,5 +61,9 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
 
     fn is_at_end(&self) -> bool {
         self.position as usize >= self.state.lock().unwrap().events.len()
+    }
+
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        Ok(self.position >= self.initial_len)
     }
 }

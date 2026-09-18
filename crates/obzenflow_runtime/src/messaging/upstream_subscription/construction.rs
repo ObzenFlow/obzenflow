@@ -60,6 +60,9 @@ where
     fn is_at_end(&self) -> bool {
         true
     }
+    fn initial_prefix_complete(&self) -> std::result::Result<bool, JournalError> {
+        Ok(true)
+    }
 }
 
 impl<T> UpstreamSubscription<T>

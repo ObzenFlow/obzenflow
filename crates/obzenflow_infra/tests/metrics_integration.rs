@@ -75,7 +75,7 @@ fn make_empty_context(
         include_error_journals: true,
         metrics_exporter: exporter,
         metrics_store: MetricsStore::default(),
-        export_interval_secs: 60,
+        export_interval: std::time::Duration::from_secs(60),
         system_id,
         stage_metadata: single_stage_metadata(stage_id),
         composite_boundaries: Vec::new(),

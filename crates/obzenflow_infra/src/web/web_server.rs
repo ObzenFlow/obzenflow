@@ -25,6 +25,7 @@ use super::RuntimeInstanceId;
 pub(crate) type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
 pub(crate) struct ManagedHostInput {
+    pub throughput: Option<Arc<dyn obzenflow_core::metrics::ThroughputSource>>,
     /// Canonical topology for this flow. Carries FLOWIP-114b annotations
     /// (stage typing, join metadata, middleware, subgraph membership,
     /// subgraph registry, role, cycle membership, flow name, API version)
@@ -193,6 +194,7 @@ pub(crate) async fn bind_managed_host(
     use super::endpoints::{FlowControlEndpoint, TopologyHttpEndpoint};
 
     let ManagedHostInput {
+        throughput,
         topology,
         contract_attachments,
         #[cfg(feature = "prometheus")]
@@ -217,6 +219,18 @@ pub(crate) async fn bind_managed_host(
         source: Some(Box::new(error)),
     })?
     .with_observations(flow_handle.observations());
+    let projection = match throughput {
+        Some(source) => projection.with_throughput(source),
+        None => projection,
+    };
+    let observation_interval = flow_handle
+        .flow_effective_config()
+        .map(|config| config.observation_export_interval())
+        .unwrap_or_else(|| {
+            std::time::Duration::from_millis(
+                obzenflow_runtime::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
+            )
+        });
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
     }
@@ -284,7 +298,8 @@ pub(crate) async fn bind_managed_host(
                 projection,
                 Some(runtime_instance_id),
                 shutdown.subscribe(),
-            ),
+            )
+            .with_observation_interval(observation_interval),
         ))?;
     }
     server.register_endpoint(Box::new(FlowControlEndpoint::new(flow_handle)))?;

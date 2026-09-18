@@ -214,6 +214,8 @@ pub(in crate::pipeline) fn test_context(
 ) -> PipelineContext {
     PipelineContext {
         observations: Arc::new(ObservationHub::default()),
+        runtime_execution: None,
+        observation_export_interval: std::time::Duration::from_millis(250),
         system_id,
         topology,
         flow_name: "test_flow".to_string(),
@@ -589,6 +591,8 @@ pub(in crate::pipeline) fn make_context(
 ) -> PipelineContext {
     PipelineContext {
         observations: Arc::new(ObservationHub::default()),
+        runtime_execution: None,
+        observation_export_interval: std::time::Duration::from_millis(250),
         system_id,
         topology: make_topology(),
         flow_name: "test_flow".to_string(),

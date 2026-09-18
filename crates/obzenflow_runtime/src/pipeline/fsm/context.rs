@@ -161,6 +161,8 @@ pub(crate) struct PipelineContext {
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
     pub(crate) observations: Arc<ObservationHub>,
+    pub(crate) runtime_execution: Option<crate::execution::RuntimeExecution>,
+    pub(crate) observation_export_interval: std::time::Duration,
     pub(crate) backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
 
     /// Per-source contract status (pass/fail) keyed by source StageId

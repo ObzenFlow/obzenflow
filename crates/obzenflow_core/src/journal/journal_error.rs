@@ -28,6 +28,9 @@ pub enum JournalError {
     #[error("Subscription closed")]
     SubscriptionClosed,
 
+    #[error("Journal reader does not support a fixed committed initial prefix")]
+    InitialPrefixUnsupported,
+
     #[error(
         "Journal does not support atomic append group '{group_id}' with {member_count} members"
     )]

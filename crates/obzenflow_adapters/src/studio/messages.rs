@@ -29,6 +29,13 @@ use std::path::PathBuf;
 #[derive(Serialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
 pub(super) enum StudioMessage<'a> {
+    ThroughputUpdate {
+        stages: Vec<StageThroughput<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_input: Option<&'a obzenflow_core::metrics::ThroughputMeasurement>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow_output: Option<&'a obzenflow_core::metrics::ThroughputMeasurement>,
+    },
     StageLifecycle {
         #[serde(serialize_with = "display")]
         stage_id: StageId,
@@ -167,6 +174,7 @@ impl StudioMessage<'_> {
     /// Pass `None` for snapshots and other messages that leave this position unchanged.
     pub(super) fn frame(&self, cursor: Option<EventId>) -> SseFrame {
         let event = match self {
+            Self::ThroughputUpdate { .. } => "throughput_update",
             Self::StageLifecycle { .. } => "stage_lifecycle",
             Self::FlowLifecycle { .. } => "flow_lifecycle",
             Self::ReplayLifecycle { .. } => "replay_lifecycle",
@@ -193,6 +201,13 @@ impl StudioMessage<'_> {
         frame.id = cursor.map(|id| id.to_string());
         frame
     }
+}
+
+#[derive(Serialize)]
+pub(super) struct StageThroughput<'a> {
+    #[serde(serialize_with = "display")]
+    pub stage_id: StageId,
+    pub measurement: &'a obzenflow_core::metrics::ThroughputMeasurement,
 }
 
 #[derive(Serialize)]

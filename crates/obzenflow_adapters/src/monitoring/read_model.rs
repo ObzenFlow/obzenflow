@@ -32,6 +32,16 @@ impl MetricsReadModel {
     }
 }
 
+impl obzenflow_core::metrics::ThroughputSource for MetricsReadModel {
+    fn throughput(&self) -> obzenflow_core::metrics::ThroughputSnapshot {
+        self.snapshot()
+            .app
+            .as_ref()
+            .map(|snapshot| snapshot.throughput.clone())
+            .unwrap_or_default()
+    }
+}
+
 impl MetricsSnapshotExporter for MetricsReadModel {
     fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot) {
         let next = Arc::new(snapshot);

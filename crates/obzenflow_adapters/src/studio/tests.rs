@@ -19,6 +19,118 @@ use obzenflow_core::{
 };
 use serde_json::{json, Value};
 
+#[test]
+fn throughput_sse_and_prometheus_share_retained_values_without_capture_or_cursor_side_effects() {
+    use crate::monitoring::{projections::PrometheusProjection, MetricsReadModel};
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::event::observability::{
+        CaptureReason, CaptureScope, CaptureSeq, CaptureStamp,
+    };
+    use obzenflow_core::metrics::{
+        AppMetricsSnapshot, MetricsSnapshotExporter, StageMetadata, ThroughputMeasurement,
+    };
+    let stage = StageId::new();
+    let other = StageId::new();
+    let flow = FlowId::new();
+    let measurement = |seq, rate| ThroughputMeasurement {
+        capture: CaptureStamp {
+            capture_scope: CaptureScope {
+                flow_id: flow,
+                resume_generation: Default::default(),
+            },
+            observer: SystemId::new().into(),
+            capture_seq: CaptureSeq(seq),
+            capture_reason: CaptureReason::Periodic,
+            observed_at_ms: 1000,
+        },
+        event_delta: 21,
+        elapsed: obzenflow_core::time::MetricsDuration::from_millis(500),
+        events_per_second: rate,
+    };
+    let model = Arc::new(MetricsReadModel::default());
+    let mut snapshot = AppMetricsSnapshot::default();
+    for stage in [stage, other] {
+        snapshot.stage_metadata.insert(
+            stage,
+            StageMetadata {
+                name: stage.to_string(),
+                stage_type: StageType::Transform,
+                reference_mode: None,
+                flow_name: "rates".into(),
+                flow_id: Some(flow),
+            },
+        );
+    }
+    snapshot.observation_export_interval = Some(std::time::Duration::from_millis(250));
+    model.publish_app_snapshot(snapshot.clone());
+    assert!(!PrometheusProjection::new()
+        .render(&model.snapshot())
+        .unwrap()
+        .contains("obzenflow_throughput_events_per_second"));
+    let retained = measurement(7, 42.0);
+    snapshot.throughput.stages.insert(stage, retained.clone());
+    snapshot
+        .throughput
+        .stages
+        .insert(other, measurement(8, 18.0));
+    snapshot.throughput.flow_input = Some(retained.clone());
+    model.publish_app_snapshot(snapshot.clone());
+    let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default())
+        .unwrap()
+        .with_throughput(model.clone());
+    let frames = projection.current_measurements();
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    assert_eq!(frame.event.as_deref(), Some("throughput_update"));
+    assert!(frame.id.is_none());
+    let value: Value = serde_json::from_str(&frame.data).unwrap();
+    assert!(value.get("capture").is_none() && value.get("revision").is_none());
+    assert_eq!(
+        value["flow_input"],
+        serde_json::to_value(&retained).unwrap()
+    );
+    assert_eq!(value["flow_input"]["elapsed"], 500_000_000);
+    assert!(projection.current_measurements().is_empty());
+    let prometheus = PrometheusProjection::new()
+        .render(&model.snapshot())
+        .unwrap();
+    assert!(prometheus.lines().any(|line| line
+        .starts_with("obzenflow_throughput_events_per_second{")
+        && line.contains("scope=\"stage\"")
+        && line.contains(&stage.to_string())
+        && line.ends_with(" 42")));
+    assert!(prometheus.lines().any(|line| line
+        .starts_with("obzenflow_throughput_events_per_second{")
+        && line.contains("scope=\"flow_input\"")
+        && line.ends_with(" 42")));
+    assert!(prometheus.lines().any(|line| line
+        .starts_with("obzenflow_observation_export_interval_seconds{")
+        && line.contains(&flow.to_string())
+        && line.ends_with(" 0.25")));
+    assert!(!prometheus.contains("capture_seq=") && !prometheus.contains("observed_at_ms="));
+    snapshot
+        .throughput
+        .stages
+        .insert(other, measurement(9, 0.0));
+    model.publish_app_snapshot(snapshot);
+    let frame = projection.current_measurements().pop().unwrap();
+    let value: Value = serde_json::from_str(&frame.data).unwrap();
+    let retained_stage = value["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["stage_id"] == stage.to_string())
+        .unwrap();
+    assert_eq!(
+        retained_stage["measurement"],
+        serde_json::to_value(retained).unwrap()
+    );
+    let mut reconnect = StudioProjection::new(vec![], ContractBoundaryAliases::default())
+        .unwrap()
+        .with_throughput(model);
+    assert_eq!(reconnect.current_measurements(), vec![frame]);
+}
+
 fn fact(event: SystemPayload) -> SystemJournalRecord {
     JournalRecord::new(
         JournalWriterId::from(JournalId::new()),

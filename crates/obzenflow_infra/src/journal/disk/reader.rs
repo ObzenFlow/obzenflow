@@ -82,6 +82,7 @@ pub struct DiskJournalReader<T: JournalEvent> {
     /// record, so it is both the rewind point for a torn tail (FLOWIP-120q) and
     /// the record position reported in corruption errors.
     read_offset: u64,
+    initial_end: Option<u64>,
     /// Consecutive `Skip` polls at `read_offset` (live-tail stall guard).
     stall_polls: u32,
     /// Read policy: live-tail retries a torn tail, a sealed scan fails loud or
@@ -114,6 +115,11 @@ pub struct DiskJournalReader<T: JournalEvent> {
 }
 
 impl<T: JournalEvent> DiskJournalReader<T> {
+    pub(super) fn with_initial_end(mut self, end: u64) -> Self {
+        self.initial_end = Some(end);
+        self
+    }
+
     /// Create a new live-tail reader starting from the beginning
     pub async fn new(
         path: PathBuf,
@@ -128,6 +134,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 decoder: Decoder::new(&path),
                 position: 0,
                 read_offset: 0,
+                initial_end: None,
                 stall_polls: 0,
                 policy: ReadPolicy::LiveTail,
                 buf: Vec::new(),
@@ -165,6 +172,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
+            initial_end: None,
             stall_polls: 0,
             policy: ReadPolicy::LiveTail,
             buf: Vec::new(),
@@ -209,6 +217,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
+            initial_end: None,
             stall_polls: 0,
             policy,
             buf: Vec::new(),
@@ -430,6 +439,13 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
 #[async_trait]
 impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        let end = self
+            .initial_end
+            .ok_or(JournalError::InitialPrefixUnsupported)?;
+        Ok(self.read_offset > end || (self.read_offset == end && self.pending.is_empty()))
+    }
+
     async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         // Don't permanently latch at_end: a live-tail reader retries after EOF to
         // pick up new appends. Only previously buffered complete frames can be
@@ -696,7 +712,9 @@ mod tests {
                 Arc::new(RwLock::new(())),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .with_initial_end(committed_end);
+            assert!(!reader.initial_prefix_complete().unwrap());
             assert_eq!(
                 reader
                     .next()
@@ -709,9 +727,14 @@ mod tests {
                     .id,
                 first.envelope.provenance.event.id
             );
+            assert!(reader.initial_prefix_complete().unwrap());
             if observe_partial {
                 assert!(reader.next().await.unwrap().is_none());
                 assert!(!reader.is_at_end());
+                assert!(
+                    reader.initial_prefix_complete().unwrap(),
+                    "prefix completion is independent of a partial live tail"
+                );
                 assert_eq!(reader.position(), 1);
             }
             file.as_file_mut().set_len(committed_end).unwrap();

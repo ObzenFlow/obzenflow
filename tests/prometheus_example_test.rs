@@ -663,6 +663,7 @@ mod managed_lifecycle_regressions {
         systems: &[obzenflow_infra::journal::disk::log_record::LogRecord<
             obzenflow_core::event::SystemEvent,
         >],
+        count: u64,
     ) {
         use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
         let actual: Vec<_> = frames
@@ -716,7 +717,7 @@ mod managed_lifecycle_regressions {
         let payload: serde_json::Value = serde_json::from_str(&frames[completed].data).unwrap();
         assert_eq!(
             payload["metrics"],
-            serde_json::json!({"events_in_total": 100, "events_out_total": 100, "errors_total": 1})
+            serde_json::json!({"events_in_total": count, "events_out_total": count - count / 100 + 1, "errors_total": count / 100})
         );
         assert!(completed < frames.len() - 1);
         assert_eq!(
@@ -729,6 +730,7 @@ mod managed_lifecycle_regressions {
     #[derive(Clone, Copy, Debug)]
     enum MetricsProofMode {
         HostedReporting,
+        HostedSse,
         InjectedSnapshots,
         Disabled,
     }
@@ -824,13 +826,18 @@ mod managed_lifecycle_regressions {
     /// certified current-build replay all traverse the application lifecycle.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn manual_prometheus_example_exports_100_inputs_and_replays_without_a_host() {
-        prometheus_example_journal_and_metrics_proof(MetricsProofMode::HostedReporting, 100).await;
+        prometheus_example_journal_and_metrics_proof(MetricsProofMode::HostedReporting, 100, None)
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unhosted_prometheus_example_exports_100_inputs_and_replays_with_final_metrics() {
-        prometheus_example_journal_and_metrics_proof(MetricsProofMode::InjectedSnapshots, 100)
-            .await;
+        prometheus_example_journal_and_metrics_proof(
+            MetricsProofMode::InjectedSnapshots,
+            100,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -969,20 +976,38 @@ mod managed_lifecycle_regressions {
         prometheus_example_journal_and_metrics_proof(
             MetricsProofMode::Disabled,
             JOURNAL_PROOF_INPUTS,
+            None,
         )
         .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prometheus_example_5k_completes_with_reporting() {
+        for intervals in [(250, 250), (250, 500), (500, 250)] {
+            prometheus_example_journal_and_metrics_proof(
+                MetricsProofMode::HostedReporting,
+                JOURNAL_PROOF_INPUTS,
+                Some(intervals),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prometheus_example_5k_completes_with_sse_and_no_prometheus() {
         prometheus_example_journal_and_metrics_proof(
-            MetricsProofMode::HostedReporting,
+            MetricsProofMode::HostedSse,
             JOURNAL_PROOF_INPUTS,
+            Some((500, 250)),
         )
         .await;
     }
 
-    async fn prometheus_example_journal_and_metrics_proof(mode: MetricsProofMode, count: u64) {
+    async fn prometheus_example_journal_and_metrics_proof(
+        mode: MetricsProofMode,
+        count: u64,
+        intervals: Option<(u64, u64)>,
+    ) {
         use obzenflow_core::event::{chain_event::ChainPayload, SystemEvent, SystemPayload};
         use obzenflow_infra::journal::disk::log_record::LogRecord;
         use std::collections::BTreeSet;
@@ -996,7 +1021,11 @@ mod managed_lifecycle_regressions {
             "CI journal proofs are capped at {CI_EVENT_LIMIT} inputs; use the example for larger storage measurements"
         );
         let proof_started = std::time::Instant::now();
-        let hosted = matches!(mode, MetricsProofMode::HostedReporting);
+        let hosted = matches!(
+            mode,
+            MetricsProofMode::HostedReporting | MetricsProofMode::HostedSse
+        );
+        let prometheus = matches!(mode, MetricsProofMode::HostedReporting);
         let collecting = !matches!(mode, MetricsProofMode::Disabled);
         let scratch = tempfile::Builder::new()
             .prefix(&format!("prometheus-proof-{count}-{mode:?}-"))
@@ -1030,12 +1059,16 @@ port = {}
 startup_mode = "manual"
 on_terminal = "exit"
 [metrics]
-enabled = {hosted}
+enabled = {prometheus}
 "#,
                 address.port()
             ),
         )
         .unwrap();
+        if let Some((journal_ms, export_ms)) = intervals {
+            use std::io::Write;
+            writeln!(std::fs::OpenOptions::new().append(true).open(&config).unwrap(), "\n[runtime.observability]\nmode = 'periodic'\ninterval_ms = {journal_ms}\nexport_interval_ms = {export_ms}").unwrap();
+        }
         let (flow_tx, flow_rx) = tokio::sync::oneshot::channel();
         let flow_tx = Mutex::new(Some(flow_tx));
         let model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
@@ -1059,7 +1092,9 @@ enabled = {hosted}
             });
         let definition = prometheus_demo::flow_definition(count as usize, dir.join("live"));
         let definition = match mode {
-            MetricsProofMode::HostedReporting => observe_exports(definition, model.clone()),
+            MetricsProofMode::HostedReporting | MetricsProofMode::HostedSse => {
+                observe_exports(definition, model.clone())
+            }
             MetricsProofMode::InjectedSnapshots => inject_snapshots(definition, model.clone()),
             MetricsProofMode::Disabled => definition,
         };
@@ -1084,7 +1119,7 @@ enabled = {hosted}
             })
             .await
             .unwrap();
-            if count == 100 {
+            {
                 let mut fresh = ExampleEvents::connect(address, None).await;
                 let cursor = fresh.bootstrap(false).await;
                 drop(fresh);
@@ -1206,7 +1241,26 @@ enabled = {hosted}
                 .await
                 .unwrap()
                 .unwrap();
-            assert_example_stream_matches_export(&frames, &cursor, &systems);
+            assert_example_stream_matches_export(&frames, &cursor, &systems, count);
+            if intervals.is_some() {
+                let throughput: Vec<_> = frames
+                    .iter()
+                    .filter(|frame| frame.event.as_deref() == Some("throughput_update"))
+                    .collect();
+                assert!(!throughput.is_empty(), "hosted reporting must deliver backend throughput, including when Prometheus is disabled");
+                for frame in throughput {
+                    assert!(frame.id.is_none());
+                    let value: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
+                    assert!(value.get("capture").is_none());
+                    assert!(value["stages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|stage| stage["measurement"]["elapsed"]
+                            .as_u64()
+                            .is_some_and(|elapsed| elapsed > 0)));
+                }
+            }
         }
         let passed_feeds: BTreeSet<_> = systems
             .iter()
