@@ -876,7 +876,16 @@ mod tests {
                     "an older maintenance snapshot must not replace newer append progress"
                 );
             }
+            // The worker can release maintenance before dropping its captured
+            // reader. Retire every shared owner so this is a cold reopen.
+            let shared = Arc::downgrade(&reader.shared);
             drop(reader);
+            completes(async {
+                while shared.strong_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
             let cold = DiskObservationReader::<ChainEvent>::open(path).unwrap();
             let ObservationLookup::Ready {
                 committed_len,
