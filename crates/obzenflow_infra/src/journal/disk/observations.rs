@@ -1578,6 +1578,8 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_reopens_read_only_behind_one_million_unobserved_records() {
+        use std::io::Write;
+
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("million.log");
         let stage = StageId::new();
@@ -1587,19 +1589,55 @@ mod tests {
         let mut noise = observed.clone();
         noise.envelope.observability = None;
         journal.append(observed, Default::default()).await.unwrap();
-        // Deliberately repeated EventIds: the lookup must use physical positions.
-        for group in 0..1000 {
-            journal
-                .append_group(
-                    &format!("quiet-{group}"),
-                    vec![noise.clone(); 1000],
-                    Default::default(),
-                )
-                .await
-                .unwrap();
-        }
-        ready(journal.observation_reader().unwrap(), &key).await;
+        let noise_records = journal
+            .append_group("quiet", vec![noise; 1000], Default::default())
+            .await
+            .unwrap();
+        let checkpoint_writer = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
         drop(journal);
+
+        // Build the checkpoint fixture by reusing a real group's encoding with
+        // self-contained codec definitions. Preserve all one million physical
+        // noise records and deliberately repeated EventIds. Each copy advances
+        // the production observation index through the writer's commit callback.
+        let bytes =
+            super::super::log_record::serialize_atomic_group("quiet", &noise_records).unwrap();
+        let frame = Anchor::of(0, &bytes);
+        let mut offset = checkpoint_writer.confirmed_end().unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for _ in 1..1000 {
+            file.write_all(&bytes).unwrap();
+            let end = offset + frame.length;
+            checkpoint_writer.committed(&noise_records, offset, end, frame.crc);
+            offset = end;
+        }
+        file.flush().unwrap();
+        assert_eq!(file.metadata().unwrap().len(), offset);
+        drop(file);
+
+        // Independently decode the last copied frame at its actual offset. The
+        // checkpoint's large record count must describe a readable archive.
+        let last_offset = offset - frame.length;
+        let (last, _) = read_at(&path, last_offset, offset).unwrap();
+        let records = Decoder::cold(&path)
+            .decode::<ChainEvent>(frame::validate(&last).unwrap(), last_offset)
+            .unwrap()
+            .into_records();
+        assert_eq!(records.len(), 1000);
+        assert!(records
+            .iter()
+            .all(|record| record.envelope.observability.is_none()));
+
+        ready(&checkpoint_writer, &key).await;
+        let cached = Arc::downgrade(&checkpoint_writer.shared);
+        drop(checkpoint_writer);
+        assert!(
+            cached.upgrade().is_none(),
+            "reopen must use the on-disk checkpoint"
+        );
         let reader = DiskObservationReader::<ChainEvent>::open(path).unwrap();
         let ObservationLookup::Ready {
             committed_len,
