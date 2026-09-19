@@ -6,6 +6,8 @@
 //!
 //! Processes a configurable volume of events (default 100,000) demonstrating:
 //! - Source-intake rate limiting middleware
+//! - Circuit-breaker opening, failed probing, and recovery during source outages
+//! - Enforced backpressure across the fan-out
 //! - Fan-out topology pattern (one stage to multiple downstream stages)
 //! - ReduceTyped for type-safe event counting (FLOWIP-080j)
 //! - TypedPayload for strongly-typed events (FLOWIP-082a)
@@ -28,20 +30,23 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::env::env_var_or;
-use obzenflow::sources;
 use obzenflow::{stateful, transforms};
-use obzenflow_adapters::middleware::RateLimiterBuilder;
+use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
+use obzenflow_dsl::dsl::backpressure_clause::enforced;
 use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
 use obzenflow_runtime::stages::sink::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteReport,
 };
 use obzenflow_runtime::stages::transform::TryMapTyped;
+use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/prometheus_demo/obzenflow.toml"
@@ -49,6 +54,8 @@ const CONFIG_FILE: &str = concat!(
 
 /// Default event volume; override with `PROMETHEUS_EVENT_COUNT`.
 const DEFAULT_EVENT_COUNT: usize = 100_000;
+const SOURCE_OUTAGE_INTERVAL: usize = 20_000;
+const SOURCE_BREAKER_COOLDOWN: Duration = Duration::from_secs(5);
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -65,6 +72,58 @@ struct DataRequest {
 impl TypedPayload for DataRequest {
     const EVENT_TYPE: &'static str = "data.request";
     const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Simulates an input service that periodically becomes unavailable. A failed
+/// poll does not consume an input: the breaker waits, probes once unsuccessfully,
+/// then recovers on its next probe and emits the same pending input.
+#[derive(Clone, Debug)]
+struct HighVolumeSource {
+    next_id: usize,
+    total_events: usize,
+    outage_interval: usize,
+    outage_failures: u8,
+}
+
+impl TypedFiniteSourceHandler for HighVolumeSource {
+    type Output = DataRequest;
+
+    fn next(&mut self) -> Result<Option<Vec<DataRequest>>, SourceError> {
+        if self.next_id >= self.total_events {
+            println!(
+                "🏁 Source complete: Generated {} total events",
+                self.next_id
+            );
+            return Ok(None);
+        }
+
+        if self.next_id > 0
+            && self.next_id.is_multiple_of(self.outage_interval)
+            && self.outage_failures < 2
+        {
+            self.outage_failures += 1;
+            tracing::warn!(
+                next_id = self.next_id,
+                attempt = self.outage_failures,
+                "Simulated source outage: circuit breaker will wait five seconds before probing"
+            );
+            return Err(SourceError::Timeout(
+                "Simulated input-service outage".into(),
+            ));
+        }
+
+        self.outage_failures = 0;
+        let current_id = self.next_id;
+        self.next_id += 1;
+        if self.next_id.is_multiple_of(10_000) {
+            println!("📊 Generated {} events...", self.next_id);
+        }
+        Ok(Some(vec![DataRequest {
+            id: current_id,
+            should_fail: current_id.is_multiple_of(100),
+            batch: current_id / 100,
+        }]))
+    }
 }
 
 /// Successfully processed event from the error-prone transform
@@ -166,11 +225,13 @@ fn main() -> Result<()> {
 
     let presentation = Presentation::new(
         Banner::new("Prometheus Demo")
-            .description("Configurable event volume (default 100k) with rate limiting and fan-out.")
+            .description("Configurable event volume (default 100k) with circuit breaking, rate limiting, and backpressure.")
             .bullets(
                 "Demonstrating",
                 [
                     "Source-intake rate limiting middleware",
+                    "Source outages with five-second circuit-breaker cooldowns",
+                    "Enforced backpressure (64 events per edge)",
                     "Fan-out topology (processor -> counter + sink)",
                     "StatefulHandler for business-level counting",
                     "Framework Prometheus metrics",
@@ -205,26 +266,27 @@ pub(crate) fn flow_definition(
     total_events: usize,
     journal_root: std::path::PathBuf,
 ) -> FlowDefinition {
+    flow_definition_with_outage_interval(total_events, journal_root, SOURCE_OUTAGE_INTERVAL)
+}
+
+/// The same demo with a shorter outage interval for bounded integration proofs.
+/// The breaker duration, middleware, backpressure, and business path stay intact.
+pub(crate) fn flow_definition_with_outage_interval(
+    total_events: usize,
+    journal_root: std::path::PathBuf,
+    outage_interval: usize,
+) -> FlowDefinition {
+    assert!(
+        outage_interval > 0,
+        "source outage interval must be positive"
+    );
     FlowDefinition::materialize(move |_runtime_config| {
-        let high_volume_source_handler = sources::finite_from_fn(move |index| {
-            if index >= total_events {
-                println!("🏁 Source complete: Generated {index} total events");
-                return None;
-            }
-
-            let current_id = index;
-            let next_count = index + 1;
-
-            if next_count.is_multiple_of(10_000) {
-                println!("📊 Generated {next_count} events...");
-            }
-
-            Some(DataRequest {
-                id: current_id,
-                should_fail: current_id % 100 == 0,
-                batch: current_id / 100,
-            })
-        });
+        let high_volume_source_handler = HighVolumeSource {
+            next_id: 0,
+            total_events,
+            outage_interval,
+            outage_failures: 0,
+        };
         let error_processor_handler = error_prone_transform();
         let event_counter_handler = stateful::reduce(
             EventCountState::default(),
@@ -261,10 +323,19 @@ pub(crate) fn flow_definition(
         Ok(flow! {
             name: "prometheus_demo",
             journals: disk_journals(journal_root),
+            // Explicit demo defaults; operator configuration can override them.
+            backpressure: enforced(64).stall_timeout_ms(30_000),
 
             stages: {
-                // Source intake is the live I/O boundary where rate limiting belongs.
+                // The simulated service outage belongs at the live source boundary.
+                // Pure transform errors still follow their existing error-journal path.
                 high_volume_source = source!(DataRequest => high_volume_source_handler with [
+                    CircuitBreaker::builder()
+                        .consecutive_failures(1)
+                        .open_for(SOURCE_BREAKER_COOLDOWN)
+                        .probes(1)
+                        .build()
+                        .expect("demo source circuit-breaker configuration must be valid"),
                     RateLimiterBuilder::new(1000.0).build()
                 ]);
                 error_processor = transform!(DataRequest -> ProcessedEvent => error_processor_handler);

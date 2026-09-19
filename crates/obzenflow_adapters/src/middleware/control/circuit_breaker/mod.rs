@@ -130,8 +130,9 @@ impl CircuitBreakerOpenEvidence {
         }
     }
 
-    fn into_event_params(self) -> CircuitBreakerOpenedEventParams {
+    fn into_event_params(self, cooldown: Duration) -> CircuitBreakerOpenedEventParams {
         CircuitBreakerOpenedEventParams {
+            cooldown_ms: cooldown.as_millis().min(u64::MAX as u128) as u64,
             trigger: self.trigger,
             observed_calls: self.observed_calls,
             error_rate: self.error_rate,
@@ -792,7 +793,7 @@ impl CircuitBreakerMiddleware {
                     .expect("every transition into Open must carry decision-point evidence");
                 ChainEventFactory::circuit_breaker_opened(
                     self.writer_id,
-                    evidence.into_event_params(),
+                    evidence.into_event_params(self.cooldown),
                 )
             }
             (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::create_event(

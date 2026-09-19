@@ -1,9 +1,10 @@
 # FLOWIP-114d Studio walkthrough config: select with
 #   --config examples/prometheus_demo/obzenflow.studio.toml
 # This is the long-runner of the walkthrough set: the default 100k events
-# rate-limited to 1000/sec runs for roughly 100 seconds, so parallel "running"
-# badges and the drain-then-depart transition stay observable past the
-# heartbeat lag. Shorten with PROMETHEUS_EVENT_COUNT for a quicker pass.
+# are rate-limited to 1000/sec, with backpressure and four ten-second source
+# outages demonstrating breaker reopening and recovery. Parallel "running"
+# badges and drain-then-depart stay observable past the heartbeat lag.
+# Shorten with PROMETHEUS_EVENT_COUNT; <= 20k inputs skip the source outages.
 # --config wins over the example's built-in with_config_file(obzenflow.toml).
 
 [server]

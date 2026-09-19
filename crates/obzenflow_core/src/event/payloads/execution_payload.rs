@@ -83,6 +83,10 @@ pub enum CircuitState {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CircuitBreakerFact {
     Opened {
+        /// Minimum wait before another probe is permitted. Older journal facts
+        /// did not record this configuration, so absence means unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cooldown_ms: Option<u64>,
         /// Failure rate in the population that caused this transition, not the
         /// breaker's cumulative lifetime failure rate.
         error_rate: f64,
@@ -357,4 +361,34 @@ pub enum CircuitBreakerRejectionReason {
     ProbeInProgress,
     #[default]
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opened_fact_round_trips_cooldown_and_reads_older_facts_without_inventing_it() {
+        let mut wire = serde_json::json!({
+            "action": "opened", "error_rate": 1.0, "failure_count": 3,
+            "trigger": "consecutive_failures", "observed_calls": 3
+        });
+        for expected in [None, Some(5_000)] {
+            if let Some(cooldown) = expected {
+                wire["cooldown_ms"] = serde_json::json!(cooldown);
+            }
+            let fact: CircuitBreakerFact = serde_json::from_value(wire.clone()).unwrap();
+            assert!(
+                matches!(&fact, CircuitBreakerFact::Opened { cooldown_ms, .. }
+                if *cooldown_ms == expected)
+            );
+            let encoded = serde_json::to_value(fact).unwrap();
+            assert_eq!(
+                encoded
+                    .get("cooldown_ms")
+                    .and_then(serde_json::Value::as_u64),
+                expected
+            );
+        }
+    }
 }

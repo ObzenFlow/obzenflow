@@ -193,6 +193,7 @@ mod tests {
         ctx.write_control_event(ChainEventFactory::circuit_breaker_opened(
             writer_id,
             CircuitBreakerOpenedEventParams {
+                cooldown_ms: 5_000,
                 trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
                 observed_calls: 10,
                 error_rate: 1.0,

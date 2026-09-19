@@ -1338,6 +1338,22 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .build(FlowBuildContext::for_tests())
         .await
         .unwrap();
+    let topology = handle.topology().unwrap();
+    let input = topology
+        .stages()
+        .find(|stage| stage.name == "input")
+        .unwrap();
+    let config = input
+        .middleware
+        .as_ref()
+        .unwrap()
+        .circuit_breaker
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        config.cooldown_ms, 1,
+        "the real factory snapshot reaches topology"
+    );
     let journal = handle.system_journal().unwrap();
     let (endpoint, closing) = endpoint(journal.clone(), vec![]);
     let endpoint = endpoint.with_observation_interval(Duration::from_secs(3600));
@@ -1361,6 +1377,14 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .filter_map(|payload| payload["state_to"].as_str())
         .collect();
     assert_eq!(breaker_states, ["open", "half_open", "closed"]);
+    let opened = payloads
+        .iter()
+        .find(|payload| payload["state_to"] == "open")
+        .unwrap();
+    assert_eq!(
+        opened["context"]["cooldown_ms"], 1,
+        "the effective cooldown survives the source journal, system mirror, and SSE"
+    );
     let limiter = payloads
         .iter()
         .find(|payload| payload["middleware"] == "rate_limiter")
