@@ -2294,12 +2294,15 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE obzenflow_ai_chunking_jobs_total counter")?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.jobs_total else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_jobs_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.jobs_total
+                        value
                     )?;
                 }
             }
@@ -2314,12 +2317,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_input_items_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.input_items_total else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_input_items_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.input_items_total
+                        value
                     )?;
                 }
             }
@@ -2334,12 +2340,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_planned_items_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.planned_items_total else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_planned_items_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.planned_items_total
+                        value
                     )?;
                 }
             }
@@ -2354,12 +2363,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_excluded_items_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.excluded_items_total else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_excluded_items_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.excluded_items_total
+                        value
                     )?;
                 }
             }
@@ -2374,12 +2386,15 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_chunks_emitted_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
+                let Some(value) = metrics.chunks_emitted_total else {
+                    continue;
+                };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
                     writeln!(
                         output,
                         "obzenflow_ai_chunking_chunks_emitted_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        metrics.chunks_emitted_total
+                        value
                     )?;
                 }
             }
@@ -3238,11 +3253,11 @@ mod tests {
         ai_chunking_metrics.insert(
             stage_id,
             AiChunkingMetricsSnapshot {
-                jobs_total: 2,
-                input_items_total: 10,
-                planned_items_total: 9,
-                excluded_items_total: 1,
-                chunks_emitted_total: 3,
+                jobs_total: Some(2),
+                input_items_total: Some(10),
+                planned_items_total: Some(9),
+                excluded_items_total: Some(1),
+                chunks_emitted_total: Some(3),
                 rerender_attempts_total: Some(4),
                 max_depth_reached: Some(2),
                 budget_overhead_tokens: Some(123),
@@ -3272,6 +3287,44 @@ mod tests {
         assert!(output.contains(&format!(
             "obzenflow_ai_chunking_budget_overhead_tokens{{flow=\"order_flow\",stage=\"chunk\",stage_id=\"{stage_id}\"}} 123"
         )));
+    }
+
+    #[test]
+    fn current_ai_measurements_do_not_publish_missing_historical_totals_as_zero() {
+        let stage_id = StageId::new();
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata.insert(
+            stage_id,
+            StageMetadata {
+                name: "chunk".into(),
+                flow_name: "test".into(),
+                stage_type: obzenflow_core::event::context::StageType::Transform,
+                reference_mode: None,
+                flow_id: None,
+            },
+        );
+        snapshot.ai_chunking_metrics.insert(
+            stage_id,
+            AiChunkingMetricsSnapshot {
+                rerender_attempts_total: Some(4),
+                ..Default::default()
+            },
+        );
+        let output = PrometheusProjection::new()
+            .render(&MetricsReadView {
+                app: Some(std::sync::Arc::new(snapshot)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(output
+            .lines()
+            .any(|line| line.starts_with("obzenflow_ai_chunking_rerender_attempts_total{")));
+        assert!(!output
+            .lines()
+            .any(|line| line.starts_with("obzenflow_ai_chunking_jobs_total{")));
+        assert!(!output
+            .lines()
+            .any(|line| line.starts_with("obzenflow_ai_chunking_planned_items_total{")));
     }
 
     #[test]

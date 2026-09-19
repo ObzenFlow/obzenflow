@@ -128,6 +128,10 @@ where
         self.inner.reader_from(position).await
     }
 
+    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.inner.read_metrics_tail().await
+    }
+
     async fn read_last_n(
         &self,
         count: usize,

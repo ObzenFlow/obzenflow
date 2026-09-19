@@ -17,7 +17,7 @@ use obzenflow_core::metrics::{
 use obzenflow_core::JournalRecord;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_runtime::metrics::fsm::{build_metrics_aggregator_fsm, MetricsJournalKind};
+use obzenflow_runtime::metrics::fsm::build_metrics_aggregator_fsm;
 use obzenflow_runtime::metrics::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
     MetricsAggregatorState, MetricsStore, StageMetrics,
@@ -79,7 +79,6 @@ fn make_empty_context(
         system_id,
         stage_metadata: single_stage_metadata(stage_id),
         composite_boundaries: Vec::new(),
-        composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
     }
 }
 
@@ -128,7 +127,7 @@ async fn export_snapshot_sanity_from_metrics_store() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publish_drain_complete_requires_physical_coverage() {
+async fn publish_drain_complete_does_not_require_historical_coverage() {
     let stage_id = StageId::new();
     let system_id = SystemId::new();
     let system_journal = make_system_journal(system_id);
@@ -136,7 +135,7 @@ async fn publish_drain_complete_requires_physical_coverage() {
 
     let mut ctx = make_empty_context(system_id, system_journal.clone(), exporter, stage_id);
 
-    // A synthetic last_event_id cannot authorise physical coverage.
+    // Completion describes the available buffer; there is no physical-coverage barrier.
     let last_event_id = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "test.event",
@@ -149,9 +148,9 @@ async fn publish_drain_complete_requires_physical_coverage() {
     }
     .execute(&mut ctx)
     .await
-    .expect_err("uncovered physical inputs cannot publish successful Drained");
+    .expect("drain publication does not require historical collection");
 
-    // Verify that no success marker was written to the system journal.
+    // Verify the completion marker was written.
     let events = system_journal
         .read_causally_ordered()
         .await
@@ -167,13 +166,13 @@ async fn publish_drain_complete_requires_physical_coverage() {
     });
 
     assert!(
-        !drained,
-        "uncovered inputs must not publish MetricsCoordination::Drained"
+        drained,
+        "completion must publish MetricsCoordination::Drained"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn running_state_process_batch_transitions() {
+async fn running_state_exports_the_buffer() {
     let stage_id = StageId::new();
     let system_id = SystemId::new();
     let system_journal = make_system_journal(system_id);
@@ -192,21 +191,8 @@ async fn running_state_process_batch_transitions() {
     }
     assert!(matches!(fsm.state(), MetricsAggregatorState::Running));
 
-    // Build a synthetic data event; ProcessBatch should keep us in Running.
-    let writer = WriterId::from(stage_id);
-    let event =
-        ChainEventFactory::data_event(writer, "test.event", serde_json::json!({"value": 1}));
-    let envelope = JournalRecord::new(JournalWriterId::new(), event);
-
     let actions = fsm
-        .handle(
-            MetricsAggregatorEvent::ProcessBatch {
-                events: vec![envelope].into(),
-                journal_kind: MetricsJournalKind::Data,
-                journal_stage: stage_id,
-            },
-            &mut ctx,
-        )
+        .handle(MetricsAggregatorEvent::ExportMetrics, &mut ctx)
         .await
         .unwrap();
     for action in actions {
@@ -215,17 +201,13 @@ async fn running_state_process_batch_transitions() {
 
     assert!(
         matches!(fsm.state(), MetricsAggregatorState::Running),
-        "expected FSM to remain in Running after ProcessBatch"
+        "expected FSM to remain in Running after export"
     );
 }
 
-/// FLOWIP-115d Phase 7: the metrics aggregator projects `IngressRefusal` facts
-/// into per-`(ingress_key, reason)` totals by folding them, incrementing by the
-/// refused `event_count`. Because the metric is a pure fold of journalled facts,
-/// strict replay over the same journal reproduces the identical totals, where the
-/// former in-memory counter would have read zero.
+/// Individual refusal facts do not supply a cumulative current measurement.
 #[tokio::test(flavor = "multi_thread")]
-async fn ingress_refusal_facts_project_to_per_reason_totals() {
+async fn ingress_refusal_facts_do_not_invent_latest_value_totals() {
     use obzenflow_core::ingress::{IngressAttemptSeq, IngressRefusalReason};
 
     let stage_id = StageId::new();
@@ -273,18 +255,5 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
 
     let snapshots = exporter.app_snapshots.lock().unwrap();
     let last = snapshots.last().expect("exported app snapshot");
-    assert_eq!(
-        last.ingestion_refusal_totals
-            .get(&("orders".into(), "rate_limited".to_string()))
-            .copied(),
-        Some(2),
-        "two single rate-limited refusals sum to 2"
-    );
-    assert_eq!(
-        last.ingestion_refusal_totals
-            .get(&("orders".into(), "validation".to_string()))
-            .copied(),
-        Some(3),
-        "a validation refusal of three events counts the events"
-    );
+    assert!(last.ingestion_refusal_totals.is_empty());
 }

@@ -4,6 +4,7 @@
 
 //! Metrics aggregator implementation
 
+mod buffer;
 pub mod builder;
 pub mod constants;
 pub mod fsm;
@@ -42,9 +43,6 @@ impl obzenflow_core::metrics::MetricsSnapshotExporter for RecordingSnapshots {
         *self.infra.lock().unwrap() = Some(value);
     }
 }
-
-mod snapshot;
-mod subscription;
 
 #[cfg(feature = "test-support")]
 pub(crate) mod tests;

@@ -94,38 +94,36 @@ fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
     assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
 }
 
-pub async fn subscription_or_metrics_preparation_failure_joins_every_supplied_stage(
+pub async fn subscription_preparation_failure_joins_every_supplied_stage(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
-    for fail_reader in [1, 2] {
-        let system_id = SystemId::new();
-        let mut journals = make_journals();
-        let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-        journal.fail_reader = Some(fail_reader);
-        let (topology, source, sink) = source_sink_topology_with_source();
-        let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
-        let result =
-            crate::pipeline::PipelineBuilder::new(topology, Arc::new(journal), FlowId::new())
-                .with_sources(vec![Box::new(owned_test_stage(
-                    source,
-                    CoreStageType::FiniteSource,
-                    Some(probes[0].clone()),
-                ))])
-                .with_stages(vec![Box::new(owned_test_stage(
-                    sink,
-                    CoreStageType::Sink,
-                    Some(probes[1].clone()),
-                ))])
-                .with_metrics_exporter(Arc::new(DiscardSnapshots))
-                .build()
-                .await;
-        assert!(
-            result.is_err(),
-            "reader {fail_reader} must fail construction"
-        );
-        for probe in probes {
-            assert_eq!(probe.request_abort_count.load(Ordering::Relaxed), 1);
-            assert_eq!(probe.abort_and_join_count.load(Ordering::Relaxed), 1);
-        }
+    let fail_reader = 1;
+    let system_id = SystemId::new();
+    let mut journals = make_journals();
+    let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
+    journal.fail_reader = Some(fail_reader);
+    let (topology, source, sink) = source_sink_topology_with_source();
+    let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
+    let result = crate::pipeline::PipelineBuilder::new(topology, Arc::new(journal), FlowId::new())
+        .with_sources(vec![Box::new(owned_test_stage(
+            source,
+            CoreStageType::FiniteSource,
+            Some(probes[0].clone()),
+        ))])
+        .with_stages(vec![Box::new(owned_test_stage(
+            sink,
+            CoreStageType::Sink,
+            Some(probes[1].clone()),
+        ))])
+        .with_metrics_exporter(Arc::new(DiscardSnapshots))
+        .build()
+        .await;
+    assert!(
+        result.is_err(),
+        "reader {fail_reader} must fail construction"
+    );
+    for probe in probes {
+        assert_eq!(probe.request_abort_count.load(Ordering::Relaxed), 1);
+        assert_eq!(probe.abort_and_join_count.load(Ordering::Relaxed), 1);
     }
 }

@@ -7,6 +7,7 @@
 //! This provides a simple, thread-safe in-memory implementation
 //! of the Journal trait for use in tests.
 
+use crate::journal::metrics_tail::{Carrier, MetricsTailIndex};
 use crate::journal::observability::JournalObservability;
 use crate::journal::observation_index::{locate, unavailable, ObservationIndex};
 use async_trait::async_trait;
@@ -35,6 +36,7 @@ pub(super) struct MemoryJournalState<T: JournalEvent> {
     pub(super) events: Vec<JournalRecord<T::Payload>>,
     writer_clocks: HashMap<WriterId, VectorClock>,
     observations: ObservationIndex,
+    metrics_tail: MetricsTailIndex,
 }
 
 /// In-memory journal for testing
@@ -65,6 +67,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 events: Vec::new(),
                 writer_clocks: HashMap::new(),
                 observations: ObservationIndex::default(),
+                metrics_tail: MetricsTailIndex::default(),
             })),
             admission_sequencer: None,
             observability: JournalObservability::default(),
@@ -81,6 +84,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 events: Vec::new(),
                 writer_clocks: HashMap::new(),
                 observations: ObservationIndex::default(),
+                metrics_tail: MetricsTailIndex::default(),
             })),
             admission_sequencer: None,
             observability: JournalObservability::default(),
@@ -292,6 +296,16 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         )))
     }
 
+    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .metrics_tail
+            .carriers()
+            .into_iter()
+            .filter_map(|carrier| state.events.get(carrier.offset as usize).cloned())
+            .collect())
+    }
+
     async fn read_last_n(
         &self,
         count: usize,
@@ -313,6 +327,20 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 
 impl<T: JournalEvent> MemoryJournalState<T> {
     fn index_committed(&mut self, new_records: usize) {
+        for (position, record) in self
+            .events
+            .iter()
+            .enumerate()
+            .skip(self.events.len() - new_records)
+        {
+            self.metrics_tail.observe(
+                record,
+                Carrier {
+                    offset: position as u64,
+                    member: 0,
+                },
+            );
+        }
         if self.observations.examined_through != (self.events.len() - new_records) as u64 {
             return;
         }

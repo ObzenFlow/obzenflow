@@ -165,8 +165,8 @@ async fn drain_metrics_skips_when_metrics_not_started() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof() {
-    pipeline::late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(journals).await;
+async fn late_metrics_bootstrap_selects_current_values_without_stage_eof() {
+    pipeline::late_metrics_bootstrap_selects_current_values_without_stage_eof(journals).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -312,14 +312,8 @@ async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
 }
 
 #[tokio::test]
-async fn subscription_or_metrics_preparation_failure_joins_every_supplied_stage() {
-    pipeline::subscription_or_metrics_preparation_failure_joins_every_supplied_stage(journals)
-        .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn metrics_export_does_not_seed_accounting_ahead_of_physical_folding() {
-    obzenflow_runtime::testing::metrics::metrics_export_does_not_seed_accounting_ahead_of_physical_folding(journals).await;
+async fn subscription_preparation_failure_joins_every_supplied_stage() {
+    pipeline::subscription_preparation_failure_joins_every_supplied_stage(journals).await;
 }
 
 async fn metrics_backends<F, Fut>(scenario: F)
@@ -346,26 +340,39 @@ where
 }
 
 #[tokio::test]
-async fn metrics_index_reports_absence_without_tail_search() {
+async fn metrics_tail_overwrites_and_preserves_sparse_families() {
     metrics_backends(
-        obzenflow_runtime::testing::metrics::metrics_index_reports_absence_without_tail_search,
+        obzenflow_runtime::testing::metrics::metrics_tail_overwrites_and_preserves_sparse_families,
     )
     .await;
 }
 
 #[tokio::test]
-async fn metrics_batch_coalesces_measurements_without_reordering_facts() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_batch_coalesces_measurements_without_reordering_facts).await;
+async fn metrics_refresh_failures_retain_values_and_exports_do_no_reads() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_refresh_failures_retain_values_and_exports_do_no_reads).await;
 }
 
 #[tokio::test]
-async fn metrics_accounting_folds_sequentially_while_measurement_failures_retain_values() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_accounting_folds_sequentially_while_measurement_failures_retain_values).await;
+async fn metrics_pending_refresh_does_not_block_publication_or_other_journals() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_pending_refresh_does_not_block_publication_or_other_journals).await;
 }
 
 #[tokio::test]
-async fn metrics_index_finds_sparse_families_beyond_the_old_tail_cap() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_index_finds_sparse_families_beyond_the_old_tail_cap).await;
+async fn metrics_cancellation_stops_owned_readers_without_drained() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_cancellation_stops_owned_readers_without_drained).await;
+}
+
+#[tokio::test]
+async fn metrics_tail_identity_and_accounting_are_idempotent() {
+    metrics_backends(
+        obzenflow_runtime::testing::metrics::metrics_tail_identity_and_accounting_are_idempotent,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn metrics_terminal_accounting_survives_without_optional_packets() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_terminal_accounting_survives_without_optional_packets).await;
 }
 
 #[tokio::test]
@@ -377,41 +384,14 @@ async fn metrics_exports_do_not_create_observations() {
 }
 
 #[tokio::test]
-async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence).await;
+async fn metrics_optional_measurements_do_not_invent_missing_accounting() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_optional_measurements_do_not_invent_missing_accounting).await;
 }
 
 #[tokio::test]
-async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn metrics_rotation_coalesces_exports_and_skips_missed_deadlines() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_rotation_coalesces_exports_and_skips_missed_deadlines).await;
-}
-
-#[tokio::test]
-async fn metrics_physical_completion_folds_all_rails_through_the_current_terminal() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_physical_completion_folds_all_rails_through_the_current_terminal).await;
-}
-
-#[tokio::test]
-async fn metrics_terminal_accounting_covers_filtering_without_optional_packets() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_terminal_accounting_covers_filtering_without_optional_packets).await;
-}
-
-#[tokio::test]
-async fn metrics_pending_read_cancellation_never_publishes_drained() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_pending_read_cancellation_never_publishes_drained).await;
-}
-
-#[tokio::test]
-async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_watermarks_exclude_each_forwarded_control_and_error_witness).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not_wait_for_export() {
-    metrics_backends(obzenflow_runtime::testing::metrics::metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not_wait_for_export).await;
+async fn metrics_manual_export_uses_the_live_control_receiver() {
+    metrics_backends(
+        obzenflow_runtime::testing::metrics::metrics_manual_export_uses_the_live_control_receiver,
+    )
+    .await;
 }

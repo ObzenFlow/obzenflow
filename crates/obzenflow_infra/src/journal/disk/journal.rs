@@ -1015,6 +1015,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         ))
     }
 
+    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.observations.metrics_tail().await
+    }
+
     async fn read_last_n(
         &self,
         count: usize,

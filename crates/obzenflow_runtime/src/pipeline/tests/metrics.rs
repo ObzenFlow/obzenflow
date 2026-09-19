@@ -342,7 +342,7 @@ pub async fn drain_metrics_skips_when_metrics_not_started(
     );
 }
 
-pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
+pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::provenance::RuntimeProvenance;
@@ -386,8 +386,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
         }
     }
     // The observer starts after publication, with no stage terminal or EOF.
-    // Another pipeline writer and a later same-writer fact cannot extend its
-    // system endpoint beyond the selected current-writer terminal.
+    // Other writers are ignored; the current writer's latest outcome wins.
     journal
         .append(
             SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
@@ -444,7 +443,7 @@ pub async fn late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof(
     {
         let snapshots = exporter.0.lock().unwrap();
         let snapshot = snapshots.last().unwrap();
-        assert_eq!(snapshot.pipeline_state, "cancelled");
+        assert_eq!(snapshot.pipeline_state, "failed");
         assert_eq!(snapshot.events_emitted_total[&data_stage], 50);
         assert_eq!(snapshot.events_emitted_total[&error_stage], 7);
         assert_eq!(snapshot.error_counts[&error_stage], 7);

@@ -2,28 +2,21 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Collector conformance scenarios supplied with real memory/disk journals by Infra.
-
+//! Latest-value conformance scenarios exercised against real memory and disk journals.
+use super::buffer::TailReaders;
 use super::fsm::{
     MetricsAggregatorAction as Action, MetricsAggregatorContext as Context,
-    MetricsAggregatorEvent as Event, MetricsAggregatorState as State, MetricsJournalKind as Rail,
+    MetricsAggregatorEvent as Event, MetricsAggregatorState as State,
 };
-use super::subscription::{MetricsSubscription, IDLE_BACKOFF};
 use super::supervisor::MetricsAggregatorSupervisor;
-use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
+use crate::supervised_base::{ChannelBuilder, SelfSupervisedExt};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::ObservationSource;
-use obzenflow_core::event::{
-    ChainEventFactory, ChainPayload, JournalEvent, SystemEvent, SystemEventFactory,
-};
+use obzenflow_core::event::{ChainEventFactory, JournalEvent, SystemEvent, SystemEventFactory};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
-use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::journal::{JournalError, JournalReader};
-use obzenflow_core::journal::{
-    JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
-};
+use obzenflow_core::journal::{AppendOptions, JournalError, JournalReader};
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{
     ChainEvent, EventId, Journal, JournalId, JournalOwner, JournalRecord, StageId, SystemId,
@@ -31,7 +24,7 @@ use obzenflow_core::{
 };
 use obzenflow_fsm::FsmAction;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,94 +33,44 @@ struct Gate {
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
-
 #[derive(Default)]
 struct Probe {
-    tail_requests: Mutex<Vec<usize>>,
-    materialised: AtomicUsize,
-    fail_tail: AtomicBool,
-    tail_gate: Mutex<Option<(usize, Arc<Gate>)>>,
-    next_calls: AtomicUsize,
-    fail_next_at: AtomicUsize,
-    unknown_end: AtomicBool,
-    end_checks: AtomicUsize,
-    position: AtomicU64,
-    read_gate: Mutex<Option<Arc<Gate>>>,
-    export_gate: Mutex<Option<Arc<Gate>>>,
+    calls: AtomicUsize,
+    fail: AtomicBool,
+    gate: Mutex<Option<Arc<Gate>>>,
+    active: AtomicUsize,
 }
-
+struct Reading(Arc<Probe>);
+impl Drop for Reading {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 struct ObservedJournal<T: JournalEvent> {
     inner: Arc<dyn Journal<T>>,
     probe: Arc<Probe>,
 }
-
 impl<T: JournalEvent> ObservedJournal<T> {
     fn new(inner: Arc<dyn Journal<T>>) -> Arc<Self> {
         Arc::new(Self {
             inner,
-            probe: Arc::new(Probe::default()),
+            probe: Arc::default(),
         })
     }
 }
-
-struct ObservedReader<T: JournalEvent> {
-    inner: Box<dyn JournalReader<T>>,
-    probe: Arc<Probe>,
-}
-
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for ObservedReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
-        let call = self.probe.next_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        let gate = self.probe.read_gate.lock().unwrap().take();
-        if let Some(gate) = gate {
-            gate.entered.notify_one();
-            gate.release.notified().await;
-        }
-        if self.probe.fail_next_at.load(Ordering::SeqCst) == call {
-            return Err(JournalError::Full);
-        }
-        let result = self.inner.next().await;
-        self.probe
-            .position
-            .store(self.inner.position(), Ordering::SeqCst);
-        result
-    }
-    fn position(&self) -> u64 {
-        self.inner.position()
-    }
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
-        self.inner.initial_prefix_complete()
-    }
-    fn is_at_end(&self) -> bool {
-        self.probe.end_checks.fetch_add(1, Ordering::SeqCst);
-        !self.probe.unknown_end.load(Ordering::SeqCst) && self.inner.is_at_end()
-    }
-}
-
-#[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
+impl<T: JournalEvent> Journal<T> for ObservedJournal<T> {
     fn id(&self) -> &JournalId {
         self.inner.id()
     }
     fn owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
-    fn observation_reader(&self) -> Option<&dyn JournalObservationReader> {
-        Some(self)
-    }
     async fn append(
         &self,
         event: T,
         options: AppendOptions<'_, T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
-        if event.event_type_name() == "system.metrics.exported" {
-            let gate = self.probe.export_gate.lock().unwrap().take();
-            if let Some(gate) = gate {
-                gate.entered.notify_one();
-                gate.release.notified().await;
-            }
-        }
         self.inner.append(event, options).await
     }
     async fn append_group(
@@ -147,79 +90,35 @@ impl<T: JournalEvent + 'static> Journal<T> for ObservedJournal<T> {
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_event(id).await
     }
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(ObservedReader {
-            inner: self.inner.reader_from(position).await?,
-            probe: self.probe.clone(),
-        }))
+    async fn reader_from(&self, _: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        panic!("metrics must never create a sequential reader")
     }
-    async fn read_last_n(
-        &self,
-        count: usize,
-    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        self.probe.tail_requests.lock().unwrap().push(count);
-        if self.probe.fail_tail.load(Ordering::SeqCst) {
-            return Err(JournalError::Full);
-        }
-        let rows = self.inner.read_last_n(count).await?;
-        self.probe
-            .materialised
-            .fetch_add(rows.len(), Ordering::SeqCst);
-        let gate = {
-            let mut gate = self.probe.tail_gate.lock().unwrap();
-            if gate.as_ref().is_some_and(|(size, _)| *size == count) {
-                gate.take().map(|(_, gate)| gate)
-            } else {
-                None
-            }
-        };
+    async fn read_last_n(&self, _: usize) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        panic!("metrics must never expand a backwards history search")
+    }
+    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.probe.calls.fetch_add(1, Ordering::SeqCst);
+        self.probe.active.fetch_add(1, Ordering::SeqCst);
+        let _reading = Reading(self.probe.clone());
+        let gate = self.probe.gate.lock().unwrap().take();
         if let Some(gate) = gate {
             gate.entered.notify_one();
             gate.release.notified().await;
         }
-        Ok(rows)
-    }
-}
-
-#[async_trait]
-impl<T: JournalEvent> JournalObservationReader for ObservedJournal<T> {
-    async fn latest_observation(
-        &self,
-        key: &ObservationKey,
-    ) -> Result<ObservationLookup, JournalError> {
-        if self.probe.fail_tail.load(Ordering::SeqCst) {
+        if self.probe.fail.load(Ordering::SeqCst) {
             return Err(JournalError::Full);
         }
-        self.inner
-            .observation_reader()
-            .expect("real indexed backend")
-            .latest_observation(key)
-            .await
-    }
-    async fn latest_observations(
-        &self,
-        observer: WriterId,
-    ) -> Result<ObservationLookup<Vec<LocatedObservation>>, JournalError> {
-        if self.probe.fail_tail.load(Ordering::SeqCst) {
-            return Err(JournalError::Full);
-        }
-        self.inner
-            .observation_reader()
-            .expect("real indexed backend")
-            .latest_observations(observer)
-            .await
+        self.inner.read_metrics_tail().await
     }
 }
-
 #[derive(Default)]
 struct Exports(Mutex<Vec<AppMetricsSnapshot>>);
 impl MetricsSnapshotExporter for Exports {
-    fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot) {
-        self.0.lock().unwrap().push(snapshot);
+    fn publish_app_snapshot(&self, value: AppMetricsSnapshot) {
+        self.0.lock().unwrap().push(value);
     }
     fn publish_infra_snapshot(&self, _: InfraMetricsSnapshot) {}
 }
-
 fn stage_journal(
     factory: &mut dyn FlowJournalFactory,
     stage: StageId,
@@ -238,7 +137,6 @@ fn stage_journal(
             .unwrap(),
     )
 }
-
 fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent {
     let mut event =
         ChainEventFactory::data_event(writer, "metrics.fact", serde_json::json!({"total": total}));
@@ -312,12 +210,7 @@ async fn context(
     factory: &mut dyn FlowJournalFactory,
     data: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
     errors: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-) -> (
-    Context,
-    super::fsm::MetricsAggregatorIo,
-    Arc<ObservedJournal<SystemEvent>>,
-    Arc<Exports>,
-) {
+) -> (Context, Arc<ObservedJournal<SystemEvent>>, Arc<Exports>) {
     let system_id = SystemId::new();
     let system = ObservedJournal::new(
         factory
@@ -325,593 +218,219 @@ async fn context(
             .unwrap(),
     );
     let exports = Arc::new(Exports::default());
-    let (ctx, io) = Context::new(
+    let ctx = Context::new(
         super::MetricsInputs::new(data, errors),
         system.clone(),
         exports.clone(),
-        std::time::Duration::from_secs(1),
+        Duration::from_millis(20),
         system_id,
         HashMap::new(),
         vec![],
     )
     .await
     .unwrap();
-    (ctx, io, system, exports)
+    (ctx, system, exports)
 }
-
-async fn fold(ctx: &mut Context, stage: StageId, rail: Rail, row: JournalRecord<ChainPayload>) {
-    Action::UpdateMetrics {
-        events: vec![row].into(),
-        journal_kind: rail,
-        journal_stage: stage,
-    }
-    .execute(ctx)
+async fn until(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
     .await
-    .unwrap();
+    .expect("latest values should become available promptly");
 }
-
-fn assert_values(ctx: &Context, stage: StageId, total: u64, gauge: u32) {
-    let store = &ctx.metrics_store;
-    let metrics = &store.stage_metrics[&stage];
-    assert_eq!(metrics.last_in_flight, Some(gauge));
-    assert_eq!(metrics.snapshot_p50_ms, Some(gauge.into()));
-    assert_eq!(metrics.snapshot_p999_ms, Some(gauge.into()));
-    assert_eq!(metrics.latest_events_processed_total, Some(total));
-    assert_eq!(metrics.last_failures_total, Some(total));
-    assert_eq!(metrics.processing_time_sum_nanos, Some(total * 10));
-    assert!(
-        !store.circuit_breaker_state.contains_key(&stage),
-        "measurement cannot establish control state"
-    );
-    assert_eq!(store.rate_limiter_bucket_tokens[&stage], f64::from(gauge));
-    assert_eq!(
-        store.rate_limiter_bucket_capacity[&stage],
-        f64::from(gauge + 1)
-    );
-    assert!(store.circuit_breaker_state_transitions_total.is_empty());
+async fn refresh(ctx: &mut Context) {
+    let since = tokio::time::Instant::now();
+    let mut readers = TailReaders::start(ctx);
+    until(|| {
+        ctx.metrics_store
+            .buffer
+            .refreshed_since(since, readers.len())
+    })
+    .await;
+    readers.stop().await;
+    Action::ExportMetrics.execute(ctx).await.unwrap();
 }
-
-pub async fn metrics_index_reports_absence_without_tail_search(
-    mut factory: Box<dyn FlowJournalFactory>,
+fn run(
+    ctx: Context,
+) -> (
+    tokio::task::JoinHandle<()>,
+    crate::supervised_base::builder::EventSender<Event>,
 ) {
-    let stage = StageId::new();
-    let journal = stage_journal(&mut *factory, stage, "negative");
-    for count in [0, 1000] {
-        if count > 0 {
-            journal
-                .append_group(
-                    "noise",
-                    (0..count).map(|_| noise(stage)).collect(),
-                    Default::default(),
-                )
-                .await
-                .unwrap();
-        }
-        for _ in 0..2 {
-            let ObservationLookup::Ready {
-                committed_len,
-                observation,
-            } = journal.latest_observations(stage.into()).await.unwrap()
-            else {
-                panic!("live index must be ready")
-            };
-            assert_eq!(committed_len, count);
-            assert!(observation.is_empty());
-        }
-    }
-    assert!(journal.probe.tail_requests.lock().unwrap().is_empty());
-}
-
-pub async fn metrics_batch_coalesces_measurements_without_reordering_facts(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    use obzenflow_core::event::payloads::execution_payload::{
-        CircuitBreakerFact, CircuitState, ExecutionPayload,
+    let (control, receiver, watcher) = ChannelBuilder::new().build(State::Initializing);
+    let supervisor = MetricsAggregatorSupervisor {
+        name: "metrics-test".into(),
+        system_journal: ctx.system_journal.clone(),
+        system_id: ctx.system_id,
+        control: receiver,
+        readers: None,
+        final_refresh: None,
+        state_watcher: watcher,
+        last_state: None,
     };
-
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "batch");
-    let mut rows = Vec::new();
-    for (index, (from_state, to_state)) in [
-        (CircuitState::Closed, CircuitState::Open),
-        (CircuitState::Open, CircuitState::HalfOpen),
-        (CircuitState::HalfOpen, CircuitState::Closed),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let mut event = fact(stage, stage.into(), index as u64 + 1, index as u32 + 4);
-        if index == 0 {
-            event
-                .envelope
-                .observability
-                .as_mut()
-                .unwrap()
-                .runtime
-                .as_mut()
-                .unwrap()
-                .event_loops_total = Some(42);
-        }
-        rows.push(data.append(event, Default::default()).await.unwrap());
-        let mut transition = ChainEventFactory::execution_event(
-            stage.into(),
-            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::StateChanged {
-                from_state,
-                to_state,
-                timestamp: index as u64,
-            }),
-        );
-        transition.flow_context.stage_id = stage;
-        rows.push(data.append(transition, Default::default()).await.unwrap());
-    }
-    let committed_max = rows
-        .last()
-        .unwrap()
-        .envelope
-        .provenance
-        .journal
-        .vector_clock
-        .get(&WriterId::from(stage).to_string());
-    let last_id = *rows.last().unwrap().id();
-    let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    // A missing optional index must not prevent the batch from retaining its own families.
-    data.probe.fail_tail.store(true, Ordering::SeqCst);
-    let events: Arc<[JournalRecord<ChainPayload>]> = rows.into();
-    let mut machine = super::fsm::build_metrics_aggregator_fsm();
-    for action in machine.handle(Event::StartRunning, &mut ctx).await.unwrap() {
-        action.execute(&mut ctx).await.unwrap();
-    }
-    let actions = machine
-        .handle(
-            Event::ProcessBatch {
-                events: events.clone(),
-                journal_kind: Rail::Data,
-                journal_stage: stage,
-            },
-            &mut ctx,
-        )
-        .await
-        .unwrap();
-    assert!(
-        matches!(&actions[..], [Action::UpdateMetrics { events: shared, .. }] if Arc::ptr_eq(shared, &events))
-    );
-    for action in actions {
-        action.execute(&mut ctx).await.unwrap();
-    }
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    let store = &ctx.metrics_store;
-    assert_eq!(store.total_events_processed, 3);
-    assert_eq!(
-        store.stage_metrics[&stage].latest_events_processed_total,
-        Some(3)
-    );
-    assert_eq!(store.stage_metrics[&stage].last_in_flight, Some(6));
-    assert_eq!(store.last_event_id, Some(last_id));
-    assert_eq!(store.stage_vector_clocks[&stage], committed_max);
-    assert_eq!(store.circuit_breaker_state[&stage], 0.0);
-    for (from, to) in [
-        ("closed", "open"),
-        ("open", "half_open"),
-        ("half_open", "closed"),
-    ] {
-        assert_eq!(
-            store.circuit_breaker_state_transitions_total[&(stage, from.into(), to.into())],
-            1
-        );
-    }
-    assert!(
-        store.observations.snapshot().iter().any(|packet| {
-            packet
-                .runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.event_loops_total == Some(42))
+    (
+        tokio::spawn(async move {
+            supervisor.run(State::Initializing, ctx).await.unwrap();
         }),
-        "an older family absent from the latest packet is still retained"
-    );
+        control,
+    )
 }
 
-pub async fn metrics_accounting_folds_sequentially_while_measurement_failures_retain_values(
+pub async fn metrics_tail_overwrites_and_preserves_sparse_families(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "data");
-    let older = data
-        .append(fact(stage, stage.into(), 1, 9), Default::default())
-        .await
-        .unwrap();
-    let newer = data
-        .append(fact(stage, stage.into(), 2, 4), Default::default())
-        .await
-        .unwrap();
-    let (mut ctx, _, _, exports) =
-        context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_eq!(
-        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
-        None
-    );
-    assert_eq!(
-        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
-        Some(4)
-    );
-    fold(&mut ctx, stage, Rail::Data, older).await;
-    data.probe.fail_tail.store(true, Ordering::SeqCst);
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_eq!(
-        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
-        Some(1)
-    );
-    assert_eq!(
-        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
-        Some(4)
-    );
-    fold(&mut ctx, stage, Rail::Data, newer).await;
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_values(&ctx, stage, 2, 4);
-    let latest = data
-        .append(fact(stage, stage.into(), 3, 1), Default::default())
-        .await
-        .unwrap();
-    fold(&mut ctx, stage, Rail::Data, latest).await;
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_values(&ctx, stage, 3, 1);
-    assert_eq!(
-        exports.0.lock().unwrap().last().unwrap().event_counts[&stage],
-        3
-    );
-    assert!(data.probe.tail_requests.lock().unwrap().is_empty());
-}
-
-pub async fn metrics_index_finds_sparse_families_beyond_the_old_tail_cap(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "sparse");
-    data.append(fact(stage, stage.into(), 1, 6), Default::default())
-        .await
-        .unwrap();
+    let data = stage_journal(&mut *factory, stage, "latest");
+    let mut first = fact(stage, stage.into(), 1, 9);
+    first
+        .envelope
+        .observability
+        .as_mut()
+        .unwrap()
+        .runtime
+        .as_mut()
+        .unwrap()
+        .event_loops_total = Some(42);
+    data.append(first, Default::default()).await.unwrap();
+    for seq in 2..=100 {
+        data.append(fact(stage, stage.into(), seq, 3), Default::default())
+            .await
+            .unwrap();
+    }
+    // History length and attachment-free suffixes cannot alter lookup work.
     for group in 0..51 {
         data.append_group(
-            &format!("sparse-{group}"),
+            &format!("noise-{group}"),
             (0..1000).map(|_| noise(stage)).collect(),
             Default::default(),
         )
         .await
         .unwrap();
     }
-    let ObservationLookup::Ready {
-        committed_len,
-        observation,
-    } = data.latest_observations(stage.into()).await.unwrap()
-    else {
-        panic!("live index must be ready")
-    };
-    assert_eq!(committed_len, 51001);
-    assert!(observation.iter().all(|located| located.position == 0));
+    let selected = data.read_metrics_tail().await.unwrap();
     assert_eq!(
-        observation.into_iter().find_map(|located| located
-            .observation
-            .runtime
-            .and_then(|runtime| runtime.in_flight)),
-        Some(6)
+        selected.len(),
+        2,
+        "one latest packet plus the independently retained sparse family"
     );
-    assert!(data.probe.tail_requests.lock().unwrap().is_empty());
-}
-
-pub async fn metrics_exports_do_not_create_observations(mut factory: Box<dyn FlowJournalFactory>) {
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "quiet");
-    let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    let execution =
-        crate::execution::RuntimeExecution::new(crate::execution::RuntimeMode::Live, None);
-    let instrumentation = Arc::new(super::instrumentation::StageInstrumentation::new());
-    instrumentation.bind_observations(obzenflow_core::FlowId::new(), stage.into(), &execution);
-    ctx.metrics_store.observations = execution.observations().clone();
-    let before = ctx.metrics_store.observations.snapshot();
+    let (mut ctx, _, _) = context(&mut *factory, vec![(stage, data)], vec![]).await;
+    refresh(&mut ctx).await;
+    let value = &ctx.metrics_store.stage_metrics[&stage];
+    assert_eq!(value.latest_events_processed_total, Some(100));
+    assert_eq!(value.last_in_flight, Some(3));
+    assert_eq!(value.event_loops_total, Some(42));
+    assert!(ctx
+        .metrics_store
+        .circuit_breaker_state_transitions_total
+        .is_empty());
     for _ in 0..3 {
         Action::ExportMetrics.execute(&mut ctx).await.unwrap();
     }
     assert_eq!(
-        serde_json::to_value(before).unwrap(),
-        serde_json::to_value(ctx.metrics_store.observations.snapshot()).unwrap()
+        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+        Some(100)
     );
-    assert!(data.read_all_unordered().await.unwrap().is_empty());
 }
 
-pub async fn metrics_snapshot_identity_handles_mixed_writers_groups_and_rail_precedence(
+pub async fn metrics_refresh_failures_retain_values_and_exports_do_no_reads(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
-    let archived = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "data");
-    let errors = stage_journal(&mut *factory, stage, "errors");
+    let data = stage_journal(&mut *factory, stage, "retention");
+    data.append(fact(stage, stage.into(), 1, 9), Default::default())
+        .await
+        .unwrap();
+    let (mut ctx, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    refresh(&mut ctx).await;
+    data.probe.fail.store(true, Ordering::SeqCst);
+    data.append(fact(stage, stage.into(), 2, 4), Default::default())
+        .await
+        .unwrap();
+    refresh(&mut ctx).await;
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+        Some(1)
+    );
+    let calls = data.probe.calls.load(Ordering::SeqCst);
     for _ in 0..4 {
-        data.append(noise(archived), Default::default())
-            .await
-            .unwrap();
+        Action::ExportMetrics.execute(&mut ctx).await.unwrap();
     }
-    let a = data
-        .append(fact(stage, archived.into(), 1, 8), Default::default())
+    assert_eq!(data.probe.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
+        Some(9)
+    );
+    data.probe.fail.store(false, Ordering::SeqCst);
+    refresh(&mut ctx).await;
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+        Some(2)
+    );
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
+        Some(4)
+    );
+}
+
+pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journals(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    let a = StageId::new();
+    let b = StageId::new();
+    let slow = stage_journal(&mut *factory, a, "slow");
+    let fast = stage_journal(&mut *factory, b, "fast");
+    slow.append(fact(a, a.into(), 90, 3), Default::default())
         .await
         .unwrap();
-    let mut b = fact(stage, stage.into(), 2, 5);
-    b.id = a.envelope.provenance.event.id;
-    let mut c = fact(stage, stage.into(), 3, 2);
-    c.id = a.envelope.provenance.event.id;
-    let group = data
-        .append_group("repeated-event-id", vec![b, c], Default::default())
+    fast.append(fact(b, b.into(), 200, 1), Default::default())
         .await
         .unwrap();
-    let (mut ctx, _, _, _) = context(
+    let gate = Arc::new(Gate::default());
+    *slow.probe.gate.lock().unwrap() = Some(gate.clone());
+    let (ctx, system, exports) = context(
         &mut *factory,
-        vec![(stage, data.clone())],
-        vec![(stage, errors.clone())],
+        vec![(a, slow.clone()), (b, fast.clone())],
+        vec![],
     )
     .await;
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    for (index, row) in [a, group[0].clone()].into_iter().enumerate() {
-        fold(&mut ctx, stage, Rail::Data, row).await;
-        Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-        assert_eq!(
-            ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
-            Some(index as u64 + 1)
-        );
-        assert_eq!(
-            ctx.metrics_store.stage_metrics[&stage].last_in_flight,
-            Some(2)
-        );
+    let (task, _control) = run(ctx);
+    gate.entered.notified().await;
+    until(|| exports.0.lock().unwrap().len() >= 4).await;
+    {
+        let snapshots = exports.0.lock().unwrap();
+        let last = snapshots.last().unwrap();
+        assert_eq!(last.event_counts.get(&b), Some(&200));
+        assert!(!last.event_counts.contains_key(&a));
     }
-    fold(&mut ctx, stage, Rail::Data, group[1].clone()).await;
-    let error = errors
-        .append(fact(stage, archived.into(), 2, 7), Default::default())
+    fast.append(fact(b, b.into(), 500, 2), Default::default())
         .await
         .unwrap();
-    errors
-        .append(fact(archived, archived.into(), 99, 99), Default::default())
-        .await
-        .unwrap();
-    fold(&mut ctx, stage, Rail::Error, error).await;
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    // Capture 2 from the error journal cannot replace capture 3 from data.
-    assert_values(&ctx, stage, 3, 2);
-    assert_eq!(ctx.metrics_store.stage_vector_clocks.get(&archived), None);
-    assert_eq!(ctx.metrics_store.stage_vector_clocks[&stage], 2);
-}
-
-pub async fn metrics_batches_preserve_prefix_errors_and_require_fresh_positive_ends(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "batch");
-    let mut sub = MetricsSubscription::new(&[(stage, data.clone())])
-        .await
-        .unwrap();
-    assert!(sub.poll_batch().await.unwrap().is_none());
-    let calls = data.probe.next_calls.load(Ordering::SeqCst);
-    assert!(sub.poll_batch().await.unwrap().is_none());
-    assert_eq!(data.probe.next_calls.load(Ordering::SeqCst), calls);
-    for _ in 0..3 {
-        data.append(noise(stage), Default::default()).await.unwrap();
-    }
-    let (mut ctx, _, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    // Terminal invalidates the live-empty cooldown before the next read.
-    data.probe.fail_next_at.store(calls + 3, Ordering::SeqCst);
-    sub.observe_terminal();
-    let mut folded = 0;
-    loop {
-        match sub.poll_batch().await {
-            Ok(Some(batch)) => {
-                assert_eq!(batch.stage, stage);
-                folded += batch.events.len();
-                assert!(!sub.is_complete());
-                for row in batch.events {
-                    fold(&mut ctx, stage, Rail::Data, row).await;
-                }
-            }
-            Err(JournalError::Full) => break,
-            _ => panic!("prefix must be delivered before its retained failure"),
-        }
-    }
-    assert_eq!(folded, 2);
-    assert_eq!(ctx.metrics_store.total_events_processed, 2);
-    assert_eq!(data.probe.next_calls.load(Ordering::SeqCst), calls + 3);
-    assert_eq!(data.probe.position.load(Ordering::SeqCst), 2);
-
-    let empty = stage_journal(&mut *factory, stage, "unknown_end");
-    empty.probe.unknown_end.store(true, Ordering::SeqCst);
-    let mut sub = MetricsSubscription::new(&[(stage, empty.clone())])
-        .await
-        .unwrap();
-    sub.observe_terminal();
-    assert!(sub.poll_batch().await.unwrap().is_none());
-    assert!(!sub.is_complete());
-    empty.probe.unknown_end.store(false, Ordering::SeqCst);
-    // This timer tests the specified retry delay, not a synchronisation barrier.
-    tokio::time::sleep(IDLE_BACKOFF).await;
-    assert!(sub.poll_batch().await.unwrap().is_none());
-    assert!(sub.is_complete());
-    assert_eq!(empty.probe.end_checks.load(Ordering::SeqCst), 2);
-}
-
-fn supervisor(ctx: &Context, io: super::fsm::MetricsAggregatorIo) -> MetricsAggregatorSupervisor {
-    let (_, _, watcher) = ChannelBuilder::<Event, State>::new().build(State::Running);
-    MetricsAggregatorSupervisor {
-        name: "metrics_conformance".into(),
-        system_journal: ctx.system_journal.clone(),
-        system_id: ctx.system_id,
-        data_subscription: Some(io.data_subscription),
-        error_subscription: io.error_subscription,
-        system_subscription: Some(io.system_subscription),
-        system_retry_at: None,
-        next_input: 0,
-        state_watcher: watcher,
-        last_state: None,
-    }
-}
-
-pub async fn metrics_rotation_coalesces_exports_and_skips_missed_deadlines(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "data");
-    let errors = stage_journal(&mut *factory, stage, "errors");
-    for _ in 0..200 {
-        data.append(noise(stage), Default::default()).await.unwrap();
-        errors
-            .append(noise(stage), Default::default())
-            .await
-            .unwrap();
-    }
-    let (mut ctx, io, system, _) =
-        context(&mut *factory, vec![(stage, data)], vec![(stage, errors)]).await;
-    ctx.export_interval = Duration::from_millis(250);
-    let events = SystemEventFactory::new(ctx.system_id);
-    system
-        .append(events.pipeline_draining(), Default::default())
-        .await
-        .unwrap();
-    system
-        .append(events.pipeline_all_stages_completed(), Default::default())
-        .await
-        .unwrap();
-    let mut supervisor = supervisor(&ctx, io);
-    let mut machine = super::fsm::build_metrics_aggregator_fsm();
-    for action in machine.handle(Event::StartRunning, &mut ctx).await.unwrap() {
-        action.execute(&mut ctx).await.unwrap();
-    }
-    for expected in [
-        "system", "data", "error", "export", "system", "data", "error",
-    ] {
-        let EventLoopDirective::Transition(event) = supervisor
-            .dispatch_state(machine.state(), &mut ctx)
-            .await
+    until(|| {
+        exports
+            .0
+            .lock()
             .unwrap()
-        else {
-            panic!("ready input turn")
-        };
-        match (&event, expected) {
-            (Event::ProcessSystemEvent { .. }, "system") | (Event::ExportMetrics, "export") => {}
-            (
-                Event::ProcessBatch {
-                    events,
-                    journal_kind,
-                    ..
-                },
-                kind,
-            ) => {
-                assert!(!events.is_empty() && events.len() <= 64);
-                assert_eq!(
-                    *journal_kind,
-                    if kind == "data" {
-                        Rail::Data
-                    } else {
-                        Rail::Error
-                    }
-                );
-            }
-            _ => panic!("unexpected turn {event:?}, expected {expected}"),
-        }
-        let actions = machine.handle(event, &mut ctx).await.unwrap();
-        if expected == "system" {
-            assert!(actions
-                .iter()
-                .all(|action| !matches!(action, Action::ExportMetrics)));
-        }
-        for action in actions {
-            if matches!(action, Action::ExportMetrics) {
-                let deadline = tokio::time::Instant::now();
-                ctx.metrics_store.next_export_at = Some(deadline);
-                let gate = Arc::new(Gate::default());
-                *system.probe.export_gate.lock().unwrap() = Some(gate.clone());
-                let (result, released) = tokio::join!(action.execute(&mut ctx), async {
-                    gate.entered.notified().await;
-                    // A slow acknowledged publication spans several intervals.
-                    tokio::time::sleep(Duration::from_millis(1_100)).await;
-                    let released = tokio::time::Instant::now();
-                    gate.release.notify_one();
-                    released
-                });
-                result.unwrap();
-                assert!(ctx.metrics_store.last_export_completed.unwrap() >= released);
-                let next = ctx.metrics_store.next_export_at.unwrap();
-                assert!(next > released && next <= released + ctx.export_interval);
-                assert_eq!(next.duration_since(deadline).as_nanos() % ctx.export_interval.as_nanos(), 0,
-                    "publication must retain the monotonic schedule instead of adding an interval after acknowledgement");
-            } else {
-                action.execute(&mut ctx).await.unwrap();
-            }
-        }
-    }
-    // Eligibility returns to input collection while the next export is spaced.
-    let event = supervisor
-        .dispatch_state(machine.state(), &mut ctx)
-        .await
-        .unwrap();
-    assert!(!matches!(
-        event,
-        EventLoopDirective::Transition(Event::ExportMetrics)
-    ));
-}
-
-pub async fn metrics_physical_completion_folds_all_rails_through_the_current_terminal(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    let mut data = Vec::new();
-    let mut errors = Vec::new();
-    let mut probes = Vec::new();
-    for index in 0..5 {
-        let stage = StageId::new();
-        let journal = stage_journal(&mut *factory, stage, "data");
-        let error = stage_journal(&mut *factory, stage, "errors");
-        journal
-            .append(fact(stage, stage.into(), 1, 0), Default::default())
-            .await
-            .unwrap();
-        if index == 0 {
-            error
-                .append(noise(stage), Default::default())
-                .await
-                .unwrap();
-        }
-        probes.push((journal.probe.clone(), 1));
-        probes.push((error.probe.clone(), u64::from(index == 0)));
-        data.push((stage, journal as Arc<dyn Journal<ChainEvent>>));
-        errors.push((stage, error as Arc<dyn Journal<ChainEvent>>));
-    }
-    let (mut ctx, io, system, exports) = context(&mut *factory, data, errors).await;
-    let pipeline = SystemId::new();
-    ctx.pipeline_writer = Some(pipeline.into());
-    let old = SystemEventFactory::new(SystemId::new());
-    let current = SystemEventFactory::new(pipeline);
+            .last()
+            .unwrap()
+            .event_counts
+            .get(&b)
+            == Some(&500)
+    })
+    .await;
+    // Even finalisation uses the available buffer, without waiting for this read.
     system
-        .append(old.pipeline_not_started(), Default::default())
+        .append(
+            SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
+            Default::default(),
+        )
         .await
         .unwrap();
-    system
-        .append(current.pipeline_all_stages_completed(), Default::default())
+    tokio::time::timeout(Duration::from_secs(2), task)
         .await
+        .unwrap()
         .unwrap();
-    system
-        .append(current.pipeline_not_started(), Default::default())
-        .await
-        .unwrap();
-    system
-        .append(current.pipeline_drained(), Default::default())
-        .await
-        .unwrap();
-    let supervisor = supervisor(&ctx, io);
-    crate::supervised_base::SelfSupervisedExt::run(supervisor, State::Initializing, ctx)
-        .await
-        .unwrap();
-    for (probe, records) in probes {
-        assert_eq!(probe.position.load(Ordering::SeqCst), records);
-        assert!(probe.end_checks.load(Ordering::SeqCst) > 0);
-    }
-    assert_eq!(
-        system.probe.position.load(Ordering::SeqCst),
-        3,
-        "system reader stops at the current terminal"
-    );
+    assert_eq!(slow.probe.active.load(Ordering::SeqCst), 0);
     let rows = system.read_all_unordered().await.unwrap();
     let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
     let drained = names
@@ -921,156 +440,24 @@ pub async fn metrics_physical_completion_folds_all_rails_through_the_current_ter
     assert_eq!(names[drained - 1], "system.metrics.exported");
     assert_eq!(names[drained + 1], "system.metrics.shutdown");
     assert_eq!(
-        exports.0.lock().unwrap().last().unwrap().pipeline_state,
-        "not_started"
+        exports.0.lock().unwrap().last().unwrap().event_counts[&b],
+        500
     );
 }
 
-pub async fn metrics_terminal_accounting_covers_filtering_without_optional_packets(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    use obzenflow_core::event::provenance::ExecutionAccounting;
-    use obzenflow_core::event::{StageLifecycleEvent, SystemPayload};
-    let stage = StageId::new();
-    let (mut ctx, _, system, _) = context(&mut *factory, vec![], vec![]).await;
-    for (index, event) in [
-        StageLifecycleEvent::Completed {
-            accounting: Some(ExecutionAccounting {
-                events_processed_total: 1000,
-                events_emitted_total: 0,
-                ..Default::default()
-            }),
-        },
-        StageLifecycleEvent::Draining {
-            accounting: Some(ExecutionAccounting {
-                events_processed_total: 10,
-                ..Default::default()
-            }),
-        },
-        StageLifecycleEvent::Cancelled {
-            reason: "stop".into(),
-            accounting: Some(ExecutionAccounting {
-                events_processed_total: 1001,
-                ..Default::default()
-            }),
-        },
-        StageLifecycleEvent::Failed {
-            error: "error".into(),
-            recoverable: None,
-            causal_event_id: None,
-            accounting: Some(ExecutionAccounting {
-                events_processed_total: 999,
-                errors_total: 1,
-                ..Default::default()
-            }),
-        },
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let row = system
-            .append(
-                SystemEvent::new(
-                    SystemId::new().into(),
-                    SystemPayload::StageLifecycle {
-                        stage_id: stage,
-                        event,
-                    },
-                ),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        assert!(row.envelope.observability.is_none());
-        Action::ProcessSystemEvent {
-            envelope: Box::new(row),
-        }
-        .execute(&mut ctx)
-        .await
-        .unwrap();
-        assert_eq!(
-            ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
-            Some(if index < 2 { 1000 } else { 1001 })
-        );
-    }
-    assert_eq!(
-        ctx.metrics_store.stage_metrics[&stage].latest_events_emitted_total,
-        Some(0)
-    );
-    assert_eq!(
-        ctx.metrics_store.stage_metrics[&stage].latest_errors_total,
-        Some(1)
-    );
-    assert!(!ctx.metrics_store.inputs_covered);
-    assert!(Action::PublishDrainComplete {
-        last_event_id: None
-    }
-    .execute(&mut ctx)
-    .await
-    .is_err());
-}
-
-pub async fn metrics_batch_quantum_keeps_pending_reads_and_finalisation_does_not_wait_for_export(
+pub async fn metrics_cancellation_stops_owned_readers_without_drained(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "pending_batch");
-    data.append(noise(stage), Default::default()).await.unwrap();
-    let mut sub = MetricsSubscription::new(&[(stage, data.clone())])
-        .await
-        .unwrap();
+    let data = stage_journal(&mut *factory, stage, "cancel");
     let gate = Arc::new(Gate::default());
-    *data.probe.read_gate.lock().unwrap() = Some(gate.clone());
-    let (result, ()) = tokio::join!(sub.poll_batch(), async {
-        gate.entered.notified().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            data.probe.next_calls.load(Ordering::SeqCst),
-            1,
-            "the quantum must not cancel or restart a pending read"
-        );
-        gate.release.notify_one();
-    });
-    assert_eq!(result.unwrap().unwrap().events.len(), 1);
-    assert_eq!(data.probe.next_calls.load(Ordering::SeqCst), 1);
-
-    // Start at eligibility with terminal already folded, then discover the
-    // final empty input later in this rotation. No periodic timer is needed.
-    let empty = stage_journal(&mut *factory, stage, "last_end");
-    let (mut ctx, io, _, _) = context(&mut *factory, vec![(stage, empty)], vec![]).await;
-    ctx.metrics_store.pipeline_state = "completed".into();
-    ctx.metrics_store.last_export_completed = Some(tokio::time::Instant::now());
-    ctx.metrics_store.next_export_at = Some(tokio::time::Instant::now() + ctx.export_interval);
-    let mut supervisor = supervisor(&ctx, io);
-    supervisor.next_input = 3;
-    let event = supervisor
-        .dispatch_state(&State::Draining, &mut ctx)
-        .await
-        .unwrap();
-    assert!(
-        matches!(event, EventLoopDirective::Transition(Event::FlowTerminal)),
-        "the completed rotation must finalise directly"
-    );
-}
-
-pub async fn metrics_pending_read_cancellation_never_publishes_drained(
-    mut factory: Box<dyn FlowJournalFactory>,
-) {
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "data");
-    let gate = Arc::new(Gate::default());
-    *data.probe.read_gate.lock().unwrap() = Some(gate.clone());
-    let (ctx, io, system, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    let supervisor = supervisor(&ctx, io);
-    let task = tokio::spawn(crate::supervised_base::SelfSupervisedExt::run(
-        supervisor,
-        State::Initializing,
-        ctx,
-    ));
+    *data.probe.gate.lock().unwrap() = Some(gate.clone());
+    let (ctx, system, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let (task, _control) = run(ctx);
     gate.entered.notified().await;
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert_eq!(data.probe.position.load(Ordering::SeqCst), 0);
+    until(|| data.probe.active.load(Ordering::SeqCst) == 0).await;
     assert!(!system
         .read_all_unordered()
         .await
@@ -1079,109 +466,176 @@ pub async fn metrics_pending_read_cancellation_never_publishes_drained(
         .any(|row| row.event_type_name() == "system.metrics.drained"));
 }
 
-pub async fn metrics_watermarks_exclude_each_forwarded_control_and_error_witness(
+pub async fn metrics_tail_identity_and_accounting_are_idempotent(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
-    use obzenflow_core::event::status::processing_status::ErrorKind;
-    use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
-    use obzenflow_core::event::SourceContractEventParams;
-    let source = StageId::new();
-    let counter = StageId::new();
-    let summary = StageId::new();
-    let transform = StageId::new();
-    let counter_data = stage_journal(&mut *factory, counter, "counter");
-    let summary_data = stage_journal(&mut *factory, summary, "summary");
-    let transform_data = stage_journal(&mut *factory, transform, "transform");
-    let transform_errors = stage_journal(&mut *factory, transform, "errors");
-    let (mut ctx, _, _, _) = context(
-        &mut *factory,
-        vec![
-            (counter, counter_data.clone()),
-            (summary, summary_data.clone()),
-            (transform, transform_data.clone()),
-        ],
-        vec![(transform, transform_errors.clone())],
-    )
-    .await;
-    for (stage, journal) in [
-        (counter, &counter_data),
-        (summary, &summary_data),
-        (transform, &transform_data),
-    ] {
-        let row = journal
-            .append(fact(stage, stage.into(), 1, 0), Default::default())
-            .await
-            .unwrap();
-        fold(&mut ctx, stage, Rail::Data, row).await;
-    }
-    // Forwarded source EOF has local counter context but retains its source writer.
+    let stage = StageId::new();
+    let foreign = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "data");
+    let errors = stage_journal(&mut *factory, stage, "errors");
+    let first = data
+        .append(fact(stage, foreign.into(), 1, 9), Default::default())
+        .await
+        .unwrap();
+    let mut second = fact(stage, stage.into(), 2, 5);
+    second.id = *first.id();
+    let mut third = fact(stage, stage.into(), 3, 2);
+    third.id = *first.id();
+    data.append_group("shared-id", vec![second, third], Default::default())
+        .await
+        .unwrap();
+    // Error accounting can be newer while its optional capture is older.
+    let mut error = fact(stage, stage.into(), 4, 7);
+    error
+        .envelope
+        .observability
+        .as_mut()
+        .unwrap()
+        .capture
+        .capture_seq = obzenflow_core::event::observability::CaptureSeq(2);
+    errors.append(error, Default::default()).await.unwrap();
+    let (mut ctx, _, _) = context(&mut *factory, vec![(stage, data)], vec![(stage, errors)]).await;
+    refresh(&mut ctx).await;
     for _ in 0..3 {
-        let mut eof = ChainEventFactory::eof_event(source.into(), true);
-        eof.flow_context.stage_id = counter;
-        let row = counter_data.append(eof, Default::default()).await.unwrap();
-        fold(&mut ctx, counter, Rail::Data, row).await;
+        Action::ExportMetrics.execute(&mut ctx).await.unwrap();
     }
-    assert_eq!(ctx.metrics_store.stage_vector_clocks[&counter], 1);
-    assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&source));
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+        Some(4)
+    );
+    assert_eq!(
+        ctx.metrics_store.stage_metrics[&stage].last_in_flight,
+        Some(2)
+    );
+    assert_eq!(ctx.metrics_store.stage_vector_clocks[&stage], 2);
+    assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&foreign));
+}
 
-    // Source contract is a separate witness, not merely another EOF assertion.
-    for _ in 0..4 {
-        let mut contract = ChainEventFactory::source_contract_event(
-            source.into(),
-            SourceContractEventParams {
-                expected_count: Some(Count(3)),
-                source_id: source,
-                route: None,
-                journal_path: JournalPath("source".into()),
-                journal_index: JournalIndex(0),
-                writer_seq: Some(SeqNo(3)),
-                vector_clock: None,
-            },
-        );
-        contract.flow_context.stage_id = summary;
-        let row = summary_data
-            .append(contract, Default::default())
-            .await
-            .unwrap();
-        fold(&mut ctx, summary, Rail::Data, row).await;
-    }
-    assert_eq!(ctx.metrics_store.stage_vector_clocks[&summary], 1);
-    assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&source));
+pub async fn metrics_terminal_accounting_survives_without_optional_packets(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    use obzenflow_core::event::provenance::ExecutionAccounting;
+    use obzenflow_core::event::{StageLifecycleEvent, SystemPayload};
+    let stage = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "filtered");
+    let (mut ctx, system, exports) = context(&mut *factory, vec![(stage, data)], vec![]).await;
+    let writer = SystemId::new();
+    ctx.pipeline_writer = Some(writer.into());
+    system
+        .append(
+            SystemEvent::new(
+                stage.into(),
+                SystemPayload::StageLifecycle {
+                    stage_id: stage,
+                    event: StageLifecycleEvent::Completed {
+                        accounting: Some(ExecutionAccounting {
+                            events_processed_total: 1000,
+                            events_emitted_total: 0,
+                            ..Default::default()
+                        }),
+                    },
+                },
+            ),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    // A later lifecycle without counters cannot discard the accounting slot.
+    system
+        .append(
+            SystemEvent::new(
+                stage.into(),
+                SystemPayload::StageLifecycle {
+                    stage_id: stage,
+                    event: StageLifecycleEvent::Drained,
+                },
+            ),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    system
+        .append(
+            SystemEventFactory::new(writer).pipeline_not_started(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    system
+        .append(
+            SystemEventFactory::new(writer).pipeline_drained(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (task, _control) = run(ctx);
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshots = exports.0.lock().unwrap();
+    let final_value = snapshots.last().unwrap();
+    assert_eq!(final_value.event_counts[&stage], 1000);
+    assert_eq!(final_value.pipeline_state, "not_started");
+}
 
-    // Error copies retain both source writer and source runtime context. Their
-    // cumulative metrics still project, while no source data was collected.
-    for total in 1..=5 {
-        let row = transform_errors
-            .append(
-                fact(source, source.into(), total, 0).mark_as_error("expected", ErrorKind::Unknown),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        fold(&mut ctx, transform, Rail::Error, row).await;
+pub async fn metrics_exports_do_not_create_observations(mut factory: Box<dyn FlowJournalFactory>) {
+    let (mut ctx, _, exports) = context(&mut *factory, vec![], vec![]).await;
+    let before = serde_json::to_value(ctx.metrics_store.observations.snapshot()).unwrap();
+    for _ in 0..3 {
+        Action::ExportMetrics.execute(&mut ctx).await.unwrap();
     }
     assert_eq!(
-        ctx.metrics_store.stage_metrics[&source].latest_events_processed_total,
-        Some(5)
+        before,
+        serde_json::to_value(ctx.metrics_store.observations.snapshot()).unwrap()
     );
-    assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&source));
-    for total in 1..=3 {
-        let row = transform_errors
-            .append(
-                fact(transform, transform.into(), total, 0),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        fold(&mut ctx, transform, Rail::Error, row).await;
+    assert_eq!(exports.0.lock().unwrap().len(), 3);
+}
+
+pub async fn metrics_optional_measurements_do_not_invent_missing_accounting(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    let stage = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "measurements-only");
+    let mut event = fact(stage, stage.into(), 1, 7);
+    event.runtime = None;
+    data.append(event, Default::default()).await.unwrap();
+    let (mut ctx, _, exports) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    refresh(&mut ctx).await;
+    {
+        let snapshots = exports.0.lock().unwrap();
+        let snapshot = snapshots.last().unwrap();
+        assert_eq!(snapshot.in_flight[&stage], 7.0);
+        assert!(!snapshot.event_counts.contains_key(&stage));
+        assert!(!snapshot.error_counts.contains_key(&stage));
+        assert!(!snapshot.events_emitted_total.contains_key(&stage));
     }
+    data.append(fact(stage, stage.into(), 2, 5), Default::default())
+        .await
+        .unwrap();
+    refresh(&mut ctx).await;
+    let snapshots = exports.0.lock().unwrap();
+    let snapshot = snapshots.last().unwrap();
+    assert_eq!(snapshot.event_counts[&stage], 2);
     assert_eq!(
-        ctx.metrics_store.stage_vector_clocks[&transform], 1,
-        "same writer on the error rail cannot advance data coverage"
+        snapshot
+            .flow_metrics
+            .as_ref()
+            .unwrap()
+            .total_events_processed,
+        2
     );
-    Action::ExportMetrics.execute(&mut ctx).await.unwrap();
-    assert_eq!(
-        ctx.metrics_store.stage_vector_clocks,
-        HashMap::from([(counter, 1), (summary, 1), (transform, 1)])
-    );
+}
+
+pub async fn metrics_manual_export_uses_the_live_control_receiver(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    let (mut ctx, _, exports) = context(&mut *factory, vec![], vec![]).await;
+    ctx.export_interval = Duration::from_secs(30);
+    let (task, control) = run(ctx);
+    until(|| exports.0.lock().unwrap().len() == 1).await;
+    control.send(Event::ExportMetrics).await.unwrap();
+    until(|| exports.0.lock().unwrap().len() == 2).await;
+    task.abort();
+    let _ = task.await;
 }

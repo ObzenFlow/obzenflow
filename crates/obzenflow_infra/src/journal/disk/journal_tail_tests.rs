@@ -114,7 +114,7 @@ async fn metrics_tail_read_keeps_the_latest_snapshot_across_chunks() {
         )
         .await
         .unwrap();
-    // Force the graduated metrics search beyond its first, non-metric row.
+    // A later unrelated row must not displace the current accounting key.
     f.journal
         .append(f.event(2, "no snapshot"), Default::default())
         .await
