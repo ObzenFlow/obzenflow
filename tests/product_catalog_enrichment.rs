@@ -5,21 +5,32 @@
 #[path = "../examples/product_catalog_enrichment/support.rs"]
 mod product_catalog_enrichment;
 
-#[test]
+#[path = "test_support/product_catalog_enrichment_fixture.rs"]
+mod catalog_fixture;
+#[path = "../examples/product_catalog_enrichment/presentation.rs"]
+mod catalog_presentation;
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "long-running end-to-end flow; enable when validating example behavior"]
-fn product_catalog_enrichment_completes() {
+async fn product_catalog_enrichment_completes() {
     std::env::remove_var("INJECT_BAD_PAYMENT");
-    product_catalog_enrichment::flow::run_example_in_tests()
+    let temp = tempfile::tempdir().unwrap();
+    FlowApplication::builder()
+        .with_cli_args([OsString::from("product_catalog_enrichment")])
+        .run_async(product_catalog_enrichment::flow::build_flow(
+            temp.path().to_path_buf(),
+        ))
+        .await
         .expect("product_catalog_enrichment example should complete");
 }
 
+use catalog_fixture::{build_for_proof, ProofProbe};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::journal::{RunManifest, JOURNAL_SCHEMA_VERSION};
 use obzenflow_core::{Journal, JournalOwner, StageId, WriterId};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::DiskJournal;
-use product_catalog_enrichment::flow::{build_for_proof, ProofProbe};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -133,6 +144,27 @@ async fn explicit_join_topology_current_schema_live_replay_and_rejected_control(
     assert_eq!(live_projection["catalog_stats"].0[0]["order_count"], 5);
     assert_eq!(live_projection["catalog_stats"].0[0]["promo_orders"], 2);
 
+    // Exercise the unmodified demo against the same archive as the instrumented
+    // fixture, so changes to the user-facing flow remain covered by this test.
+    let example_replay_root = temp.path().join("example-replay");
+    FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("product_catalog_enrichment"),
+            OsString::from("--replay-from"),
+            live.as_os_str().to_os_string(),
+            OsString::from("--verify"),
+        ])
+        .run_async(product_catalog_enrichment::flow::build_flow(
+            example_replay_root.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        projection(&recorded_run(&example_replay_root)).await,
+        live_projection,
+        "the educational example must reproduce the instrumented fixture's results"
+    );
+
     let replay_root = temp.path().join("replay");
     let replay_probe = ProofProbe::default();
     FlowApplication::builder()
@@ -155,4 +187,53 @@ async fn explicit_join_topology_current_schema_live_replay_and_rejected_control(
         live_projection,
         "stable stage identities, authored facts, and local terminal kinds must agree"
     );
+}
+
+mod presentation_tests {
+    use super::catalog_presentation::*;
+    use obzenflow_infra::application::ReplayRunContext;
+    use obzenflow_infra::application::{RunMode, RunPresentationOutcome};
+    use std::path::PathBuf;
+
+    fn replay_mode() -> RunMode {
+        RunMode::Replay(ReplayRunContext {
+            archive_path: PathBuf::from("target/catalog-logs/flows/flow_01SOURCE"),
+            archive_flow_id: Some("flow_01SOURCE".to_string()),
+        })
+    }
+
+    #[test]
+    fn replay_banner_names_the_archive_and_drops_live_only_guidance() {
+        let replay = banner_for(&replay_mode()).render_for_stdout().text;
+
+        assert!(replay.contains("strict replay"));
+        assert!(replay.contains("flow_01SOURCE"));
+        assert!(replay.contains("environment variables are ignored"));
+        assert!(!replay.contains("INJECT_BAD_PAYMENT is set"));
+    }
+
+    #[test]
+    fn replay_footer_does_not_recommend_an_ignored_environment_variable() {
+        let replay = footer_for(RunPresentationOutcome::Completed {
+            flow_name: "product_catalog_enrichment".to_string(),
+            location: None,
+            run_mode: replay_mode(),
+        })
+        .finish();
+
+        assert!(replay.contains("separate live run"));
+        assert!(!replay.contains("INJECT_BAD_PAYMENT"));
+    }
+
+    #[test]
+    fn live_footer_keeps_the_strict_join_experiment() {
+        let live = footer_for(RunPresentationOutcome::Completed {
+            flow_name: "product_catalog_enrichment".to_string(),
+            location: None,
+            run_mode: RunMode::Live,
+        })
+        .finish();
+
+        assert!(live.contains("INJECT_BAD_PAYMENT=1"));
+    }
 }

@@ -14,5 +14,8 @@ pub mod sources;
 #[path = "console.rs"]
 pub mod console;
 
+#[path = "handlers.rs"]
+pub mod handlers;
+
 #[path = "flow.rs"]
 pub mod flow;
