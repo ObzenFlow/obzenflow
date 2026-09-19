@@ -9,6 +9,7 @@
 pub mod disk;
 pub mod factory;
 pub mod memory;
+mod metrics_tail;
 mod observability;
 mod observation_index;
 

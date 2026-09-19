@@ -410,6 +410,11 @@ impl OutputCommitter<'_> {
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let intent = if event.consumes_data_credit() {
             StageAppendIntent::NormalStageData
+        } else if is_framework_middleware_observability_event(&event) {
+            // Source policies drain their control events through this generic
+            // path. Preserve the system-journal mirror for their transitions;
+            // its allowlist and author check exclude activity and forwarded rows.
+            StageAppendIntent::FrameworkObservability
         } else {
             StageAppendIntent::NonDataStageFact
         };

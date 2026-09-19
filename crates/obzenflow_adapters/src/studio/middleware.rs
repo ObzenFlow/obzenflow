@@ -103,6 +103,7 @@ impl MiddlewareView {
                     .and_then(|snapshot| snapshot.state.as_deref());
                 MiddlewareUpdate::CircuitBreaker(match event {
                     CircuitBreakerFact::Opened {
+                        cooldown_ms,
                         error_rate,
                         failure_count,
                         trigger,
@@ -114,6 +115,7 @@ impl MiddlewareView {
                         state_from,
                         state_to: "open",
                         context: CircuitTransition::Opened {
+                            cooldown_ms: *cooldown_ms,
                             error_rate: *error_rate,
                             failure_count: *failure_count,
                             trigger: *trigger,

@@ -3,13 +3,15 @@
 // https://obzenflow.dev
 
 //! [`MetricsBarrier`] (FLOWIP-114h): wait for the metrics aggregator to
-//! have exported a stage's data through the FLOWIP-059c metrics-watermark
+//! have exported a selected current carrier at a stage writer position via the metrics-watermark
 //! `SystemEvent` stream, or to have published its drain-complete signal.
 //!
 //! The barrier consumes [`crate::pipeline::FlowHandle::system_journal`] and
 //! filters for `MetricsCoordination::Exported` / `MetricsCoordination::Drained`
 //! events. It does not invent a new aggregator surface; the events it relies
 //! on are emitted by the production actions in `metrics/fsm.rs`.
+//! A watermark is freshness evidence, not an assertion of physical historical
+//! coverage. Drained means the available buffer was published and readers stopped.
 //!
 //! Cursor semantic is catch-up-then-poll: construction records a baseline
 //! over the system journal and the wait loops scan from that baseline so a
@@ -29,6 +31,9 @@ use thiserror::Error;
 /// Failure modes for [`MetricsBarrier`] construction.
 #[derive(Debug, Error)]
 pub enum MetricsBarrierError {
+    #[error("metrics shut down without publishing the final buffer")]
+    ShutdownWithoutDrain,
+
     /// The handle was built without a system journal. Metrics watermark
     /// events live on the system journal, so a flow without one cannot
     /// produce the signals the barrier waits on.
@@ -150,23 +155,22 @@ impl MetricsBarrier {
         }
     }
 
-    /// Wait until the metrics aggregator has published its drain-complete
-    /// signal. Resolves on either `MetricsCoordination::Drained` or
-    /// `MetricsCoordination::Shutdown` to match the existing
-    /// historical drain polling contract.
-    /// Shutdown alone also follows failure. Completion acceptance must inspect
-    /// successful Drained and the final Exported/Shutdown settlement ordering.
+    /// Wait for successful final buffer publication and reader shutdown.
+    /// A Shutdown event without Drained reports failure, not successful completion.
     pub async fn wait_for_drained(&self) -> Result<(), MetricsBarrierError> {
         let mut scan_from = self.baseline_offset;
         loop {
             let envelopes = read_journal_from(&self.system_journal, scan_from).await?;
             let next_scan_from = scan_from + envelopes.len() as u64;
             for env in envelopes {
-                if let SystemPayload::MetricsCoordination(
-                    MetricsCoordinationEvent::Drained | MetricsCoordinationEvent::Shutdown,
-                ) = &env.payload
-                {
-                    return Ok(());
+                match &env.payload {
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained) => {
+                        return Ok(())
+                    }
+                    SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Shutdown) => {
+                        return Err(MetricsBarrierError::ShutdownWithoutDrain)
+                    }
+                    _ => {}
                 }
             }
             scan_from = next_scan_from;
@@ -544,7 +548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_for_drained_resolves_when_shutdown_appended_before_wait_begins() {
+    async fn wait_for_drained_rejects_shutdown_without_final_publication() {
         let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
         let harness = harness_with_system_journal(system_journal.clone(), None);
 
@@ -566,7 +570,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), barrier.wait_for_drained())
             .await
             .expect("wait should resolve within timeout")
-            .expect("wait should succeed");
+            .expect_err("shutdown is not a successful final publication");
     }
 
     #[tokio::test]

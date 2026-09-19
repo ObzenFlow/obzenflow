@@ -5,12 +5,11 @@
 //! Metrics aggregator supervisor - self-contained event loop
 //!
 //! The supervisor owns the FSM directly and runs autonomously.
-//! Once started, all communication happens through journal events only.
+//! Owned tail readers overwrite buffers; publication never waits for refresh I/O.
 
-use super::subscription::{MetricsSubscription, IDLE_BACKOFF};
-use crate::messaging::system_subscription::SystemSubscription;
-use crate::messaging::{PollResult, SubscriptionPoller};
+use super::buffer::TailReaders;
 use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::builder::EventReceiver;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
 use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::SystemId;
@@ -19,7 +18,7 @@ use std::sync::Arc;
 
 use super::fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
-    MetricsAggregatorState, MetricsJournalKind,
+    MetricsAggregatorState,
 };
 
 /// The supervisor that manages the metrics aggregator
@@ -33,11 +32,9 @@ pub(crate) struct MetricsAggregatorSupervisor {
     /// System ID for metrics writer
     pub(crate) system_id: SystemId,
 
-    pub(crate) data_subscription: Option<MetricsSubscription>,
-    pub(crate) error_subscription: Option<MetricsSubscription>,
-    pub(crate) system_subscription: Option<SystemSubscription<SystemEvent>>,
-    pub(crate) system_retry_at: Option<tokio::time::Instant>,
-    pub(crate) next_input: usize,
+    pub(crate) control: EventReceiver<MetricsAggregatorEvent>,
+    pub(crate) readers: Option<TailReaders>,
+    pub(crate) final_refresh: Option<tokio::time::Instant>,
 
     pub(crate) state_watcher: StateWatcher<MetricsAggregatorState>,
     pub(crate) last_state: Option<MetricsAggregatorState>,
@@ -111,6 +108,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
 
         match state {
             MetricsAggregatorState::Initializing => {
+                self.readers = Some(TailReaders::start(ctx));
                 // Publish ready event to system journal
                 // Metrics aggregator creates SystemEvent directly
                 let event = obzenflow_core::event::SystemEvent::new(
@@ -138,124 +136,52 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             }
 
             MetricsAggregatorState::Running | MetricsAggregatorState::Draining => {
-                use tokio::time::Instant;
-                let terminal = ctx.metrics_store.pipeline_terminal();
-                if terminal {
-                    for subscription in [&mut self.data_subscription, &mut self.error_subscription]
-                        .into_iter()
-                        .flatten()
-                    {
-                        subscription.observe_terminal();
-                    }
-                }
-                let export_at = ctx.metrics_store.next_export_at;
-                // Input and export eligibility share one rotation. Each read
-                // settles before advancing; actions fold the entire batch before
-                // this supervisor is dispatched again.
-                for _ in 0..4 {
-                    let input = self.next_input;
-                    if input == 0 {
-                        if !terminal && self.system_retry_at.is_none_or(|at| at <= Instant::now()) {
-                            if let Some(subscription) = &mut self.system_subscription {
-                                let result = subscription.poll_next().await;
-                                self.next_input = 1;
-                                match result {
-                                    PollResult::Event(envelope) => {
-                                        self.system_retry_at = None;
-                                        return Ok(EventLoopDirective::Transition(
-                                            MetricsAggregatorEvent::ProcessSystemEvent {
-                                                envelope: Box::new(envelope),
-                                            },
-                                        ));
-                                    }
-                                    PollResult::Error(error) => {
-                                        return Ok(EventLoopDirective::Transition(
-                                            MetricsAggregatorEvent::Error(error.to_string()),
-                                        ))
-                                    }
-                                    _ => self.system_retry_at = Some(Instant::now() + IDLE_BACKOFF),
-                                }
-                            }
-                        }
-                        self.next_input = 1;
-                    } else if input < 3 {
-                        let (subscription, journal_kind) = if input == 1 {
-                            (&mut self.data_subscription, MetricsJournalKind::Data)
-                        } else {
-                            (&mut self.error_subscription, MetricsJournalKind::Error)
-                        };
-                        if let Some(subscription) = subscription {
-                            let result = subscription.poll_batch().await;
-                            self.next_input = input + 1;
-                            match result {
-                                Ok(Some(batch)) => {
-                                    return Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::ProcessBatch {
-                                            events: batch.events,
-                                            journal_kind,
-                                            journal_stage: batch.stage,
-                                        },
-                                    ))
-                                }
-                                Err(error) => {
-                                    return Ok(EventLoopDirective::Transition(
-                                        MetricsAggregatorEvent::Error(error.to_string()),
-                                    ))
-                                }
-                                Ok(None) => {}
-                            }
-                        }
-                        self.next_input = input + 1;
-                    } else {
-                        self.next_input = 0;
-                        // Ready memory reads need not yield. Give cancellation
-                        // and other tasks service at the rotation boundary.
-                        tokio::task::yield_now().await;
-                        if terminal
-                            && [&self.data_subscription, &self.error_subscription]
-                                .into_iter()
-                                .flatten()
-                                .all(MetricsSubscription::is_complete)
-                        {
-                            ctx.metrics_store.inputs_covered = true;
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::FlowTerminal,
-                            ));
-                        }
-                        if export_at.is_none_or(|at| at <= Instant::now()) {
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::ExportMetrics,
-                            ));
-                        }
-                    }
-                }
-                // A rotation that began at export eligibility may discover
-                // its last ends afterwards. Finalisation must not sleep until
-                // the next periodic export in that case either.
-                if terminal
-                    && [&self.data_subscription, &self.error_subscription]
-                        .into_iter()
-                        .flatten()
-                        .all(MetricsSubscription::is_complete)
-                {
-                    ctx.metrics_store.inputs_covered = true;
+                use tokio::time::{Duration, Instant};
+                let buffer = ctx.metrics_store.buffer.clone();
+                let terminal = buffer.terminal(ctx.pipeline_writer);
+                if terminal && matches!(state, MetricsAggregatorState::Running) {
+                    self.final_refresh = Some(Instant::now());
                     return Ok(EventLoopDirective::Transition(
-                        MetricsAggregatorEvent::FlowTerminal,
+                        MetricsAggregatorEvent::StartDraining,
                     ));
                 }
-                let mut wake_at = export_at.unwrap_or_else(Instant::now);
-                if !terminal {
-                    wake_at = wake_at.min(self.system_retry_at.unwrap_or_else(Instant::now));
-                }
-                for subscription in [&self.data_subscription, &self.error_subscription]
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(at) = subscription.next_probe() {
-                        wake_at = wake_at.min(at);
+                let mut wake_at = ctx
+                    .metrics_store
+                    .next_export_at
+                    .unwrap_or_else(Instant::now);
+                if terminal {
+                    let since = *self.final_refresh.get_or_insert_with(Instant::now);
+                    // One current refresh opportunity, independent of journal length.
+                    // An unavailable journal retains its buffer and cannot become a
+                    // historical-drain barrier. Periodic exports remain eligible.
+                    let deadline = since + ctx.export_interval.min(Duration::from_millis(250));
+                    if buffer
+                        .refreshed_since(since, self.readers.as_ref().map_or(0, TailReaders::len))
+                        || Instant::now() >= deadline
+                    {
+                        if let Some(readers) = &mut self.readers {
+                            readers.stop().await;
+                        }
+                        return Ok(EventLoopDirective::Transition(
+                            MetricsAggregatorEvent::FlowTerminal,
+                        ));
                     }
+                    wake_at = wake_at.min(deadline);
                 }
-                tokio::time::sleep_until(wake_at).await;
+                if ctx
+                    .metrics_store
+                    .next_export_at
+                    .is_none_or(|at| at <= Instant::now())
+                {
+                    return Ok(EventLoopDirective::Transition(
+                        MetricsAggregatorEvent::ExportMetrics,
+                    ));
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep_until(wake_at) => {},
+                    _ = buffer.updated.notified() => {},
+                    Some(event) = self.control.recv() => return Ok(EventLoopDirective::Transition(event)),
+                }
                 Ok(EventLoopDirective::Continue)
             }
 
@@ -278,7 +204,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
 
 impl Drop for MetricsAggregatorSupervisor {
     fn drop(&mut self) {
-        // Clean shutdown - subscription will be dropped automatically
+        // JoinSet aborts all owned refresh tasks if the supervisor is cancelled.
         tracing::debug!("Metrics aggregator supervisor dropped");
     }
 }
@@ -397,11 +323,9 @@ mod tests {
             name: "metrics_aggregator".to_string(),
             system_journal: system_journal.clone(),
             system_id,
-            data_subscription: None,
-            error_subscription: None,
-            system_subscription: None,
-            system_retry_at: None,
-            next_input: 0,
+            control: _event_receiver,
+            readers: None,
+            final_refresh: None,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),
         };
@@ -419,7 +343,6 @@ mod tests {
             system_id,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
-            composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
         };
 
         let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Initializing, ctx).await;

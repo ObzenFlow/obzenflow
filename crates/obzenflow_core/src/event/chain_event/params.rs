@@ -67,6 +67,7 @@ pub struct CircuitBreakerSummaryEventParams {
 
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerOpenedEventParams {
+    pub cooldown_ms: u64,
     pub trigger: CircuitBreakerOpenTrigger,
     pub observed_calls: u64,
     pub error_rate: f64,

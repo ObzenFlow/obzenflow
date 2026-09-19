@@ -12,9 +12,11 @@
 use crate::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
-use crate::event::ChainEvent;
+use crate::event::provenance::ChainEventProvenance;
+use crate::event::{ChainEvent, ChainPayload};
 use crate::id::{CompositeId, StageId};
 use crate::metrics::snapshots::{ContractMetricsSnapshot, ContractViolationCauseLabel};
+use crate::JournalRecord;
 use crate::{EventId, EventType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -520,7 +522,28 @@ impl CompositeDurationAccumulator {
         if !event.is_typed_input() {
             return;
         }
-        let event_type = &event.envelope.provenance.event.event_type;
+        self.observe_provenance(boundaries, journal_stage, &event.envelope.provenance.event);
+    }
+
+    /// Fold a committed fact without rebuilding its authored event or copying its payload.
+    pub fn observe_record(
+        &mut self,
+        boundaries: &[CompositeBoundary],
+        journal_stage: StageId,
+        record: &JournalRecord<ChainPayload>,
+    ) {
+        if record.is_typed_input() {
+            self.observe_provenance(boundaries, journal_stage, &record.envelope.provenance.event);
+        }
+    }
+
+    fn observe_provenance(
+        &mut self,
+        boundaries: &[CompositeBoundary],
+        journal_stage: StageId,
+        event: &ChainEventProvenance,
+    ) {
+        let event_type = &event.event_type;
 
         for boundary in boundaries {
             let output_ports: Vec<_> = boundary
@@ -542,7 +565,7 @@ impl CompositeDurationAccumulator {
             }
 
             for activation in event
-                .composite_activations()
+                .composite_activations
                 .iter()
                 .filter(|activation| activation.composite_id == boundary.composite_id)
             {

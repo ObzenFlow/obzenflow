@@ -36,6 +36,137 @@ const CI_EVENT_LIMIT: usize = 5_000;
 const ERROR_EVERY: usize = 100;
 const EXPECTED_UNKNOWN_ERRORS: u64 = (CI_EVENT_LIMIT / ERROR_EVERY) as u64;
 
+/// Exercise the shipped policies with a bounded outage schedule. Both cooldowns
+/// remain five seconds, and every input must survive the failed source polls.
+#[cfg(all(feature = "web-host", feature = "prometheus"))]
+#[tokio::test]
+async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
+    use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
+    use obzenflow_core::config::ConfigSource;
+    use obzenflow_core::event::chain_event::ChainPayload;
+    use obzenflow_core::StageKey;
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    use obzenflow_runtime::runtime_config::BackpressureMode;
+    use serde_json::Value;
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir_in("target").unwrap();
+    let flow = prometheus_demo::flow_definition_with_outage_interval(
+        1_000,
+        directory.path().join("journals"),
+        500,
+    )
+    .build(FlowBuildContext::for_tests())
+    .await
+    .unwrap();
+    let topology = flow.topology().unwrap();
+    let source = topology
+        .stages()
+        .find(|stage| stage.name == "high_volume_source")
+        .unwrap();
+    let middleware = source.middleware.as_ref().unwrap();
+    assert_eq!(
+        middleware.circuit_breaker.as_ref().unwrap().cooldown_ms,
+        5_000
+    );
+    assert!(middleware.rate_limiter.is_some());
+    let config = flow.flow_effective_config().unwrap();
+    for (from, to) in [
+        ("high_volume_source", "error_processor"),
+        ("error_processor", "event_counter"),
+        ("error_processor", "completion_sink"),
+        ("event_counter", "summary_sink"),
+    ] {
+        let from = StageKey::from(from);
+        let to = StageKey::from(to);
+        assert_eq!(
+            config.backpressure_mode_for(&from, &to),
+            (BackpressureMode::Enforce, ConfigSource::Dsl)
+        );
+        assert_eq!(
+            config
+                .backpressure_window_for(&from, &to)
+                .unwrap()
+                .value
+                .as_u64(),
+            Some(64)
+        );
+        assert_eq!(
+            config.backpressure_stall_timeout_for(&from, &to),
+            Some(30_000)
+        );
+    }
+
+    let system = flow.system_journal().unwrap();
+    let archive = flow.run_substrate().locator().unwrap().path().to_path_buf();
+    tokio::time::timeout(Duration::from_secs(30), flow.run())
+        .await
+        .expect("the real demo must recover from both five-second openings")
+        .unwrap();
+
+    // Project the actual durable records through the same adapter as Studio.
+    let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
+    let records = system.read_all_unordered().await.unwrap();
+    let changes: Vec<(Value, u64)> = records
+        .iter()
+        .flat_map(|record| {
+            projection
+                .project(record, 0)
+                .into_iter()
+                .filter_map(|frame| {
+                    if frame.event.as_deref() != Some("middleware_lifecycle") {
+                        return None;
+                    }
+                    let payload: Value = serde_json::from_str(&frame.data).unwrap();
+                    (payload["middleware"] == "circuit_breaker")
+                        .then_some((payload, record.envelope.provenance.event.timestamp))
+                })
+        })
+        .collect();
+    let states: Vec<_> = changes
+        .iter()
+        .map(|(payload, _)| payload["state_to"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["open", "half_open", "open", "half_open", "closed"]);
+    for opening in [0, 2] {
+        assert_eq!(changes[opening].0["context"]["cooldown_ms"], 5_000);
+        let elapsed = changes[opening + 1].1 - changes[opening].1;
+        // Facts are persisted after each transition; allow journal scheduling
+        // skew while catching a missing cooldown or a burst of stale states.
+        assert!(
+            elapsed >= 4_900,
+            "half-open arrived after only {elapsed} ms"
+        );
+    }
+
+    let export = directory.path().join("events.jsonl");
+    obzenflow_infra::journal::disk::inspect::export_jsonl(&archive, Some(&export)).unwrap();
+    let events = exported_jsonl::chain_events(&std::fs::read_to_string(export).unwrap());
+    let mut inputs = Vec::new();
+    let mut summaries = Vec::new();
+    let mut receipts = 0;
+    for event in events {
+        if let ChainPayload::Fact(payload) = &event.payload {
+            if event.processing.status.is_success() {
+                match event.flow_context.stage_name.as_str() {
+                    "high_volume_source" => inputs.push(payload["id"].as_u64().unwrap()),
+                    "event_counter" => summaries.push(payload["event_count"].as_u64().unwrap()),
+                    _ => {}
+                }
+            }
+        }
+        receipts += usize::from(matches!(event.payload, ChainPayload::Delivery(_)));
+    }
+    inputs.sort_unstable();
+    assert_eq!(
+        inputs,
+        (0..1_000).collect::<Vec<_>>(),
+        "source recovery must not lose or duplicate inputs"
+    );
+    assert_eq!(summaries, [990]);
+    assert_eq!(receipts, 991);
+}
+
 /// Source that generates a high-volume stream with a deterministic error pattern.
 #[derive(Clone, Debug)]
 struct HighVolumeSource {

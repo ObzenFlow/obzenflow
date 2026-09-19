@@ -4,8 +4,8 @@
 
 //! Handle for controlling the metrics aggregator
 //!
-//! The metrics aggregator runs mostly autonomously, processing events from
-//! the journal. This handle allows for basic control like triggering exports
+//! The metrics aggregator publishes an asynchronously refreshed latest-value
+//! buffer. This handle allows for basic control like triggering exports
 //! or initiating shutdown.
 
 use super::fsm::{MetricsAggregatorEvent, MetricsAggregatorState};

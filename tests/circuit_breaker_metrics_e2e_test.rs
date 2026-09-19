@@ -57,10 +57,10 @@ impl TimedEventSource {
             ("failure".to_string(), Duration::from_millis(100)),
             ("failure".to_string(), Duration::from_millis(100)),
             ("failure".to_string(), Duration::from_millis(100)),
-            // Phase 3: More events while circuit is open (should be rejected)
-            ("rejected".to_string(), Duration::from_millis(100)),
-            ("rejected".to_string(), Duration::from_millis(100)),
-            ("rejected".to_string(), Duration::from_millis(100)),
+            // Phase 3: Source admission waits for recovery before polling again.
+            ("resumed".to_string(), Duration::from_millis(100)),
+            ("resumed".to_string(), Duration::from_millis(100)),
+            ("resumed".to_string(), Duration::from_millis(100)),
             // Phase 4: Wait for cooldown then attempt recovery
             ("recovery".to_string(), Duration::from_secs(2)), // Wait for circuit to go half-open
             ("recovery".to_string(), Duration::from_millis(100)),
@@ -151,7 +151,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         .with_metrics_exporter(metrics_model.clone());
     // Initialize tracing
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .with_test_writer()
         .try_init();
 
@@ -196,27 +196,18 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
     println!("Running flow to trigger circuit breaker state transitions...");
 
-    // Keep a metrics exporter handle even if the strict source delivery contract
-    // aborts after the circuit breaker rejects downstream traffic.
-    let metrics_exporter = metrics_model.clone();
-    let run_result = flow_handle.run().await;
-    if let Err(e) = run_result {
-        let error = format!("{e:?}");
-        assert!(
-            error.contains("SeqDivergence") || error.contains("Pipeline abort requested"),
-            "unexpected circuit breaker flow failure: {error}"
-        );
-        println!("Flow aborted after breaker-induced delivery divergence, as expected: {error}");
-    }
-
-    // Wait a bit to allow metrics aggregator to process events
-    sleep(Duration::from_secs(5)).await;
+    // Source admission pauses instead of rejecting inputs. Completion waits for
+    // metrics finalisation, so the exported snapshot is ready when run returns.
+    flow_handle
+        .run()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?;
 
     println!("\n=== Verifying Circuit Breaker Metrics ===");
 
     // Get metrics
     let metrics_text = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
-        .render(&metrics_exporter.snapshot())
+        .render(&metrics_model.snapshot())
         .map_err(|e| anyhow::anyhow!("Failed to render metrics: {e}"))?;
 
     // Debug output
@@ -231,81 +222,39 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         }
     }
 
-    // Verify circuit breaker metrics exist
-    let has_cb_state = metrics_text.contains("obzenflow_circuit_breaker_state");
-    let has_cb_rejection_rate = metrics_text.contains("obzenflow_circuit_breaker_rejection_rate");
-    let has_cb_failures = metrics_text.contains("obzenflow_circuit_breaker_consecutive_failures");
-
-    println!("\nCircuit Breaker Metrics Found:");
-    println!("  State metric: {}", if has_cb_state { "✓" } else { "✗" });
-    println!(
-        "  Rejection rate metric present: {}",
-        if has_cb_rejection_rate { "✓" } else { "✗" }
-    );
-    println!(
-        "  Consecutive failures metric present: {}",
-        if has_cb_failures { "✓" } else { "✗" }
-    );
-
-    // Check for state transitions in metrics
-    if has_cb_state {
-        // Look for evidence of state transitions
-        let state_lines: Vec<&str> = metrics_text
+    // The gauge reports the latest state, including recovery at EOF. Historical
+    // openings remain visible in cumulative measurements without replaying them.
+    // Sixteen polls comprise eight data batches, seven failures, and clean EOF.
+    for (metric, expected) in [
+        ("obzenflow_circuit_breaker_state", 0.0),
+        ("obzenflow_circuit_breaker_opened_total", 3.0),
+        ("obzenflow_circuit_breaker_requests_total", 16.0),
+        ("obzenflow_circuit_breaker_successes_total", 9.0),
+        ("obzenflow_circuit_breaker_failures_total", 7.0),
+        ("obzenflow_circuit_breaker_rejections_total", 0.0),
+    ] {
+        let prefix = format!("{metric}{{");
+        let values: Vec<f64> = metrics_text
             .lines()
-            .filter(|line| line.contains("obzenflow_circuit_breaker_state"))
+            .filter(|line| line.starts_with(&prefix) && line.contains("stage=\"cb_source\""))
+            .map(|line| line.rsplit_once(' ').unwrap().1.parse().unwrap())
             .collect();
-
-        println!("\nCircuit Breaker State Values:");
-        for line in &state_lines {
-            println!("  {line}");
-        }
-
-        // Should see state = 1.0 (open) at some point
-        let has_open_state = state_lines.iter().any(|line| line.contains("} 1"));
-
-        assert!(
-            has_open_state,
-            "Circuit breaker should have transitioned to OPEN state"
-        );
+        assert_eq!(values, [expected], "incorrect or missing {metric}");
     }
 
-    // Verify events processing (drop the lock before awaiting).
-    let (events_len, success_count) = {
-        let events = collected_events
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Failed to lock events: {e:?}"))?;
-
-        let events_len = events.len();
-        let success_count = events.iter().filter(|e| e.kind == "normal").count();
-
-        (events_len, success_count)
-    };
-
-    println!("\nFlow Processing Results:");
-    println!("  Total events sent: 15");
-    println!("  Events reached sink: {events_len}");
-    println!("  Events rejected/failed: {}", 15 - events_len);
-
-    // We expect fewer events due to circuit breaker rejections
-    assert!(
-        events_len < 15,
-        "Circuit breaker should have rejected some events"
+    let events = collected_events
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Failed to lock events: {e:?}"))?;
+    let sequences: Vec<_> = events.iter().map(|event| event.sequence).collect();
+    assert_eq!(
+        sequences,
+        [0, 1, 2, 7, 8, 9, 10, 11],
+        "all successful source batches must reach the sink exactly once"
     );
-
-    assert!(
-        success_count >= 3,
-        "Expected at least 3 successful events before breaker effects; got {success_count}"
-    );
-
-    // Final metrics check
-    sleep(Duration::from_millis(500)).await;
-    obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
-        .render(&metrics_exporter.snapshot())
-        .map_err(|e| anyhow::anyhow!("Failed to render final metrics: {e}"))?;
 
     println!("\n✅ Circuit Breaker Metrics E2E Test PASSED!");
-    println!("   - Circuit breaker limited downstream traffic (sink saw < 15 events)");
-    println!("   - Metrics exporter produced a coherent snapshot");
+    println!("   - Source pauses preserved every successful batch");
+    println!("   - Final metrics retain opening counts and report recovery");
 
     Ok(())
 }

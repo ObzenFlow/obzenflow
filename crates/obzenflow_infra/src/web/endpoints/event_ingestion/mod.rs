@@ -343,10 +343,6 @@ mod tests {
 
     use crate::journal::MemoryJournal;
     use obzenflow_dsl::{async_infinite_source, flow, sink, FlowDefinition};
-    use obzenflow_fsm::FsmAction;
-    use obzenflow_runtime::metrics::{
-        MetricsAggregatorAction, MetricsAggregatorContext, MetricsStore,
-    };
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handlers::{
         InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -816,39 +812,28 @@ mod tests {
             .collect()
     }
 
-    async fn replay_system_journal_through_refusal_aggregator(
+    async fn archived_refusal_totals(
         system_journal: Arc<dyn Journal<SystemEvent>>,
     ) -> HashMap<(obzenflow_core::ingress::IngressKey, String), u64> {
         let events = system_journal
             .read_causally_ordered()
             .await
             .expect("read archived system journal");
-        let mut ctx = MetricsAggregatorContext {
-            system_journal,
-            stage_data_journals: HashMap::new(),
-            stage_error_journals: HashMap::new(),
-            backpressure_registry: None,
-            include_error_journals: true,
-            metrics_exporter: Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default()),
-            metrics_store: MetricsStore::default(),
-            export_interval: std::time::Duration::from_secs(60),
-            system_id: SystemId::new(),
-            pipeline_writer: None,
-            stage_metadata: HashMap::new(),
-            composite_boundaries: Vec::new(),
-            composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
-        };
-
-        for envelope in events {
-            MetricsAggregatorAction::ProcessSystemEvent {
-                envelope: Box::new(envelope),
+        let mut totals = HashMap::new();
+        for record in events {
+            if let SystemPayload::IngressRefusal {
+                ingress_key,
+                reason,
+                event_count,
+                ..
+            } = record.payload
+            {
+                *totals
+                    .entry((ingress_key, reason.as_str().to_owned()))
+                    .or_insert(0) += event_count;
             }
-            .execute(&mut ctx)
-            .await
-            .expect("replay archived system event through metrics aggregator");
         }
-
-        ctx.metrics_store.ingestion_refusals_total
+        totals
     }
 
     #[tokio::test]
@@ -2052,8 +2037,7 @@ mod tests {
             1,
             "disk-backed live run writes one replay archive manifest"
         );
-        let replayed_refusals =
-            replay_system_journal_through_refusal_aggregator(system_journal.clone()).await;
+        let replayed_refusals = archived_refusal_totals(system_journal.clone()).await;
         assert_eq!(
             replayed_refusals.get(&("/api/orders".into(), "rate_limited".to_string())),
             Some(&1),

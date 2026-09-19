@@ -7,7 +7,7 @@
 
 use crate::execution::RuntimeExecution;
 use obzenflow_core::event::observability::families::{
-    observation_families as split, ObservationFamily,
+    any_observation_family, observation_families as split, ObservationFamily,
 };
 #[cfg(test)]
 use obzenflow_core::event::observability::RuntimeObservability;
@@ -31,6 +31,32 @@ struct Key {
 struct View {
     active_scope: Option<CaptureScope>,
     latest: HashMap<Key, ObservabilityContext>,
+}
+
+impl View {
+    fn can_replace(&self, key: &Key, capture: CaptureStamp, recorded: bool) -> bool {
+        let scope = capture.capture_scope;
+        if let Some(active) = self.active_scope {
+            if (!recorded && scope != active)
+                || (scope.flow_id == active.flow_id
+                    && scope.resume_generation > active.resume_generation)
+            {
+                return false;
+            }
+        }
+        if let Some(previous) = self.latest.get(key) {
+            if previous.capture.capture_scope == scope {
+                return previous.capture.capture_seq < capture.capture_seq;
+            }
+            if self.active_scope != Some(scope) {
+                let previous_scope = previous.capture.capture_scope;
+                return recorded
+                    && previous_scope.flow_id == scope.flow_id
+                    && previous_scope.resume_generation < scope.resume_generation;
+            }
+        }
+        true
+    }
 }
 
 /// A bounded, mutex-protected hash map of the latest observation per observer
@@ -161,8 +187,28 @@ impl LatestObservationMap {
 
     /// Restore only evidence already admitted through a consumer's journal cut.
     /// Recorded attachments never activate an execution generation.
-    pub(crate) fn offer_recorded(&self, packet: ObservabilityContext) {
-        let _ = self.select_recorded(packet);
+    pub(crate) fn offer_recorded(&self, packet: &ObservabilityContext) {
+        if self.could_update(packet, true).unwrap_or(false) {
+            let _ = self.select_inner(packet.clone(), true, false);
+        }
+    }
+
+    fn could_update(
+        &self,
+        packet: &ObservabilityContext,
+        recorded: bool,
+    ) -> Result<bool, ObservationOffer> {
+        let view = self.view.try_lock().map_err(|_| self.drop_sample())?;
+        Ok(any_observation_family(packet, |kind, capture| {
+            view.can_replace(
+                &Key {
+                    observer: capture.observer,
+                    kind,
+                },
+                capture,
+                recorded,
+            )
+        }))
     }
 
     /// An independent copy of the retained values and active scope.
@@ -184,20 +230,21 @@ impl LatestObservationMap {
         &self,
         observation: ObservabilityContext,
     ) -> Result<Vec<ObservabilityContext>, ObservationOffer> {
-        self.select_inner(observation, false)
+        self.select_inner(observation, false, true)
     }
 
     pub fn select_recorded(
         &self,
         observation: ObservabilityContext,
     ) -> Result<Vec<ObservabilityContext>, ObservationOffer> {
-        self.select_inner(observation, true)
+        self.select_inner(observation, true, true)
     }
 
     fn select_inner(
         &self,
         observation: ObservabilityContext,
         recorded: bool,
+        include_deltas: bool,
     ) -> Result<Vec<ObservabilityContext>, ObservationOffer> {
         let Some(observation) = observation.validated() else {
             return Err(self.drop_sample());
@@ -209,44 +256,29 @@ impl LatestObservationMap {
             return Err(self.drop_sample());
         };
         let mut selected = Vec::new();
+        let mut retained = false;
         let mut capacity_dropped = false;
         for (kind, packet) in families {
-            let scope = packet.capture.capture_scope;
-            if let Some(active) = view.active_scope {
-                if (!recorded && scope != active)
-                    || (scope.flow_id == active.flow_id
-                        && scope.resume_generation > active.resume_generation)
-                {
-                    continue;
-                }
-            }
             let key = Key {
                 observer: packet.capture.observer,
                 kind,
             };
-            if let Some(previous) = view.latest.get(&key) {
-                if previous.capture.capture_scope == packet.capture.capture_scope {
-                    if previous.capture.capture_seq >= packet.capture.capture_seq {
-                        continue;
-                    }
-                } else if view.active_scope != Some(scope) {
-                    let previous_scope = previous.capture.capture_scope;
-                    if !recorded
-                        || previous_scope.flow_id != scope.flow_id
-                        || previous_scope.resume_generation >= scope.resume_generation
-                    {
-                        continue;
-                    }
-                }
-            } else if view.latest.len() >= MAX_KEYS {
+            // Validation runs outside the lock. Recheck against concurrent live captures.
+            if !view.can_replace(&key, packet.capture, recorded) {
+                continue;
+            }
+            if !view.latest.contains_key(&key) && view.latest.len() >= MAX_KEYS {
                 self.drop_sample();
                 capacity_dropped = true;
                 continue;
             }
-            selected.push(packet.clone());
+            if include_deltas {
+                selected.push(packet.clone());
+            }
+            retained = true;
             view.latest.insert(key, packet);
         }
-        if selected.is_empty() && capacity_dropped {
+        if !retained && capacity_dropped {
             Err(ObservationOffer::Dropped)
         } else {
             Ok(selected)
@@ -256,7 +288,12 @@ impl LatestObservationMap {
 
 impl ObservationSink for LatestObservationMap {
     fn offer(&self, observation: ObservabilityContext) -> ObservationOffer {
-        match self.select(observation) {
+        match self.could_update(&observation, false) {
+            Ok(false) => return ObservationOffer::Accepted,
+            Err(dropped) => return dropped,
+            Ok(true) => {}
+        }
+        match self.select_inner(observation, false, false) {
             Ok(_) => ObservationOffer::Accepted,
             Err(dropped) => dropped,
         }
@@ -332,9 +369,11 @@ impl ObservationOwner {
         let sequence = self
             .sequence
             .as_ref()?
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
+            .fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |current_capture_seq| current_capture_seq.checked_add(1),
+            )
             .ok()?
             + 1;
         Some(ObservabilityContext::new(CaptureStamp {
@@ -390,7 +429,7 @@ mod tests {
         scope: CaptureScope,
         observer: WriterId,
         sequence: u64,
-        value: u32,
+        in_flight: u32,
     ) -> ObservabilityContext {
         let mut packet = ObservabilityContext::new(CaptureStamp {
             capture_scope: scope,
@@ -400,10 +439,69 @@ mod tests {
             observed_at_ms: sequence,
         });
         packet.runtime = Some(RuntimeObservability {
-            in_flight: Some(value),
+            in_flight: Some(in_flight),
             ..Default::default()
         });
         packet
+    }
+
+    #[test]
+    fn retained_candidates_use_family_stamps_and_validate_the_whole_packet() {
+        use obzenflow_core::event::observability::{ExecutionProgress, RuntimeSnapshot};
+
+        let observations = LatestObservationMap::default();
+        let scope = CaptureScope {
+            flow_id: FlowId::new(),
+            resume_generation: ReaderGeneration(0),
+        };
+        let writer = StageId::new().into();
+        let local = StageId::new().into();
+        observations.activate_scope(scope);
+        observations.offer_recorded(&packet(scope, writer, 100, 4));
+
+        // The outer family is old, but the independently stamped nested family is new.
+        let mut carrier = packet(scope, writer, 99, 9);
+        carrier.runtime_snapshot = Some(RuntimeSnapshot {
+            capture: packet(scope, local, 7, 0).capture,
+            progress: ExecutionProgress::default(),
+            fsm_state: "Running".into(),
+        });
+        observations.offer_recorded(&carrier);
+        let retained = observations.snapshot();
+        assert_eq!(retained.len(), 2);
+        assert_eq!(
+            retained.iter().find_map(|p| p.runtime.as_ref()?.in_flight),
+            Some(4)
+        );
+        assert_eq!(
+            retained
+                .iter()
+                .find_map(|p| p.runtime_snapshot.as_ref())
+                .unwrap()
+                .capture
+                .capture_seq,
+            CaptureSeq(7)
+        );
+
+        // Even a stale family must be validated when any part of its original
+        // packet is a candidate. Splitting first would wrongly admit in_flight.
+        carrier.capture.capture_seq = CaptureSeq(101);
+        carrier.runtime_snapshot.as_mut().unwrap().fsm_state = "x".repeat(65_536);
+        observations.offer_recorded(&carrier);
+        assert_eq!(observations.dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            serde_json::to_value(observations.snapshot()).unwrap(),
+            serde_json::to_value(&retained).unwrap()
+        );
+
+        // Entirely superseded optional measurements need no admission validation.
+        carrier.capture.capture_seq = CaptureSeq(98);
+        observations.offer_recorded(&carrier);
+        assert_eq!(observations.dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            serde_json::to_value(observations.snapshot()).unwrap(),
+            serde_json::to_value(retained).unwrap()
+        );
     }
 
     #[test]
@@ -634,8 +732,8 @@ mod tests {
             ..scope
         };
         let writer = StageId::new().into();
-        observations.offer_recorded(packet(resumed, writer, 1, 2));
-        observations.offer_recorded(packet(scope, writer, 1000, 9));
+        observations.offer_recorded(&packet(resumed, writer, 1, 2));
+        observations.offer_recorded(&packet(scope, writer, 1000, 9));
         assert_eq!(observations.active_scope(), None);
         assert_eq!(observations.snapshot()[0].capture.capture_scope, resumed);
         assert_eq!(observations.snapshot()[0].capture.observed_at_ms, 1);

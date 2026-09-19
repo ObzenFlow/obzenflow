@@ -24,6 +24,25 @@ use std::sync::Arc;
 
 type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
 
+/// Project current breaker settings into the published topology annotation.
+/// Its threshold is the consecutive failure limit or count-window size.
+fn circuit_breaker_topology_config(
+    breaker_config: &serde_json::Value,
+) -> Result<obzenflow_topology::CircuitBreakerInfo, serde_json::Error> {
+    let breaker_mode = &breaker_config["mode"];
+    let opening_threshold = match breaker_mode.get("kind").and_then(serde_json::Value::as_str) {
+        Some("consecutive") => breaker_mode.get("consecutive_failures"),
+        Some("rate_based") => breaker_mode.get("count_window"),
+        _ => None,
+    };
+    serde_json::from_value(serde_json::json!({
+        "threshold": opening_threshold,
+        "cooldown_ms": breaker_config.get("open_for_ms"),
+        "open_policy": "fail_fast",
+        "has_fallback": false,
+    }))
+}
+
 fn describe_handler_keys(keys: &[&str]) -> String {
     match keys {
         [] => "<none>".to_string(),
@@ -1614,11 +1633,19 @@ where
                         circuit_breaker: config
                             .circuit_breaker
                             .as_ref()
-                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                            .map(circuit_breaker_topology_config)
+                            .transpose()
+                            .map_err(|error| FlowBuildError::StageResourcesFailed(format!(
+                                "Stage '{id}' has invalid circuit-breaker topology configuration: {error}"
+                            )))?,
                         rate_limiter: config
                             .rate_limiter
                             .as_ref()
-                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                            .map(|v| serde_json::from_value(v.clone()))
+                            .transpose()
+                            .map_err(|error| FlowBuildError::StageResourcesFailed(format!(
+                                "Stage '{id}' has invalid rate-limiter topology configuration: {error}"
+                            )))?,
                         // Published topology 0.5.1 retains this producer-dead
                         // compatibility tombstone. First-party runtime output
                         // never populates it.
@@ -1721,6 +1748,51 @@ where
         error,
         run: __run_state,
     })
+}
+
+#[cfg(test)]
+mod middleware_topology_tests {
+    use super::*;
+    use obzenflow_adapters::middleware::{CircuitBreaker, MiddlewareFactory};
+    use std::time::Duration;
+
+    #[test]
+    fn current_breaker_modes_preserve_their_cooldown_in_published_topology() {
+        let breakers = [
+            (CircuitBreaker::builder().consecutive_failures(3), 3),
+            (
+                CircuitBreaker::builder()
+                    .count_window(10)
+                    .minimum_calls(2)
+                    .failure_rate_threshold(0.5),
+                10,
+            ),
+        ];
+        for (builder, threshold) in breakers {
+            let breaker = builder.open_for(Duration::from_secs(5)).build().unwrap();
+            let projected =
+                circuit_breaker_topology_config(&breaker.config_snapshot().unwrap()).unwrap();
+            assert_eq!(projected.cooldown_ms, 5_000);
+            assert_eq!(projected.threshold, threshold);
+            assert!(!projected.has_fallback);
+            let wire = serde_json::to_value(projected).unwrap();
+            assert_eq!(wire["cooldown_ms"], 5_000);
+        }
+    }
+
+    #[test]
+    fn malformed_breaker_configuration_is_an_error_instead_of_an_absent_annotation() {
+        for snapshot in [
+            serde_json::json!({"mode": {"kind": "consecutive", "consecutive_failures": 3}}),
+            serde_json::json!({"mode": {"kind": "unknown"}, "open_for_ms": 5_000}),
+            serde_json::json!({
+                "threshold": 3, "cooldown_ms": 5_000,
+                "open_policy": "fail_fast", "has_fallback": false
+            }),
+        ] {
+            assert!(circuit_breaker_topology_config(&snapshot).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

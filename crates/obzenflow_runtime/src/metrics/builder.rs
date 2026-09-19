@@ -107,7 +107,6 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
 /// Prepared journal inputs, with no live child and no published readiness.
 pub(crate) struct PreparedMetricsAggregator {
     context: MetricsAggregatorContext,
-    io: super::fsm::MetricsAggregatorIo,
     system_journal: Arc<dyn Journal<SystemEvent>>,
     system_id: obzenflow_core::id::SystemId,
 }
@@ -118,7 +117,7 @@ impl MetricsAggregatorBuilder {
         let system_id = obzenflow_core::id::SystemId::new();
 
         // Create metrics context with all mutable state
-        let (mut metrics_context, metrics_io) = MetricsAggregatorContext::new(
+        let mut metrics_context = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
             self.metrics_exporter,
@@ -134,7 +133,6 @@ impl MetricsAggregatorBuilder {
 
         Ok(PreparedMetricsAggregator {
             context: metrics_context,
-            io: metrics_io,
             system_journal: self.system_journal,
             system_id,
         })
@@ -146,20 +144,17 @@ impl PreparedMetricsAggregator {
         self.system_id.into()
     }
 
-    /// The caller authorises the child's lifetime. All fallible journal input
-    /// construction happened in prepare; spawning does no storage I/O.
+    /// The caller authorises the child's lifetime. Preparation creates no
+    /// journal readers; owned tail tasks start inside the supervisor.
     pub(crate) fn start(self) -> Result<super::MetricsHandle, BuilderError> {
         let Self {
             context: metrics_context,
-            io: metrics_io,
             system_journal,
             system_id,
         } = self;
 
-        // Create channels for supervisor communication
-        // Even though metrics runs autonomously, we still create channels
-        // for consistency and potential future use
-        let (event_sender, _event_receiver, state_watcher) =
+        // Lifecycle control and explicit export requests share the owned supervisor.
+        let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
                 .with_event_buffer(10) // Small buffer, rarely used
                 .build(MetricsAggregatorState::Initializing);
@@ -169,11 +164,9 @@ impl PreparedMetricsAggregator {
             name: "metrics_aggregator".to_string(),
             system_journal,
             system_id,
-            data_subscription: Some(metrics_io.data_subscription),
-            error_subscription: metrics_io.error_subscription,
-            system_subscription: Some(metrics_io.system_subscription),
-            system_retry_at: None,
-            next_input: 0,
+            control: event_receiver,
+            readers: None,
+            final_refresh: None,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),
         };

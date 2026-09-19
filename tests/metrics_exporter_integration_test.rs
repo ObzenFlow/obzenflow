@@ -672,7 +672,6 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         "obzenflow_circuit_breaker_failures_total".to_string(),
         "obzenflow_circuit_breaker_slow_total".to_string(),
         "obzenflow_circuit_breaker_time_in_state_seconds_total".to_string(),
-        "obzenflow_circuit_breaker_state_transitions_total".to_string(),
         flow_label.clone(),
         cb_stage_label.clone(),
     ];
@@ -683,7 +682,6 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
             && text.contains("obzenflow_circuit_breaker_failures_total")
             && text.contains("obzenflow_circuit_breaker_slow_total")
             && text.contains("obzenflow_circuit_breaker_time_in_state_seconds_total")
-            && text.contains("obzenflow_circuit_breaker_state_transitions_total")
             && text.contains(&flow_label)
             && text.contains(&cb_stage_label)
     })?;
@@ -732,25 +730,11 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         "expected fast source calls to leave circuit_breaker_slow_total=0, got {slow_total}"
     );
 
-    let transitions_total = metric_line_value(
-        &metrics_text,
-        "obzenflow_circuit_breaker_state_transitions_total{",
-        &[
-            flow_label.clone(),
-            cb_stage_label.clone(),
-            "from_state=\"closed\"".to_string(),
-            "to_state=\"open\"".to_string(),
-        ],
-    )
-    .ok_or_else(|| {
-        anyhow!(
-            "missing circuit_breaker_state_transitions_total closed->open for {cb_stage_label}\n{}",
-            filter_metrics_lines(&metrics_text, &debug_patterns, 120)
-        )
-    })?;
     assert!(
-        (transitions_total - 1.0).abs() < f64::EPSILON,
-        "expected closed->open transition count=1, got {transitions_total}"
+        !metrics_text
+            .lines()
+            .any(|line| line.starts_with("obzenflow_circuit_breaker_state_transitions_total{")),
+        "latest-value reporting must not invent historical transition totals"
     );
 
     for state in ["closed", "open", "half_open"] {
@@ -819,14 +803,12 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
     let flow_label = "flow=\"metrics_source_rate_based_cb\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker_opened_total".to_string(),
-        "obzenflow_circuit_breaker_state_transitions_total".to_string(),
         flow_label.clone(),
         cb_stage_label.clone(),
     ];
 
     let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_circuit_breaker_opened_total")
-            && text.contains("obzenflow_circuit_breaker_state_transitions_total")
             && text.contains(&flow_label)
             && text.contains(&cb_stage_label)
     })?;
@@ -842,25 +824,11 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
         "expected source rate-based circuit_breaker_opened_total=1, got {opened_total}"
     );
 
-    let transitions_total = metric_line_value(
-        &metrics_text,
-        "obzenflow_circuit_breaker_state_transitions_total{",
-        &[
-            flow_label.clone(),
-            cb_stage_label.clone(),
-            "from_state=\"closed\"".to_string(),
-            "to_state=\"open\"".to_string(),
-        ],
-    )
-    .ok_or_else(|| {
-        anyhow!(
-            "missing source rate-based closed->open transition for {cb_stage_label}\n{}",
-            filter_metrics_lines(&metrics_text, &debug_patterns, 120)
-        )
-    })?;
     assert!(
-        (transitions_total - 1.0).abs() < f64::EPSILON,
-        "expected source rate-based closed->open transition count=1, got {transitions_total}"
+        !metrics_text
+            .lines()
+            .any(|line| line.starts_with("obzenflow_circuit_breaker_state_transitions_total{")),
+        "latest-value reporting must not invent historical transition totals"
     );
 
     Ok(())
@@ -1260,18 +1228,17 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         run_with_metrics_barrier(test_handle, timeout_flow, metrics_model.clone()).await?;
 
     let debug_patterns = vec![
-        "obzenflow_contract_results_total".to_string(),
+        "obzenflow_contract_reader_seq".to_string(),
         "obzenflow_contract_violations_total".to_string(),
         "obzenflow_contract_overrides_total".to_string(),
         "flow=\"metrics_contracts_exporter\"".to_string(),
     ];
     let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
-        text.contains("obzenflow_contract_results_total")
+        text.contains("obzenflow_contract_reader_seq")
             && text.contains("flow=\"metrics_contracts_exporter\"")
     })?;
 
-    // For every structurally attached contract, there must be a corresponding results series
-    // with ID-first labels for joinability.
+    // Each attached contract exposes its latest reader position with joinable labels.
     for ((upstream, downstream), contracts) in contract_attachments.iter() {
         for contract in contracts {
             let upstream_label = format!("upstream_stage_id=\"{upstream}\"");
@@ -1280,13 +1247,13 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
 
             assert!(
                 metrics_text.lines().any(|l| {
-                    l.starts_with("obzenflow_contract_results_total{")
+                    l.starts_with("obzenflow_contract_reader_seq{")
                         && l.contains("flow=\"metrics_contracts_exporter\"")
                         && l.contains(&upstream_label)
                         && l.contains(&downstream_label)
                         && l.contains(&contract_label)
                 }),
-                "missing contract results series for {upstream_label} {downstream_label} {contract_label}"
+                "missing contract reader-position series for {upstream_label} {downstream_label} {contract_label}"
             );
         }
     }

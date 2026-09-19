@@ -4,6 +4,7 @@
 
 //! Metrics aggregator implementation
 
+mod buffer;
 pub mod builder;
 pub mod constants;
 pub mod fsm;
@@ -35,16 +36,13 @@ pub(crate) struct RecordingSnapshots {
 }
 #[cfg(test)]
 impl obzenflow_core::metrics::MetricsSnapshotExporter for RecordingSnapshots {
-    fn publish_app_snapshot(&self, value: obzenflow_core::metrics::AppMetricsSnapshot) {
-        *self.app.lock().unwrap() = Some(value);
+    fn publish_app_snapshot(&self, snapshot: obzenflow_core::metrics::AppMetricsSnapshot) {
+        *self.app.lock().unwrap() = Some(snapshot);
     }
-    fn publish_infra_snapshot(&self, value: obzenflow_core::metrics::InfraMetricsSnapshot) {
-        *self.infra.lock().unwrap() = Some(value);
+    fn publish_infra_snapshot(&self, snapshot: obzenflow_core::metrics::InfraMetricsSnapshot) {
+        *self.infra.lock().unwrap() = Some(snapshot);
     }
 }
-
-mod snapshot;
-mod subscription;
 
 #[cfg(feature = "test-support")]
 pub(crate) mod tests;

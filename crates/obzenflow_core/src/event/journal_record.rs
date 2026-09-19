@@ -143,6 +143,12 @@ impl JournalRecord<ChainPayload> {
     pub fn is_fact(&self) -> bool {
         matches!(self.payload, ChainPayload::Fact(_))
     }
+    pub fn is_typed_input(&self) -> bool {
+        matches!(
+            self.payload,
+            ChainPayload::Fact(_) | ChainPayload::CompositeData(_)
+        )
+    }
     pub fn consumes_data_credit(&self) -> bool {
         self.payload.consumes_data_credit()
     }

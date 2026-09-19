@@ -6,7 +6,7 @@
 //! Each factory call creates an isolated flow for a scenario or parameterised case.
 //! Only the test entry points are public; lifecycle types remain crate-private.
 
-pub use crate::pipeline::builder::tests::subscription_or_metrics_preparation_failure_joins_every_supplied_stage;
+pub use crate::pipeline::builder::tests::subscription_preparation_failure_joins_every_supplied_stage;
 pub use crate::pipeline::tests::admission::{
     controlled_journal_preserves_causality_groups_and_live_readers,
     controls_and_operational_failure_follow_the_approved_successor_matrix,
@@ -37,7 +37,7 @@ pub use crate::pipeline::tests::fsm::{
 pub use crate::pipeline::tests::metrics::{
     drain_metrics_skips_when_metrics_not_started,
     dropping_pipeline_context_cancels_its_metrics_supervisor,
-    late_metrics_bootstrap_reads_all_physical_inputs_without_stage_eof,
+    late_metrics_bootstrap_selects_current_values_without_stage_eof,
     metrics_preparation_is_passive_and_cancellation_prevents_late_installation,
     original_terminal_acknowledgement_expires_metrics_before_delayed_journal_consumption,
     parent_panic_retains_metrics_publication_until_repeated_flow_joins_finish,

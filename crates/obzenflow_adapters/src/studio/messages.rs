@@ -414,6 +414,7 @@ pub(super) enum CircuitBreakerUpdate<'a> {
 #[serde(untagged)]
 pub(super) enum CircuitTransition<'a> {
     Opened {
+        cooldown_ms: u64,
         error_rate: f64,
         failure_count: u64,
         trigger: CircuitBreakerOpenTrigger,

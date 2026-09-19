@@ -62,6 +62,43 @@ fn decode(path: &Path, offset: u64, bytes: &[u8]) -> Result<JournalRecord<ChainP
 }
 
 #[test]
+fn ordinary_and_measured_decode_share_validation_and_record_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("decode-modes.log");
+    let store = DefinitionStore::default();
+    let original = complete_observation_record();
+    for _ in 0..2 {
+        // The second frame exercises external definition references as well.
+        let (offset, bytes) = persist(&path, &original, store.clone());
+        let body = frame::validate(&bytes).unwrap();
+        let ordinary = Decoder::cold(&path)
+            .decode::<ChainEvent>(body, offset)
+            .unwrap();
+        let (measured, sizes) = Decoder::cold(&path)
+            .decode_measured::<ChainEvent>(body, offset)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(ordinary.into_records()).unwrap(),
+            serde_json::to_value(measured.into_records()).unwrap()
+        );
+        assert_eq!(sizes.records, 1);
+        assert_eq!(sizes.packets, 1);
+        assert_eq!(
+            sizes.provenance + sizes.observability + sizes.payload + sizes.shared,
+            bytes.len()
+        );
+        for malformed in [&body[..body.len() - 1], &[body, &[0]].concat()] {
+            assert!(Decoder::cold(&path)
+                .decode::<ChainEvent>(malformed, offset)
+                .is_err());
+            assert!(Decoder::cold(&path)
+                .decode_measured::<ChainEvent>(malformed, offset)
+                .is_err());
+        }
+    }
+}
+
+#[test]
 fn absolute_current_numbers_do_not_depend_on_previous_numeric_records() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("numbers.log");

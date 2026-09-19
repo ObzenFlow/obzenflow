@@ -424,12 +424,13 @@ pub enum ReplayLifecycleEvent {
 pub enum MetricsCoordinationEvent {
     Ready,
     DrainRequested,
+    /// Available metrics buffer published and owned refresh readers stopped.
+    /// This is not a physical journal-coverage certificate.
     Drained,
     Shutdown,
-    /// Stage keys cover only the bound stage writer's sequentially folded
-    /// data-journal component. Error rails and archived/foreign writers are
-    /// not represented as stage-data coverage. System keys cover system facts.
-    /// Complete physical observation requires successful metrics Drained.
+    /// Positions of selected current carriers. Stage keys refer to the bound
+    /// stage writer's data journal; error and foreign carriers cannot advance
+    /// those positions. Neither Exported nor Drained certifies history coverage.
     Exported {
         watermark: VectorClock,
     },

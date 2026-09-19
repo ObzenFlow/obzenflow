@@ -83,6 +83,8 @@ pub enum CircuitState {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CircuitBreakerFact {
     Opened {
+        /// Configured minimum wait before another probe is permitted.
+        cooldown_ms: u64,
         /// Failure rate in the population that caused this transition, not the
         /// breaker's cumulative lifetime failure rate.
         error_rate: f64,
@@ -357,4 +359,34 @@ pub enum CircuitBreakerRejectionReason {
     ProbeInProgress,
     #[default]
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opened_fact_requires_and_round_trips_its_cooldown() {
+        let mut opening_json = serde_json::json!({
+            "action": "opened", "error_rate": 1.0, "failure_count": 3,
+            "trigger": "consecutive_failures", "observed_calls": 3,
+            "cooldown_ms": 5_000
+        });
+        let opening: CircuitBreakerFact = serde_json::from_value(opening_json.clone()).unwrap();
+        assert!(matches!(
+            &opening,
+            CircuitBreakerFact::Opened {
+                cooldown_ms: 5_000,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(opening).unwrap()["cooldown_ms"], 5_000);
+
+        opening_json.as_object_mut().unwrap().remove("cooldown_ms");
+        let missing_cooldown =
+            serde_json::from_value::<CircuitBreakerFact>(opening_json.clone()).unwrap_err();
+        assert!(missing_cooldown.to_string().contains("cooldown_ms"));
+        opening_json["cooldown_ms"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<CircuitBreakerFact>(opening_json).is_err());
+    }
 }

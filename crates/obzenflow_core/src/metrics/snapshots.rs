@@ -226,7 +226,7 @@ pub struct AppMetricsSnapshot {
     pub stage_last_event_time: HashMap<StageId, chrono::DateTime<chrono::Utc>>,
 
     /// Stage lifecycle states (FLOWIP-059b - essential events only)
-    /// Maps (StageId, state_name) to whether that state has been seen
+    /// Maps (StageId, state_name) to the retained current state.
     pub stage_lifecycle_states: HashMap<(StageId, String), bool>,
 
     /// Pipeline state (FLOWIP-059b)
@@ -235,8 +235,8 @@ pub struct AppMetricsSnapshot {
     /// Per-stage vector clock watermark (FLOWIP-059c).
     /// This mirrors MetricsStore.stage_vector_clocks and is used by exporters
     /// to expose obzenflow_stage_vector_clock metrics.
-    /// Each value covers this stage writer in its own data journal only;
-    /// error/foreign/replay rows cannot manufacture current-stage coverage.
+    /// Each value identifies a selected own-writer carrier in the data journal.
+    /// It does not certify complete historical coverage.
     pub stage_vector_clocks: HashMap<StageId, u64>,
 
     /// Exact logical throughput at connected named composite ports
@@ -374,14 +374,20 @@ pub struct LivenessMetricsSnapshot {
     pub edge_idle_seconds: HashMap<(StageId, StageId), f64>,
 }
 
-/// Aggregated AI chunk planning metrics per stage.
+/// Current AI chunk planning measurements per stage. Historical fact totals
+/// are absent when no cumulative measurement supplies them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AiChunkingMetricsSnapshot {
-    pub jobs_total: u64,
-    pub input_items_total: u64,
-    pub planned_items_total: u64,
-    pub excluded_items_total: u64,
-    pub chunks_emitted_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_items_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_items_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_items_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks_emitted_total: Option<u64>,
     pub rerender_attempts_total: Option<u64>,
     pub max_depth_reached: Option<u32>,
     pub budget_overhead_tokens: Option<u64>,

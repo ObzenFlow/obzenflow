@@ -33,6 +33,16 @@ where
         None
     }
 
+    /// Current committed carriers, newest first, for reporting keys and
+    /// independently stamped observation families. Cost is proportional to
+    /// retained keys and their carrier frames, never the journal's history.
+    /// Implementations must not scan, rebuild an index, or write checkpoints
+    /// here. An unavailable live index returns no values; callers retain their
+    /// previous buffer. This does not certify physical journal coverage.
+    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        Ok(Vec::new())
+    }
+
     /// Configure this journal before publication starts. Handles of the same
     /// journal share the policy and allowance; other journals are independent.
     fn configure(&self, config: JournalConfig) -> Result<(), JournalError> {

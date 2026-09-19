@@ -643,34 +643,11 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let rendered = obzenflow_adapters::monitoring::projections::PrometheusProjection::new()
         .render(&metrics.snapshot())
         .expect("terminal backpressure metrics should render");
-    let duration_count = rendered
-        .lines()
-        .find_map(|line| {
-            if line.starts_with("obzenflow_composite_boundary_duration_seconds_count{")
-                && line.contains("composite=\"ai_map_reduce:digest\"")
-                && line.contains("entry_port=\"in\"")
-                && line.contains("exit_port=\"out\"")
-            {
-                line.split_whitespace().last()?.parse::<u64>().ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "runtime resource wiring must stamp the digest input activation and project its final output:\n{rendered}"
-            )
-        });
-    assert_eq!(
-        duration_count, 1,
-        "one admitted seed and one final output form one paired boundary duration"
-    );
     assert!(
-        !rendered.lines().any(|line| {
-            line.starts_with("obzenflow_composite_boundary_duration_invalid_total{")
-                && line.contains("composite=\"ai_map_reduce:digest\"")
-        }),
-        "the canonical ai_map_reduce boundary must not produce rejected duration evidence"
+        !rendered
+            .lines()
+            .any(|line| line.starts_with("obzenflow_composite_boundary_duration_seconds_count{")),
+        "live metrics must not reconstruct paired historical durations"
     );
     let in_flight: Vec<&str> = rendered
         .lines()

@@ -4,8 +4,8 @@
 
 //! Explicit, best-effort inspection of protected accounting in journal tails.
 //!
-//! Collector accounting comes from its sequential fold, not these helpers.
-//! Optional measurements use the committed-attachment index independently.
+//! These helpers use the same live current-key lookup as background refresh.
+//! They never scan or reconstruct journal history.
 
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::RuntimeProvenance;
@@ -16,8 +16,6 @@ use obzenflow_core::{Journal, WriterId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const SEARCH_WINDOWS: [usize; 8] = [1, 5, 20, 100, 500, 2_000, 10_000, 50_000];
-
 type StageJournalEntry = (
     StageId,
     Arc<dyn Journal<ChainEvent>>,
@@ -26,40 +24,17 @@ type StageJournalEntry = (
 
 /// Read the most recent `RuntimeProvenance` from a journal's tail.
 ///
-/// Uses a graduated search to handle cases where the very last events may not
-/// carry `runtime_context` (e.g., control/forwarded events, partial writes).
-/// The search is capped and makes no completeness claim. Metrics export and
-/// terminal accounting do not use this inspection path.
-///
-/// This relies on `Journal::read_last_n` returning events in
-/// most-recent-first order.
+/// Reads selected current carriers, newest first. Missing live locators yield
+/// no value; archive history is not rebuilt by a metrics helper.
 pub async fn read_latest_runtime_context(
     journal: &Arc<dyn Journal<ChainEvent>>,
 ) -> Option<RuntimeProvenance> {
-    // In most flows, the last few events contain a runtime_context snapshot.
-    // However, some stages can end with a large number of control or forwarded
-    // events that omit runtime_context, so we expand the search window.
-    for n in SEARCH_WINDOWS {
-        match journal.read_last_n(n).await {
-            Ok(events) => {
-                let reached_beginning = events.len() < n;
-                // IMPORTANT: read_last_n returns most recent first (API contract).
-                for env in events.into_iter() {
-                    if let Some(ctx) = env.envelope.provenance.event.runtime {
-                        return Some(ctx);
-                    }
-                }
-                if reached_beginning {
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::debug!("Failed to read last {} from journal: {}", n, e);
-                continue;
-            }
-        }
-    }
-    None
+    journal
+        .read_metrics_tail()
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|record| record.envelope.provenance.event.runtime)
 }
 
 /// Read the most recent `RuntimeProvenance` from a journal's tail for a specific
@@ -73,36 +48,17 @@ pub async fn read_latest_runtime_context_for_stage(
     journal: &Arc<dyn Journal<ChainEvent>>,
     stage_id: StageId,
 ) -> Option<RuntimeProvenance> {
-    // See read_latest_runtime_context. The stage-filtered variant can be more
-    // sensitive to "tail noise" because forwarded events often re-stamp
-    // flow_context but omit runtime_context.
-    for n in SEARCH_WINDOWS {
-        match journal.read_last_n(n).await {
-            Ok(events) => {
-                let reached_beginning = events.len() < n;
-                for env in events.into_iter() {
-                    if let Some(ctx) = env.envelope.provenance.event.runtime.clone() {
-                        if env.envelope.provenance.event.flow_context.stage_id == stage_id {
-                            return Some(ctx);
-                        }
-                    }
-                }
-                if reached_beginning {
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Failed to read last {} from journal for stage {:?}: {}",
-                    n,
-                    stage_id,
-                    e
-                );
-                continue;
-            }
-        }
-    }
-    None
+    journal
+        .read_metrics_tail()
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|record| {
+            let event = record.envelope.provenance.event;
+            (event.flow_context.stage_id == stage_id && event.writer_id == WriterId::from(stage_id))
+                .then_some(event.runtime)
+                .flatten()
+        })
 }
 
 /// Read stage metrics from journal tails.
@@ -120,15 +76,21 @@ pub async fn read_stage_metrics_from_tail(
     let mut metrics = super::fsm::StageMetrics::default();
     let observations = super::observations::LatestObservationMap::default();
     for journal in std::iter::once(data_journal).chain(error_journal) {
-        if let Some(provenance) = read_latest_runtime_context_for_stage(journal, stage_id).await {
-            metrics.merge_runtime_context(&provenance);
+        if let Ok(records) = journal.read_metrics_tail().await {
+            for record in records {
+                if let Some(packet) = &record.envelope.observability {
+                    observations.offer_recorded(packet);
+                }
+                let event = record.envelope.provenance.event;
+                if event.flow_context.stage_id == stage_id
+                    && event.writer_id == WriterId::from(stage_id)
+                {
+                    if let Some(provenance) = event.runtime {
+                        metrics.merge_runtime_context(&provenance);
+                    }
+                }
+            }
         }
-        super::snapshot::retain_journal_observations(
-            journal.as_ref(),
-            WriterId::from(stage_id),
-            &observations,
-        )
-        .await;
     }
     for packet in observations.snapshot() {
         if let Some(runtime) = packet.runtime {
@@ -265,6 +227,12 @@ mod tests {
             let mut guard = self.events.lock().unwrap();
             guard.push(envelope.clone());
             Ok(envelope)
+        }
+
+        async fn read_metrics_tail(
+            &self,
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+            Ok(self.events.lock().unwrap().iter().rev().cloned().collect())
         }
 
         async fn read_all_unordered(

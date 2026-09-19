@@ -3,6 +3,21 @@
 This example demonstrates the framework’s fixed Prometheus reporting format with explicit opt-in. Ordinary ObzenFlow launches
 start neither metrics reporting nor an HTTP host, including when those capabilities are compiled.
 
+The default 100,000-input run also exercises circuit breaking and backpressure. Source
+intake is limited to 1,000 events/second. After every 20,000 inputs, the simulated input
+service times out: its breaker opens for five seconds, the first half-open probe fails,
+and it opens for another five seconds before recovering. Watch `high_volume_source` in
+Studio for `Open → Half-open → Open → Half-open → Closed`. Each opening carries its
+five-second cooldown to Studio. Runs of 20,000 inputs or fewer finish before the first
+outage; the small acceptance runs below do not exercise breaker recovery.
+
+Backpressure is enabled on all four edges, with a 64-event window and a 30-second stall
+timeout. These are demo defaults declared in the flow and can be overridden through
+`[runtime.backpressure.flow]`. The outage retries preserve all input IDs; the existing
+transform still routes every hundredth input to its error journal. A default run therefore
+retains 100,000 inputs and 99,000 successful processed events, with four ten-second
+outages in addition to its ordinary processing time.
+
 Build one executable for reporting enabled and disabled:
 
 ```sh

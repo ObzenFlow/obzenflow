@@ -553,6 +553,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             7,
             MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
+                cooldown_ms: 5_000,
                 error_rate: 0.5,
                 failure_count: 2,
                 trigger: CircuitBreakerOpenTrigger::FailureRate,
@@ -640,6 +641,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     );
     assert!(payload(&frames[1][0]).get("state_from").is_none());
     assert_eq!(payload(&frames[1][0])["state_to"], "open");
+    assert_eq!(payload(&frames[1][0])["context"]["cooldown_ms"], 5_000);
     assert_eq!(
         payload(snapshots[2].as_ref().unwrap())["middleware"][0]["circuit_breaker"]["state"],
         "open"

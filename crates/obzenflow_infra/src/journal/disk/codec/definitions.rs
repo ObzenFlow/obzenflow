@@ -291,7 +291,7 @@ impl WriteDefinitions for WriteTable {
     }
 }
 
-pub(super) struct ReadTable<'a> {
+pub(super) struct ReadTable<'a, const MEASURE: bool> {
     entries: Vec<Entry>,
     decoded: HashMap<usize, Value>,
     store: &'a DefinitionStore,
@@ -304,7 +304,7 @@ pub(super) struct ReadTable<'a> {
     capture: Option<Value>,
 }
 
-impl<'a> ReadTable<'a> {
+impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
     pub(super) fn begin_record(&mut self) {
         self.capture = None;
     }
@@ -315,8 +315,12 @@ impl<'a> ReadTable<'a> {
         offset: u64,
     ) -> Result<Self> {
         let mut costs = Vec::new();
-        let entries = read_entries(input, path, Some(&mut costs))?;
-        let usage = vec![0; entries.len()];
+        let entries = read_entries(input, path, MEASURE.then_some(&mut costs))?;
+        let usage = if MEASURE {
+            vec![0; entries.len()]
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             entries,
             decoded: HashMap::new(),
@@ -332,7 +336,9 @@ impl<'a> ReadTable<'a> {
     }
 
     pub(super) fn section(&mut self, section: u8) {
-        self.section = section;
+        if MEASURE {
+            self.section = section;
+        }
     }
 
     pub(super) fn attributed_bytes(&self) -> (usize, usize) {
@@ -476,7 +482,7 @@ impl<'a> ReadTable<'a> {
     }
 }
 
-impl ReadDefinitions for ReadTable<'_> {
+impl<const MEASURE: bool> ReadDefinitions for ReadTable<'_, MEASURE> {
     fn remember_capture(&mut self, capture: &Value) {
         self.capture = Some(capture.clone());
     }
@@ -489,7 +495,9 @@ impl ReadDefinitions for ReadTable<'_> {
             .entries
             .get(slot)
             .ok_or_else(|| invalid("missing definition ordinal"))?;
-        self.usage[slot] |= self.section;
+        if MEASURE {
+            self.usage[slot] |= self.section;
+        }
         let actual_kind = match entry {
             Entry::Local(definition) => definition.kind,
             Entry::External(kind, _) => *kind,
@@ -719,7 +727,8 @@ mod tests {
             table.encode(&mut out);
             out
         };
-        let mut table = ReadTable::new(&mut Cursor::new(&encoded), &store, &path, 1000).unwrap();
+        let mut table =
+            ReadTable::<false>::new(&mut Cursor::new(&encoded), &store, &path, 1000).unwrap();
         assert!(table
             .resolve(DefinitionKind::Descriptor, &mut Cursor::new(&[0]))
             .unwrap_err()
@@ -730,7 +739,8 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("kind mismatch"));
-        let mut future = ReadTable::new(&mut Cursor::new(&encoded), &store, &path, 0).unwrap();
+        let mut future =
+            ReadTable::<false>::new(&mut Cursor::new(&encoded), &store, &path, 0).unwrap();
         assert!(future
             .resolve(DefinitionKind::Descriptor, &mut Cursor::new(&[0]))
             .unwrap_err()

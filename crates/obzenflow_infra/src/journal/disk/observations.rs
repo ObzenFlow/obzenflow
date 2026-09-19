@@ -7,6 +7,7 @@
 
 use super::codec::{frame, Decoder};
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
+use crate::journal::metrics_tail::{Carrier, MetricsTailIndex};
 use crate::journal::observation_index::{
     locate, unavailable, Locator, ObservationIndex, HISTORY_PER_KEY,
 };
@@ -31,6 +32,7 @@ static INDEXES: OnceLock<SharedIndexes> = OnceLock::new();
 
 struct Shared {
     state: Mutex<State>,
+    metrics_tail: Mutex<MetricsTailIndex>,
     // Commitment is independent of the disposable index, including its mutex.
     // NO_WRITER permits read-only archive inspection until a writer takes over.
     committed_end: AtomicU64,
@@ -44,6 +46,7 @@ impl Default for Shared {
     fn default() -> Self {
         Self {
             state: Mutex::default(),
+            metrics_tail: Mutex::default(),
             committed_end: AtomicU64::new(NO_WRITER),
             opening: Mutex::default(),
             maintenance: Arc::default(),
@@ -184,6 +187,13 @@ impl<T: JournalEvent> DiskObservationReader<T> {
         };
         let (recovered, committed_end) = recover(end)?;
         if end.is_none() {
+            if reader.confirmed_end() != Some(committed_end) {
+                *reader
+                    .shared
+                    .metrics_tail
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = MetricsTailIndex::default();
+            }
             reader
                 .shared
                 .committed_end
@@ -215,6 +225,16 @@ impl<T: JournalEvent> DiskObservationReader<T> {
             // Another handle's indeterminate suffix needs journal recovery.
             // A later successful append cannot certify the intervening bytes.
             return;
+        }
+        {
+            let mut tail = self
+                .shared
+                .metrics_tail
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for (member, record) in records.iter().enumerate() {
+                tail.observe(record, Carrier { offset, member });
+            }
         }
         self.maintain(|state| {
             if !state.confirmed {
@@ -262,6 +282,56 @@ impl<T: JournalEvent> DiskObservationReader<T> {
             // the journal. The next reader can rebuild from committed facts.
             *state = State::default();
         }
+    }
+
+    pub(super) async fn metrics_tail(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        let carriers = self
+            .shared
+            .metrics_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .carriers();
+        let Some(end) = self.confirmed_end() else {
+            return Ok(Vec::new());
+        };
+        if carriers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut frames = HashMap::new();
+            let mut decoder = Decoder::new(&path);
+            let mut result = Vec::with_capacity(carriers.len());
+            for carrier in carriers {
+                let records = match frames.entry(carrier.offset) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let (bytes, termination) = read_at(&path, carrier.offset, end)?;
+                        let Disposition::Yield(frame) = dispose(
+                            classify_frame::<T>(&bytes, &mut decoder, carrier.offset),
+                            termination,
+                            ReadPolicy::SealedScan {
+                                tolerate_torn_tail: false,
+                            },
+                        ) else {
+                            return Err(unavailable("invalid metrics tail carrier"));
+                        };
+                        entry.insert(frame.into_records())
+                    }
+                };
+                result.push(
+                    records
+                        .get(carrier.member)
+                        .ok_or_else(|| unavailable("missing metrics tail member"))?
+                        .clone(),
+                );
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|error| unavailable(error.to_string()))?
     }
 
     async fn lookup(
@@ -753,6 +823,59 @@ mod tests {
             .capture
             .capture_seq = CaptureSeq(seq);
         next
+    }
+
+    #[tokio::test]
+    async fn metrics_tail_never_rebuilds_or_checkpoints_an_unindexed_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("live-tail.log");
+        let stage = StageId::new();
+        {
+            let journal =
+                DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+            journal
+                .append(event(stage, 1), Default::default())
+                .await
+                .unwrap();
+            journal
+                .append_group(
+                    "old-history",
+                    (0..1000)
+                        .map(|_| {
+                            ChainEventFactory::data_event(
+                                stage.into(),
+                                "test.noise",
+                                serde_json::json!({}),
+                            )
+                        })
+                        .collect(),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+        }
+        let journal = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+        let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
+        // Holding archive maintenance would deadlock an accidental archive lookup.
+        let _maintenance = reader.shared.maintenance.lock().await;
+        *reader.shared.io_hook.lock().unwrap() = Some(Arc::new(|_| {
+            panic!("live lookup entered archive maintenance")
+        }));
+        assert!(completes(journal.read_metrics_tail())
+            .await
+            .unwrap()
+            .is_empty());
+        let latest = journal
+            .append(event(stage, 2), Default::default())
+            .await
+            .unwrap();
+        let rows = completes(journal.read_metrics_tail()).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id(), latest.id());
+        let state = reader.shared.state.lock().unwrap();
+        assert!(!state.loaded);
+        assert_eq!(state.index.examined_through, 0);
+        assert!(!checkpoint_path(&path).exists());
     }
 
     #[tokio::test]
@@ -1455,6 +1578,8 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_reopens_read_only_behind_one_million_unobserved_records() {
+        use std::io::Write;
+
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("million.log");
         let stage = StageId::new();
@@ -1464,19 +1589,55 @@ mod tests {
         let mut noise = observed.clone();
         noise.envelope.observability = None;
         journal.append(observed, Default::default()).await.unwrap();
-        // Deliberately repeated EventIds: the lookup must use physical positions.
-        for group in 0..1000 {
-            journal
-                .append_group(
-                    &format!("quiet-{group}"),
-                    vec![noise.clone(); 1000],
-                    Default::default(),
-                )
-                .await
-                .unwrap();
-        }
-        ready(journal.observation_reader().unwrap(), &key).await;
+        let noise_records = journal
+            .append_group("quiet", vec![noise; 1000], Default::default())
+            .await
+            .unwrap();
+        let checkpoint_writer = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
         drop(journal);
+
+        // Build the checkpoint fixture by reusing a real group's encoding with
+        // self-contained codec definitions. Preserve all one million physical
+        // noise records and deliberately repeated EventIds. Each copy advances
+        // the production observation index through the writer's commit callback.
+        let bytes =
+            super::super::log_record::serialize_atomic_group("quiet", &noise_records).unwrap();
+        let frame = Anchor::of(0, &bytes);
+        let mut offset = checkpoint_writer.confirmed_end().unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for _ in 1..1000 {
+            file.write_all(&bytes).unwrap();
+            let end = offset + frame.length;
+            checkpoint_writer.committed(&noise_records, offset, end, frame.crc);
+            offset = end;
+        }
+        file.flush().unwrap();
+        assert_eq!(file.metadata().unwrap().len(), offset);
+        drop(file);
+
+        // Independently decode the last copied frame at its actual offset. The
+        // checkpoint's large record count must describe a readable archive.
+        let last_offset = offset - frame.length;
+        let (last, _) = read_at(&path, last_offset, offset).unwrap();
+        let records = Decoder::cold(&path)
+            .decode::<ChainEvent>(frame::validate(&last).unwrap(), last_offset)
+            .unwrap()
+            .into_records();
+        assert_eq!(records.len(), 1000);
+        assert!(records
+            .iter()
+            .all(|record| record.envelope.observability.is_none()));
+
+        ready(&checkpoint_writer, &key).await;
+        let cached = Arc::downgrade(&checkpoint_writer.shared);
+        drop(checkpoint_writer);
+        assert!(
+            cached.upgrade().is_none(),
+            "reopen must use the on-disk checkpoint"
+        );
         let reader = DiskObservationReader::<ChainEvent>::open(path).unwrap();
         let ObservationLookup::Ready {
             committed_len,

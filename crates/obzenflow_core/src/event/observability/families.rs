@@ -60,6 +60,32 @@ fn record_family(record: &ObservationRecord) -> ObservationFamily {
 pub fn observation_families(
     packet: ObservabilityContext,
 ) -> Option<Vec<(ObservationFamily, ObservabilityContext)>> {
+    let mut families = Vec::new();
+    visit_families(&packet, |key, _, materialise| {
+        families.push((key, materialise()));
+        families.len() <= MAX_PACKET_FAMILIES
+    });
+    (families.len() <= MAX_PACKET_FAMILIES).then_some(families)
+}
+
+/// Inspect actual family stamps without copying measurement values. Nested
+/// runtime snapshots keep their own owner and sequence, independently of the packet.
+pub fn any_observation_family(
+    packet: &ObservabilityContext,
+    mut predicate: impl FnMut(ObservationFamily, CaptureStamp) -> bool,
+) -> bool {
+    let mut found = false;
+    visit_families(packet, |key, stamp, _| {
+        found = predicate(key, stamp);
+        !found
+    });
+    found
+}
+
+fn visit_families(
+    packet: &ObservabilityContext,
+    mut visit: impl FnMut(ObservationFamily, CaptureStamp, &dyn Fn() -> ObservabilityContext) -> bool,
+) {
     // Exhaustive destructuring makes a new packet or runtime field require an
     // explicit selection decision here. There is no separate kind catalogue.
     let ObservabilityContext {
@@ -71,11 +97,24 @@ pub fn observation_families(
         sli,
         records,
     } = packet;
-    let mut families = Vec::new();
+    let stamp = *stamp;
+    macro_rules! emit {
+        ($key:expr, $stamp:expr, $part:expr) => {
+            if !visit($key, $stamp, &$part) {
+                return;
+            }
+        };
+    }
     if let Some(snapshot) = runtime_snapshot {
-        let mut part = ObservabilityContext::new(snapshot.capture);
-        part.runtime_snapshot = Some(snapshot);
-        families.push((ObservationFamily::new(stringify!(runtime_snapshot)), part));
+        emit!(
+            ObservationFamily::new(stringify!(runtime_snapshot)),
+            snapshot.capture,
+            || {
+                let mut part = ObservabilityContext::new(snapshot.capture);
+                part.runtime_snapshot = Some(snapshot.clone());
+                part
+            }
+        );
     }
     if let Some(runtime) = runtime {
         let RuntimeObservability {
@@ -92,16 +131,19 @@ pub fn observation_families(
         } = runtime;
         macro_rules! field {
             ($name:ident) => {
-                if let Some(value) = $name {
-                    let mut part = ObservabilityContext::new(stamp);
-                    part.runtime = Some(RuntimeObservability {
-                        $name: Some(value),
-                        ..Default::default()
-                    });
-                    families.push((
+                if let Some(measurement) = $name {
+                    emit!(
                         ObservationFamily::new(concat!("runtime.", stringify!($name))),
-                        part,
-                    ));
+                        stamp,
+                        || {
+                            let mut part = ObservabilityContext::new(stamp);
+                            part.runtime = Some(RuntimeObservability {
+                                $name: Some(measurement.clone()),
+                                ..Default::default()
+                            });
+                            part
+                        }
+                    );
                 }
             };
         }
@@ -110,23 +152,27 @@ pub fn observation_families(
         field!(time_in_state_ms);
         field!(event_loops_total);
         field!(event_loops_with_work_total);
-        let timing = timing.filter(TimingMeasurements::is_valid);
+        let timing = timing.as_ref().filter(|timing| timing.is_valid());
         field!(timing);
         field!(circuit_breaker);
         field!(rate_limiter);
         macro_rules! effects {
             ($name:ident) => {
-                for value in $name {
+                for effect_measurements in $name {
                     let key = ObservationFamily {
-                        subject: ObservationSubject::Effect(value.effect_type.clone()),
+                        subject: ObservationSubject::Effect(
+                            effect_measurements.effect_type.clone(),
+                        ),
                         ..ObservationFamily::new(concat!("runtime.", stringify!($name)))
                     };
-                    let mut part = ObservabilityContext::new(stamp);
-                    part.runtime = Some(RuntimeObservability {
-                        $name: vec![value],
-                        ..Default::default()
+                    emit!(key, stamp, || {
+                        let mut part = ObservabilityContext::new(stamp);
+                        part.runtime = Some(RuntimeObservability {
+                            $name: vec![effect_measurements.clone()],
+                            ..Default::default()
+                        });
+                        part
                     });
-                    families.push((key, part));
                 }
             };
         }
@@ -135,10 +181,12 @@ pub fn observation_families(
     }
     macro_rules! field {
         ($name:ident) => {
-            if let Some(value) = $name {
-                let mut part = ObservabilityContext::new(stamp);
-                part.$name = Some(value);
-                families.push((ObservationFamily::new(stringify!($name)), part));
+            if let Some(measurement) = $name {
+                emit!(ObservationFamily::new(stringify!($name)), stamp, || {
+                    let mut part = ObservabilityContext::new(stamp);
+                    part.$name = Some(measurement.clone());
+                    part
+                });
             }
         };
     }
@@ -146,12 +194,12 @@ pub fn observation_families(
     field!(metrics);
     field!(sli);
     for record in records {
-        let family = record_family(&record);
-        let mut part = ObservabilityContext::new(stamp);
-        part.records.push(record);
-        families.push((family, part));
+        emit!(record_family(record), stamp, || {
+            let mut part = ObservabilityContext::new(stamp);
+            part.records.push(record.clone());
+            part
+        });
     }
-    (families.len() <= MAX_PACKET_FAMILIES).then_some(families)
 }
 
 #[cfg(test)]
