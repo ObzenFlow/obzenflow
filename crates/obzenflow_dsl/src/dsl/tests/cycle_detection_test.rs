@@ -21,7 +21,7 @@ mod tests {
     /// in a cycle, while the pure source/sink stages are not.
     #[test]
     fn feedback_loop_stages_are_marked_as_in_cycle() {
-        let mut connections: Vec<(String, String, EdgeKind)> = Vec::new();
+        let mut connections = Vec::new();
 
         crate::parse_topology!(
             connections,
@@ -45,7 +45,8 @@ mod tests {
         }
 
         // Convert (from_name, to_name, kind) into concrete edges, preserving EdgeKind
-        for (from_name, to_name, kind) in connections {
+        for edge in crate::dsl::topology::role_edges(connections) {
+            let (from_name, to_name, kind) = (edge.from, edge.to, edge.kind);
             let from = *name_to_id
                 .get(&from_name)
                 .unwrap_or_else(|| panic!("Unknown from stage: {from_name}"));

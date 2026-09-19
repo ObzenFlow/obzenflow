@@ -1306,7 +1306,7 @@ mod tests {
             // handle outlives the writer; it must not disable recovery on reopen.
             Write::write_all(
                 &mut StdFile::options().append(true).open(&path).unwrap(),
-                b"OJF4",
+                &super::super::codec::frame::MAGIC,
             )
             .unwrap();
             assert!(matches!(

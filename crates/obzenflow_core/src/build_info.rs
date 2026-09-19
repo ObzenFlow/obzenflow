@@ -4,8 +4,8 @@
 
 //! Build and version information.
 //!
-//! This module intentionally stays small and dependency-free so archive readers
-//! can require exact build identity without pulling in extra crates.
+//! Package identity is archive provenance. Admission is governed by the
+//! Core-owned journal schema version and required interpretation capabilities.
 
-/// The exact current ObzenFlow build version recorded in run manifests.
+/// The current ObzenFlow package version recorded in run manifests.
 pub const OBZENFLOW_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -154,6 +154,7 @@ pub struct CompositeBuildContext {
     permitted_classes: Vec<String>,
     members: Vec<MemberDecl>,
     edges: Vec<EdgeDecl>,
+    joins: Vec<super::topology::AuthoredConnection>,
     feeds: Vec<InternalFeedSpec>,
     ports: Vec<PortDecl>,
     /// Declaration order across plain edges and feeds, preserved into the
@@ -165,6 +166,7 @@ pub struct CompositeBuildContext {
 enum EdgeRef {
     Plain(usize),
     Feed(usize),
+    Join(usize),
 }
 
 impl CompositeBuildContext {
@@ -175,6 +177,7 @@ impl CompositeBuildContext {
             permitted_classes: Vec::new(),
             members: Vec::new(),
             edges: Vec::new(),
+            joins: Vec::new(),
             feeds: Vec::new(),
             ports: Vec::new(),
             edge_decl_order: Vec::new(),
@@ -216,6 +219,17 @@ impl CompositeBuildContext {
         EdgeBuilder {
             decl: self.edges.last_mut().expect("edge just pushed"),
         }
+    }
+
+    /// An explicit catalog-first pair for a private join member. Catalog
+    /// declarations on member descriptors are identity witnesses, not edges.
+    pub fn join(&mut self, catalog: &str, stream: &str, join: &str) -> &mut Self {
+        self.joins.push(super::topology::AuthoredConnection::join(
+            catalog, stream, join,
+        ));
+        self.edge_decl_order
+            .push(EdgeRef::Join(self.joins.len() - 1));
+        self
     }
 
     /// An internal edge carrying selected payload feeds (D3). Implies the
@@ -479,6 +493,7 @@ pub struct CompositeExpansion {
     pub members: Vec<ExpandedMember>,
     /// Internal edges as `(from_stage, to_stage, lane)`.
     pub internal_edges: Vec<(String, String, String)>,
+    pub(crate) join_catalogs: std::collections::HashMap<String, String>,
     pub feeds: Vec<ResolvedInternalFeed>,
     pub boundary: ResolvedBoundary,
 }
@@ -693,6 +708,14 @@ impl CompositeBuildContext {
                 .expect("boundary role validated above");
             let descriptor = member.descriptor.as_ref().expect("members validated above");
             let member_stage = format!("{binding}__{}", port.role);
+            if port.direction == PortDirection::Input
+                && descriptor.stage_type() == obzenflow_core::event::context::StageType::Join
+            {
+                return Err(CompositeBuildError::new(format!(
+                    "composite '{composite}': input boundary port '{}' is owned by join member '{member_stage}'; join-owned composite inputs are not supported",
+                    port.name
+                )));
+            }
             let metadata = descriptor.typing_metadata().ok_or_else(|| {
                 CompositeBuildError::new(format!(
                     "composite '{composite}': boundary port '{}' on role '{}' (member '{member_stage}') cannot be validated because the member has no typing metadata",
@@ -815,6 +838,48 @@ impl CompositeBuildContext {
             )));
         }
 
+        // Validate private binding identities before qualification. An outer
+        // stage with the same name can never satisfy a private catalog witness.
+        use super::topology::{role_edges, validate_authored, AuthoredConnection, JoinRole};
+        let bindings = self
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    member.role.as_str(),
+                    Some(member.descriptor.as_deref().expect("validated member")),
+                )
+            })
+            .collect();
+        let mut authored = Vec::new();
+        let mut lanes = std::collections::HashMap::new();
+        for edge_ref in &self.edge_decl_order {
+            let (from, to, lane) = match edge_ref {
+                EdgeRef::Join(index) => {
+                    authored.push(self.joins[*index].clone());
+                    continue;
+                }
+                EdgeRef::Plain(index) => {
+                    let edge = &self.edges[*index];
+                    (&edge.from_role, &edge.to_role, &edge.lane)
+                }
+                EdgeRef::Feed(index) => {
+                    let feed = &self.feeds[*index];
+                    (&feed.from_role, &feed.to_role, &feed.lane)
+                }
+            };
+            lanes.insert((from.clone(), to.clone()), lane.clone());
+            authored.push(AuthoredConnection::edge(
+                from.clone(),
+                to.clone(),
+                obzenflow_topology::EdgeKind::Forward,
+            ));
+        }
+        validate_authored(&authored, &bindings).map_err(|message| {
+            CompositeBuildError::new(format!("composite '{composite}': {message}"))
+        })?;
+        let edges = role_edges(authored);
+
         // Resolve to member stage names.
         let stage_name = |role: &str| format!("{binding}__{role}");
 
@@ -849,19 +914,16 @@ impl CompositeBuildContext {
             });
         }
 
-        let mut internal_edges: Vec<(String, String, String)> = Vec::new();
-        for edge_ref in &self.edge_decl_order {
-            let (from_role, to_role, lane) = match edge_ref {
-                EdgeRef::Plain(index) => {
-                    let edge = &self.edges[*index];
-                    (&edge.from_role, &edge.to_role, &edge.lane)
-                }
-                EdgeRef::Feed(index) => {
-                    let feed = &self.feeds[*index];
-                    (&feed.from_role, &feed.to_role, &feed.lane)
-                }
-            };
-            internal_edges.push((stage_name(from_role), stage_name(to_role), lane.clone()));
+        let mut internal_edges = Vec::new();
+        let mut join_catalogs = std::collections::HashMap::new();
+        for edge in edges {
+            if edge.role == Some(JoinRole::Catalog) {
+                join_catalogs.insert(stage_name(&edge.to), stage_name(&edge.from));
+            }
+            let lane = lanes
+                .remove(&(edge.from.clone(), edge.to.clone()))
+                .unwrap_or_else(|| "data".to_string());
+            internal_edges.push((stage_name(&edge.from), stage_name(&edge.to), lane));
         }
 
         let feeds = self
@@ -898,6 +960,7 @@ impl CompositeBuildContext {
             schema_version,
             members,
             internal_edges,
+            join_catalogs,
             feeds,
             boundary,
         })

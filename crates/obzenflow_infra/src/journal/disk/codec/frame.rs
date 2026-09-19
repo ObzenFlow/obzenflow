@@ -2,16 +2,39 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::journal::JOURNAL_SCHEMA_VERSION;
 use std::io;
 
-pub(crate) const MAGIC: [u8; 4] = *b"OJF4";
-pub(crate) const COMMIT_MAGIC: [u8; 4] = *b"4FJO";
-pub(crate) const HEADER_LEN: usize = 16;
-pub(crate) const TRAILER_LEN: usize = 16;
+// The complete schema version is part of every frame. No independent format
+// epoch can drift from the manifest, including on a minor schema bump.
+pub(crate) const MAGIC: [u8; 3 + JOURNAL_SCHEMA_VERSION.len()] = {
+    let mut marker = [0; 3 + JOURNAL_SCHEMA_VERSION.len()];
+    marker[0] = b'O';
+    marker[1] = b'J';
+    marker[2] = b'F';
+    let mut i = 0;
+    while i < JOURNAL_SCHEMA_VERSION.len() {
+        marker[3 + i] = JOURNAL_SCHEMA_VERSION.as_bytes()[i];
+        i += 1;
+    }
+    marker
+};
+pub(crate) const COMMIT_MAGIC: [u8; MAGIC.len()] = {
+    let mut marker = MAGIC;
+    let mut i = 0;
+    while i < MAGIC.len() {
+        marker[i] = MAGIC[MAGIC.len() - 1 - i];
+        i += 1;
+    }
+    marker
+};
+pub(crate) const HEADER_LEN: usize = MAGIC.len() + 12;
+pub(crate) const TRAILER_LEN: usize = COMMIT_MAGIC.len() + 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FrameProblem {
     Incomplete(String),
+    SchemaMismatch,
     Corrupt(String),
 }
 
@@ -32,26 +55,25 @@ pub(crate) fn encode(body: &[u8]) -> Vec<u8> {
 pub(crate) fn frame_length(header: &[u8]) -> Result<usize, FrameProblem> {
     if header
         .iter()
-        .take(4)
+        .take(MAGIC.len())
         .zip(MAGIC)
         .any(|(actual, expected)| *actual != expected)
     {
-        return Err(FrameProblem::Corrupt(
-            "invalid format-4 magic; re-record older journal formats".into(),
-        ));
+        return Err(FrameProblem::SchemaMismatch);
     }
     if header.len() < HEADER_LEN {
         return Err(FrameProblem::Incomplete(
-            "incomplete format-4 header".into(),
+            "incomplete journal frame header".into(),
         ));
     }
-    let expected = u32::from_le_bytes(header[12..16].try_into().unwrap());
-    if crc32fast::hash(&header[..12]) != expected {
+    let checksum_offset = MAGIC.len() + 8;
+    let expected = u32::from_le_bytes(header[checksum_offset..HEADER_LEN].try_into().unwrap());
+    if crc32fast::hash(&header[..checksum_offset]) != expected {
         return Err(FrameProblem::Corrupt(
             "frame header checksum mismatch".into(),
         ));
     }
-    let body_length = u64::from_le_bytes(header[4..12].try_into().unwrap());
+    let body_length = u64::from_le_bytes(header[MAGIC.len()..checksum_offset].try_into().unwrap());
     usize::try_from(body_length)
         .ok()
         .and_then(|length| length.checked_add(HEADER_LEN + TRAILER_LEN))
@@ -70,7 +92,7 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<&[u8], FrameProblem> {
         return Err(FrameProblem::Corrupt("trailing bytes after frame".into()));
     }
     let trailer = length - TRAILER_LEN;
-    if bytes[length - 4..] != COMMIT_MAGIC {
+    if bytes[length - COMMIT_MAGIC.len()..] != COMMIT_MAGIC {
         return Err(FrameProblem::Corrupt("invalid commit trailer".into()));
     }
     if u64::from_le_bytes(bytes[trailer + 4..trailer + 12].try_into().unwrap()) != length as u64 {
@@ -88,6 +110,7 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<&[u8], FrameProblem> {
 
 pub(crate) fn io_error(problem: FrameProblem) -> io::Error {
     match problem {
+        FrameProblem::SchemaMismatch => io::Error::new(io::ErrorKind::InvalidData, format!("journal schema marker mismatch (supported: {JOURNAL_SCHEMA_VERSION}); re-record the archive")),
         FrameProblem::Incomplete(message) => io::Error::new(io::ErrorKind::UnexpectedEof, message),
         FrameProblem::Corrupt(message) => io::Error::new(io::ErrorKind::InvalidData, message),
     }
@@ -99,10 +122,10 @@ mod tests {
 
     #[test]
     fn previous_format_is_rejected_even_as_an_incomplete_tail() {
-        assert_eq!(obzenflow_core::journal::JOURNAL_FORMAT_VERSION, 4);
+        assert_eq!(&MAGIC[3..], JOURNAL_SCHEMA_VERSION.as_bytes());
         assert!(matches!(
-            frame_length(b"OJF3"),
-            Err(FrameProblem::Corrupt(message)) if message.contains("format-4")
+            frame_length(b"OJF4"),
+            Err(FrameProblem::SchemaMismatch)
         ));
     }
 
@@ -120,7 +143,10 @@ mod tests {
             let mut corrupt = frame.clone();
             corrupt[index] ^= 1;
             assert!(
-                matches!(validate(&corrupt), Err(FrameProblem::Corrupt(_))),
+                matches!(
+                    validate(&corrupt),
+                    Err(FrameProblem::Corrupt(_) | FrameProblem::SchemaMismatch)
+                ),
                 "byte {index}"
             );
         }

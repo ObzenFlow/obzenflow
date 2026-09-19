@@ -167,7 +167,7 @@ fn build_flow(
 
             topology: {
                 tickets |> triage;
-                triage |> enrich;
+                (customers, triage) |> enrich;
                 enrich |> csv_out;
             }
         })

@@ -17,13 +17,13 @@ use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use obzenflow_core::journal::archive::manifest::{
-    RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::ArchiveStatus;
 use thiserror::Error;
 
 use super::codec::Decoder;
-use super::manifest_gate::require_current_manifest_version;
+use super::manifest_gate::require_current_journal_schema_version;
 use super::replay_archive::derive_status_derivation_from_system_log;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 
@@ -49,7 +49,7 @@ pub enum JournalInspectError {
 /// order. Fails loud on corruption with path and record position.
 pub fn export_jsonl(run_dir: &Path, output: Option<&Path>) -> Result<(), JournalInspectError> {
     let manifest = load_manifest(run_dir)?;
-    let policy = archive_policy(run_dir, &manifest);
+    let policy = archive_policy(run_dir, &manifest)?;
 
     let mut out: Box<dyn Write> = match output {
         Some(path) => Box::new(BufWriter::new(File::create(path).map_err(|source| {
@@ -91,16 +91,13 @@ pub fn inspect(
     event_type: Option<&str>,
 ) -> Result<(), JournalInspectError> {
     let manifest = load_manifest(run_dir)?;
-    let policy = archive_policy(run_dir, &manifest);
-    let status = archive_status(run_dir, &manifest);
+    let policy = archive_policy(run_dir, &manifest)?;
+    let status = archive_status(run_dir, &manifest)?;
 
     println!("flow_id:    {}", manifest.flow_id);
     println!("flow_name:  {}", manifest.flow_name);
     println!("status:     {status:?}");
-    println!(
-        "format:     manifest v{}, journal v{}",
-        manifest.manifest_version, manifest.journal_format_version
-    );
+    println!("schema:     {}", manifest.journal_schema_version);
     println!("stages:     {}", manifest.stages.len());
 
     for key in sorted_stage_keys(&manifest) {
@@ -239,19 +236,34 @@ fn sorted_stage_keys(manifest: &RunManifest) -> Vec<String> {
     keys
 }
 
-fn archive_status(run_dir: &Path, manifest: &RunManifest) -> ArchiveStatus {
+fn archive_status(
+    run_dir: &Path,
+    manifest: &RunManifest,
+) -> Result<ArchiveStatus, JournalInspectError> {
     let system_log = run_dir.join(&manifest.system_journal_file);
-    derive_status_derivation_from_system_log(&system_log)
-        .map(|derivation| derivation.chosen)
-        .unwrap_or(ArchiveStatus::Unknown)
+    match derive_status_derivation_from_system_log(&system_log) {
+        Ok(derivation) => Ok(derivation.chosen),
+        Err(
+            error
+            @ obzenflow_core::journal::archive::ReplayError::UnsupportedJournalSchemaVersion {
+                ..
+            },
+        ) => Err(JournalInspectError::Manifest {
+            path: system_log,
+            message: error.to_string(),
+        }),
+        Err(_) => Ok(ArchiveStatus::Unknown),
+    }
 }
 
-/// Same sealed/full-scan policy as replay and verification: tolerate a final
-/// torn tail only on a non-`Completed` archive.
-fn archive_policy(run_dir: &Path, manifest: &RunManifest) -> ReadPolicy {
-    ReadPolicy::SealedScan {
-        tolerate_torn_tail: archive_status(run_dir, manifest) != ArchiveStatus::Completed,
-    }
+/// Tolerate a final torn tail only on a non-completed, current-schema archive.
+fn archive_policy(
+    run_dir: &Path,
+    manifest: &RunManifest,
+) -> Result<ReadPolicy, JournalInspectError> {
+    Ok(ReadPolicy::SealedScan {
+        tolerate_torn_tail: archive_status(run_dir, manifest)? != ArchiveStatus::Completed,
+    })
 }
 
 pub(super) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
@@ -267,22 +279,12 @@ pub(super) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspec
             message: e.to_string(),
         })?;
 
-    if let Err(version) = require_current_manifest_version(&value) {
+    if let Err(version) = require_current_journal_schema_version(&value) {
         return Err(JournalInspectError::Manifest {
             path: manifest_path,
-            message: format!("{version} (supported: {RUN_MANIFEST_VERSION})"),
+            message: format!("{version} (supported: {JOURNAL_SCHEMA_VERSION})"),
         });
     }
-    let journal_format_version = value.get("journal_format_version").and_then(|v| v.as_u64());
-    if journal_format_version != Some(u64::from(JOURNAL_FORMAT_VERSION)) {
-        return Err(JournalInspectError::Manifest {
-            path: manifest_path,
-            message: format!(
-                "unsupported journal_format_version {journal_format_version:?} (supported: {JOURNAL_FORMAT_VERSION})"
-            ),
-        });
-    }
-
     super::manifest_gate::require_observability_capture(&value).map_err(|message| {
         JournalInspectError::Manifest {
             path: manifest_path.clone(),
@@ -455,15 +457,15 @@ mod tests {
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
-            (Some(serde_json::json!("5.0")), "5.0"),
+            (Some(serde_json::json!("6.0")), "6.0"),
         ] {
             let temp = tempfile::tempdir().expect("temporary archive");
             let mut manifest = serde_json::json!({
-                "journal_format_version": JOURNAL_FORMAT_VERSION,
+
                 "system_journal_file": "sentinel-system.journal"
             });
             if let Some(version) = version {
-                manifest["manifest_version"] = version;
+                manifest["journal_schema_version"] = version;
             }
             std::fs::write(
                 temp.path().join(RUN_MANIFEST_FILENAME),
@@ -483,7 +485,7 @@ mod tests {
                 error,
                 JournalInspectError::Manifest { ref message, .. }
                     if message.contains(expected)
-                        && message.contains(RUN_MANIFEST_VERSION)
+                        && message.contains(JOURNAL_SCHEMA_VERSION)
             ));
             assert!(
                 !output.exists(),

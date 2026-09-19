@@ -8,8 +8,8 @@
 //! authoring surface (FLOWIP-115r).
 
 use crate::dsl::backpressure_clause::BackpressureClause;
-use crate::dsl::composites::LoweringArtifacts;
 use crate::dsl::stage_descriptor::StageDescriptor;
+use crate::dsl::topology::LoweredFlow;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::JournalConfig;
@@ -18,7 +18,6 @@ use obzenflow_core::{FlowId, StageId};
 use obzenflow_runtime::effects::{EffectPortRegistry, EffectRegistrationCollectionError};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::run_context::FlowBuildContext;
-use obzenflow_topology::EdgeKind;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -136,9 +135,7 @@ impl FlowBuildOutput {
 pub async fn build_flow<J, P>(
     flow_name: &'static str,
     journal_factory_provider: P,
-    stages: HashMap<String, Box<dyn StageDescriptor>>,
-    connections: Vec<(String, String, EdgeKind)>,
-    lowering_artifacts: LoweringArtifacts,
+    lowered: LoweredFlow,
     build_ctx: FlowBuildContext,
     flow_backpressure_clause: Option<BackpressureClause>,
 ) -> Result<FlowBuildOutput, crate::FlowBuildFailure>
@@ -146,9 +143,15 @@ where
     J: FlowJournalFactory,
     P: FnOnce(FlowId) -> Result<J, JournalError> + Send,
 {
+    let LoweredFlow {
+        stages,
+        connections,
+        artifacts: lowering_artifacts,
+        join_catalogs,
+    } = lowered;
     use crate::dsl::FlowBuildError;
     use crate::prelude::*;
-    use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo as TopologyStageInfo};
+    use obzenflow_topology::{DirectedEdge, StageInfo as TopologyStageInfo};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
@@ -286,113 +289,13 @@ where
             topology_stages.push(info);
         }
 
-        // Build edges, including join reference edges and explicit topology edges
+        // Catalog identities were proved from authored tuples before lowering.
+        // This pass only attaches the corresponding ID; it cannot create edges.
         let mut topology_edges: Vec<DirectedEdge> = Vec::new();
-
-        // Precompute explicit forward edges so join reference edges can avoid duplication (e.g.
-        // when using join tuple syntax in the topology block).
-        let explicit_forward_edges: HashSet<(String, String)> = connections
-            .iter()
-            .filter(|(_, _, kind)| matches!(kind, EdgeKind::Forward))
-            .map(|(from, to, _)| (from.clone(), to.clone()))
-            .collect();
-
-        // Pass 2: Resolve join references and add reference edges
-        for name in &descriptor_names {
-            let descriptor = descriptors
-                .get_mut(name)
-                .expect("descriptor map should contain all stage names");
-            let core_id = *name_to_id
-                .get(name)
-                .expect("name_to_id should contain all stage names");
-            let topology_id = to_topology_id(core_id);
-
-            // If this is a join stage with a DSL reference variable, resolve it
-            if let Some(ref_var) = descriptor.reference_stage_name().map(|s| s.to_string()) {
-                // FLOWIP-128a A4: a reference variable naming a composite
-                // resolves through its boundary by the join's declared
-                // reference type (D1), with default-port fallback.
-                let (resolved_ref_name, resolved_composite_port) = if name_to_id.contains_key(ref_var.as_str()) {
-                    (ref_var.clone(), None)
-                } else if let Some(boundary) =
-                    lowering_artifacts.boundaries.get(ref_var.as_str())
-                {
-                    let reference_hint = descriptor
-                        .typing_metadata()
-                        .map(|metadata| metadata.reference_type.clone())
-                        .filter(|hint| {
-                            matches!(hint, crate::dsl::typing::TypeHint::Exact { .. })
-                        });
-                    let port = boundary.resolve_output(reference_hint.as_ref()).map_err(|err| {
-                        match err {
-                            crate::dsl::composition::PortResolveError::Ambiguous {
-                                ports,
-                                input_display,
-                            } => {
-                                let listed = ports
-                                    .iter()
-                                    .map(|p| format!("'{p}'"))
-                                    .collect::<Vec<_>>()
-                                    .join(" and ");
-                                FlowBuildError::StageResourcesFailed(format!(
-                                    "join '{name}' references composite '{ref_var}': ambiguous output port (reference '{input_display}' matches ports {listed})"
-                                ))
-                            }
-                            crate::dsl::composition::PortResolveError::NoDefaultPort => {
-                                FlowBuildError::StageResourcesFailed(format!(
-                                    "join '{name}' references composite '{ref_var}': no output port matches and no default port exists; available ports: {}",
-                                    boundary.describe_outputs()
-                                ))
-                            }
-                        }
-                    })?;
-                    (
-                        port.stage_name.clone(),
-                        Some(obzenflow_topology::CompositePortRef::new(
-                            boundary.subgraph_id.clone(),
-                            port.name.clone(),
-                        )),
-                    )
-                } else {
-                    return Err(FlowBuildError::StageResourcesFailed(format!(
-                        "Join stage '{}' references unknown stage variable '{}'",
-                        name, ref_var
-                    )));
-                };
-
-                // Explicit tuple-syntax edges were rewritten by lowering, so
-                // dedup against the RESOLVED reference stage name.
-                let reference_edge_explicit =
-                    explicit_forward_edges.contains(&(resolved_ref_name.clone(), name.clone()));
-
-                let ref_id = name_to_id
-                    .get(resolved_ref_name.as_str())
-                    .copied()
-                    .ok_or_else(|| {
-                        FlowBuildError::StageResourcesFailed(format!(
-                            "Join stage '{}' resolved reference '{}' to missing stage '{}'",
-                            name, ref_var, resolved_ref_name
-                        ))
-                    })?;
-
-                tracing::debug!("Join stage '{}' resolved reference variable '{}' to ID {:?}",
-                               name, ref_var, ref_id);
-                descriptor.set_reference_stage_id(ref_id);
-
-                // Add topology edge from reference stage to join stage (forward) unless already
-                // declared in the user's explicit topology (e.g. join tuple syntax).
-                if !reference_edge_explicit {
-                    let mut edge = DirectedEdge::new(
-                        to_topology_id(ref_id),
-                        topology_id,
-                        EdgeKind::Forward,
-                    );
-                    if let Some(port) = resolved_composite_port {
-                        edge = edge.with_composite_ports(vec![port]);
-                    }
-                    topology_edges.push(edge);
-                }
-            }
+        for (join, catalog) in &join_catalogs {
+            let ref_id = name_to_id[catalog];
+            descriptors.get_mut(join).expect("validated join descriptor")
+                .set_reference_stage_id(ref_id);
         }
 
         // Add connections from the DSL (|> and <|) with correct EdgeKind.
@@ -1243,8 +1146,8 @@ where
             );
         }
         let run_manifest = obzenflow_core::journal::archive::manifest::RunManifest {
-            manifest_version: obzenflow_core::journal::archive::manifest::RUN_MANIFEST_VERSION.to_string(),
-            journal_format_version: obzenflow_core::journal::archive::manifest::JOURNAL_FORMAT_VERSION,
+            journal_schema_version: obzenflow_core::journal::archive::manifest::JOURNAL_SCHEMA_VERSION.to_string(),
+
             obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
             flow_id: flow_id.to_string(),
             flow_name: flow_name.to_string(),
@@ -1513,42 +1416,23 @@ where
                     "DSL: Got resources for stage"
                 );
 
-                // Special handling for join stages: add reference journal to upstream_journals
-                // Join descriptors store reference_stage_id from the builder
+                // A join consumes the catalog first. Reorder only connected
+                // resources; looking up a disconnected journal would invent wiring.
                 if let Some(ref_stage_id) = descriptor.reference_stage_id() {
-                    // Find the reference journal
-                    let ref_journal = stage_resources_set
-                        .stage_journals
-                        .iter()
-                        .find(|(sid, _)| sid == &ref_stage_id)
-                        .map(|(_, j)| (ref_stage_id, j.clone()))
-                        .ok_or_else(|| {
-                            FlowBuildError::StageResourcesFailed(format!(
-                                "No journal found for reference stage {:?}",
-                                ref_stage_id
-                            ))
-                        })?;
-
-                    // Prepend reference journal to upstream_journals (reference must be first)
-                    // Filter out any duplicate reference journals to prevent it appearing in stream_journals
-                    let mut updated_journals = vec![ref_journal];
-                    updated_journals.extend(
-                        resources.upstream_journals.into_iter()
-                            .filter(|(id, _)| *id != ref_stage_id)
-                    );
-                    resources.upstream_journals = updated_journals;
-
-                    // Add reference to upstream_stages if not already present
-                    if !resources.upstream_stages.contains(&ref_stage_id) {
-                        let mut updated_stages = vec![ref_stage_id];
-                        updated_stages.extend(&resources.upstream_stages);
-                        resources.upstream_stages = updated_stages;
-                    }
-
-                    tracing::info!(
-                        "Configured join stage '{}' with reference={:?}",
-                        name, ref_stage_id
-                    );
+                    let position = resources.upstream_journals.iter()
+                        .position(|(id, _)| *id == ref_stage_id)
+                        .ok_or_else(|| FlowBuildError::StageResourcesFailed(format!(
+                            "join '{name}' has no connected catalog journal for {ref_stage_id:?}"
+                        )))?;
+                    let catalog = resources.upstream_journals.remove(position);
+                    resources.upstream_journals.insert(0, catalog);
+                    let position = resources.upstream_stages.iter()
+                        .position(|id| *id == ref_stage_id)
+                        .ok_or_else(|| FlowBuildError::StageResourcesFailed(format!(
+                            "join '{name}' has no connected catalog stage {ref_stage_id:?}"
+                        )))?;
+                    resources.upstream_stages.remove(position);
+                    resources.upstream_stages.insert(0, ref_stage_id);
                 }
 
                 // Structural: compute the effective middleware stack config for this stage (FLOWIP-059).

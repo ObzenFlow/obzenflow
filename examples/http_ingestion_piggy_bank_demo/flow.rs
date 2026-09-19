@@ -157,7 +157,7 @@ pub fn build_flow(
         },
 
         topology: {
-            tx |> posted;
+            (accounts, tx) |> posted;
             posted |> checkbook;
             checkbook |> printer;
         }

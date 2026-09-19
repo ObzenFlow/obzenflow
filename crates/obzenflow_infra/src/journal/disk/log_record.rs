@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Logical handoff shared by all format-4 disk readers.
+//! Logical handoff shared by all current-schema disk readers.
 
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::JournalEvent;

@@ -15,8 +15,8 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::archive::manifest::{
-    RunManifest, RunManifestStage, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
-    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, RunManifestStage, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
+    RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::ArchiveStatus;
@@ -59,8 +59,8 @@ fn write_manifest(dir: &Path) {
     );
 
     let manifest = RunManifest {
-        manifest_version: RUN_MANIFEST_VERSION.to_string(),
-        journal_format_version: JOURNAL_FORMAT_VERSION,
+        journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
+
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
         flow_name: "test_flow".to_string(),
@@ -279,139 +279,21 @@ async fn open_requires_completed_status_by_default() {
     assert!(matches!(err, ReplayError::IncompleteArchive { .. }));
 }
 
-/// Write a manifest with a custom `obzenflow_version` for exact-build tests.
-fn write_manifest_with_version(dir: &Path, version: &str) {
-    let mut stages = HashMap::new();
-    stages.insert(
-        "returns".to_string(),
-        RunManifestStage {
-            dsl_var: "source".to_string(),
-            stage_type: StageType::FiniteSource,
-            stage_id: "stage_01H000000000000000000000000".to_string(),
-            stage_logic_version: "1".to_string(),
-            data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
-                .to_string(),
-            error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
-                .to_string(),
-            inbound: Vec::new(),
-            ordered_delivery: true,
-        },
-    );
-
-    let manifest = RunManifest {
-        manifest_version: RUN_MANIFEST_VERSION.to_string(),
-        journal_format_version: JOURNAL_FORMAT_VERSION,
-        obzenflow_version: version.to_string(),
-        flow_id: "flow_01H000000000000000000000000".to_string(),
-        flow_name: "test_flow".to_string(),
-        created_at: Utc::now(),
-        replay: None,
-        resume: None,
-        stages,
-        system_journal_file: "system.log".to_string(),
-        effective_config: None,
-        capabilities: binding_descriptor_capabilities(),
-        bounded_direct_fact_admission: Vec::new(),
-    };
-
-    let body = serde_json::to_string_pretty(&manifest).unwrap();
-    std::fs::write(dir.join(RUN_MANIFEST_FILENAME), body).unwrap();
-}
-
 #[tokio::test]
-async fn open_rejects_archive_from_newer_minor_version() {
-    let dir = tempdir().unwrap();
-    // Bump the minor version beyond what the framework reports.
-    let (major, minor, _patch) = {
-        let parts: Vec<u64> = OBZENFLOW_VERSION
-            .split('.')
-            .map(|p| p.parse().unwrap())
-            .collect();
-        (parts[0], parts[1], parts[2])
-    };
-    let future_version = format!("{}.{}.0", major, minor + 1);
-    write_manifest_with_version(dir.path(), &future_version);
-    write_system_log_completed(dir.path()).await;
-
-    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        matches!(err, ReplayError::VersionMismatch { .. }),
-        "expected VersionMismatch for newer minor, got: {err}"
-    );
-}
-
-#[tokio::test]
-async fn open_rejects_archive_from_older_minor_version() {
-    let dir = tempdir().unwrap();
-    let (major, minor, _patch) = {
-        let parts: Vec<u64> = OBZENFLOW_VERSION
-            .split('.')
-            .map(|p| p.parse().unwrap())
-            .collect();
-        (parts[0], parts[1], parts[2])
-    };
-
-    // Only meaningful if minor > 0; otherwise skip gracefully.
-    if minor == 0 {
-        // Bump major instead to guarantee a mismatch.
-        let old_version = format!("{}.999.0", major.saturating_sub(1));
-        write_manifest_with_version(dir.path(), &old_version);
-    } else {
-        let old_version = format!("{}.{}.0", major, minor - 1);
-        write_manifest_with_version(dir.path(), &old_version);
+async fn current_schema_accepts_different_package_versions_as_provenance() {
+    for package in ["0.0.0", "99.12.34", "0.2.2", "development-build"] {
+        let dir = tempdir().unwrap();
+        write_manifest(dir.path());
+        let path = dir.path().join(RUN_MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["obzenflow_version"] = serde_json::json!(package);
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        write_system_log_completed(dir.path()).await;
+        DiskReplayArchive::open(dir.path().to_path_buf(), false)
+            .await
+            .unwrap_or_else(|error| panic!("package {package} is provenance only: {error}"));
     }
-    write_system_log_completed(dir.path()).await;
-
-    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        matches!(err, ReplayError::VersionMismatch { .. }),
-        "expected VersionMismatch for older minor, got: {err}"
-    );
-}
-
-#[tokio::test]
-async fn open_rejects_archive_with_different_patch_version() {
-    let dir = tempdir().unwrap();
-    let (major, minor, patch) = {
-        let parts: Vec<u64> = OBZENFLOW_VERSION
-            .split('.')
-            .map(|p| p.parse().unwrap())
-            .collect();
-        (parts[0], parts[1], parts[2])
-    };
-    // Use a different patch version (if current is 0, use 99; otherwise use 0).
-    let alt_patch = if patch == 0 { 99 } else { 0 };
-    let compat_version = format!("{}.{}.{}", major, minor, alt_patch);
-    write_manifest_with_version(dir.path(), &compat_version);
-    write_system_log_completed(dir.path()).await;
-
-    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
-        .await
-        .err()
-        .expect("archive build identity must match exactly");
-    assert!(matches!(err, ReplayError::VersionMismatch { .. }));
-}
-
-#[tokio::test]
-async fn open_rejects_archive_with_unparseable_version() {
-    let dir = tempdir().unwrap();
-    write_manifest_with_version(dir.path(), "not-a-version");
-    write_system_log_completed(dir.path()).await;
-
-    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
-        .await
-        .err()
-        .unwrap();
-    assert!(
-        matches!(err, ReplayError::VersionMismatch { .. }),
-        "unparseable version should fail closed as VersionMismatch, got: {err}"
-    );
 }
 
 /// FLOWIP-122a: an archive written under the previous manifest version is refused
@@ -419,10 +301,10 @@ async fn open_rejects_archive_with_unparseable_version() {
 /// JSON deliberately lacks current fields, so this
 /// only passes when the version gate runs before typed deserialization.
 #[tokio::test]
-async fn open_rejects_previous_manifest_version_before_typed_parse() {
+async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
     let dir = tempdir().unwrap();
     let old_manifest = serde_json::json!({
-        "manifest_version": "2.0",
+        "journal_schema_version": "2.0",
         "obzenflow_version": OBZENFLOW_VERSION,
         "flow_id": "flow_01H000000000000000000000000",
         "flow_name": "test_flow",
@@ -453,10 +335,10 @@ async fn open_rejects_previous_manifest_version_before_typed_parse() {
     assert!(
         matches!(
             err,
-            ReplayError::UnsupportedManifestVersion { ref manifest_version, .. }
-                if manifest_version == "2.0"
+            ReplayError::UnsupportedJournalSchemaVersion { ref journal_schema_version, .. }
+                if journal_schema_version == "2.0"
         ),
-        "expected UnsupportedManifestVersion for a 2.0 archive, got: {err}"
+        "expected UnsupportedJournalSchemaVersion for a 2.0 archive, got: {err}"
     );
     assert!(
         err.to_string().contains("re-record"),
@@ -470,15 +352,15 @@ async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
         (None, "<missing>"),
         (Some(serde_json::json!(3.0)), "3.0"),
         (Some(serde_json::json!("2.0")), "2.0"),
-        (Some(serde_json::json!("5.0")), "5.0"),
+        (Some(serde_json::json!("6.0")), "6.0"),
     ] {
         let dir = tempdir().unwrap();
         let mut manifest = serde_json::json!({
-            "journal_format_version": JOURNAL_FORMAT_VERSION,
+
             "system_journal_file": "sentinel-system.log"
         });
         if let Some(version) = version {
-            manifest["manifest_version"] = version;
+            manifest["journal_schema_version"] = version;
         }
         std::fs::write(
             dir.path().join(RUN_MANIFEST_FILENAME),
@@ -497,8 +379,8 @@ async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
             .expect("non-current manifest must be refused");
         assert!(matches!(
             err,
-            ReplayError::UnsupportedManifestVersion { ref manifest_version, supported }
-                if manifest_version == expected && supported == RUN_MANIFEST_VERSION
+            ReplayError::UnsupportedJournalSchemaVersion { ref journal_schema_version, supported }
+                if journal_schema_version == expected && supported == JOURNAL_SCHEMA_VERSION
         ));
     }
 }
@@ -513,7 +395,7 @@ async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows()
     let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["journal_format_version"] = serde_json::json!(JOURNAL_FORMAT_VERSION - 1);
+    manifest["journal_schema_version"] = serde_json::json!("4.0");
     std::fs::write(
         &manifest_path,
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -525,12 +407,12 @@ async fn open_rejects_previous_journal_format_before_parsing_legacy_retry_rows()
         .err()
         .unwrap();
     assert!(
-        matches!(err, ReplayError::Parse { .. }),
+        matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. }),
         "expected the raw manifest gate to reject the old journal format, got: {err}"
     );
     assert!(
         err.to_string()
-            .contains("unsupported journal_format_version"),
+            .contains("unsupported journal schema version"),
         "refusal must identify the incompatible record format, got: {err}"
     );
 }
@@ -551,4 +433,45 @@ async fn open_source_reader_errors_when_journal_missing() {
         .err()
         .unwrap();
     assert!(matches!(err, ReplayError::MissingJournal { .. }));
+}
+
+/// Schema 5 manifests cannot relabel schema 4 frames, even as torn tails.
+#[tokio::test]
+async fn manifest_frame_mismatches_refuse_replay_inspect_export_and_verify() {
+    use obzenflow_infra::journal::disk::inspect::{export_jsonl, inspect};
+    use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
+    for system in [false, true] {
+        for allow_incomplete in [false, true] {
+            let dir = tempdir().unwrap();
+            write_manifest(dir.path());
+            write_system_log_completed(dir.path()).await;
+            let path = if system {
+                dir.path().join("system.log")
+            } else {
+                dir.path()
+                    .join("FiniteSource_returns_stage_01H000000000000000000000000.log")
+            };
+            // An old partial frame after valid current frames is still a schema mismatch.
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)
+                .unwrap()
+                .write_all(b"OJF4")
+                .unwrap();
+            let error = DiskReplayArchive::open(dir.path().to_path_buf(), allow_incomplete)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                matches!(error, ReplayError::UnsupportedJournalSchemaVersion { .. }),
+                "{error}"
+            );
+            assert!(inspect(dir.path(), None, None).is_err());
+            assert!(export_jsonl(dir.path(), Some(&dir.path().join("projection.jsonl"))).is_err());
+            let outcome = verify_run_dirs(dir.path(), dir.path(), &VerifyOptions::default());
+            assert!(outcome.is_err() || outcome.unwrap().exit_code() != 0);
+        }
+    }
 }

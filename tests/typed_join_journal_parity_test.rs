@@ -285,7 +285,7 @@ fn build_flow(
             topology: {
                 references |> reference_validate;
                 streams |> stream_validate;
-                stream_validate |> joined;
+                (reference_validate, stream_validate) |> joined;
                 joined |> output;
             }
         })
@@ -651,4 +651,204 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
         std::fs::read(&archived_join_path).unwrap() == archived_join_bytes,
         "replay must not rewrite archived records or contexts"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpressure() {
+    use obzenflow_core::StageKey;
+    use obzenflow_dsl::dsl::backpressure_clause::enforced;
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    let temp = tempfile::tempdir().unwrap();
+    let journal_base = temp.path().join("multi-stream");
+    let handle = FlowDefinition::materialize(move |_| {
+        let references = ReferenceSource::new(Arc::new(AtomicUsize::new(0)));
+        let stream_a = StreamSource::new(Arc::new(AtomicUsize::new(0)));
+        let stream_b = StreamSource::new(Arc::new(AtomicUsize::new(0)));
+        let joined = ExactJoin { calls: Arc::new(AtomicUsize::new(0)) };
+        let output = SinkTyped::new(|_: JoinedFact| async {}).idempotent();
+        Ok(flow! {
+            name: "explicit_multi_stream_join",
+            journals: disk_journals(journal_base),
+            backpressure: enforced(2).stall_timeout_ms(3_000),
+            stages: {
+                references = source!(ReferenceItem => references with [], backpressure: enforced(1));
+                stream_a = source!(StreamItem => stream_a);
+                stream_b = source!(StreamItem => stream_b);
+                joined = join!(catalog references: ReferenceItem, StreamItem -> JoinedFact => joined);
+                output = sink!(JoinedFact => output);
+            },
+            topology: {
+                (references, stream_a) |> joined;
+                (references, stream_b) |> joined;
+                joined |> output;
+            }
+        })
+    }).build(FlowBuildContext::for_tests()).await.unwrap();
+    let topology = handle.topology().unwrap();
+    let join = topology
+        .stages()
+        .find(|stage| stage.name == "joined")
+        .unwrap();
+    let metadata = join.join_metadata.as_ref().unwrap();
+    assert_eq!(metadata.catalog_source_ids.len(), 1);
+    assert_eq!(metadata.stream_source_ids.len(), 2);
+    assert_eq!(
+        topology.edges().len(),
+        4,
+        "one catalog edge, two stream edges, one output edge"
+    );
+    let config = handle.flow_effective_config().unwrap();
+    for producer in ["references", "stream_a", "stream_b"] {
+        assert_eq!(
+            config
+                .backpressure_window_for(&StageKey::from(producer), &StageKey::from("joined"))
+                .unwrap()
+                .value
+                .as_u64(),
+            Some(if producer == "references" { 1 } else { 2 })
+        );
+    }
+    assert_eq!(
+        config
+            .backpressure_window_for(&StageKey::from("joined"), &StageKey::from("output"))
+            .unwrap()
+            .value
+            .as_u64(),
+        Some(2)
+    );
+    let archive = handle
+        .run_substrate()
+        .locator()
+        .unwrap()
+        .path()
+        .to_path_buf();
+    tokio::time::timeout(std::time::Duration::from_secs(30), handle.run())
+        .await
+        .unwrap()
+        .unwrap();
+    let records = read_stage_appended(&archive, "joined").await;
+    let authored = facts(&records);
+    assert_eq!(
+        authored
+            .iter()
+            .filter(|fact| fact.phase == "stream")
+            .count(),
+        6
+    );
+    assert_eq!(
+        authored.iter().filter(|fact| fact.phase == "hook").count(),
+        1
+    );
+    assert_eq!(
+        authored.iter().filter(|fact| fact.phase == "drain").count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("must-not-exist");
+    let providers = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    macro_rules! invalid {
+        ($($wiring:tt)*) => {{
+            let root = root.clone();
+            let providers = providers.clone();
+            let reads = reads.clone();
+            FlowDefinition::materialize(move |_| {
+                let catalog = ReferenceSource::new(reads.clone());
+                let stream = ReferenceSource::new(reads.clone());
+                let other = ReferenceSource::new(reads);
+                let joiner = obzenflow::joins::inner(
+                    |row: &ReferenceItem| row.key.clone(),
+                    |row: &ReferenceItem| row.key.clone(),
+                    |reference: ReferenceItem, _stream: ReferenceItem| reference,
+                );
+                Ok(flow! {
+                    journals: {
+                        providers.fetch_add(1, Ordering::SeqCst);
+                        disk_journals(root)
+                    },
+                    stages: {
+                        catalog = source!(ReferenceItem => catalog);
+                        stream = source!(ReferenceItem => stream);
+                        other = source!(ReferenceItem => other);
+                        joined = join!(name: "visible-name", catalog catalog: ReferenceItem, ReferenceItem -> ReferenceItem => joiner);
+                    },
+                    topology: { $($wiring)* }
+                })
+            })
+        }};
+    }
+    for (definition, diagnostic) in [
+        (invalid!(), "requires explicit"),
+        (invalid!(stream |> joined;), "plain edge"),
+        (invalid!(catalog |> joined; stream |> joined;), "plain edge"),
+        (
+            invalid!((catalog, stream) |> joined; other |> joined;),
+            "plain edge",
+        ),
+        (
+            invalid!((stream, catalog) |> joined;),
+            "declares catalog 'catalog'",
+        ),
+        (
+            invalid!((other, stream) |> joined;),
+            "declares catalog 'catalog'",
+        ),
+        (
+            invalid!((catalog, stream) |> joined; (catalog, stream) |> joined;),
+            "duplicate join tuple",
+        ),
+        (
+            invalid!((catalog, catalog) |> joined;),
+            "both catalog and stream",
+        ),
+        (
+            invalid!((catalog, missing) |> joined;),
+            "unknown binding 'missing'",
+        ),
+        (invalid!((catalog, stream) |> other;), "not a declared join"),
+        (invalid!(joined <| catalog;), "requires explicit"),
+    ] {
+        let error = definition
+            .build(FlowBuildContext::for_tests())
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+        assert_eq!(providers.load(Ordering::SeqCst), 0);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert!(!root.exists());
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn test_flow_rejects_plain_join_input_before_journal_provider_evaluation() {
+    let providers = Arc::new(AtomicUsize::new(0));
+    let reference = ReferenceSource::new(Arc::new(AtomicUsize::new(0)));
+    let stream = StreamSource::new(Arc::new(AtomicUsize::new(0)));
+    let joiner = ExactJoin {
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let provider_counter = providers.clone();
+    let result = obzenflow_dsl::test_flow! {
+        journals: {
+            provider_counter.fetch_add(1, Ordering::SeqCst);
+            obzenflow_infra::journal::memory_journals()
+        },
+        stages: {
+            reference = source!(ReferenceItem => reference);
+            stream = source!(StreamItem => stream);
+            joined = join!(catalog reference: ReferenceItem, StreamItem -> JoinedFact => joiner);
+        },
+        topology: { stream |> joined; }
+    }
+    .await;
+    let error = result.err().unwrap();
+    assert!(error.to_string().contains("plain edge"), "{error}");
+    assert_eq!(providers.load(Ordering::SeqCst), 0);
 }

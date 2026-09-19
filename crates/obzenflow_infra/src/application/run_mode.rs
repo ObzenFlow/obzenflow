@@ -79,7 +79,7 @@ impl ReplayRunContext {
 fn peek_archive_flow_id(archive_path: &Path) -> Option<String> {
     let manifest = std::fs::read_to_string(archive_path.join(RUN_MANIFEST_FILENAME)).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
-    crate::journal::disk::manifest_gate::require_current_manifest_version(&manifest).ok()?;
+    crate::journal::disk::manifest_gate::require_current_journal_schema_version(&manifest).ok()?;
     manifest.get("flow_id")?.as_str().map(str::to_string)
 }
 
@@ -120,7 +120,7 @@ mod tests {
         std::fs::write(
             temp.path().join(RUN_MANIFEST_FILENAME),
             serde_json::to_vec(&serde_json::json!({
-                "manifest_version": "2.0",
+                "journal_schema_version": "2.0",
                 "flow_id": "old-flow-must-not-leak-through"
             }))
             .unwrap(),
