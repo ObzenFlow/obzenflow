@@ -114,8 +114,8 @@ impl<T: JournalEvent> Journal<T> for ObservedJournal<T> {
 #[derive(Default)]
 struct Exports(Mutex<Vec<AppMetricsSnapshot>>);
 impl MetricsSnapshotExporter for Exports {
-    fn publish_app_snapshot(&self, value: AppMetricsSnapshot) {
-        self.0.lock().unwrap().push(value);
+    fn publish_app_snapshot(&self, snapshot: AppMetricsSnapshot) {
+        self.0.lock().unwrap().push(snapshot);
     }
     fn publish_infra_snapshot(&self, _: InfraMetricsSnapshot) {}
 }
@@ -316,10 +316,10 @@ pub async fn metrics_tail_overwrites_and_preserves_sparse_families(
     );
     let (mut ctx, _, _) = context(&mut *factory, vec![(stage, data)], vec![]).await;
     refresh(&mut ctx).await;
-    let value = &ctx.metrics_store.stage_metrics[&stage];
-    assert_eq!(value.latest_events_processed_total, Some(100));
-    assert_eq!(value.last_in_flight, Some(3));
-    assert_eq!(value.event_loops_total, Some(42));
+    let stage_metrics = &ctx.metrics_store.stage_metrics[&stage];
+    assert_eq!(stage_metrics.latest_events_processed_total, Some(100));
+    assert_eq!(stage_metrics.last_in_flight, Some(3));
+    assert_eq!(stage_metrics.event_loops_total, Some(42));
     assert!(ctx
         .metrics_store
         .circuit_breaker_state_transitions_total
@@ -574,9 +574,9 @@ pub async fn metrics_terminal_accounting_survives_without_optional_packets(
         .unwrap()
         .unwrap();
     let snapshots = exports.0.lock().unwrap();
-    let final_value = snapshots.last().unwrap();
-    assert_eq!(final_value.event_counts[&stage], 1000);
-    assert_eq!(final_value.pipeline_state, "not_started");
+    let final_snapshot = snapshots.last().unwrap();
+    assert_eq!(final_snapshot.event_counts[&stage], 1000);
+    assert_eq!(final_snapshot.pipeline_state, "not_started");
 }
 
 pub async fn metrics_exports_do_not_create_observations(mut factory: Box<dyn FlowJournalFactory>) {

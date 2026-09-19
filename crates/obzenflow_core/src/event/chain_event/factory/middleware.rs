@@ -165,7 +165,7 @@ impl ChainEventFactory {
         Self::execution_event(
             writer_id,
             ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
-                cooldown_ms: Some(cooldown_ms),
+                cooldown_ms,
                 error_rate,
                 failure_count,
                 trigger,

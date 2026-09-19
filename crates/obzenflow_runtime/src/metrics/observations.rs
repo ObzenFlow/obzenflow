@@ -369,9 +369,11 @@ impl ObservationOwner {
         let sequence = self
             .sequence
             .as_ref()?
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
-            })
+            .fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |current_capture_seq| current_capture_seq.checked_add(1),
+            )
             .ok()?
             + 1;
         Some(ObservabilityContext::new(CaptureStamp {
@@ -427,7 +429,7 @@ mod tests {
         scope: CaptureScope,
         observer: WriterId,
         sequence: u64,
-        value: u32,
+        in_flight: u32,
     ) -> ObservabilityContext {
         let mut packet = ObservabilityContext::new(CaptureStamp {
             capture_scope: scope,
@@ -437,7 +439,7 @@ mod tests {
             observed_at_ms: sequence,
         });
         packet.runtime = Some(RuntimeObservability {
-            in_flight: Some(value),
+            in_flight: Some(in_flight),
             ..Default::default()
         });
         packet

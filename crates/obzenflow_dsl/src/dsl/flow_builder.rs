@@ -24,25 +24,20 @@ use std::sync::Arc;
 
 type ConfiguredSinkResolution = (HashMap<String, Box<dyn StageDescriptor>>, HashSet<String>);
 
-/// Project the current breaker snapshot into the published topology 0.5.1
-/// annotation. Its legacy threshold is the consecutive limit or count-window
-/// size, matching the runtime's threshold configuration key. Source admission
-/// still waits for cooldown; the legacy open-policy field describes rejection
-/// without a fallback, not a promise that all stage surfaces stop or fail alike.
+/// Project current breaker settings into the published topology annotation.
+/// Its threshold is the consecutive failure limit or count-window size.
 fn circuit_breaker_topology_config(
-    snapshot: &serde_json::Value,
+    breaker_config: &serde_json::Value,
 ) -> Result<obzenflow_topology::CircuitBreakerInfo, serde_json::Error> {
-    let Some(mode) = snapshot.get("mode") else {
-        return serde_json::from_value(snapshot.clone());
-    };
-    let threshold = match mode.get("kind").and_then(serde_json::Value::as_str) {
-        Some("consecutive") => mode.get("consecutive_failures"),
-        Some("rate_based") => mode.get("count_window"),
+    let breaker_mode = &breaker_config["mode"];
+    let opening_threshold = match breaker_mode.get("kind").and_then(serde_json::Value::as_str) {
+        Some("consecutive") => breaker_mode.get("consecutive_failures"),
+        Some("rate_based") => breaker_mode.get("count_window"),
         _ => None,
     };
     serde_json::from_value(serde_json::json!({
-        "threshold": threshold,
-        "cooldown_ms": snapshot.get("open_for_ms"),
+        "threshold": opening_threshold,
+        "cooldown_ms": breaker_config.get("open_for_ms"),
         "open_policy": "fail_fast",
         "has_fallback": false,
     }))
@@ -1790,6 +1785,10 @@ mod middleware_topology_tests {
         for snapshot in [
             serde_json::json!({"mode": {"kind": "consecutive", "consecutive_failures": 3}}),
             serde_json::json!({"mode": {"kind": "unknown"}, "open_for_ms": 5_000}),
+            serde_json::json!({
+                "threshold": 3, "cooldown_ms": 5_000,
+                "open_policy": "fail_fast", "has_fallback": false
+            }),
         ] {
             assert!(circuit_breaker_topology_config(&snapshot).is_err());
         }

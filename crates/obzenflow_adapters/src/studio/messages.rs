@@ -414,8 +414,7 @@ pub(super) enum CircuitBreakerUpdate<'a> {
 #[serde(untagged)]
 pub(super) enum CircuitTransition<'a> {
     Opened {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cooldown_ms: Option<u64>,
+        cooldown_ms: u64,
         error_rate: f64,
         failure_count: u64,
         trigger: CircuitBreakerOpenTrigger,

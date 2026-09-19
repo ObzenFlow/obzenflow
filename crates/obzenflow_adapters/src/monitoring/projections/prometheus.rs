@@ -2294,7 +2294,7 @@ impl PrometheusProjection {
             )?;
             writeln!(output, "# TYPE obzenflow_ai_chunking_jobs_total counter")?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.jobs_total else {
+                let Some(jobs_total) = metrics.jobs_total else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2302,7 +2302,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_jobs_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        jobs_total
                     )?;
                 }
             }
@@ -2317,7 +2317,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_input_items_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.input_items_total else {
+                let Some(input_items_total) = metrics.input_items_total else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2325,7 +2325,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_input_items_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        input_items_total
                     )?;
                 }
             }
@@ -2340,7 +2340,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_planned_items_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.planned_items_total else {
+                let Some(planned_items_total) = metrics.planned_items_total else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2348,7 +2348,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_planned_items_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        planned_items_total
                     )?;
                 }
             }
@@ -2363,7 +2363,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_excluded_items_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.excluded_items_total else {
+                let Some(excluded_items_total) = metrics.excluded_items_total else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2371,7 +2371,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_excluded_items_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        excluded_items_total
                     )?;
                 }
             }
@@ -2386,7 +2386,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_chunks_emitted_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.chunks_emitted_total else {
+                let Some(chunks_emitted_total) = metrics.chunks_emitted_total else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2394,7 +2394,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_chunks_emitted_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        chunks_emitted_total
                     )?;
                 }
             }
@@ -2409,7 +2409,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_rerender_attempts_total counter"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.rerender_attempts_total else {
+                let Some(rerender_attempts_total) = metrics.rerender_attempts_total else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2417,7 +2417,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_rerender_attempts_total{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        rerender_attempts_total
                     )?;
                 }
             }
@@ -2432,7 +2432,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_max_depth_reached gauge"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.max_depth_reached else {
+                let Some(max_depth_reached) = metrics.max_depth_reached else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2440,7 +2440,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_max_depth_reached{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        max_depth_reached
                     )?;
                 }
             }
@@ -2455,7 +2455,7 @@ impl PrometheusProjection {
                 "# TYPE obzenflow_ai_chunking_budget_overhead_tokens gauge"
             )?;
             for (stage_id, metrics) in &snapshot.ai_chunking_metrics {
-                let Some(value) = metrics.budget_overhead_tokens else {
+                let Some(budget_overhead_tokens) = metrics.budget_overhead_tokens else {
                     continue;
                 };
                 if let Some(metadata) = snapshot.stage_metadata.get(stage_id) {
@@ -2463,7 +2463,7 @@ impl PrometheusProjection {
                         output,
                         "obzenflow_ai_chunking_budget_overhead_tokens{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
-                        value
+                        budget_overhead_tokens
                     )?;
                 }
             }

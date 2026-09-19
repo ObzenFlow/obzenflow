@@ -131,14 +131,14 @@ fn visit_families(
         } = runtime;
         macro_rules! field {
             ($name:ident) => {
-                if let Some(value) = $name {
+                if let Some(measurement) = $name {
                     emit!(
                         ObservationFamily::new(concat!("runtime.", stringify!($name))),
                         stamp,
                         || {
                             let mut part = ObservabilityContext::new(stamp);
                             part.runtime = Some(RuntimeObservability {
-                                $name: Some(value.clone()),
+                                $name: Some(measurement.clone()),
                                 ..Default::default()
                             });
                             part
@@ -158,15 +158,17 @@ fn visit_families(
         field!(rate_limiter);
         macro_rules! effects {
             ($name:ident) => {
-                for value in $name {
+                for effect_measurements in $name {
                     let key = ObservationFamily {
-                        subject: ObservationSubject::Effect(value.effect_type.clone()),
+                        subject: ObservationSubject::Effect(
+                            effect_measurements.effect_type.clone(),
+                        ),
                         ..ObservationFamily::new(concat!("runtime.", stringify!($name)))
                     };
                     emit!(key, stamp, || {
                         let mut part = ObservabilityContext::new(stamp);
                         part.runtime = Some(RuntimeObservability {
-                            $name: vec![value.clone()],
+                            $name: vec![effect_measurements.clone()],
                             ..Default::default()
                         });
                         part
@@ -179,10 +181,10 @@ fn visit_families(
     }
     macro_rules! field {
         ($name:ident) => {
-            if let Some(value) = $name {
+            if let Some(measurement) = $name {
                 emit!(ObservationFamily::new(stringify!($name)), stamp, || {
                     let mut part = ObservabilityContext::new(stamp);
-                    part.$name = Some(value.clone());
+                    part.$name = Some(measurement.clone());
                     part
                 });
             }

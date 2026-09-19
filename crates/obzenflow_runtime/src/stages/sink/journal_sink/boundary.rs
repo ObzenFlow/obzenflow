@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn every_sink_legal_breaker_and_limiter_variant_is_explicitly_allowed() {
         assert_allowed_breaker(CircuitBreakerFact::Opened {
-            cooldown_ms: Some(5_000),
+            cooldown_ms: 5_000,
             error_rate: 0.5,
             failure_count: 2,
             trigger: CircuitBreakerOpenTrigger::FailureRate,
@@ -364,7 +364,7 @@ mod tests {
     fn evidence_text_numbers_and_batch_capacity_fail_closed() {
         assert!(matches!(
             SinkPolicyEvidence::circuit_breaker(CircuitBreakerFact::Opened {
-                cooldown_ms: Some(5_000),
+                cooldown_ms: 5_000,
                 error_rate: f64::NAN,
                 failure_count: 1,
                 trigger: CircuitBreakerOpenTrigger::FailureRate,

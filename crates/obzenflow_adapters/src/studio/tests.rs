@@ -553,7 +553,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         factual(
             7,
             MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
-                cooldown_ms: Some(5_000),
+                cooldown_ms: 5_000,
                 error_rate: 0.5,
                 failure_count: 2,
                 trigger: CircuitBreakerOpenTrigger::FailureRate,

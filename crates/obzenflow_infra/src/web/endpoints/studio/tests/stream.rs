@@ -428,7 +428,7 @@ async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
 async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up() {
     use obzenflow_core::event::observability::*;
     use obzenflow_core::event::payloads::execution_payload::{
-        CircuitBreakerFact, CircuitState, MiddlewareFact,
+        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact,
     };
     use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
     use obzenflow_core::event::types::SeqNo;
@@ -492,10 +492,15 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
                 writer_key: stage.to_string(),
                 seq: SeqNo(420),
             },
-            middleware: MiddlewareFact::CircuitBreaker(CircuitBreakerFact::StateChanged {
-                from_state: CircuitState::Closed,
-                to_state: CircuitState::Open,
-                timestamp: 420,
+            middleware: MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
+                cooldown_ms: 5_000,
+                error_rate: 1.0,
+                failure_count: 3,
+                trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+                observed_calls: 3,
+                slow_call_rate: None,
+                slow_call_count: None,
+                last_error: None,
             }),
         },
     );
@@ -518,6 +523,7 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
         .unwrap();
     assert_eq!(fact.id, Some(opened.id().to_string()));
     assert_eq!(frame_payload(&fact)["revision"], 420);
+    assert_eq!(frame_payload(&fact)["context"]["cooldown_ms"], 5_000);
     drop(first); // Disconnect before the optional frame belonging to this fact.
 
     let terminal = append(
@@ -932,7 +938,8 @@ async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallbac
 #[tokio::test(start_paused = true)]
 async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
     use obzenflow_core::event::payloads::execution_payload::{
-        CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
+        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact,
+        RateLimiterFact, RateLimiterMode,
     };
     use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
     use obzenflow_core::event::types::SeqNo;
@@ -972,10 +979,15 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 middleware(
                     breaker,
                     420,
-                    MiddlewareFact::CircuitBreaker(CircuitBreakerFact::StateChanged {
-                        from_state: CircuitState::Closed,
-                        to_state: CircuitState::Open,
-                        timestamp: 420,
+                    MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
+                        cooldown_ms: 5_000,
+                        error_rate: 1.0,
+                        failure_count: 3,
+                        trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+                        observed_calls: 3,
+                        slow_call_rate: None,
+                        slow_call_count: None,
+                        last_error: None,
                     }),
                 ),
             )

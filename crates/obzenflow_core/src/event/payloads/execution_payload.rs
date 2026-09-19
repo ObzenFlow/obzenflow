@@ -83,10 +83,8 @@ pub enum CircuitState {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CircuitBreakerFact {
     Opened {
-        /// Minimum wait before another probe is permitted. Older journal facts
-        /// did not record this configuration, so absence means unknown.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cooldown_ms: Option<u64>,
+        /// Configured minimum wait before another probe is permitted.
+        cooldown_ms: u64,
         /// Failure rate in the population that caused this transition, not the
         /// breaker's cumulative lifetime failure rate.
         error_rate: f64,
@@ -368,27 +366,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opened_fact_round_trips_cooldown_and_reads_older_facts_without_inventing_it() {
-        let mut wire = serde_json::json!({
+    fn opened_fact_requires_and_round_trips_its_cooldown() {
+        let mut opening_json = serde_json::json!({
             "action": "opened", "error_rate": 1.0, "failure_count": 3,
-            "trigger": "consecutive_failures", "observed_calls": 3
+            "trigger": "consecutive_failures", "observed_calls": 3,
+            "cooldown_ms": 5_000
         });
-        for expected in [None, Some(5_000)] {
-            if let Some(cooldown) = expected {
-                wire["cooldown_ms"] = serde_json::json!(cooldown);
+        let opening: CircuitBreakerFact = serde_json::from_value(opening_json.clone()).unwrap();
+        assert!(matches!(
+            &opening,
+            CircuitBreakerFact::Opened {
+                cooldown_ms: 5_000,
+                ..
             }
-            let fact: CircuitBreakerFact = serde_json::from_value(wire.clone()).unwrap();
-            assert!(
-                matches!(&fact, CircuitBreakerFact::Opened { cooldown_ms, .. }
-                if *cooldown_ms == expected)
-            );
-            let encoded = serde_json::to_value(fact).unwrap();
-            assert_eq!(
-                encoded
-                    .get("cooldown_ms")
-                    .and_then(serde_json::Value::as_u64),
-                expected
-            );
-        }
+        ));
+        assert_eq!(serde_json::to_value(opening).unwrap()["cooldown_ms"], 5_000);
+
+        opening_json.as_object_mut().unwrap().remove("cooldown_ms");
+        let missing_cooldown =
+            serde_json::from_value::<CircuitBreakerFact>(opening_json.clone()).unwrap_err();
+        assert!(missing_cooldown.to_string().contains("cooldown_ms"));
+        opening_json["cooldown_ms"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<CircuitBreakerFact>(opening_json).is_err());
     }
 }

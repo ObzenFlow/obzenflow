@@ -281,17 +281,17 @@ pub struct StageMetrics {
 
 impl StageMetrics {
     pub(super) fn merge_runtime_measurements(&mut self, runtime: &RuntimeObservability) {
-        if let Some(value) = runtime.in_flight {
-            self.last_in_flight = Some(value);
+        if let Some(in_flight) = runtime.in_flight {
+            self.last_in_flight = Some(in_flight);
         }
-        if let Some(value) = runtime.join_reference_since_last_stream {
-            self.join_reference_since_last_stream = Some(value);
+        if let Some(join_reference_since_last_stream) = runtime.join_reference_since_last_stream {
+            self.join_reference_since_last_stream = Some(join_reference_since_last_stream);
         }
-        if let Some(value) = runtime.event_loops_total {
-            self.event_loops_total = Some(value);
+        if let Some(event_loops_total) = runtime.event_loops_total {
+            self.event_loops_total = Some(event_loops_total);
         }
-        if let Some(value) = runtime.event_loops_with_work_total {
-            self.event_loops_with_work_total = Some(value);
+        if let Some(event_loops_with_work_total) = runtime.event_loops_with_work_total {
+            self.event_loops_with_work_total = Some(event_loops_with_work_total);
         }
         if let Some(timing) = &runtime.timing {
             if timing.is_valid() {
@@ -505,33 +505,40 @@ impl MetricsAggregatorContext {
         // Convert stage metrics to snapshot format
         for (stage_id, metrics) in &store.stage_metrics {
             // Prefer wide-event snapshot counters when available
-            let events_count = metrics.latest_events_processed_total.unwrap_or(0);
-            if let Some(value) = metrics.latest_events_processed_total {
-                snapshot.event_counts.insert(*stage_id, value);
+            let stage_events_processed_total = metrics.latest_events_processed_total.unwrap_or(0);
+            if let Some(events_processed_total) = metrics.latest_events_processed_total {
+                snapshot
+                    .event_counts
+                    .insert(*stage_id, events_processed_total);
             }
 
-            if let Some(value) = metrics.latest_events_accumulated_total {
-                snapshot.events_accumulated_total.insert(*stage_id, value);
+            if let Some(events_accumulated_total) = metrics.latest_events_accumulated_total {
+                snapshot
+                    .events_accumulated_total
+                    .insert(*stage_id, events_accumulated_total);
             }
 
-            if let Some(value) = metrics.latest_events_emitted_total {
-                snapshot.events_emitted_total.insert(*stage_id, value);
+            if let Some(events_emitted_total) = metrics.latest_events_emitted_total {
+                snapshot
+                    .events_emitted_total
+                    .insert(*stage_id, events_emitted_total);
             }
 
-            if let Some(value) = metrics.join_reference_since_last_stream {
+            if let Some(join_reference_since_last_stream) = metrics.join_reference_since_last_stream
+            {
                 if let Some(metadata) = self.stage_metadata.get(stage_id) {
                     if metadata.stage_type == StageType::Join {
                         snapshot
                             .join_reference_since_last_stream
-                            .insert(*stage_id, value);
+                            .insert(*stage_id, join_reference_since_last_stream);
                     }
                 }
             }
 
             // Use wide-event snapshot errors_total as authoritative.
             let stage_errors_total = metrics.latest_errors_total.unwrap_or(0);
-            if let Some(value) = metrics.latest_errors_total {
-                snapshot.error_counts.insert(*stage_id, value);
+            if let Some(errors_total) = metrics.latest_errors_total {
+                snapshot.error_counts.insert(*stage_id, errors_total);
             }
 
             if !metrics.errors_by_kind.is_empty() && stage_errors_total > 0 {
@@ -584,37 +591,41 @@ impl MetricsAggregatorContext {
                 snapshot.failures_total.insert(*stage_id, failures_total);
             }
 
-            if let Some(value) = metrics.event_loops_total {
-                snapshot.event_loops_total.insert(*stage_id, value);
+            if let Some(event_loops_total) = metrics.event_loops_total {
+                snapshot
+                    .event_loops_total
+                    .insert(*stage_id, event_loops_total);
             }
-            if let Some(value) = metrics.event_loops_with_work_total {
+            if let Some(event_loops_with_work_total) = metrics.event_loops_with_work_total {
                 snapshot
                     .event_loops_with_work_total
-                    .insert(*stage_id, value);
+                    .insert(*stage_id, event_loops_with_work_total);
             }
 
             // Aggregate flow-level metrics from snapshots
             total_events_processed_snapshot =
-                total_events_processed_snapshot.saturating_add(events_count);
+                total_events_processed_snapshot.saturating_add(stage_events_processed_total);
 
             flow_errors_total_snapshot =
                 flow_errors_total_snapshot.saturating_add(stage_errors_total);
 
             total_event_loops = total_event_loops
                 .zip(metrics.event_loops_total)
-                .map(|(total, value)| total.saturating_add(value));
+                .map(|(flow_total, stage_total)| flow_total.saturating_add(stage_total));
             total_event_loops_with_work = total_event_loops_with_work
                 .zip(metrics.event_loops_with_work_total)
-                .map(|(total, value)| total.saturating_add(value));
+                .map(|(flow_total, stage_total)| flow_total.saturating_add(stage_total));
 
             if let Some(metadata) = self.stage_metadata.get(stage_id) {
                 match metadata.stage_type {
                     obzenflow_core::event::context::StageType::FiniteSource
                     | obzenflow_core::event::context::StageType::InfiniteSource => {
-                        flow_events_in_total = flow_events_in_total.saturating_add(events_count);
+                        flow_events_in_total =
+                            flow_events_in_total.saturating_add(stage_events_processed_total);
                     }
                     obzenflow_core::event::context::StageType::Sink => {
-                        flow_events_out_total = flow_events_out_total.saturating_add(events_count);
+                        flow_events_out_total =
+                            flow_events_out_total.saturating_add(stage_events_processed_total);
                     }
                     _ => {}
                 }
@@ -623,7 +634,7 @@ impl MetricsAggregatorContext {
             tracing::debug!(
                 "Exported metrics for {:?}: events={}, errors_total_snapshot={}",
                 stage_id,
-                events_count,
+                stage_events_processed_total,
                 stage_errors_total
             );
         }
@@ -847,16 +858,16 @@ impl MetricsStore {
         let metrics = self.stage_metrics.entry(stage).or_default();
         let changed = metrics
             .latest_events_processed_total
-            .is_none_or(|value| accounting.events_processed_total > value)
+            .is_none_or(|previous_total| accounting.events_processed_total > previous_total)
             || metrics
                 .latest_events_emitted_total
-                .is_none_or(|value| accounting.events_emitted_total > value)
+                .is_none_or(|previous_total| accounting.events_emitted_total > previous_total)
             || metrics
                 .latest_events_accumulated_total
-                .is_none_or(|value| accounting.events_accumulated_total > value)
+                .is_none_or(|previous_total| accounting.events_accumulated_total > previous_total)
             || metrics
                 .latest_errors_total
-                .is_none_or(|value| accounting.errors_total > value);
+                .is_none_or(|previous_total| accounting.errors_total > previous_total);
         metrics.merge_accounting(accounting);
         if changed {
             // Times describe changes observed by this live view. Re-exporting
@@ -1364,8 +1375,8 @@ impl FsmAction for MetricsAggregatorAction {
                     &ctx.stage_metadata,
                     export_started,
                 );
-                let buffered = ctx.metrics_store.buffer.snapshot();
-                for ((stage, kind), records) in buffered.stages {
+                let buffer_snapshot = ctx.metrics_store.buffer.snapshot();
+                for ((stage, kind), records) in buffer_snapshot.stage_records {
                     MetricsAggregatorAction::UpdateMetrics {
                         events: records,
                         journal_kind: kind,
@@ -1376,7 +1387,7 @@ impl FsmAction for MetricsAggregatorAction {
                 }
                 // Older accounting carriers may precede a newer lifecycle value.
                 // Applying oldest first leaves each lifecycle at its newest state.
-                for record in buffered.system.iter().rev() {
+                for record in buffer_snapshot.system_records.iter().rev() {
                     MetricsAggregatorAction::ProcessSystemEvent {
                         envelope: Box::new(record.clone()),
                     }

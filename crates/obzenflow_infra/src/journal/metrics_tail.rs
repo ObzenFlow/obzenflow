@@ -13,7 +13,7 @@ use obzenflow_core::journal::ObservationKey;
 use obzenflow_core::JournalRecord;
 use std::collections::{BTreeSet, HashMap};
 
-const MAX_KEYS: usize = 4096;
+const MAX_OBSERVATION_KEYS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Carrier {
@@ -23,8 +23,8 @@ pub(super) struct Carrier {
 
 #[derive(Default)]
 pub(super) struct MetricsTailIndex {
-    values: HashMap<MetricsTailKey, Carrier>,
-    observations: HashMap<ObservationKey, (CaptureSeq, Carrier)>,
+    reporting_carriers: HashMap<MetricsTailKey, Carrier>,
+    observation_carriers: HashMap<ObservationKey, (CaptureSeq, Carrier)>,
 }
 
 impl MetricsTailIndex {
@@ -34,7 +34,7 @@ impl MetricsTailIndex {
             .visit_metrics_keys(&record.envelope.provenance.event, &mut |key| {
                 // Reporting identities follow the flow's stages and contract edges.
                 // In particular, optional-family capacity cannot hide its terminal.
-                self.values.insert(key, carrier);
+                self.reporting_carriers.insert(key, carrier);
             });
         if let Some(packet) = &record.envelope.observability {
             any_observation_family(packet, |kind, stamp| {
@@ -43,13 +43,14 @@ impl MetricsTailIndex {
                     observer: stamp.observer,
                     kind,
                 };
-                if let Some((sequence, previous)) = self.observations.get_mut(&key) {
+                if let Some((sequence, previous)) = self.observation_carriers.get_mut(&key) {
                     if stamp.capture_seq > *sequence {
                         *sequence = stamp.capture_seq;
                         *previous = carrier;
                     }
-                } else if self.observations.len() < MAX_KEYS {
-                    self.observations.insert(key, (stamp.capture_seq, carrier));
+                } else if self.observation_carriers.len() < MAX_OBSERVATION_KEYS {
+                    self.observation_carriers
+                        .insert(key, (stamp.capture_seq, carrier));
                 }
                 false
             });
@@ -57,10 +58,14 @@ impl MetricsTailIndex {
     }
 
     pub fn carriers(&self) -> Vec<Carrier> {
-        self.values
+        self.reporting_carriers
             .values()
             .copied()
-            .chain(self.observations.values().map(|(_, carrier)| *carrier))
+            .chain(
+                self.observation_carriers
+                    .values()
+                    .map(|(_, carrier)| *carrier),
+            )
             .collect::<BTreeSet<_>>()
             .into_iter()
             .rev()

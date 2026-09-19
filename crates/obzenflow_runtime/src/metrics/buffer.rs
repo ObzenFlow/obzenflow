@@ -15,41 +15,50 @@ use tokio::time::{Duration, Instant};
 const REFRESH_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Default, Clone)]
-pub(super) struct Values {
-    pub stages: HashMap<(StageId, MetricsJournalKind), Arc<[JournalRecord<ChainPayload>]>>,
-    pub system: Arc<[JournalRecord<SystemPayload>]>,
-    refreshed: HashMap<JournalId, Instant>,
+pub(super) struct MetricsBufferSnapshot {
+    pub stage_records: HashMap<(StageId, MetricsJournalKind), Arc<[JournalRecord<ChainPayload>]>>,
+    pub system_records: Arc<[JournalRecord<SystemPayload>]>,
+    refreshed_at_by_journal: HashMap<JournalId, Instant>,
 }
 
 #[derive(Default)]
 pub(crate) struct MetricsBuffer {
-    values: Mutex<Values>,
+    state: Mutex<MetricsBufferSnapshot>,
     pub updated: tokio::sync::Notify,
 }
 
 impl MetricsBuffer {
-    pub(super) fn snapshot(&self) -> Values {
-        self.values.lock().unwrap().clone()
+    pub(super) fn snapshot(&self) -> MetricsBufferSnapshot {
+        self.state.lock().unwrap().clone()
     }
 
     pub fn terminal(&self, writer: Option<WriterId>) -> bool {
-        self.values.lock().unwrap().system.iter().any(|record| {
-            writer.is_none_or(|writer| writer == record.envelope.provenance.event.writer_id)
-                && matches!(
-                    record.payload,
-                    SystemPayload::PipelineLifecycle(
-                        PipelineLifecycleEvent::Completed { .. }
-                            | PipelineLifecycleEvent::Failed { .. }
-                            | PipelineLifecycleEvent::Cancelled { .. }
-                            | PipelineLifecycleEvent::NotStarted
+        self.state
+            .lock()
+            .unwrap()
+            .system_records
+            .iter()
+            .any(|record| {
+                writer.is_none_or(|writer| writer == record.envelope.provenance.event.writer_id)
+                    && matches!(
+                        record.payload,
+                        SystemPayload::PipelineLifecycle(
+                            PipelineLifecycleEvent::Completed { .. }
+                                | PipelineLifecycleEvent::Failed { .. }
+                                | PipelineLifecycleEvent::Cancelled { .. }
+                                | PipelineLifecycleEvent::NotStarted
+                        )
                     )
-                )
-        })
+            })
     }
 
     pub fn refreshed_since(&self, since: Instant, readers: usize) -> bool {
-        let values = self.values.lock().unwrap();
-        values.refreshed.len() == readers && values.refreshed.values().all(|at| *at >= since)
+        let buffer_state = self.state.lock().unwrap();
+        buffer_state.refreshed_at_by_journal.len() == readers
+            && buffer_state
+                .refreshed_at_by_journal
+                .values()
+                .all(|refreshed_at| *refreshed_at >= since)
     }
 }
 
@@ -71,8 +80,8 @@ impl TailReaders {
                 readers.spawn(
                     journal.clone(),
                     ctx.metrics_store.buffer.clone(),
-                    move |values, rows| {
-                        values.stages.insert((stage, kind), rows);
+                    move |buffer_state, records| {
+                        buffer_state.stage_records.insert((stage, kind), records);
                     },
                 );
             }
@@ -80,7 +89,7 @@ impl TailReaders {
         readers.spawn(
             ctx.system_journal.clone(),
             ctx.metrics_store.buffer.clone(),
-            |values, rows| values.system = rows,
+            |buffer_state, records| buffer_state.system_records = records,
         );
         readers
     }
@@ -89,7 +98,9 @@ impl TailReaders {
         &mut self,
         journal: Arc<dyn Journal<T>>,
         buffer: Arc<MetricsBuffer>,
-        replace: impl Fn(&mut Values, Arc<[JournalRecord<T::Payload>]>) + Send + 'static,
+        replace_records: impl Fn(&mut MetricsBufferSnapshot, Arc<[JournalRecord<T::Payload>]>)
+            + Send
+            + 'static,
     ) {
         self.0.spawn(async move {
             let mut interval = tokio::time::interval(REFRESH_INTERVAL);
@@ -99,13 +110,15 @@ impl TailReaders {
                 let started = Instant::now();
                 let result = journal.read_metrics_tail().await;
                 {
-                    let mut values = buffer.values.lock().unwrap();
+                    let mut buffer_state = buffer.state.lock().unwrap();
                     match result {
-                        Ok(rows) if !rows.is_empty() => replace(&mut values, rows.into()),
+                        Ok(records) if !records.is_empty() => {
+                            replace_records(&mut buffer_state, records.into());
+                        }
                         Ok(_) => {}
-                        Err(error) => tracing::debug!(journal_id = %journal.id(), %error, "Metrics tail unavailable; retaining buffered values"),
+                        Err(error) => tracing::debug!(journal_id = %journal.id(), %error, "Metrics tail unavailable; retaining buffered records"),
                     }
-                    values.refreshed.insert(*journal.id(), started);
+                    buffer_state.refreshed_at_by_journal.insert(*journal.id(), started);
                 }
                 buffer.updated.notify_one();
             }
