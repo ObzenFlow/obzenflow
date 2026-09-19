@@ -901,7 +901,7 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
         },
 
         topology: {
-            stream_src |> joiner;
+            (ref_src, stream_src) |> joiner;
             joiner |> snk;
         }
     }

@@ -274,7 +274,7 @@ fn build_flow(
             },
 
             topology: {
-                tx |> posted;
+                (accounts, tx) |> posted;
                 posted |> ledger;
                 ledger |> collect;
             }

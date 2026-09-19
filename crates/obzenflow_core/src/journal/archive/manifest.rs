@@ -14,17 +14,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
-pub const RUN_MANIFEST_VERSION: &str = "4.0";
-
-/// On-disk journal record format version (FLOWIP-120q). Bumped only when the
-/// framed record byte format changes. Readers gate on this in the same raw-JSON
-/// check that gates `manifest_version`, so an archive written by an incompatible
-/// format is refused before any record is parsed. There is no mixed-format file:
-/// append and resume across a changed format refuse or start a new segment.
-/// Format 4 removes retired provenance fields from the compact schema. Numbers
-/// remain absolute and immutable definitions contain complete values.
-/// Earlier development formats must be re-recorded.
-pub const JOURNAL_FORMAT_VERSION: u32 = 4;
+/// One version for the journal records, physical frames, and run manifest.
+/// Breaking any of these contracts requires a bump here and fresh archives.
+/// Framework package versions are provenance only, never archive admission gates.
+pub const JOURNAL_SCHEMA_VERSION: &str = "5.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -34,9 +27,7 @@ pub const OBSERVABILITY_CAPTURE_CAPABILITY: &str = "observability_capture";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
-    pub manifest_version: String,
-    /// FLOWIP-120q: framed record format version. See `JOURNAL_FORMAT_VERSION`.
-    pub journal_format_version: u32,
+    pub journal_schema_version: String,
     pub obzenflow_version: String,
     pub flow_id: String,
     pub flow_name: String,

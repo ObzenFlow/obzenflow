@@ -211,6 +211,8 @@ mod flow_definition;
 pub mod inference;
 pub mod stage_descriptor;
 mod stage_macros;
+#[doc(hidden)]
+pub mod topology;
 pub mod typing;
 
 #[cfg(test)]

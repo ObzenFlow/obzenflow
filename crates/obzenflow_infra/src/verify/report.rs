@@ -39,7 +39,7 @@ pub struct RunSummary {
     pub flow_id: String,
     pub flow_name: String,
     pub status: String,
-    pub manifest_version: String,
+    pub journal_schema_version: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

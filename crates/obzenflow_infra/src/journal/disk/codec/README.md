@@ -1,26 +1,16 @@
-# Journal format 4 (FLOWIP-145c)
+# Journal schema 5.0 (FLOWIP-133j)
 
-This is the provider-private physical representation of the current Core journal
-record. JSONL export remains the expanded current logical record. Earlier
-development formats, including formats 2 and 3, are rejected before decoding.
-There is no numeric delta, patch, inherited snapshot, relative timestamp or
-floating-point XOR encoding. Every retained number is its complete absolute value.
+Core's `JOURNAL_SCHEMA_VERSION` is the single version for records, frame encoding,
+archive interpretation, and the run manifest. `run_manifest.json` records only
+`journal_schema_version: "5.0"`. Frame markers and disposable observation
+checkpoint stamps derive from that same authority. A breaking change to any of
+these contracts bumps the one version. Package versions remain provenance.
 
-Format 4 is an explicit schema retirement: processing no longer carries
-`processed_by` or `error_hops_remaining`; event intent and its public constructors
-are removed; accounting no longer carries the two terminal-group counters;
-origins no longer carry `entry_stage`; replay context no longer carries
-`archive_path` or `replayed_at`. Runtime journey enrichment no longer creates
-`flow_name`, `flow_id` or `source_event_id` metadata. Application metadata remains
-opaque, including explicit null and empty objects. Source entry time, source
-event identity and the retained replay event/flow/stage identities remain exact.
-
-These removals change both Core's logical schema and the binary field positions.
-The manifest still uses schema 4.0 and now declares `journal_format_version: 4`.
-There is no format-3 migration or compatibility decoder: retained format-3
-archives require their matching reader, or the example must be recorded again.
-Existing archives are not rewritten. The previous 100k measurements describe
-format 3 and must not be presented as measurements of this schema.
+Earlier development archives must be re-recorded. Readers reject unsupported
+schemas before typed manifest decoding or record interpretation, including with
+`--allow-incomplete-archive`. There are no legacy readers or conversion paths.
+The logical field layout retains absolute numbers and complete immutable
+definitions; JSONL export remains the expanded current logical record.
 
 ## Framing
 
@@ -28,15 +18,15 @@ All fixed-width integers are little endian. A frame consists of:
 
 | Position | Bytes | Meaning |
 |---|---:|---|
-| 0 | 4 | Magic `OJF4` |
-| 4 | 8 | Body length |
-| 12 | 4 | CRC32 of magic and body length |
-| 16 | body length | Compact body |
+| 0 | 6 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF5.0`) |
+| 6 | 8 | Body length |
+| 14 | 4 | CRC32 of magic and body length |
+| 18 | body length | Compact body |
 | after body | 4 | CRC32 of header and body |
 | after checksum | 8 | Complete frame length, including header and trailer |
-| final | 4 | Commit trailer magic `4FJO` |
+| final | 6 | Reversed header magic (`0.5FJO`) |
 
-The 16-byte trailer commits the entire ordinary record or atomic group. A reader
+The 18-byte trailer commits the entire ordinary record or atomic group. A reader
 validates both lengths, magic values and checksums before exposing members.
 Reverse reads first follow checked header lengths from the latest indexed frame
 offset to establish the physical tail boundary, then use terminal lengths.
@@ -84,7 +74,7 @@ length-delimited JSON value; its application keys are never interpreted by the
 codec. Timestamps retain their original units and precision.
 
 Core types and their Serde declarations define the logical records.
-The checked-in `layout.rs` maps their serialized names to immutable format-4
+The checked-in `layout.rs` maps their serialized names to current-schema
 field positions, defaults and contextual value types. A structure stores explicit
 field-presence/default masks followed by complete non-default values in layout order. Defaults are
 fixed literals, never values inherited from a prior record. Absent, null, empty,
@@ -174,7 +164,9 @@ proof. These synthetic measurements are not directly comparable to the previous
 captured corpus. No historical archive, JSONL capture or schema projection is
 needed by the provider tests.
 
-The frozen `fixtures/*.frame` files were captured before the observation-key
-refactor. Their matching JSON records cover all observation families and absent
-attachments. Tests require byte-for-byte encoding compatibility and decode the
-original bytes through Core's existing Serde declarations.
+The current `fixtures/*.frame` files and matching JSON records cover all
+observation families and absent attachments. Tests require byte-for-byte encoding
+and exact logical decoding within the current schema. After a deliberate schema
+bump, regenerate frames from the JSON records with the existing
+`current_schema_fixtures_preserve_bytes_and_logical_records` test and
+`UPDATE_JOURNAL_FIXTURES=1`, then run it normally to check the captured bytes.

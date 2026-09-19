@@ -87,49 +87,57 @@ fn guarded_flow(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_non_current_manifest_shape_fails_before_materialisation_or_connector_io() {
-    for (name, manifest) in [
-        ("missing", r#"{"flow_id":"old"}"#),
-        ("numeric", r#"{"manifest_version":3.0}"#),
-        ("old", r#"{"manifest_version":"2.0"}"#),
-        ("future", r#"{"manifest_version":"4.0"}"#),
-        ("object", r#"{"manifest_version":{"major":3}}"#),
-        ("malformed", r#"{"manifest_version":"3.0""#),
-    ] {
-        let temp = tempfile::tempdir().expect("temporary archive gate directory");
-        let archive = temp.path().join(format!("archive-{name}"));
-        std::fs::create_dir_all(&archive).expect("archive directory");
-        std::fs::write(archive.join("run_manifest.json"), manifest).expect("raw manifest fixture");
-        let output_root = temp.path().join("must-not-exist");
-        let materialisations = Arc::new(AtomicUsize::new(0));
-        let opens = Arc::new(AtomicUsize::new(0));
-        let args = vec![
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            archive.into_os_string(),
-        ];
+    for verb in ["--replay-from", "--resume-from"] {
+        for (name, manifest) in [
+            ("missing", r#"{"flow_id":"old"}"#),
+            ("numeric", r#"{"journal_schema_version":3.0}"#),
+            ("old", r#"{"journal_schema_version":"4.0"}"#),
+            (
+                "legacy-fields",
+                r#"{"manifest_version":"4.0","journal_format_version":4}"#,
+            ),
+            ("future", r#"{"journal_schema_version":"6.0"}"#),
+            ("object", r#"{"journal_schema_version":{"major":3}}"#),
+            ("malformed", r#"{"journal_schema_version":"3.0""#),
+        ] {
+            let temp = tempfile::tempdir().expect("temporary archive gate directory");
+            let archive = temp.path().join(format!("archive-{name}"));
+            std::fs::create_dir_all(&archive).expect("archive directory");
+            std::fs::write(archive.join("run_manifest.json"), manifest)
+                .expect("raw manifest fixture");
+            let output_root = temp.path().join("must-not-exist");
+            let materialisations = Arc::new(AtomicUsize::new(0));
+            let opens = Arc::new(AtomicUsize::new(0));
+            let args = vec![
+                OsString::from("obzenflow"),
+                OsString::from(verb),
+                archive.into_os_string(),
+                OsString::from("--allow-incomplete-archive"),
+            ];
 
-        let result = FlowApplication::builder()
-            .with_cli_args(args)
-            .run_async(guarded_flow(
-                output_root.clone(),
-                Arc::clone(&materialisations),
-                Arc::clone(&opens),
-            ))
-            .await;
-        assert!(result.is_err(), "{name} manifest must be refused");
-        assert_eq!(
-            materialisations.load(Ordering::SeqCst),
-            0,
-            "{name} manifest reached flow materialisation"
-        );
-        assert_eq!(
-            opens.load(Ordering::SeqCst),
-            0,
-            "{name} manifest opened the sink connector"
-        );
-        assert!(
-            !output_root.exists(),
-            "{name} manifest created output journals"
-        );
+            let result = FlowApplication::builder()
+                .with_cli_args(args)
+                .run_async(guarded_flow(
+                    output_root.clone(),
+                    Arc::clone(&materialisations),
+                    Arc::clone(&opens),
+                ))
+                .await;
+            assert!(result.is_err(), "{name} manifest must be refused");
+            assert_eq!(
+                materialisations.load(Ordering::SeqCst),
+                0,
+                "{name} manifest reached flow materialisation"
+            );
+            assert_eq!(
+                opens.load(Ordering::SeqCst),
+                0,
+                "{name} manifest opened the sink connector"
+            );
+            assert!(
+                !output_root.exists(),
+                "{name} manifest created output journals"
+            );
+        }
     }
 }

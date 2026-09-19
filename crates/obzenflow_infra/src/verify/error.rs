@@ -52,7 +52,7 @@ pub enum RefusalReason {
 
     /// The manifest was written under a different (older or newer) schema
     /// version. Pre-release there is no migration path: re-record the run.
-    ManifestVersion {
+    JournalSchemaVersion {
         path: PathBuf,
         found: String,
         supported: String,
@@ -95,13 +95,13 @@ impl fmt::Display for RefusalReason {
             Self::ArchiveUnavailable { path } => {
                 write!(f, "run directory unavailable: {}", path.display())
             }
-            Self::ManifestVersion {
+            Self::JournalSchemaVersion {
                 path,
                 found,
                 supported,
             } => write!(
                 f,
-                "unsupported provenance schema version: {found} at {} (supported: {supported}); re-record the run with this build of ObzenFlow",
+                "unsupported journal schema version: {found} at {} (supported: {supported}); re-record the run with this build of ObzenFlow",
                 path.display()
             ),
             Self::FlowNameMismatch {

@@ -243,7 +243,7 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
                 },
 
                 topology: {
-                    stream |> joined;
+                    (reference, stream) |> joined;
                     joined |> output;
                 }
             })

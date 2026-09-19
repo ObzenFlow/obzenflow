@@ -1,6 +1,6 @@
 {
-  "manifest_version": "3.0",
-  "journal_format_version": 2,
+  "journal_schema_version": "5.0",
+
   "obzenflow_version": "0.1.0",
   "flow_id": "flow_01J00000000000000000000000",
   "flow_name": "effective_config_manifest_two_effects",

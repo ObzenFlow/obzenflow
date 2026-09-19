@@ -4,15 +4,15 @@
 
 //! Shared raw-JSON archive epoch gate.
 
-use obzenflow_core::journal::archive::manifest::RUN_MANIFEST_VERSION;
+use obzenflow_core::journal::archive::manifest::JOURNAL_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unsupported provenance schema version: {found}")]
-pub(crate) struct UnsupportedManifestVersion {
+#[error("unsupported journal schema version: {found}")]
+pub(crate) struct UnsupportedJournalSchemaVersion {
     found: String,
 }
 
-impl UnsupportedManifestVersion {
+impl UnsupportedJournalSchemaVersion {
     pub(crate) fn found(&self) -> &str {
         &self.found
     }
@@ -20,18 +20,18 @@ impl UnsupportedManifestVersion {
 
 /// Require the one archive epoch this build understands before any typed
 /// manifest deserialisation or journal access.
-pub(crate) fn require_current_manifest_version(
+pub(crate) fn require_current_journal_schema_version(
     manifest: &serde_json::Value,
-) -> Result<(), UnsupportedManifestVersion> {
-    match manifest.get("manifest_version") {
-        Some(serde_json::Value::String(version)) if version == RUN_MANIFEST_VERSION => Ok(()),
-        Some(serde_json::Value::String(version)) => Err(UnsupportedManifestVersion {
+) -> Result<(), UnsupportedJournalSchemaVersion> {
+    match manifest.get("journal_schema_version") {
+        Some(serde_json::Value::String(version)) if version == JOURNAL_SCHEMA_VERSION => Ok(()),
+        Some(serde_json::Value::String(version)) => Err(UnsupportedJournalSchemaVersion {
             found: version.clone(),
         }),
-        Some(value) => Err(UnsupportedManifestVersion {
+        Some(value) => Err(UnsupportedJournalSchemaVersion {
             found: value.to_string(),
         }),
-        None => Err(UnsupportedManifestVersion {
+        None => Err(UnsupportedJournalSchemaVersion {
             found: "<missing>".to_string(),
         }),
     }
@@ -56,24 +56,24 @@ mod tests {
 
     #[test]
     fn exact_string_epoch_is_the_only_accepted_shape() {
-        assert!(require_current_manifest_version(&serde_json::json!({
-            "manifest_version": RUN_MANIFEST_VERSION
+        assert!(require_current_journal_schema_version(&serde_json::json!({
+            "journal_schema_version": JOURNAL_SCHEMA_VERSION
         }))
         .is_ok());
 
         for (value, found) in [
             (serde_json::json!({}), "<missing>"),
-            (serde_json::json!({"manifest_version": 3.0}), "3.0"),
-            (serde_json::json!({"manifest_version": "3.0"}), "3.0"),
-            (serde_json::json!({"manifest_version": "2.0"}), "2.0"),
-            (serde_json::json!({"manifest_version": "5.0"}), "5.0"),
+            (serde_json::json!({"journal_schema_version": 3.0}), "3.0"),
+            (serde_json::json!({"journal_schema_version": "3.0"}), "3.0"),
+            (serde_json::json!({"journal_schema_version": "2.0"}), "2.0"),
+            (serde_json::json!({"journal_schema_version": "6.0"}), "6.0"),
         ] {
-            let error =
-                require_current_manifest_version(&value).expect_err("non-exact version must fail");
+            let error = require_current_journal_schema_version(&value)
+                .expect_err("non-exact version must fail");
             assert_eq!(error.found(), found);
             assert_eq!(
                 error.to_string(),
-                format!("unsupported provenance schema version: {found}")
+                format!("unsupported journal schema version: {found}")
             );
         }
     }

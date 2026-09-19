@@ -16,12 +16,12 @@ use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::archive::manifest::{
-    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
-    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
+    RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::ArchiveStatus;
 
-use crate::journal::disk::manifest_gate::require_current_manifest_version;
+use crate::journal::disk::manifest_gate::require_current_journal_schema_version;
 use crate::journal::disk::replay_archive::derive_status_derivation_from_system_log;
 use crate::journal::disk::scanner::{
     classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
@@ -89,22 +89,11 @@ impl DiskRunSource {
                 message: e.to_string(),
             })
         })?;
-        if let Err(version) = require_current_manifest_version(&value) {
-            return Err(refused(RefusalReason::ManifestVersion {
+        if let Err(version) = require_current_journal_schema_version(&value) {
+            return Err(refused(RefusalReason::JournalSchemaVersion {
                 path: manifest_path,
                 found: version.found().to_string(),
-                supported: RUN_MANIFEST_VERSION.to_string(),
-            }));
-        }
-        // FLOWIP-120q: refuse an archive whose framed record format this build
-        // does not read, in the same raw-JSON gate as manifest_version.
-        let journal_format_version = value.get("journal_format_version").and_then(|v| v.as_u64());
-        if journal_format_version != Some(u64::from(JOURNAL_FORMAT_VERSION)) {
-            return Err(SourceOpenError::Failed(VerifyError::Parse {
-                path: manifest_path.clone(),
-                message: format!(
-                    "unsupported journal_format_version {journal_format_version:?} (supported: {JOURNAL_FORMAT_VERSION})"
-                ),
+                supported: JOURNAL_SCHEMA_VERSION.to_string(),
             }));
         }
         let binding_descriptor_version = value
@@ -279,15 +268,15 @@ mod tests {
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
-            (Some(serde_json::json!("5.0")), "5.0"),
+            (Some(serde_json::json!("6.0")), "6.0"),
         ] {
             let temp = tempfile::tempdir().expect("temporary archive");
             let mut manifest = serde_json::json!({
-                "journal_format_version": JOURNAL_FORMAT_VERSION,
+
                 "system_journal_file": "sentinel-system.journal"
             });
             if let Some(version) = version {
-                manifest["manifest_version"] = version;
+                manifest["journal_schema_version"] = version;
             }
             std::fs::write(
                 temp.path().join(RUN_MANIFEST_FILENAME),
@@ -302,11 +291,11 @@ mod tests {
 
             match DiskRunSource::open(temp.path()) {
                 Err(SourceOpenError::Refused(reason)) => match *reason {
-                    RefusalReason::ManifestVersion {
+                    RefusalReason::JournalSchemaVersion {
                         found, supported, ..
                     } => {
                         assert_eq!(found, expected);
-                        assert_eq!(supported, RUN_MANIFEST_VERSION);
+                        assert_eq!(supported, JOURNAL_SCHEMA_VERSION);
                     }
                     other => panic!("wrong refusal: {other:?}"),
                 },
@@ -330,8 +319,8 @@ mod tests {
                 );
             }
             let manifest = serde_json::json!({
-                "manifest_version": RUN_MANIFEST_VERSION,
-                "journal_format_version": JOURNAL_FORMAT_VERSION,
+                "journal_schema_version": JOURNAL_SCHEMA_VERSION,
+
                 "capabilities": capabilities,
                 "system_journal_file": "malformed-system.journal"
             });

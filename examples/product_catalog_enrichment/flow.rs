@@ -15,6 +15,17 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::sink::SinkTyped;
 
 fn build_flow() -> FlowDefinition {
+    build_flow_at(
+        std::path::PathBuf::from("target/catalog-logs"),
+        #[cfg(test)]
+        ProofProbe::default(),
+    )
+}
+
+fn build_flow_at(
+    journal_root: std::path::PathBuf,
+    #[cfg(test)] probe: ProofProbe,
+) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let sku_products_handler = joins::inner(
             |p: &Product| p.product_id.clone(),
@@ -145,6 +156,22 @@ fn build_flow() -> FlowDefinition {
         let promotions_handler = promotions_source();
         let payment_methods_handler = payment_methods_source();
         let orders_handler = orders_source();
+        #[cfg(test)]
+        let (
+            categories_handler,
+            products_handler,
+            skus_handler,
+            promotions_handler,
+            payment_methods_handler,
+            orders_handler,
+        ) = (
+            probe.source(categories_handler),
+            probe.source(products_handler),
+            probe.source(skus_handler),
+            probe.source(promotions_handler),
+            probe.source(payment_methods_handler),
+            probe.source(orders_handler),
+        );
         let per_order_printer_handler =
             SinkTyped::new(|order: EnrichedOrderWithPromo| async move {
                 console::print_order(&order);
@@ -169,9 +196,15 @@ fn build_flow() -> FlowDefinition {
             })
             .idempotent();
 
-        Ok(flow! {
+        // The proof's rejected control changes only the enrichment input below.
+        macro_rules! catalog_flow {
+            ($($enrichment_input:tt)*) => { flow! {
         name: "product_catalog_enrichment",
-        journals: disk_journals(std::path::PathBuf::from("target/catalog-logs")),
+        journals: {
+            #[cfg(test)]
+            probe.journal_providers.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            disk_journals(journal_root)
+        },
 
         stages: {
             categories = source!(Category => categories_handler);
@@ -217,17 +250,23 @@ fn build_flow() -> FlowDefinition {
         },
 
         topology: {
-            skus |> sku_products;
-            sku_products |> sku_full_dim;
+            (products, skus) |> sku_products;
+            (categories, sku_products) |> sku_full_dim;
 
-            orders |> payment_validated;
-            payment_validated |> enriched_orders;
-            enriched_orders |> promo_enriched;
+            (payment_methods, orders) |> payment_validated;
+            $($enrichment_input)*
+            (promotions, enriched_orders) |> promo_enriched;
             promo_enriched |> per_order_printer;
             promo_enriched |> catalog_stats;
             catalog_stats |> summary_printer;
         }
-        })
+        }};
+        }
+        #[cfg(test)]
+        if probe.invalid_wiring {
+            return Ok(catalog_flow!(payment_validated |> enriched_orders;));
+        }
+        Ok(catalog_flow!((sku_full_dim, payment_validated) |> enriched_orders;))
     })
 }
 
@@ -276,4 +315,51 @@ fn run_flow_in_tests(
             .await
             .map_err(|e| anyhow::anyhow!("{error_context}: {e:?}"))
     })
+}
+
+/// Counts the real example's source reads and journal-provider evaluation.
+/// The only control mutation removes the explicit catalog input to enriched_orders.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct ProofProbe {
+    pub source_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub journal_providers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub invalid_wiring: bool,
+}
+
+#[cfg(test)]
+impl ProofProbe {
+    fn source<H>(&self, inner: H) -> CountedSource<H> {
+        CountedSource {
+            inner,
+            calls: self.source_reads.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct CountedSource<H> {
+    inner: H,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl<H: obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler>
+    obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler for CountedSource<H>
+{
+    type Output = H::Output;
+    fn next(
+        &mut self,
+    ) -> Result<Option<Vec<Self::Output>>, obzenflow_runtime::stages::common::handlers::SourceError>
+    {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.next()
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub fn build_for_proof(journal_root: std::path::PathBuf, probe: ProofProbe) -> FlowDefinition {
+    build_flow_at(journal_root, probe)
 }

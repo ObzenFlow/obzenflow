@@ -797,7 +797,7 @@ async fn join_reference_resolves_through_composite_boundary_port() {
 
             topology: {
                 seed |> digest;
-                stream_src |> enrich;
+                (digest, stream_src) |> enrich;
                 enrich |> joined_sink;
             }
         })

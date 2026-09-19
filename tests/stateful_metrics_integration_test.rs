@@ -508,7 +508,7 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
         },
 
         topology: {
-            stream_src |> joiner;
+            (ref_src, stream_src) |> joiner;
             joiner |> snk;
         }
     }

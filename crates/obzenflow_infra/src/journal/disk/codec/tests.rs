@@ -668,13 +668,15 @@ fn warm_caches_cannot_hide_missing_or_edited_carriers_and_archives_are_relocatab
 }
 
 #[test]
-fn format_four_fixtures_preserve_bytes_and_logical_records() {
-    for (json, bytes) in [
+fn current_schema_fixtures_preserve_bytes_and_logical_records() {
+    for (name, json, bytes) in [
         (
+            "observations",
             include_str!("fixtures/observations.json"),
             include_bytes!("fixtures/observations.frame").as_slice(),
         ),
         (
+            "plain",
             include_str!("fixtures/plain.json"),
             include_bytes!("fixtures/plain.frame").as_slice(),
         ),
@@ -687,7 +689,16 @@ fn format_four_fixtures_preserve_bytes_and_logical_records() {
             DefinitionStore::default(),
         )
         .unwrap();
-        assert_eq!(prepared.bytes, bytes);
+        // Regenerate these current-schema fixtures after an intentional schema
+        // bump using this existing test, never a legacy frame converter.
+        if std::env::var_os("UPDATE_JOURNAL_FIXTURES").is_some() {
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("src/journal/disk/codec/fixtures/{name}.frame"));
+            std::fs::write(fixture, &prepared.bytes).unwrap();
+        } else {
+            assert_eq!(prepared.bytes, bytes);
+        }
+        let bytes = prepared.bytes.as_slice();
         let restored = decode(Path::new("fixture.log"), 0, bytes).unwrap();
         assert_eq!(
             serde_json::to_vec(&record).unwrap(),

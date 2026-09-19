@@ -92,7 +92,7 @@ struct State {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Checkpoint {
-    format: u32,
+    journal_schema_version: String,
     archive: Option<String>,
     journal: String,
     committed_len: u64,
@@ -657,7 +657,7 @@ fn write_checkpoint(path: &Path, state: &State) -> Result<(), JournalError> {
         return Ok(());
     };
     let checkpoint = Checkpoint {
-        format: obzenflow_core::journal::JOURNAL_FORMAT_VERSION,
+        journal_schema_version: obzenflow_core::journal::JOURNAL_SCHEMA_VERSION.to_string(),
         archive: archive_id(path),
         journal: path
             .file_name()
@@ -703,7 +703,7 @@ fn load_checkpoint(path: &Path, committed_end: u64) -> Option<State> {
     }
     let checkpoint: Checkpoint = serde_json::from_str(&checked.body).ok()?;
     let end = checkpoint.last.offset.checked_add(checkpoint.last.length)?;
-    if checkpoint.format != obzenflow_core::journal::JOURNAL_FORMAT_VERSION
+    if checkpoint.journal_schema_version != obzenflow_core::journal::JOURNAL_SCHEMA_VERSION
         || checkpoint.archive != archive_id(path)
         || checkpoint.journal != path.file_name()?.to_str()?
         || end > committed_end
@@ -1750,6 +1750,16 @@ mod tests {
         old.body = serde_json::to_string(&body).unwrap();
         old.crc = crc32fast::hash(old.body.as_bytes());
         let old_keys = serde_json::to_vec(&old).unwrap();
+        let mut old_schema: CheckedCheckpoint = serde_json::from_slice(&valid).unwrap();
+        let mut body: serde_json::Value = serde_json::from_str(&old_schema.body).unwrap();
+        assert_eq!(
+            body["journal_schema_version"],
+            obzenflow_core::journal::JOURNAL_SCHEMA_VERSION
+        );
+        body["journal_schema_version"] = serde_json::json!("4.0");
+        old_schema.body = serde_json::to_string(&body).unwrap();
+        old_schema.crc = crc32fast::hash(old_schema.body.as_bytes());
+        let old_schema = serde_json::to_vec(&old_schema).unwrap();
         let foreign_directory = tempfile::tempdir().unwrap();
         let foreign_path = foreign_directory.path().join("recovery.log");
         let foreign =
@@ -1771,6 +1781,7 @@ mod tests {
             Some(b"broken".to_vec()),
             Some(foreign_checkpoint),
             Some(old_keys),
+            Some(old_schema),
         ] {
             match checkpoint {
                 None => std::fs::remove_file(checkpoint_path(&path)).unwrap(),
