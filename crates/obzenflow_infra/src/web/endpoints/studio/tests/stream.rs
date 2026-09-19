@@ -1276,6 +1276,144 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
 }
 
 #[tokio::test]
+async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
+    use obzenflow_adapters::middleware::{rate_limit_with_burst, CircuitBreaker};
+    use obzenflow_core::TypedPayload;
+    use obzenflow_dsl::{flow, sink, source, FlowDefinition};
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+    use obzenflow_runtime::stages::sink::SinkTyped;
+    use obzenflow_runtime::stages::SourceError;
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct Item(usize);
+    impl TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "studio.source_middleware";
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecoveringSource(usize);
+    impl TypedFiniteSourceHandler for RecoveringSource {
+        type Output = Item;
+
+        fn next(&mut self) -> Result<Option<Vec<Item>>, SourceError> {
+            let attempt = self.0;
+            self.0 += 1;
+            match attempt {
+                1 => Err(SourceError::Timeout("open the source breaker".into())),
+                0..=1000 => Ok(Some(vec![Item(attempt)])),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_path_buf();
+    let definition = FlowDefinition::materialize(move |_| {
+        let input_handler = RecoveringSource(0);
+        let output_handler = SinkTyped::new(|_: Item| async {}).idempotent();
+        Ok(flow! {
+            name: "source_middleware_studio",
+            journals: crate::journal::disk_journals(path.clone()),
+            stages: {
+                input = source!(Item => input_handler with [
+                    CircuitBreaker::builder()
+                        .count_window(2)
+                        .minimum_calls(2)
+                        .failure_rate_threshold(0.5)
+                        .open_for(Duration::from_millis(1))
+                        .build()
+                        .unwrap(),
+                    // The initial burst funds all 1,000 admissions. Their
+                    // utilisation produces a mode change without a long wait.
+                    rate_limit_with_burst(1.0, 2000.0)
+                ]);
+                output = sink!(Item => output_handler);
+            },
+            topology: { input |> output; }
+        })
+    });
+    // No metrics exporter or observation source participates in delivery.
+    let handle = definition
+        .build(FlowBuildContext::for_tests())
+        .await
+        .unwrap();
+    let journal = handle.system_journal().unwrap();
+    let (endpoint, closing) = endpoint(journal.clone(), vec![]);
+    let endpoint = endpoint.with_observation_interval(Duration::from_secs(3600));
+    let mut stream = open(&endpoint, None).await;
+    while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {}
+
+    // Do not read Studio again until the breaker has opened and recovered.
+    // All transitions must survive independently of measurement deadlines.
+    tokio::time::timeout(Duration::from_secs(15), handle.run())
+        .await
+        .expect("source finishes while Studio is unread")
+        .unwrap();
+    closing.send(true).unwrap();
+    let body: Vec<_> = tokio::time::timeout(Duration::from_secs(2), stream.collect())
+        .await
+        .unwrap();
+    let changes = frames(&body, "middleware_lifecycle");
+    let payloads: Vec<_> = changes.iter().map(|frame| frame_payload(frame)).collect();
+    let breaker_states: Vec<_> = payloads
+        .iter()
+        .filter_map(|payload| payload["state_to"].as_str())
+        .collect();
+    assert_eq!(breaker_states, ["open", "half_open", "closed"]);
+    let limiter = payloads
+        .iter()
+        .find(|payload| payload["middleware"] == "rate_limiter")
+        .expect("source limiter mode change reaches Studio");
+    assert_eq!(limiter["mode_from"], "normal");
+    assert_eq!(limiter["mode_to"], "limiting");
+    assert_eq!(changes.len(), 4, "each transition is delivered once");
+    assert!(payloads.iter().all(|payload| {
+        payload["revision"].is_u64()
+            && payload["origin"].is_object()
+            && payload.get("capture").is_none()
+    }));
+    assert!(payloads.windows(2).all(|pair| {
+        pair[0]["revision"].as_u64().unwrap() < pair[1]["revision"].as_u64().unwrap()
+    }));
+
+    let recorded: Vec<_> = journal
+        .read_all_unordered()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|record| matches!(record.payload, SystemPayload::MiddlewareLifecycle { .. }))
+        .collect();
+    let ids: Vec<_> = changes.iter().map(|frame| frame.id.clone()).collect();
+    assert_eq!(
+        ids,
+        recorded
+            .iter()
+            .map(|record| Some(record.id().to_string()))
+            .collect::<Vec<_>>()
+    );
+
+    // A reconnect after Opened must still receive HalfOpen and Closed.
+    let cursor = EventId::from_string(changes[0].id.as_deref().unwrap()).unwrap();
+    let resumed = request_body(journal.clone(), vec![], Some(cursor)).await;
+    assert_eq!(
+        frames(&resumed, "middleware_lifecycle")
+            .iter()
+            .map(|frame| frame.id.clone())
+            .collect::<Vec<_>>(),
+        ids[1..]
+    );
+
+    // A new viewer receives the current factual state without replaying it.
+    let fresh = request_body(journal, vec![], None).await;
+    let snapshot = frame_payload(frames(&fresh, "middleware_state_snapshot")[0]);
+    let middleware = snapshot["middleware"].as_array().unwrap();
+    assert_eq!(middleware.len(), 1);
+    assert_eq!(middleware[0]["circuit_breaker"]["state"], "closed");
+    assert_eq!(middleware[0]["rate_limiter"]["mode"], "limiting");
+}
+
+#[tokio::test]
 async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
     use obzenflow_adapters::monitoring::MetricsReadModel;
     use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload};
