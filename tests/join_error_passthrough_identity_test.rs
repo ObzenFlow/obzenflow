@@ -261,7 +261,7 @@ fn build_flow(journal_base: PathBuf, typed_handler_calls: Arc<AtomicUsize>) -> F
             topology: {
                 ref_src |> ref_validator;
                 stream_src |> validator;
-                validator |> joined;
+                (ref_validator, validator) |> joined;
                 joined |> collector;
             }
         })

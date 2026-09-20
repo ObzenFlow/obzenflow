@@ -8,90 +8,27 @@
 //! is ordinary Rust outside the macro but inside the enclosing deferred
 //! materialiser.
 
-/// Parse topology edges supporting both |> and <| operators.
+/// Preserve authored join tuples until binding and role validation has run.
 #[macro_export]
 macro_rules! parse_topology {
     ($connections:expr,) => {};
-
-    ($connections:expr, ($reference:ident, $stream:ident) |> $join:ident; $($rest:tt)*) => {
-        $connections.extend([
-            (
-                stringify!($reference).to_string(),
-                stringify!($join).to_string(),
-                obzenflow_topology::EdgeKind::Forward,
-            ),
-            (
-                stringify!($stream).to_string(),
-                stringify!($join).to_string(),
-                obzenflow_topology::EdgeKind::Forward,
-            ),
-        ]);
+    ($connections:expr, ($catalog:ident, $stream:ident) |> $join:ident; $($rest:tt)*) => {
+        $connections.extend([$crate::dsl::topology::AuthoredConnection::join(
+            stringify!($catalog), stringify!($stream), stringify!($join),
+        )]);
         $crate::parse_topology!($connections, $($rest)*);
     };
-
     ($connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
-        $connections.extend([(
-            stringify!($from).to_string(),
-            stringify!($to).to_string(),
-            obzenflow_topology::EdgeKind::Forward,
+        $connections.extend([$crate::dsl::topology::AuthoredConnection::edge(
+            stringify!($from), stringify!($to), obzenflow_topology::EdgeKind::Forward,
         )]);
         $crate::parse_topology!($connections, $($rest)*);
     };
-
     ($connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
-        $connections.extend([(
-            stringify!($to).to_string(),
-            stringify!($from).to_string(),
-            obzenflow_topology::EdgeKind::Backward,
+        $connections.extend([$crate::dsl::topology::AuthoredConnection::edge(
+            stringify!($to), stringify!($from), obzenflow_topology::EdgeKind::Backward,
         )]);
         $crate::parse_topology!($connections, $($rest)*);
-    };
-}
-
-/// Parse topology edges while also collecting join input metadata.
-#[macro_export]
-macro_rules! parse_topology_with_joins {
-    ($connections:expr, $join_connections:expr,) => {};
-
-    ($connections:expr, $join_connections:expr, ($reference:ident, $stream:ident) |> $join:ident; $($rest:tt)*) => {
-        $join_connections.extend([(
-            stringify!($join).to_string(),
-            (
-                stringify!($reference).to_string(),
-                stringify!($stream).to_string()
-            )
-        )]);
-        $connections.extend([
-            (
-                stringify!($reference).to_string(),
-                stringify!($join).to_string(),
-                obzenflow_topology::EdgeKind::Forward,
-            ),
-            (
-                stringify!($stream).to_string(),
-                stringify!($join).to_string(),
-                obzenflow_topology::EdgeKind::Forward,
-            ),
-        ]);
-        $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
-    };
-
-    ($connections:expr, $join_connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
-        $connections.extend([(
-            stringify!($from).to_string(),
-            stringify!($to).to_string(),
-            obzenflow_topology::EdgeKind::Forward,
-        )]);
-        $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
-    };
-
-    ($connections:expr, $join_connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
-        $connections.extend([(
-            stringify!($to).to_string(),
-            stringify!($from).to_string(),
-            obzenflow_topology::EdgeKind::Backward,
-        )]);
-        $crate::parse_topology_with_joins!($connections, $join_connections, $($rest)*);
     };
 }
 
@@ -177,15 +114,11 @@ macro_rules! flow {
                     }
                 }
 
-                let mut connections: Vec<(
-                    String,
-                    String,
-                    obzenflow_topology::EdgeKind,
-                )> = Vec::new();
+                let mut connections = Vec::new();
                 $crate::parse_topology!(connections, $($edge)*);
 
-                let (stages, lowering_artifacts) =
-                    $crate::dsl::composites::lower_composites(members, &mut connections)?;
+                let lowered =
+                    $crate::dsl::composites::lower_composites(members, connections)?;
 
                 // Preserve the pre-substrate validation boundary: these
                 // expressions run only after composite lowering succeeds.
@@ -199,9 +132,7 @@ macro_rules! flow {
                 $crate::dsl::flow_builder::build_flow(
                     $flow_name,
                     journals,
-                    stages,
-                    connections,
-                    lowering_artifacts,
+                    lowered,
                     __build_ctx,
                     flow_backpressure_clause,
                 )
@@ -350,15 +281,11 @@ macro_rules! test_flow {
                 }
             }
 
-            let mut connections: Vec<(
-                String,
-                String,
-                obzenflow_topology::EdgeKind,
-            )> = Vec::new();
+            let mut connections = Vec::new();
             $crate::parse_topology!(connections, $($edge)*);
 
-            let (stages, lowering_artifacts) =
-                $crate::dsl::composites::lower_composites(members, &mut connections)?;
+            let lowered =
+                $crate::dsl::composites::lower_composites(members, connections)?;
 
             let journals = $journals;
             #[allow(unused_mut)]
@@ -370,9 +297,7 @@ macro_rules! test_flow {
             let output = $crate::dsl::flow_builder::build_flow(
                 $flow_name,
                 journals,
-                stages,
-                connections,
-                lowering_artifacts,
+                lowered,
                 __build_ctx,
                 flow_backpressure_clause,
             )

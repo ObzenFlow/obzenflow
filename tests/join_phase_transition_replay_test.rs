@@ -295,7 +295,7 @@ fn build_hydrating_flow(journal_base: PathBuf) -> FlowDefinition {
             },
 
             topology: {
-                stream_src |> joined;
+                (ref_src, stream_src) |> joined;
                 joined |> collector;
             }
         })
@@ -332,7 +332,7 @@ fn build_live_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefini
             },
 
             topology: {
-                stream_src |> joined;
+                (ref_src, stream_src) |> joined;
                 joined |> effectful;
                 effectful |> collector;
             }
@@ -517,7 +517,7 @@ fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
             },
 
             topology: {
-                stream_src |> joined;
+                (ref_src, stream_src) |> joined;
                 joined |> collector;
             }
         })

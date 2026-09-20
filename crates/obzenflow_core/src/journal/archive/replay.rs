@@ -20,9 +20,9 @@ pub enum ReplayError {
     #[error("Replay archive is missing run_manifest.json at {path}")]
     MissingManifest { path: PathBuf },
 
-    #[error("unsupported provenance schema version: {manifest_version} (supported: {supported}); re-record the run with this build of ObzenFlow")]
-    UnsupportedManifestVersion {
-        manifest_version: String,
+    #[error("unsupported journal schema version: {journal_schema_version} (supported: {supported}); re-record the run with this build of ObzenFlow")]
+    UnsupportedJournalSchemaVersion {
+        journal_schema_version: String,
         supported: &'static str,
     },
 
@@ -31,12 +31,6 @@ pub enum ReplayError {
         capability: &'static str,
         found: Option<u64>,
         supported: u32,
-    },
-
-    #[error("Replay archive build version {archive_version} does not exactly match running framework version {current_version}; re-record the run with this build of ObzenFlow")]
-    VersionMismatch {
-        archive_version: String,
-        current_version: String,
     },
 
     #[error("Replay archive system.log missing at {path}")]

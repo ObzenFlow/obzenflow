@@ -117,10 +117,9 @@ mod tests {
             );
         }
         RunManifest {
-            manifest_version: obzenflow_core::journal::archive::manifest::RUN_MANIFEST_VERSION
-                .to_string(),
-            journal_format_version:
-                obzenflow_core::journal::archive::manifest::JOURNAL_FORMAT_VERSION,
+            journal_schema_version:
+                obzenflow_core::journal::archive::manifest::JOURNAL_SCHEMA_VERSION.to_string(),
+
             obzenflow_version: "0.1.2".to_string(),
             flow_id: "flow_test".to_string(),
             flow_name: "test".to_string(),

@@ -223,7 +223,7 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
             },
 
             topology: {
-                stream_src |> joiner;
+                (ref_src, stream_src) |> joiner;
                 joiner |> snk;
             }
         })

@@ -21,7 +21,7 @@ pub mod reader;
 pub use append::{AppendOptions, JournalCapture, ObservationCapture};
 pub use archive::{
     ArchiveStatus, RunManifest, RunManifestReplayConfig, RunManifestStage, StatusDerivation,
-    JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    JOURNAL_SCHEMA_VERSION, RUN_MANIFEST_FILENAME,
 };
 pub use config::{JournalConfig, ObservabilityPolicy};
 pub use journal_error::JournalError;

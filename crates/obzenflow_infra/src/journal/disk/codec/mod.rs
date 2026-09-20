@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Private format-4 storage adapter for the current Core provenance schema.
+//! Private current-schema storage adapter for the current Core provenance schema.
 //! See README.md for the wire contract and scalar-preservation invariants.
 
 mod definitions;

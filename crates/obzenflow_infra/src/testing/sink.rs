@@ -975,9 +975,13 @@ fn parse_current_manifest(raw: &str) -> Result<RunManifest, SinkConformanceFailu
     let raw_value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|error| failure("archive", "manifest-json", error.to_string()))?;
     if let Err(error) =
-        crate::journal::disk::manifest_gate::require_current_manifest_version(&raw_value)
+        crate::journal::disk::manifest_gate::require_current_journal_schema_version(&raw_value)
     {
-        return Err(failure("archive", "manifest-version", error.to_string()));
+        return Err(failure(
+            "archive",
+            "journal-schema-version",
+            error.to_string(),
+        ));
     }
     crate::journal::disk::manifest_gate::require_observability_capture(&raw_value)
         .map_err(|error| failure("archive", "observability-capability", error))?;
@@ -1793,14 +1797,14 @@ mod tests {
     fn outward_manifest_gate_rejects_every_non_exact_raw_shape() {
         for raw in [
             r#"{}"#,
-            r#"{"manifest_version":3.0}"#,
-            r#"{"manifest_version":"2.0"}"#,
-            r#"{"manifest_version":"5.0"}"#,
-            r#"{"manifest_version":null}"#,
+            r#"{"journal_schema_version":3.0}"#,
+            r#"{"journal_schema_version":"2.0"}"#,
+            r#"{"journal_schema_version":"6.0"}"#,
+            r#"{"journal_schema_version":null}"#,
         ] {
             let error = parse_current_manifest(raw).expect_err("non-exact epoch must fail");
             assert_eq!(error.suite(), "archive");
-            assert_eq!(error.case(), "manifest-version");
+            assert_eq!(error.case(), "journal-schema-version");
         }
     }
 

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! One format-4 classifier and policy arbiter for every journal read surface.
+//! One current-schema classifier and policy arbiter for every journal read surface.
 //! Binary lengths delimit frames; a checked fixed trailer commits the frame.
 
 use super::codec::{frame, Decoder};
@@ -23,10 +23,20 @@ pub(crate) enum ParseOutcome<R: JournalEvent> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParseProblem(pub(crate) String);
+pub(crate) enum ParseProblem {
+    Invalid(String),
+    SchemaMismatch,
+}
 impl std::fmt::Display for ParseProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Invalid(message) => f.write_str(message),
+            Self::SchemaMismatch => write!(
+                f,
+                "journal schema marker mismatch (supported: {}); re-record the archive",
+                obzenflow_core::journal::JOURNAL_SCHEMA_VERSION
+            ),
+        }
     }
 }
 
@@ -54,15 +64,18 @@ pub(crate) fn classify_frame<R: JournalEvent>(
     let body = match frame::validate(bytes) {
         Ok(body) => body,
         Err(frame::FrameProblem::Incomplete(message)) => {
-            return ParseOutcome::Incomplete(ParseProblem(message))
+            return ParseOutcome::Incomplete(ParseProblem::Invalid(message))
+        }
+        Err(frame::FrameProblem::SchemaMismatch) => {
+            return ParseOutcome::Corrupt(ParseProblem::SchemaMismatch)
         }
         Err(frame::FrameProblem::Corrupt(message)) => {
-            return ParseOutcome::Corrupt(ParseProblem(message))
+            return ParseOutcome::Corrupt(ParseProblem::Invalid(message))
         }
     };
     match decoder.decode::<R>(body, offset) {
         Ok(record) => ParseOutcome::Complete(record),
-        Err(error) => ParseOutcome::Corrupt(ParseProblem(error.to_string())),
+        Err(error) => ParseOutcome::Corrupt(ParseProblem::Invalid(error.to_string())),
     }
 }
 
@@ -75,7 +88,7 @@ pub(crate) fn dispose<R: JournalEvent>(
         ParseOutcome::Corrupt(problem) => return Disposition::Corrupt(problem),
         ParseOutcome::Complete(frame) => match termination {
             FrameTermination::Committed => return Disposition::Yield(frame),
-            FrameTermination::Incomplete => ParseProblem("missing commit trailer".into()),
+            FrameTermination::Incomplete => ParseProblem::Invalid("missing commit trailer".into()),
         },
         ParseOutcome::Incomplete(problem) => match termination {
             FrameTermination::Committed => return Disposition::Corrupt(problem),

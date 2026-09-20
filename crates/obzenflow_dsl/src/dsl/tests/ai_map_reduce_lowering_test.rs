@@ -15,9 +15,9 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
-    use crate::dsl::composites::lower_composites;
     use crate::dsl::composition::{FlowMember, IntoFlowMember};
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
+    use crate::dsl::tests::lower_edges as lower_composites;
     use crate::dsl::typing::TypeHint;
     use obzenflow_adapters::ai::{
         ChatBindingEvidence, ChatBindingEvidenceBuildError, ChatCompletion, CHAT_CLIENT,
@@ -870,6 +870,12 @@ mod tests {
         members.insert("digest__chunk".to_string(), existing.into_flow_member());
 
         members.insert("digest".to_string(), generated_digest().into_flow_member());
+
+        // Logical bindings must be valid before the collision under test is reached.
+        members.insert(
+            "out".to_string(),
+            crate::sink!(TestOut => placeholder!()).into_flow_member(),
+        );
 
         let mut connections = vec![("digest".to_string(), "out".to_string(), EdgeKind::Forward)];
 

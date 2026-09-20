@@ -20,11 +20,11 @@ mod tests {
     use obzenflow_topology::EdgeKind;
     use serde::{Deserialize, Serialize};
 
-    use crate::dsl::composites::lower_composites;
     use crate::dsl::composition::{
         CompositeBuildContext, CompositeBuildError, CompositeDescriptor, FlowMember, IntoFlowMember,
     };
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
+    use crate::dsl::tests::lower_edges as lower_composites;
     use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 
     #[derive(Debug, Clone)]

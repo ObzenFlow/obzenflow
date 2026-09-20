@@ -6,11 +6,11 @@
 //! Physical codec details stay in Infra, including test-only archive rewrites.
 
 use crate::journal::disk::codec::{self, Decoder, DefinitionStore};
+use crate::journal::disk::inspect::load_manifest;
 use crate::journal::disk::scanner::{
     classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
 };
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
-use obzenflow_core::journal::RunManifest;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -90,8 +90,7 @@ fn rewrite_archive(
     keep_observation: impl Fn(usize) -> bool,
     keep_frame: impl Fn(&Path, &[serde_json::Value]) -> bool,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
-    let manifest: RunManifest =
-        serde_json::from_slice(&std::fs::read(run.join("run_manifest.json"))?)?;
+    let manifest = load_manifest(run)?;
     let mut files = std::collections::BTreeMap::new();
     files.insert(manifest.system_journal_file, true);
     for stage in manifest.stages.values() {
@@ -281,8 +280,7 @@ struct Samples {
 /// over the identical captured stream. This is an existing-suite proof helper,
 /// not another runtime journal format or a selectable production codec.
 pub fn audit_archive(run: &Path) -> Result<StorageAudit, Box<dyn std::error::Error + Send + Sync>> {
-    let manifest: RunManifest =
-        serde_json::from_slice(&std::fs::read(run.join("run_manifest.json"))?)?;
+    let manifest = load_manifest(run)?;
     let mut audit = StorageAudit::default();
     let mut samples = Samples::default();
     audit_file::<SystemEvent>(

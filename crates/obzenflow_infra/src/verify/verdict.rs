@@ -8,7 +8,7 @@
 //! `1` divergence in the certified region;
 //! `2` certified region matched but uncertified stages exist;
 //! `3` refused (lineage, incomplete-archive replay, stage sets, status gate,
-//! manifest version, unavailable archive).
+//! journal schema version, unavailable archive).
 
 use std::path::PathBuf;
 

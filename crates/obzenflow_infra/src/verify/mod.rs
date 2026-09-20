@@ -369,7 +369,7 @@ fn run_summary(source: &dyn RunSource) -> RunSummary {
         flow_id: source.manifest().flow_id.clone(),
         flow_name: source.manifest().flow_name.clone(),
         status: format!("{:?}", source.status()),
-        manifest_version: source.manifest().manifest_version.clone(),
+        journal_schema_version: source.manifest().journal_schema_version.clone(),
     }
 }
 
@@ -403,7 +403,7 @@ mod tests {
     };
     use obzenflow_core::event::ChainEvent;
     use obzenflow_core::journal::archive::manifest::{
-        RunManifest, RunManifestReplayConfig, RunManifestStage, RUN_MANIFEST_VERSION,
+        RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_SCHEMA_VERSION,
     };
     use obzenflow_core::journal::ArchiveStatus;
     use obzenflow_core::{StageId, WriterId};
@@ -459,9 +459,8 @@ mod tests {
             );
         }
         RunManifest {
-            manifest_version: RUN_MANIFEST_VERSION.to_string(),
-            journal_format_version:
-                obzenflow_core::journal::archive::manifest::JOURNAL_FORMAT_VERSION,
+            journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
+
             obzenflow_version: "0.1.2".to_string(),
             flow_id: flow_id.to_string(),
             flow_name: "test_flow".to_string(),

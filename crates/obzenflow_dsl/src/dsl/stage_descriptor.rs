@@ -2876,12 +2876,9 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
         let reference_mode = self.handler.reference_mode();
         let reference_batch_cap = self.handler.reference_batch_cap();
 
-        // Create the stage configuration
-        // reference_stage_id comes from the builder (stored in self)
-        // Stream stages come from topology (in upstream_stages, after DSL adds reference)
+        // Explicit topology validation orders the catalog first, then streams.
         let reference_source_id = self.reference_stage_id;
 
-        // Get stream sources - all upstreams after the reference (which DSL prepended)
         let stream_sources: Vec<StageId> = resources
             .upstream_stages
             .iter()
@@ -2889,7 +2886,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
             .copied()
             .collect();
 
-        // For now, we support single stream source
+        // JoinConfig retains one stream identity; the builder receives all stream journals.
         let stream_source_id = stream_sources
             .first()
             .copied()
@@ -2917,9 +2914,8 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> St
                 return Err("Join stage requires at least one upstream journal".into());
             };
 
-        // Use the builder to create the handle
-        // NOTE: For join stages, the pre-built subscription in resources is stale
-        // because DSL mutates upstream_journals AFTER subscription was built
+        // The runtime builder preserves the planned subscription metadata when
+        // binding the catalog and stream journal subsets.
         let handle = JoinBuilder::new(
             self.handler,
             join_config,

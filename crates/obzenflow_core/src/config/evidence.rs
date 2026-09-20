@@ -11,7 +11,7 @@
 use super::ConfigSubject;
 use serde::{Deserialize, Serialize};
 
-/// Evidence-local schema version, independent of `RUN_MANIFEST_VERSION`.
+/// Evidence-local schema version, independent of `JOURNAL_SCHEMA_VERSION`.
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
 
 /// The concrete point that received an effective configuration value.

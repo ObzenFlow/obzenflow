@@ -89,7 +89,7 @@ pub fn run_example() -> Result<()> {
                 topology: {
                     flights |> val;
                     val |> calc;
-                    calc |> enricher;
+                    (carriers, calc) |> enricher;
                     enricher |> agg;
                     agg |> printer;
                 }

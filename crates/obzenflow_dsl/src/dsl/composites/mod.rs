@@ -19,6 +19,9 @@ use crate::dsl::composition::{
     ResolvedBoundary, ResolvedInternalFeed, ResolvedPort,
 };
 use crate::dsl::stage_descriptor::StageDescriptor;
+use crate::dsl::topology::{
+    role_edges, validate_authored, AuthoredConnection, JoinRole, LoweredFlow,
+};
 use crate::dsl::typing::TypeHint;
 use crate::dsl::FlowBuildError;
 use obzenflow_topology::{CompositePortRef, EdgeKind, StageSubgraphMembership};
@@ -66,8 +69,8 @@ pub struct LoweringArtifacts {
     /// Declared internal feeds, member-stage resolved (D3); consumed by
     /// feed-plan derivation and edge validation.
     pub internal_feeds: Vec<ResolvedInternalFeed>,
-    /// Composite boundaries keyed by binding, for join-reference resolution
-    /// (A4) and boundary diagnostics.
+    /// Composite boundaries keyed by authored binding for role-directed
+    /// resolution and boundary diagnostics.
     pub boundaries: HashMap<String, ResolvedBoundary>,
     /// Named port identities on rewritten physical boundary edges (B3).
     pub boundary_edges: Vec<BoundaryEdgeBindingSpec>,
@@ -77,14 +80,17 @@ fn build_error(message: String) -> FlowBuildError {
     FlowBuildError::StageResourcesFailed(message)
 }
 
-/// The downstream's declared input hint for port resolution: a transform's
-/// input type, or a join's stream type. Reference edges resolve separately
-/// in the join pass (A4).
+/// Resolve outputs against the downstream input contract, using the authored
+/// catalog or stream role when the downstream is a join.
 fn downstream_input_hint(
     stages: &HashMap<String, Box<dyn StageDescriptor>>,
     downstream: &str,
+    role: Option<JoinRole>,
 ) -> Option<TypeHint> {
     let metadata = stages.get(downstream)?.typing_metadata()?;
+    if role == Some(JoinRole::Catalog) {
+        return Some(metadata.reference_type.clone());
+    }
     if matches!(metadata.input_type, TypeHint::Exact { .. }) {
         return Some(metadata.input_type.clone());
     }
@@ -98,8 +104,22 @@ fn downstream_input_hint(
 #[allow(clippy::type_complexity)]
 pub fn lower_composites(
     members: HashMap<String, FlowMember>,
-    connections: &mut Vec<(String, String, EdgeKind)>,
-) -> Result<(HashMap<String, Box<dyn StageDescriptor>>, LoweringArtifacts), FlowBuildError> {
+    authored: Vec<AuthoredConnection>,
+) -> Result<LoweredFlow, FlowBuildError> {
+    let bindings = members
+        .iter()
+        .map(|(name, member)| {
+            let descriptor = match member {
+                FlowMember::Stage(stage) => Some(stage.as_ref()),
+                FlowMember::Composite(_) => None,
+            };
+            (name.as_str(), descriptor)
+        })
+        .collect();
+    validate_authored(&authored, &bindings).map_err(build_error)?;
+    let mut external_edges = role_edges(authored);
+    let mut connections = Vec::new();
+    let mut join_catalogs = HashMap::new();
     let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
     let mut composites: Vec<(
         String,
@@ -113,10 +133,6 @@ pub fn lower_composites(
             }
             FlowMember::Composite(descriptor) => composites.push((binding, descriptor)),
         }
-    }
-
-    if composites.is_empty() {
-        return Ok((stages, LoweringArtifacts::default()));
     }
 
     // Deterministic lowering order (A2): artifacts and edge appends must not
@@ -231,6 +247,7 @@ pub fn lower_composites(
             .boundaries
             .insert(binding.clone(), expansion.boundary);
 
+        join_catalogs.extend(expansion.join_catalogs);
         for (from, to, _lane) in &expansion.internal_edges {
             connections.push((from.clone(), to.clone(), EdgeKind::Forward));
         }
@@ -244,7 +261,8 @@ pub fn lower_composites(
     // default fallback; ambiguity fails loud. Backward edges use the same
     // rule. Targets are rewritten first so composite-to-composite edges see
     // the resolved member when the source side looks up its hint.
-    for (from, to, kind) in connections.iter_mut() {
+    for edge in &mut external_edges {
+        let (from, to, kind) = (&mut edge.from, &mut edge.to, &edge.kind);
         let mut ports = Vec::new();
         if let Some(boundary) = artifacts.boundaries.get(to.as_str()) {
             let input = boundary.input();
@@ -256,7 +274,7 @@ pub fn lower_composites(
         }
         if let Some(boundary) = artifacts.boundaries.get(from.as_str()) {
             let binding = from.clone();
-            let hint = downstream_input_hint(&stages, to);
+            let hint = downstream_input_hint(&stages, to, edge.role);
             let port = boundary.resolve_output(hint.as_ref()).map_err(|err| match err {
                 PortResolveError::Ambiguous {
                     ports,
@@ -281,6 +299,9 @@ pub fn lower_composites(
             ));
             *from = port.stage_name.clone();
         }
+        if edge.role == Some(JoinRole::Catalog) {
+            join_catalogs.insert(to.clone(), from.clone());
+        }
         if !ports.is_empty() {
             artifacts.boundary_edges.push(BoundaryEdgeBindingSpec {
                 from_stage: from.clone(),
@@ -291,5 +312,23 @@ pub fn lower_composites(
         }
     }
 
-    Ok((stages, artifacts))
+    for edge in &external_edges {
+        if edge.role == Some(JoinRole::Stream) && join_catalogs.get(&edge.to) == Some(&edge.from) {
+            return Err(build_error(format!(
+                "join '{}' resolves catalog and stream to the same producer '{}'",
+                edge.to, edge.from
+            )));
+        }
+    }
+    let mut authored_edges: Vec<_> = external_edges
+        .into_iter()
+        .map(|edge| (edge.from, edge.to, edge.kind))
+        .collect();
+    authored_edges.extend(connections);
+    Ok(LoweredFlow {
+        stages,
+        connections: authored_edges,
+        artifacts,
+        join_catalogs,
+    })
 }

@@ -9,17 +9,16 @@
 //! trait.
 
 use super::codec::Decoder;
-use super::manifest_gate::require_current_manifest_version;
+use super::manifest_gate::require_current_journal_schema_version;
 use super::reader::DiskJournalReader;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use async_trait::async_trait;
-use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::archive::manifest::{
-    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_FORMAT_VERSION,
-    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
+    RUN_MANIFEST_FILENAME,
 };
 use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
 use obzenflow_core::journal::{ArchiveStatus, JournalReader, StatusDerivation};
@@ -75,7 +74,7 @@ impl DiskReplayArchive {
                 source: e,
             })?;
         // FLOWIP-095j: gate on the version from the raw JSON before typed
-        // deserialization. Required fields added in newer manifest versions would
+        // deserialization. Required fields added in newer journal schemas would
         // otherwise turn an old archive into a confusing missing-field parse error
         // instead of the clean unsupported-version refusal.
         let manifest_value: serde_json::Value =
@@ -86,24 +85,10 @@ impl DiskReplayArchive {
                     e
                 ),
             })?;
-        if let Err(version) = require_current_manifest_version(&manifest_value) {
-            return Err(ReplayError::UnsupportedManifestVersion {
-                manifest_version: version.found().to_string(),
-                supported: RUN_MANIFEST_VERSION,
-            });
-        }
-        // FLOWIP-120q: refuse an archive whose framed record format this build
-        // does not read, in the same raw-JSON gate as manifest_version, so a
-        // stale archive is rejected before any record is parsed.
-        let journal_format_version = manifest_value
-            .get("journal_format_version")
-            .and_then(|v| v.as_u64());
-        if journal_format_version != Some(u64::from(JOURNAL_FORMAT_VERSION)) {
-            return Err(ReplayError::Parse {
-                message: format!(
-                    "unsupported journal_format_version {journal_format_version:?} in {} (supported: {JOURNAL_FORMAT_VERSION})",
-                    manifest_path.display()
-                ),
+        if let Err(version) = require_current_journal_schema_version(&manifest_value) {
+            return Err(ReplayError::UnsupportedJournalSchemaVersion {
+                journal_schema_version: version.found().to_string(),
+                supported: JOURNAL_SCHEMA_VERSION,
             });
         }
         // FLOWIP-132a: descriptor shape is an archive interpretation contract,
@@ -141,18 +126,13 @@ impl DiskReplayArchive {
                 ),
             })?;
 
-        if manifest.obzenflow_version != OBZENFLOW_VERSION {
-            return Err(ReplayError::VersionMismatch {
-                archive_version: manifest.obzenflow_version.clone(),
-                current_version: OBZENFLOW_VERSION.to_string(),
-            });
-        }
-
         let system_log_path = archive_path.join(&manifest.system_journal_file);
         let status_derivation = match derive_status_derivation_from_system_log(&system_log_path) {
             Ok(derivation) => derivation,
             Err(err) => {
-                if allow_incomplete_archive {
+                if allow_incomplete_archive
+                    && !matches!(err, ReplayError::UnsupportedJournalSchemaVersion { .. })
+                {
                     tracing::warn!(
                         archive_path = %archive_path.display(),
                         system_log_path = %system_log_path.display(),
@@ -493,6 +473,12 @@ fn scan_recorded_maxima(
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
+                    if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
+                        return Err(ReplayError::UnsupportedJournalSchemaVersion {
+                            journal_schema_version: format!("frame marker in {}", path.display()),
+                            supported: JOURNAL_SCHEMA_VERSION,
+                        });
+                    }
                     // The scan only collects boundaries. The resume read path
                     // re-reads this journal and fails loud on the same record
                     // (FLOWIP-120q), before any boundary from it could matter.
@@ -579,6 +565,12 @@ pub(crate) fn derive_status_derivation_from_system_log(
             }
             Disposition::EndOfCommittedRecords | Disposition::Skip => break,
             Disposition::Corrupt(problem) => {
+                if matches!(problem, super::scanner::ParseProblem::SchemaMismatch) {
+                    return Err(ReplayError::UnsupportedJournalSchemaVersion {
+                        journal_schema_version: format!("frame marker in {}", path.display()),
+                        supported: JOURNAL_SCHEMA_VERSION,
+                    });
+                }
                 return Err(ReplayError::Parse {
                     message: format!(
                         "system.log record corrupt at line {line_no} in {}: {problem}",

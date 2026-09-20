@@ -56,3 +56,24 @@ sequenceDiagram
   Build->>Stages: create handles (middleware + instrumentation)
   Build->>Pipe: build pipeline + return FlowHandle
 ```
+
+## Explicit join topology
+
+Every forward input to a join uses a catalog-first tuple:
+
+```ignore
+posted = join!(catalog accounts: Account, Transaction -> Posted => post);
+// In topology:
+(accounts, api_transactions) |> posted;
+(accounts, imported_transactions) |> posted;
+```
+
+The catalog clause witnesses identity and type. Only tuples create the catalog
+and stream edges. Distinct stream tuples share one catalog edge; duplicate tuples,
+plain inputs, swapped roles, and unknown bindings fail before journals are created.
+Composite outputs resolve against each role's type. A composite input port cannot
+belong to a join; private joins require explicit `CompositeBuildContext::join`
+wiring between their member roles.
+
+This is journal schema 5.0. Re-record older archives; package versions do not govern
+schema admission.
