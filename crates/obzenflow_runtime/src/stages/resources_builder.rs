@@ -190,6 +190,32 @@ impl SubscriptionFactory {
 }
 
 impl BoundSubscriptionFactory {
+    /// Split a stage's configured inputs into role-specific journal sets while
+    /// preserving feed selection, composite entries, ordering and replay metadata.
+    pub(crate) fn rebind(&self, journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)]) -> Self {
+        let mut factory = self.clone();
+        factory.journals_with_names = journals
+            .iter()
+            .map(|(id, journal)| {
+                let name = self
+                    .journals_with_names
+                    .iter()
+                    .find(|(upstream, _, _)| upstream == id)
+                    .map(|(_, name, _)| name.clone())
+                    .unwrap_or_else(|| format!("{id:?}"));
+                (*id, name, journal.clone())
+            })
+            .collect();
+        let upstream_ids: HashSet<_> = journals.iter().map(|(id, _)| *id).collect();
+        factory
+            .selected_feeds_by_stage
+            .retain(|id, _| upstream_ids.contains(id));
+        factory
+            .composite_entries_by_stage
+            .retain(|id, _| upstream_ids.contains(id));
+        factory
+    }
+
     /// Build a subscription from the bound journals
     pub async fn build(&self) -> Result<UpstreamSubscription<ChainEvent>, String> {
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)

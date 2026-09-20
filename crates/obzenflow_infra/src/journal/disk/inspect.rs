@@ -266,7 +266,7 @@ fn archive_policy(
     })
 }
 
-pub(super) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
+pub(crate) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspectError> {
     let manifest_path = run_dir.join(RUN_MANIFEST_FILENAME);
     let body =
         std::fs::read_to_string(&manifest_path).map_err(|source| JournalInspectError::Io {

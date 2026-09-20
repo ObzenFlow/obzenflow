@@ -119,6 +119,93 @@ async fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
         .unwrap();
 }
 
+#[test]
+fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access() {
+    use obzenflow_infra::testing::journal::{
+        audit_archive, corrupt_chain_frame, omit_observations, retain_archive_frames,
+    };
+
+    for complete in [false, true] {
+        for (version, expected) in [
+            (None, "<missing>"),
+            (Some(serde_json::json!(5.0)), "5.0"),
+            (Some(serde_json::json!("4.0")), "4.0"),
+            (Some(serde_json::json!("6.0")), "6.0"),
+            (Some(serde_json::json!({"major": 5})), r#"{"major":5}"#),
+            (Some(serde_json::Value::Null), "null"),
+        ] {
+            let temp = tempdir().unwrap();
+            write_manifest(temp.path());
+            let path = temp.path().join(RUN_MANIFEST_FILENAME);
+            let mut manifest: serde_json::Value = if complete {
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
+            } else {
+                // Deliberately incomplete: the raw epoch gate must run before
+                // RunManifest deserialisation can complain about missing fields.
+                serde_json::json!({"system_journal_file": "system.log"})
+            };
+            manifest
+                .as_object_mut()
+                .unwrap()
+                .remove("journal_schema_version");
+            if let Some(version) = version {
+                manifest["journal_schema_version"] = version;
+            }
+            let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+            std::fs::write(&path, &manifest_bytes).unwrap();
+            let journal = temp.path().join("system.log");
+            let sentinel = b"must not be decoded or rewritten";
+            std::fs::write(&journal, sentinel).unwrap();
+
+            for (helper, result) in [
+                ("audit", audit_archive(temp.path()).map(|_| ())),
+                (
+                    "omit",
+                    omit_observations(temp.path(), |_| panic!("observation predicate reached"))
+                        .map(|_| ()),
+                ),
+                (
+                    "retain",
+                    retain_archive_frames(temp.path(), |_, _| panic!("frame predicate reached"))
+                        .map(|_| ()),
+                ),
+                (
+                    "corrupt",
+                    corrupt_chain_frame(temp.path(), &journal, |_| {
+                        panic!("corruption predicate reached")
+                    }),
+                ),
+            ] {
+                let error = result
+                    .expect_err("non-current schema must be refused")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("unsupported journal schema version: {expected}")),
+                    "{helper}: {error}"
+                );
+                assert_eq!(std::fs::read(&journal).unwrap(), sentinel);
+                assert_eq!(std::fs::read(&path).unwrap(), manifest_bytes);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn archive_fixture_helpers_accept_current_schema() {
+    use obzenflow_infra::testing::journal::{
+        audit_archive, omit_observations, retain_archive_frames,
+    };
+
+    let temp = tempdir().unwrap();
+    write_manifest(temp.path());
+    write_system_log_completed(temp.path()).await;
+    assert_eq!(audit_archive(temp.path()).unwrap().records, 1);
+    assert_eq!(omit_observations(temp.path(), |_| true).unwrap(), 0);
+    assert_eq!(audit_archive(temp.path()).unwrap().records, 1);
+    assert_eq!(retain_archive_frames(temp.path(), |_, _| false).unwrap(), 1);
+    assert_eq!(audit_archive(temp.path()).unwrap().records, 0);
+}
+
 fn write_released_legacy_retry_row(dir: &Path) {
     let writer_id = WriterId::from(obzenflow_core::StageId::new());
     let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));

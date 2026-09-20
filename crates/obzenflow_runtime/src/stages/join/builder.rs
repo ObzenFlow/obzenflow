@@ -111,16 +111,18 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             &self.resources.runtime_execution,
         );
 
-        // Bind factories for reference and stream subscriptions (after DSL split)
-        let mut reference_subscription_factory = self.resources.subscription_factory.bind(&[(
-            self.config.reference_source_id,
-            self.reference_journal.clone(),
-        )]);
+        // Split the configured upstream factory so both roles retain their
+        // selected feeds, composite boundaries and replay metadata.
+        let mut reference_subscription_factory =
+            self.resources.upstream_subscription_factory.rebind(&[(
+                self.config.reference_source_id,
+                self.reference_journal.clone(),
+            )]);
 
         let mut stream_subscription_factory = self
             .resources
-            .subscription_factory
-            .bind(&self.stream_journals);
+            .upstream_subscription_factory
+            .rebind(&self.stream_journals);
 
         // FLOWIP-095d: an ordered join runs the canonical merge on both side
         // subscriptions, so every poll path (live canonical dispatch, drain)

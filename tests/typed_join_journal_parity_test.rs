@@ -14,7 +14,7 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
@@ -145,6 +145,27 @@ impl TypedFiniteSourceHandler for StreamSource {
         };
         self.next += 1;
         Ok(Some(vec![row]))
+    }
+}
+
+#[derive(Clone, Debug, StageOutputFacts)]
+enum MixedFact {
+    Reference(ReferenceItem),
+    Stream(StreamItem),
+}
+
+#[derive(Clone, Debug)]
+struct MixedSource {
+    rows: std::collections::VecDeque<MixedFact>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl TypedFiniteSourceHandler for MixedSource {
+    type Output = MixedFact;
+
+    fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(self.rows.pop_front().map(|row| vec![row]))
     }
 }
 
@@ -743,6 +764,147 @@ async fn explicit_multi_stream_join_has_one_catalog_and_releases_enforced_backpr
         authored.iter().filter(|fact| fact.phase == "drain").count(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_join_feeds_filter_both_roles_with_backpressure_and_replay() {
+    use obzenflow_dsl::dsl::backpressure_clause::enforced;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut live_archive = None;
+    let mut live_facts = Vec::new();
+    for mode in ["live", "replay"] {
+        let base = temp.path().join(mode);
+        let journal_base = base.clone();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source_reads = reads.clone();
+        let join_calls = calls.clone();
+        let definition = FlowDefinition::materialize(move |_| {
+            // Each journal includes the other role's payload before, between,
+            // and after its selected rows. A one-row credit window also proves
+            // that filtered rows release backpressure on both subscriptions.
+            let reference = |key: &str, version: &str| {
+                MixedFact::Reference(ReferenceItem {
+                    key: key.into(),
+                    version: version.into(),
+                })
+            };
+            let stream = |key: &str| {
+                MixedFact::Stream(StreamItem {
+                    key: key.into(),
+                    reject: false,
+                })
+            };
+            let references = MixedSource {
+                rows: [
+                    stream("unselected"),
+                    reference("k1", "old"),
+                    stream("unselected"),
+                    reference("k1", "new"),
+                    reference("k2", "terminal"),
+                    stream("unselected"),
+                ]
+                .into(),
+                reads: source_reads.clone(),
+            };
+            let stream_a = MixedSource {
+                rows: [
+                    reference("k1", "unselected"),
+                    stream("k1"),
+                    reference("k1", "unselected"),
+                    stream("k2"),
+                    reference("k1", "unselected"),
+                ]
+                .into(),
+                reads: source_reads,
+            };
+            let stream_b = stream_a.clone();
+            let joined = ExactJoin { calls: join_calls };
+            let output = SinkTyped::new(|_: JoinedFact| async {}).idempotent();
+            Ok(flow! {
+                name: "mixed_join_feeds",
+                journals: disk_journals(journal_base),
+                backpressure: enforced(1).stall_timeout_ms(3_000),
+                stages: {
+                    references = source!({ ReferenceItem, StreamItem } => references);
+                    stream_a = source!({ ReferenceItem, StreamItem } => stream_a);
+                    stream_b = source!({ ReferenceItem, StreamItem } => stream_b);
+                    joined = join!(catalog references: ReferenceItem, StreamItem -> JoinedFact => joined);
+                    output = sink!(JoinedFact => output);
+                },
+                topology: {
+                    (references, stream_a) |> joined;
+                    (references, stream_b) |> joined;
+                    joined |> output;
+                }
+            })
+        });
+        let mut args = vec![OsString::from("obzenflow")];
+        if let Some(archive) = &live_archive {
+            args.push(OsString::from("--replay-from"));
+            args.push(OsString::from(archive));
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            FlowApplication::builder()
+                .with_cli_args(args)
+                .run_async(definition),
+        )
+        .await
+        .expect("mixed feeds release enforced backpressure")
+        .expect("only selected payloads reach the join handler");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            9,
+            "{mode}: selected rows and terminal hooks"
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            if mode == "live" { 19 } else { 0 }
+        );
+
+        let archive = latest_run_dir(&base);
+        let records = read_stage_appended(&archive, "joined").await;
+        let join_writer = stage_writer(&archive, "joined");
+        let mut consumed = Vec::new();
+        for record in &records {
+            if record.envelope.provenance.event.writer_id != join_writer {
+                continue;
+            }
+            if let ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
+                pass,
+                consumed_count,
+                reader_seq,
+                advertised_writer_seq,
+                eof_seen,
+                ..
+            }) = &record.payload
+            {
+                assert!(*pass && *eof_seen, "{mode}: selected-feed contract passes");
+                assert_eq!(Some(*reader_seq), *advertised_writer_seq);
+                assert_eq!(consumed_count.0, reader_seq.0);
+                consumed.push(consumed_count.0);
+            }
+        }
+        consumed.sort();
+        assert_eq!(
+            consumed,
+            [2, 2, 3],
+            "{mode}: contracts count selected facts"
+        );
+        let authored = facts(&records);
+        assert_eq!(authored.len(), 8, "six stream facts and two terminal facts");
+        assert!(authored.iter().all(
+            |fact| fact.reference_version == if fact.key == "k1" { "new" } else { "terminal" }
+        ));
+        if mode == "live" {
+            live_archive = Some(archive);
+            live_facts = authored;
+        } else {
+            assert_eq!(authored, live_facts, "selected-feed order is replay-stable");
+        }
+    }
 }
 
 #[tokio::test]
