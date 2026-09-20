@@ -42,7 +42,7 @@
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use obzenflow::dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
+use obzenflow::flow::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
 use obzenflow::stages::sinks::SnapshotTableFormatter;

@@ -30,9 +30,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow::dsl::backpressure::enforced;
-use obzenflow::dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::env::env_var_or;
+use obzenflow::flow::backpressure::enforced;
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow::schema::TypedPayload;

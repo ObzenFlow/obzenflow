@@ -19,7 +19,7 @@ use anyhow::{bail, Result};
 use obzenflow::application::{
     Banner, FlowApplication, Footer, Presentation, RunPresentationOutcome,
 };
-use obzenflow::dsl::{flow, sink, source, stateful, FlowDefinition};
+use obzenflow::flow::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::SinkTyped;

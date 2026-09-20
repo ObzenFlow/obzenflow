@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::{console, domain::*, handlers, sources::*};
-use obzenflow::dsl::{flow, join, sink, source, stateful, FlowDefinition};
+use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
 use obzenflow::stages::sinks::SinkTyped;

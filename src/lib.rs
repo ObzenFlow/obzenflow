@@ -60,7 +60,7 @@
 //!
 //! ## 3. The `flow!` block
 //!
-//! The [`crate::dsl::flow!`] macro takes four sections:
+//! The [`crate::flow::flow!`] macro takes four sections:
 //!
 //! ### `name:`
 //! A string identifier for the flow. Used for journal directory naming and
@@ -99,7 +99,7 @@
 //!
 //! [`crate::application::FlowApplication`] handles runtime setup,
 //! optional HTTP server, CLI argument parsing, Prometheus metrics, and graceful
-//! shutdown. Pass a deferred [`crate::dsl::FlowDefinition`] to `run()`:
+//! shutdown. Pass a deferred [`crate::flow::FlowDefinition`] to `run()`:
 //!
 //! ```rust,ignore
 //! FlowApplication::run(build_flow()).await?;
@@ -120,7 +120,7 @@
 //! use anyhow::Result;
 //! use obzenflow::schema::TypedPayload;
 //! use obzenflow::stages::{sources, transforms};
-//! use obzenflow::dsl::{flow, sink, source, transform, FlowDefinition};
+//! use obzenflow::flow::{flow, sink, source, transform, FlowDefinition};
 //! use obzenflow::application::FlowApplication;
 //! use obzenflow::journal::disk_journals;
 //! use obzenflow::stages::sinks::SinkTyped;
@@ -200,6 +200,7 @@
 //!
 //! - [`prelude`] supplies the common flow, macro, error, and schema vocabulary.
 //! - [`schema`] defines typed payloads and fact carriers.
+//! - [`flow`] defines flows, stage declarations, and construction settings.
 //! - [`stages`] groups sources, transforms, stateful handlers, joins, and sinks.
 //! - [`effects`] describes replay-safe external operations.
 //! - [`middleware`] provides live-I/O policies and passive observers.
@@ -210,10 +211,10 @@
 
 pub mod ai;
 pub mod application;
-pub mod dsl;
 pub mod effects;
 pub mod env;
 pub mod error;
+pub mod flow;
 pub mod journal;
 pub mod middleware;
 pub mod prelude;

@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use obzenflow::application::{Banner, FlowApplication, Presentation};
-use obzenflow::dsl::{flow, sink, source, stateful, FlowDefinition};
+use obzenflow::flow::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
 use obzenflow::schema::TypedPayload;

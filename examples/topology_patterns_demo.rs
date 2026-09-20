@@ -29,8 +29,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::application::{Banner, FlowApplication, Presentation};
-use obzenflow::dsl::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::error::HandlerError;
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
 use obzenflow::stages::sinks::DeliveryMethod;

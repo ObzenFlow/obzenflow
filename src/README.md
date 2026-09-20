@@ -9,7 +9,7 @@ inside the existing deferred materialiser.
 | --- | --- | --- | --- | --- |
 | `prelude` | Root capability re-exports | None | Exact common vocabulary listed in `prelude.rs`; no specialised catalogues | Renamed facade fixture |
 | `schema` | Core event schema | None | Payload errors, flat fact carriers, member/subset contracts, event identity | Renamed derives; payment and allocation carriers |
-| `dsl` | DSL | None | Flow build errors, backpressure clauses | Every example; renamed macro fixture covering every stage family |
+| `flow` | DSL | None | Flow build errors, backpressure clauses | Every example; renamed macro fixture covering every stage family |
 | `stages::sources` | Adapters catalogue; Runtime typed contracts; Infra HTTP client composition | `http-pull` for the default HTTP client | Four source traits, source/decode errors, CSV rows, HTTP request/response/configuration/cursor types, concrete functional source return types | Character, CSV, bank, HN, multi-source examples |
 | `stages::transforms` | Runtime | None | Pure/effectful handler traits, named mapping/filter/budget helpers | Character, payment, renamed fixture |
 | `stages::stateful` | Runtime | None | Pure/effectful handler traits, emissions, accumulator states/snapshots and strategies | Bank, allocation, accumulator catalogue, renamed fixture |

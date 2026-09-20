@@ -12,7 +12,7 @@ use super::domain::{
 use super::warehouse::{
     ReleaseStock, ReserveStock, WarehouseConfig, WarehouseEffectBindings, WarehouseStats,
 };
-use obzenflow::dsl::{effectful_stateful, flow, sink, source, FlowDefinition};
+use obzenflow::flow::{effectful_stateful, flow, sink, source, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{CircuitBreaker, EffectResilience};
 use obzenflow::stages::sinks::SinkTyped;

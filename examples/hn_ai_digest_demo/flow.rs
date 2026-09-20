@@ -16,12 +16,12 @@ use obzenflow::ai::{
     SystemPrompt, TokenCount, UserPrompt,
 };
 use obzenflow::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
-use obzenflow::dsl::FlowBuildError;
-use obzenflow::dsl::{
-    ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition,
-};
 use obzenflow::effects::EffectBinding;
 use obzenflow::error::HandlerError;
+use obzenflow::flow::FlowBuildError;
+use obzenflow::flow::{
+    ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition,
+};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::ai_resilience;
 use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};

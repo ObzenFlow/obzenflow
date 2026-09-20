@@ -30,8 +30,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow::application::{Banner, FlowApplication, Presentation};
-use obzenflow::dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow::error::HandlerError;
+use obzenflow::flow::{flow, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::RateLimiterBuilder;
 use obzenflow::schema::TypedPayload;

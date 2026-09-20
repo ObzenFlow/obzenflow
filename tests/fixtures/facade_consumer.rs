@@ -226,11 +226,11 @@ fn renamed_facade_macros_and_constructors_compile() {
         let folded =
             stateful::reduce(Fact(0), |sum: &mut Fact, fact: &Fact| sum.0 += fact.0).emit_on_eof();
         let output = sinks::SinkTyped::new(|_: Fact| async {});
-        Ok(of::dsl::flow! {
+        Ok(of::flow::flow! {
             name: "facade",
             journals: of::journal::memory_journals(),
             stages: {
-                input = of::dsl::source!(Fact => input);
+                input = of::flow::source!(Fact => input);
                 mapped = transform!(Fact -> Fact => mapped);
                 folded = stateful!(Fact -> Fact => folded);
                 output = sink!(Fact => output);
@@ -245,20 +245,20 @@ fn renamed_facade_macros_and_constructors_compile() {
 
     // Placeholder-first authoring works through both prelude and qualified paths.
     let _ = source!(Fact => placeholder!());
-    let _ = of::dsl::async_source!(Fact => placeholder!());
+    let _ = of::flow::async_source!(Fact => placeholder!());
     let _ = infinite_source!(Fact => placeholder!());
-    let _ = of::dsl::async_infinite_source!(Fact => placeholder!());
+    let _ = of::flow::async_infinite_source!(Fact => placeholder!());
     let _ = effectful_transform!(Fact -> Fact => Pure, observers: []);
-    let _ = of::dsl::effectful_stateful!(Fact -> Fact => Pure, observers: []);
-    let _ = of::dsl::transform!(Fact -> Fact => placeholder!());
-    let _ = of::dsl::stateful!(Fact -> Fact => placeholder!());
-    let _ = of::dsl::sink!(Fact => placeholder!());
+    let _ = of::flow::effectful_stateful!(Fact -> Fact => Pure, observers: []);
+    let _ = of::flow::transform!(Fact -> Fact => placeholder!());
+    let _ = of::flow::stateful!(Fact -> Fact => placeholder!());
+    let _ = of::flow::sink!(Fact => placeholder!());
     let joined = joins::inner(
         |fact: &Fact| fact.0,
         |fact: &Fact| fact.0,
         |_reference: Fact, fact: Fact| fact,
     );
-    let _ = of::dsl::join!(catalog input: Fact, Fact -> Fact => joined);
+    let _ = of::flow::join!(catalog input: Fact, Fact -> Fact => joined);
     let _ = source!(Fact => Pure);
     let _ = async_source!(Fact => Pure);
     let _ = infinite_source!(Fact => Pure);
@@ -276,7 +276,7 @@ fn renamed_facade_macros_and_constructors_compile() {
             journals: of::journal::memory_journals(),
             stages: {
                 input = source!(Fact => input);
-                output = of::dsl::sink!(Fact => handler_set!(first, second))?;
+                output = of::flow::sink!(Fact => handler_set!(first, second))?;
             },
             topology: { input |> output; }
         })
@@ -357,13 +357,13 @@ impl AiFinaliseRole<Fact, Many<Fact>, Fact> for Pure {
 
 fn ai_stages(chat: of::effects::EffectBinding<ChatCompletion>) {
     let handler = Pure;
-    let _ = of::dsl::inference!(
+    let _ = of::flow::inference!(
         Fact -> Fact uses at_least_once(ChatCompletion)
             via chat with of::middleware::ai_resilience() => handler
     );
     let map_role = Pure;
     let finalise_role = Pure;
-    let _ = of::dsl::ai_map_reduce!(
+    let _ = of::flow::ai_map_reduce!(
         Fact -> Fact => {
             map: [u64] -> Fact uses at_least_once(ChatCompletion)
                 via chat with of::middleware::ai_resilience() => map_role,

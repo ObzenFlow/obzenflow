@@ -33,7 +33,7 @@
 
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
-use obzenflow::dsl::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};

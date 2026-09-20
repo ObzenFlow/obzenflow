@@ -53,7 +53,7 @@ use super::domain::{
 use super::fixtures;
 use super::gateway::{AuthorizePayment, GatewayTransform};
 use super::validation;
-use obzenflow::dsl::{effectful_transform, flow, sink, source, transform};
+use obzenflow::flow::{effectful_transform, flow, sink, source, transform};
 use obzenflow::journal::disk_journals;
 use obzenflow::middleware::{
     sink_delivery_observer, CircuitBreaker, EffectResilience, RateLimiter, RateLimiterBuilder,
@@ -105,7 +105,7 @@ fn demo_jitter(channel: &str, index: usize) {
 /// Gentle source and gateway-effect rate limits keep logs and metrics readable,
 /// so you can watch source-boundary and effect-boundary policy metrics change
 /// over time.
-pub fn build_flow() -> obzenflow::dsl::FlowDefinition {
+pub fn build_flow() -> obzenflow::flow::FlowDefinition {
     assemble_flow(
         fixtures::scripted_web_orders(),
         fixtures::scripted_store_orders(),
@@ -125,8 +125,8 @@ pub fn assemble_flow(
     gateway_transform: GatewayTransform,
     gateway_calls_per_second: f64,
     journal_root: std::path::PathBuf,
-) -> obzenflow::dsl::FlowDefinition {
-    obzenflow::dsl::FlowDefinition::materialize(move |_runtime_config| {
+) -> obzenflow::flow::FlowDefinition {
+    obzenflow::flow::FlowDefinition::materialize(move |_runtime_config| {
         // One effect-only resilience attachment owns the gateway's health,
         // recovery policy, and per-physical-attempt admission. Its fixed ordering
         // keeps limiter wait outside the dependency clock and prevents a stale

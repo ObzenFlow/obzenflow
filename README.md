@@ -108,6 +108,7 @@ Applications depend on `obzenflow` and import capabilities from its facade. Thei
 | --- | --- |
 | `prelude` | Common flow macros, `FlowDefinition`, `FlowApplication`, handler errors, and schema traits/derives |
 | `schema` | Typed payloads and output/effect fact carriers |
+| `flow` | Flow definitions, stage declarations, backpressure settings, and construction errors |
 | `stages::{sources, transforms, stateful, joins, sinks}` | Built-in constructors and custom handler contracts, grouped by stage family |
 | `effects` | External operations and replay-safe bindings |
 | `middleware` | Live-I/O policies and passive observers |
@@ -130,7 +131,7 @@ enum ValidationOutput {
 }
 ```
 
-`EffectOutcomeFacts` uses `#[effect_outcome(schema = obzenflow::schema)]`. If the dependency is renamed to `of`, use `of::schema` in either attribute. The set macros live at `obzenflow::schema::stage_fact_set!` and `obzenflow::effects::effect_set!`; stage macros live under `obzenflow::dsl` and are also in the prelude.
+`EffectOutcomeFacts` uses `#[effect_outcome(schema = obzenflow::schema)]`. If the dependency is renamed to `of`, use `of::schema` in either attribute. The set macros live at `obzenflow::schema::stage_fact_set!` and `obzenflow::effects::effect_set!`; stage macros live under `obzenflow::flow` and are also in the prelude.
 
 Direct layer-crate APIs remain available to integration authors. The workspace crates `obzenflow_benchmarks` and `obzenflow_sketches` are internal support crates outside the application surface.
 

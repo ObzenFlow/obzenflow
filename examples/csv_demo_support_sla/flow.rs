@@ -8,8 +8,8 @@ use super::domain::{
 use super::fixtures;
 use anyhow::{Context, Result};
 use obzenflow::application::{FlowApplication, LogLevel, Presentation};
-use obzenflow::dsl::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow::error::HandlerError;
+use obzenflow::flow::{flow, join, sink, source, transform, FlowDefinition};
 use obzenflow::journal::disk_journals;
 use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
