@@ -6,7 +6,7 @@
 //!
 //! These tests validate the decoder logic with fixtures — no network required.
 
-use obzenflow::sources::{HeaderMap, HttpResponse, ListDetailDecoder, PullDecoder, Url};
+use obzenflow::stages::sources::{HeaderMap, HttpResponse, ListDetailDecoder, PullDecoder, Url};
 use obzenflow_core::TypedPayload;
 use serde::{Deserialize, Serialize};
 

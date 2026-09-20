@@ -4,7 +4,7 @@
 
 mod support;
 
-use obzenflow_infra::application::{Banner, Presentation};
+use obzenflow::application::{Banner, Presentation};
 
 fn main() -> anyhow::Result<()> {
     let paths = support::flow::DemoPaths::resolve()?;

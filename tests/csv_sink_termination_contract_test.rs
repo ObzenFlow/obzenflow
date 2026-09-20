@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use obzenflow::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow_adapters::middleware::{
     validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,

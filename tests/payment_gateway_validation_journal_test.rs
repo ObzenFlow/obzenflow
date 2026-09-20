@@ -192,3 +192,47 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         );
     }
 }
+
+// Runtime adapter regression belongs to framework integration coverage.
+mod shipping_adapter {
+
+    use crate::support::deliveries::ShippingHandoff;
+    use crate::support::domain::{PaymentAuthorized, TrafficPhase};
+    use obzenflow::schema::{StageId, TypedPayload, WriterId};
+    use obzenflow::stages::sinks::{DeliveryMethod, DeliveryResult};
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_runtime::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
+
+    #[tokio::test]
+    async fn inline_shipping_sink_reports_its_real_console_write() {
+        let authorized = PaymentAuthorized {
+            order_id: "order-1".to_string(),
+            customer_id: "customer-1".to_string(),
+            amount_cents: 500,
+            phase: TrafficPhase::Warmup,
+            authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
+        };
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            PaymentAuthorized::versioned_event_type(),
+            serde_json::to_value(authorized).expect("serialize payment"),
+        );
+        let stage_id = StageId::new();
+        let mut adapter = SinkWriterAdapter::new(ShippingHandoff, stage_id);
+        let report = adapter
+            .consume_report(event)
+            .await
+            .expect("shipping delivery");
+
+        assert!(matches!(
+            report.primary.result,
+            DeliveryResult::Success { .. }
+        ));
+        assert!(matches!(
+            report.primary.delivery_method,
+            DeliveryMethod::Custom(ref method) if method == "console:stdout"
+        ));
+        assert_eq!(report.primary.items_delivered, Some(1));
+        assert_eq!(report.primary.bytes_processed, None);
+    }
+}

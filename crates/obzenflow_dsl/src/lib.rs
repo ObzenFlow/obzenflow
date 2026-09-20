@@ -8,6 +8,10 @@ pub mod dsl;
 pub mod prelude;
 pub mod stage_handle_adapter;
 
+/// Implementation support resolved through the defining crate by exported macros.
+#[doc(hidden)]
+pub mod __private;
+
 /// The `backpressure:` clause constructors (FLOWIP-115e): `enforced`,
 /// `enforced_from_config`, `track_only`, `off`.
 pub mod backpressure {

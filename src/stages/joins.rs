@@ -7,3 +7,9 @@
 pub use obzenflow_runtime::stages::join::{
     inner, inner_live, left, left_live, strict, strict_live,
 };
+
+pub use obzenflow_runtime::stages::common::handlers::{JoinReferenceView, TypedJoinHandler};
+pub use obzenflow_runtime::stages::join::strategies::{
+    InnerJoin, InnerJoinBuilder, LeftJoin, LeftJoinBuilder, StrictJoin, StrictJoinBuilder,
+};
+pub use obzenflow_runtime::stages::join::JoinReferenceMode;

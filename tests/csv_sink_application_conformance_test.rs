@@ -5,8 +5,8 @@
 #![cfg(feature = "test-support")]
 
 use async_trait::async_trait;
-use obzenflow::sinks::{CsvProjection, CsvSink};
-use obzenflow::sources;
+use obzenflow::stages::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::sources;
 use obzenflow::testing::sink::{
     run_application_conformance, SinkApplicationBuildCase, SinkApplicationConformanceFixture,
     SinkApplicationScenario, SinkApplicationTopology, SinkApplicationTreatment,

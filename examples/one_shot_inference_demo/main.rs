@@ -13,16 +13,16 @@
 //! without resolving credentials or contacting the provider.
 
 use anyhow::Result;
+use obzenflow::ai::{ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec};
 use obzenflow::ai::{ChatEffectBinding, InferenceHandler};
-use obzenflow::sinks;
-use obzenflow::sources;
-use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_core::ai::{ChatCompletionReply, ChatMessage, ChatParams, ChatRequestSpec};
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, inference, sink, source, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow::application::FlowApplication;
+use obzenflow::dsl::{flow, inference, sink, source, FlowDefinition};
+use obzenflow::error::HandlerError;
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::ai_resilience;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks;
+use obzenflow::stages::sources;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

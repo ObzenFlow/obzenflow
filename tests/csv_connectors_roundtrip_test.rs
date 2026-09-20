@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::sinks::{CsvProjection, CsvSink};
-use obzenflow::sources::{CsvDecoder, CsvRow, CsvRowDecoder, CsvSource};
+use obzenflow::stages::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::sources::{CsvDecoder, CsvRow, CsvRowDecoder, CsvSource};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;

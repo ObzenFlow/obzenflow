@@ -14,8 +14,8 @@
 
 use super::flow::{self, AccountIngress, LedgerIngress};
 use anyhow::Result;
-use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow_infra::web::endpoints::event_ingestion::{http_ingress, IngestionConfig};
+use obzenflow::application::ingress::{http_ingress, IngestionConfig};
+use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 
 const ACCOUNTS_BASE_PATH: &str = "/api/bank/accounts";
 const TX_BASE_PATH: &str = "/api/bank/tx";

@@ -5,7 +5,7 @@
 mod presentation;
 mod support;
 
-use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
+use obzenflow::application::{FlowApplication, LogLevel, Presentation};
 
 fn main() -> anyhow::Result<()> {
     let presentation =

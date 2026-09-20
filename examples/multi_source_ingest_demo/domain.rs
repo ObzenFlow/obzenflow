@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use obzenflow_core::TypedPayload;
+use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 
 // ─── Source-specific types ────────────────────────────────────────────────

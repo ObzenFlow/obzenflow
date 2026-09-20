@@ -4,7 +4,7 @@
 
 //! FLOWIP-134e journal oracle for plain typed stateful handlers and accumulators.
 
-use obzenflow::stateful;
+use obzenflow::stages::stateful;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};

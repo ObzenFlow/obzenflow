@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "http-pull")]
 #[test]
 fn http_pull_config_preloads_default_client_when_feature_enabled() {
-    let _config = obzenflow::sources::http_pull_config()
+    let _config = obzenflow::stages::sources::http_pull_config()
         .expect("http_pull_config ok")
         .build()
         .expect("build ok");
@@ -23,17 +23,19 @@ fn http_pull_config_preloads_default_client_when_feature_enabled() {
 #[cfg(not(feature = "http-pull"))]
 #[test]
 fn http_pull_config_errors_when_feature_disabled() {
-    let err = obzenflow::sources::http_pull_config().expect_err("http_pull_config should error");
+    let err =
+        obzenflow::stages::sources::http_pull_config().expect_err("http_pull_config should error");
     assert!(matches!(
         err,
-        obzenflow_infra::http_client::HttpClientFactoryError::FeatureNotEnabled(_)
+        obzenflow::stages::sources::HttpClientFactoryError::FeatureNotEnabled(ref capability)
+            if capability == "http-pull"
     ));
 }
 
 #[cfg(feature = "http-pull")]
 #[test]
 fn http_poll_config_preloads_default_client_when_feature_enabled() {
-    let _config = obzenflow::sources::http_poll_config()
+    let _config = obzenflow::stages::sources::http_poll_config()
         .expect("http_poll_config ok")
         .poll_interval(Duration::from_secs(1))
         .build()
@@ -44,7 +46,7 @@ fn http_poll_config_preloads_default_client_when_feature_enabled() {
 #[test]
 fn facade_helpers_preserve_custom_client_overrides() {
     let pull_client: Arc<dyn HttpClient> = Arc::new(MockHttpClient::new());
-    let pull = obzenflow::sources::http_pull_config()
+    let pull = obzenflow::stages::sources::http_pull_config()
         .expect("http_pull_config ok")
         .client(pull_client.clone())
         .build()
@@ -52,7 +54,7 @@ fn facade_helpers_preserve_custom_client_overrides() {
     assert!(Arc::ptr_eq(&pull.client, &pull_client));
 
     let poll_client: Arc<dyn HttpClient> = Arc::new(MockHttpClient::new());
-    let poll = obzenflow::sources::http_poll_config()
+    let poll = obzenflow::stages::sources::http_poll_config()
         .expect("http_poll_config ok")
         .client(poll_client.clone())
         .poll_interval(Duration::from_secs(1))
@@ -64,9 +66,11 @@ fn facade_helpers_preserve_custom_client_overrides() {
 #[cfg(not(feature = "http-pull"))]
 #[test]
 fn http_poll_config_errors_when_feature_disabled() {
-    let err = obzenflow::sources::http_poll_config().expect_err("http_poll_config should error");
+    let err =
+        obzenflow::stages::sources::http_poll_config().expect_err("http_poll_config should error");
     assert!(matches!(
         err,
-        obzenflow_infra::http_client::HttpClientFactoryError::FeatureNotEnabled(_)
+        obzenflow::stages::sources::HttpClientFactoryError::FeatureNotEnabled(ref capability)
+            if capability == "http-pull"
     ));
 }

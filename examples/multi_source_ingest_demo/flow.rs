@@ -11,9 +11,9 @@
 //! Every stage is typed; every edge is typed.
 
 use anyhow::Result;
-use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use obzenflow::application::FlowApplication;
+use obzenflow::dsl::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::journal::disk_journals;
 
 use crate::domain::{FileLine, IngestSummary, IngestedEvent, KafkaRawEvent, WebhookEnvelope};
 use crate::handlers::{

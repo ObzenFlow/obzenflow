@@ -8,27 +8,30 @@ use super::domain::{FormattedStory, HnStory};
 use super::util::truncate_chars;
 use anyhow::Result;
 use obzenflow::ai::{
-    ChatBindingMetadata, ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt,
-    SystemPrompt, TokenCount, UserPrompt,
-};
-use obzenflow::sinks::postgres::{
-    PostgresBind, PostgresBindings, PostgresSink, PostgresSinkConfig,
-};
-use obzenflow::sources::{http_pull_config, HttpPullSource};
-use obzenflow::{sinks, stateful, transforms};
-use obzenflow_adapters::middleware::control::ai_resilience;
-use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
-use obzenflow_core::ai::{
     AiFinaliseRole, AiMapRole, AiRoleLogicFailure, ChatCompletionReply, ChatMessage, ChatParams,
     ChatRequestSpec, ChatResponse, ChatTarget, Many,
 };
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::dsl::error::FlowBuildError;
-use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{EffectBinding, SinkRedeliverySafety};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow::ai::{
+    ChatBindingMetadata, ChatCompletion, ChatEffectBinding, ChunkInfo, EstimateSource, Prompt,
+    SystemPrompt, TokenCount, UserPrompt,
+};
+use obzenflow::application::{Banner, FlowApplication, Presentation, RunPresentationOutcome};
+use obzenflow::dsl::FlowBuildError;
+use obzenflow::dsl::{
+    ai_map_reduce, async_source, flow, sink, stateful, transform, FlowDefinition,
+};
+use obzenflow::effects::EffectBinding;
+use obzenflow::error::HandlerError;
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::ai_resilience;
+use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::postgres::{
+    PostgresBind, PostgresBindings, PostgresSink, PostgresSinkConfig,
+};
+use obzenflow::stages::sinks::SinkRedeliverySafety;
+use obzenflow::stages::sources::{http_pull_config, HttpPullSource};
+use obzenflow::stages::{sinks, stateful, transforms};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
 
@@ -123,11 +126,9 @@ fn build_digest_postgres_config(
 #[cfg(test)]
 pub(crate) fn describe_digest_postgres_sink(
     config: HnDigestPostgresConfig,
-) -> Result<obzenflow_runtime::stages::sink::SinkDescription> {
+) -> Result<obzenflow::stages::sinks::SinkDescription> {
     let sink = sinks::postgres(build_digest_postgres_config(config)?);
-    Ok(obzenflow_runtime::stages::sink::SinkConnector::describe(
-        &sink,
-    ))
+    Ok(obzenflow::stages::sinks::SinkConnector::describe(&sink))
 }
 
 struct DigestMapCtx {

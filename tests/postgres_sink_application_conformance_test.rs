@@ -7,13 +7,13 @@
 mod replay_testkit;
 
 use async_trait::async_trait;
-use obzenflow::sinks::postgres::testing::{
+use obzenflow::stages::sinks::postgres::testing::{
     PostgresDelayPoint, PostgresTestProbe, POSTGRES_SQLSTATE_NAMESPACE,
 };
-use obzenflow::sinks::postgres::{
+use obzenflow::stages::sinks::postgres::{
     PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
-use obzenflow::sources;
+use obzenflow::stages::sources;
 use obzenflow::testing::sink::{
     run_application_conformance, SinkApplicationBuildCase, SinkApplicationConformanceFixture,
     SinkApplicationScenario, SinkApplicationTopology, SinkApplicationTreatment,

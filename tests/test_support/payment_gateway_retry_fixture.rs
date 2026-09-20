@@ -13,7 +13,7 @@ use crate::payment_domain::{
     TrafficPhase,
 };
 use async_trait::async_trait;
-use obzenflow::sources;
+use obzenflow::stages::sources;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, RateLimiter, Retry};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;

@@ -20,13 +20,13 @@ macro_rules! parse_topology {
     };
     ($connections:expr, $from:ident |> $to:ident; $($rest:tt)*) => {
         $connections.extend([$crate::dsl::topology::AuthoredConnection::edge(
-            stringify!($from), stringify!($to), obzenflow_topology::EdgeKind::Forward,
+            stringify!($from), stringify!($to), $crate::__private::EdgeKind::Forward,
         )]);
         $crate::parse_topology!($connections, $($rest)*);
     };
     ($connections:expr, $from:ident <| $to:ident; $($rest:tt)*) => {
         $connections.extend([$crate::dsl::topology::AuthoredConnection::edge(
-            stringify!($to), stringify!($from), obzenflow_topology::EdgeKind::Backward,
+            stringify!($to), stringify!($from), $crate::__private::EdgeKind::Backward,
         )]);
         $crate::parse_topology!($connections, $($rest)*);
     };
@@ -93,7 +93,7 @@ macro_rules! flow {
         }
     } => {{
         $crate::FlowDefinition::new(
-            move |__build_ctx: obzenflow_runtime::run_context::FlowBuildContext| async move {
+            move |__build_ctx: $crate::__private::FlowBuildContext| async move {
                 use $crate::dsl::stage_descriptor::*;
                 use std::collections::HashMap;
 
@@ -262,7 +262,7 @@ macro_rules! test_flow {
             use std::collections::HashMap;
 
             let __build_ctx =
-                obzenflow_runtime::run_context::FlowBuildContext::for_tests();
+                $crate::__private::FlowBuildContext::for_tests();
             $(let __build_ctx = $build_ctx;)?
             let mut members: HashMap<
                 String,

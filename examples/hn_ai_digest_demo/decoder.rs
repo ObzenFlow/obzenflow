@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::domain::{HnStory, HnStoryId};
-use obzenflow::sources::{ListDetailDecoder, Url};
+use obzenflow::stages::sources::{ListDetailDecoder, Url};
 
 /// Build the decoder for the HN Firebase API:
 /// `topstories.json` → many `item/{id}.json`.

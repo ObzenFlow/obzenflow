@@ -6,16 +6,17 @@
 
 use super::domain::{HoldId, OrderId, Sku, StockReleased, StockReserved};
 use async_trait::async_trait;
-use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
-use obzenflow_core::{BoundedBindingEvidence, StageFactSet};
-use obzenflow_runtime::effects::{
+use obzenflow::effects::BoundedBindingEvidence;
+use obzenflow::effects::{
     AllowedEffectsAllowEffect, Effect, EffectBinding, EffectBindingEvidence, EffectBindingUse,
     EffectContext, EffectError, EffectOutcomeFitsOutput, EffectPortSlot, EffectPortSlotSet,
     EffectRegistrationBuilder, EffectSafety, EffectSet, Effects, LogicalEffectBindingName, Named,
     NamedEffect,
 };
+use obzenflow::effects::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 #[cfg(test)]
-use obzenflow_runtime::effects::{EffectPortResolutionError, EffectPortResolver};
+use obzenflow::effects::{EffectPortResolutionError, EffectPortResolver};
+use obzenflow::schema::StageFactSet;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -196,7 +197,7 @@ impl Effect for ReserveStock {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
     type BindingMode = Named<WarehouseBindingEvidence>;
     type Outcome = StockReserved;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "reserve_stock"
@@ -258,7 +259,7 @@ impl Effect for ReleaseStock {
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
     type BindingMode = Named<WarehouseBindingEvidence>;
     type Outcome = StockReleased;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "release_stock"
@@ -320,9 +321,9 @@ fn warehouse_error(error: WarehousePortError) -> EffectError {
 #[derive(Debug, thiserror::Error)]
 pub enum WarehouseBindingsBuildError {
     #[error("reserve warehouse binding is invalid: {0}")]
-    Reserve(#[source] obzenflow_runtime::effects::EffectBindingBuildError),
+    Reserve(#[source] obzenflow::effects::EffectBindingBuildError),
     #[error("release warehouse binding is invalid: {0}")]
-    Release(#[source] obzenflow_runtime::effects::EffectBindingBuildError),
+    Release(#[source] obzenflow::effects::EffectBindingBuildError),
 }
 
 /// Composition-root bundle. Each field is the exact proof required by its

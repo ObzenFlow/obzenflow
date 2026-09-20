@@ -7,6 +7,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "fixtures/facade_consumer.rs"]
+mod facade_consumer;
+
 fn rust_sources_under(path: &Path, output: &mut Vec<PathBuf>) {
     if !path.is_dir() {
         return;
@@ -111,10 +114,70 @@ fn root_facades_export_the_owned_authoring_surfaces() {
         "the retired free inference factory must not return"
     );
 
-    let source_facade = fs::read_to_string(root.join("src/sources.rs"))
+    let source_facade = fs::read_to_string(root.join("src/stages/sources.rs"))
         .expect("source facade module should be readable");
     assert!(
         source_facade.contains("pub use obzenflow_adapters::sources"),
-        "obzenflow::sources must re-export its constructors from adapters"
+        "obzenflow::stages::sources must re-export its constructors from adapters"
     );
+}
+
+#[test]
+fn every_example_uses_only_the_application_facade() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    rust_sources_under(&root.join("examples"), &mut sources);
+    assert!(!sources.is_empty());
+    for path in sources {
+        let source = fs::read_to_string(&path).expect("read example");
+        for internal in [
+            "obzenflow_core::",
+            "obzenflow_runtime::",
+            "obzenflow_adapters::",
+            "obzenflow_dsl::",
+            "obzenflow_infra::",
+            "obzenflow_topology::",
+        ] {
+            assert!(
+                !source.contains(internal),
+                "{} imports {internal}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn exported_dsl_macros_resolve_support_in_the_defining_crate() {
+    fn check(stream: proc_macro2::TokenStream) {
+        for token in stream {
+            match token {
+                proc_macro2::TokenTree::Group(group) => check(group.stream()),
+                proc_macro2::TokenTree::Ident(ident) => {
+                    assert!(
+                        !ident.to_string().starts_with("obzenflow_"),
+                        "caller-site implementation crate in exported macro: {ident}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for file in ["dsl.rs", "stage_macros.rs"] {
+        let path = root.join("crates/obzenflow_dsl/src/dsl").join(file);
+        let source = fs::read_to_string(path).expect("read macros");
+        let syntax = syn::parse_file(&source).expect("parse macro source");
+        for item in syntax.items {
+            if let syn::Item::Macro(item) = item {
+                if item
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("macro_export"))
+                {
+                    check(item.mac.tokens);
+                }
+            }
+        }
+    }
 }

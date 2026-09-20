@@ -63,7 +63,7 @@ fn one_shot_witness_uses_the_locked_materializer_surface() {
     for required in [
         "FlowDefinition::materialize(move |runtime_config| {",
         "use obzenflow::ai::{ChatEffectBinding, InferenceHandler};",
-        "use obzenflow::sources;",
+        "use obzenflow::stages::sources;",
         "let chat = ChatEffectBinding::from_config(&runtime_config.ai_models())?;",
         "let evidence = sources::once(input);",
         "impl InferenceHandler for GenerateBrief {",
@@ -455,7 +455,7 @@ fn build_user_handler_flow(
 ) -> FlowDefinition {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let evidence = obzenflow::sources::once(ReducedEvidence { value: 7 });
+        let evidence = obzenflow::stages::sources::once(ReducedEvidence { value: 7 });
         let generate_brief = FunctionalBriefHandler;
         let collected = CollectBrief { outputs };
 
@@ -529,7 +529,7 @@ fn build_shared_domain_operation_flow(
 ) -> FlowDefinition {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let evidence = obzenflow::sources::once(ReducedEvidence { value: 7 });
+        let evidence = obzenflow::stages::sources::once(ReducedEvidence { value: 7 });
         let generate_brief = FunctionalBriefHandler;
         let reviewed = HandwrittenBriefReview;
         let collected = CollectBrief { outputs };
@@ -582,7 +582,7 @@ where
 {
     let chat = chat_authority;
     FlowDefinition::materialize(move |_runtime_config| {
-        let evidence_handler = obzenflow::sources::finite(evidence_inputs);
+        let evidence_handler = obzenflow::stages::sources::finite(evidence_inputs);
         let generate_brief = brief_handler;
         let collected_handler = CollectBrief { outputs };
 
@@ -625,7 +625,7 @@ fn build_credit_flow(
             interpret_calls,
             prompt_suffix: "",
         };
-        let credit_evidence = obzenflow::sources::finite([
+        let credit_evidence = obzenflow::stages::sources::finite([
             ReducedEvidence { value: 7 },
             ReducedEvidence { value: 8 },
         ]);
@@ -670,7 +670,7 @@ fn build_fan_out_flow(
             interpret_calls: Arc::new(AtomicUsize::new(0)),
             prompt_suffix: "",
         };
-        let fan_out_evidence = obzenflow::sources::finite([
+        let fan_out_evidence = obzenflow::stages::sources::finite([
             ReducedEvidence { value: 7 },
             ReducedEvidence { value: 8 },
         ]);

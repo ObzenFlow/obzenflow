@@ -3,10 +3,9 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
-    StatefulEmission, TypedStatefulHandler, TypedTransformHandler,
-};
+use obzenflow::error::HandlerError;
+use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
+use obzenflow::stages::transforms::TypedTransformHandler;
 use std::collections::HashMap;
 
 // ============================================================================

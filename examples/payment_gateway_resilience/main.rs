@@ -32,7 +32,7 @@ mod flow;
 mod gateway;
 mod validation;
 
-use obzenflow_infra::application::{
+use obzenflow::application::{
     Banner, FlowApplication, Footer, LogLevel, Presentation, RunMode, RunPresentationOutcome,
 };
 
@@ -115,7 +115,7 @@ fn main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_infra::application::ReplayRunContext;
+    use obzenflow::application::ReplayRunContext;
     use std::path::PathBuf;
 
     fn replay_mode() -> RunMode {
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn replay_footer_offers_comparison_not_live_metrics() {
-        let location = obzenflow_infra::application::CurrentRunLocator::new(PathBuf::from(
+        let location = obzenflow::application::CurrentRunLocator::new(PathBuf::from(
             "target/payment-gateway-logs/flows/flow_01REPLAY",
         ));
         let live = footer_for(RunPresentationOutcome::Completed {

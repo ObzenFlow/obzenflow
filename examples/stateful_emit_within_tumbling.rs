@@ -16,15 +16,15 @@
 //! not replay inputs, so replay and resume CLI modes are rejected explicitly.
 
 use anyhow::{bail, Result};
-use obzenflow::sources;
-use obzenflow::stateful;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::{
+use obzenflow::application::{
     Banner, FlowApplication, Footer, Presentation, RunPresentationOutcome,
 };
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow::dsl::{flow, sink, source, stateful, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::sources;
+use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

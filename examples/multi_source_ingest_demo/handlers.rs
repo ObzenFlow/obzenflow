@@ -12,15 +12,16 @@
 //! file is intentionally mechanical.
 
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::source::SourceError;
-use obzenflow_runtime::stages::common::handlers::{
+use obzenflow::error::HandlerError;
+use obzenflow::stages::sinks::DeliveryMethod;
+use obzenflow::stages::sinks::SinkRedeliverySafety;
+use obzenflow::stages::sinks::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    StatefulEmission, TypedFiniteSourceHandler, TypedStatefulHandler,
 };
-use obzenflow_runtime::stages::transform::MapTyped;
+use obzenflow::stages::sources::SourceError;
+use obzenflow::stages::sources::TypedFiniteSourceHandler;
+use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
+use obzenflow::stages::transforms::MapTyped;
 
 use crate::domain::{FileLine, IngestSummary, IngestedEvent, KafkaRawEvent, WebhookEnvelope};
 
@@ -164,7 +165,7 @@ impl InlineSink for SummaryConsole {
         &mut self,
         event: IngestSummary,
         _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
         println!("=== IngestSummary ===");
         println!(
             "{}",

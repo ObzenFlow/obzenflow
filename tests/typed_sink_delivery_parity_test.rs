@@ -5,7 +5,7 @@
 //! FLOWIP-134h journal oracle for immediate and deferred typed sink settlement.
 
 use async_trait::async_trait;
-use obzenflow::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, JournalRecord, StageFatalCode, StageFatalReason, StageFatalRecorded,

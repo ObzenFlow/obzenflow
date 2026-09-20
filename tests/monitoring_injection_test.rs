@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 //! The same explicit exporter presence governs preflight and Runtime collection.
-use obzenflow::{sinks, sources};
+use obzenflow::stages::{sinks, sources};
 use obzenflow_adapters::monitoring::MetricsReadModel;
 use obzenflow_core::event::{ChainEvent, PipelineLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};

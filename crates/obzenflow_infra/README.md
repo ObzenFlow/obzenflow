@@ -1,6 +1,6 @@
 # ObzenFlow Infrastructure
 
-This crate is an internal implementation detail of the ObzenFlow project. Most users should depend on the top-level `obzenflow` crate, though application binaries typically use `obzenflow_infra::application::FlowApplication` directly.
+Application authors should depend on `obzenflow` and use `obzenflow::application::FlowApplication`, `obzenflow::application::ingress`, and `obzenflow::journal`. This crate owns their infrastructure implementations. The layer-specific APIs and feature names below are for integration authors working directly with infrastructure.
 
 **Layer:** Infrastructure (outermost). Depends on all other ObzenFlow workspace crates.
 

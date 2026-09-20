@@ -17,7 +17,7 @@ mod run_mode;
 pub(crate) mod runtime_config_sources;
 mod web_surface;
 
-pub use config::FlowConfig;
+pub use config::{ControlPlaneAuthModeArg, CorsModeArg, FlowConfig, OnTerminalArg, StartupMode};
 pub use error::ApplicationError;
 pub use flow_application::{FlowApplication, FlowApplicationBuilder, LogLevel};
 pub use obzenflow_core::journal::factory::{CurrentRunLocator, RunSubstrateState};

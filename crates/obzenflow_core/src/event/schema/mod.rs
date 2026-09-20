@@ -31,4 +31,14 @@ pub use typed_fact_set::{
     decode_member_fact, missing_fact_group_error, sum_group_arity_error, TypedFact, TypedFactSet,
     TypedFactSetError, TypedFactType,
 };
-pub use typed_payload::TypedPayload;
+pub use typed_payload::{TypedPayload, TypedPayloadError};
+
+/// Stable, narrow compiler support selected by the carrier derives' schema path.
+#[doc(hidden)]
+pub mod __private {
+    pub use super::{
+        decode_member_fact, missing_fact_group_error, sum_group_arity_error, EmptySet, FactList,
+        OneFactStageOutput, StageFactSet, TypedFact, TypedFactSet, TypedFactSetError,
+        TypedFactType, TypedPayload, WithMember,
+    };
+}

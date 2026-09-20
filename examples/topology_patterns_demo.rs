@@ -28,19 +28,19 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::sources;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
+use obzenflow::application::{Banner, FlowApplication, Presentation};
+use obzenflow::dsl::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::error::HandlerError;
+use obzenflow::journal::disk_journals;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::DeliveryMethod;
+use obzenflow::stages::sinks::SinkRedeliverySafety;
+use obzenflow::stages::sinks::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    StatefulEmission, TypedStatefulHandler,
 };
-use obzenflow_runtime::stages::transform::MapTyped;
+use obzenflow::stages::sources;
+use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
+use obzenflow::stages::transforms::MapTyped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -300,7 +300,7 @@ impl InlineSink for PrioritySink {
         &mut self,
         event: RawDataEvent,
         _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
         // Only process events matching our filter
         if event.route.as_deref().unwrap_or("") == self.route_filter {
             let new_total = self.event_count.fetch_add(1, Ordering::Relaxed) + 1;

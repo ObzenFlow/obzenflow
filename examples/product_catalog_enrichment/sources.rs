@@ -4,8 +4,8 @@
 
 use super::domain::{Category, OrderEvent, PaymentMethod, Product, Promotion, Sku};
 use super::fixtures;
-use obzenflow::sources;
-use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
+use obzenflow::stages::sources;
+use obzenflow::stages::sources::TypedFiniteSourceHandler;
 
 pub fn categories_source(
 ) -> impl TypedFiniteSourceHandler<Output = Category> + Clone + std::fmt::Debug + 'static {

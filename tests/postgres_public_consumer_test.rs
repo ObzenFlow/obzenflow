@@ -7,11 +7,11 @@
 //! This source intentionally names no driver query or argument type. The
 //! adapter-owned accumulator is the complete binder capability.
 
-use obzenflow::sinks::postgres::{
+use obzenflow::dsl::sink;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::postgres::{
     PostgresBind, PostgresBindings, PostgresConnection, PostgresSink, PostgresTransport,
 };
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::sink;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

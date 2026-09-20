@@ -19,13 +19,13 @@
 //! Run with: `cargo run -p obzenflow --example web_analytics_pipeline`
 
 use anyhow::Result;
-use obzenflow::sources;
-use obzenflow::stateful;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow::application::{Banner, FlowApplication, Presentation};
+use obzenflow::dsl::{flow, sink, source, stateful, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::sources;
+use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;

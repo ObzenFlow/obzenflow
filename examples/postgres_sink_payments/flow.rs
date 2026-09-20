@@ -4,11 +4,11 @@
 
 use super::domain::{sample_payments, PaymentAuthorized, PaymentBinder};
 use anyhow::Result;
-use obzenflow::sinks::postgres::{PostgresConnection, PostgresSink};
-use obzenflow::sources;
-use obzenflow_dsl::{flow, sink, source, FlowDefinition};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
+use obzenflow::dsl::{flow, sink, source, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::stages::sinks::postgres::{PostgresConnection, PostgresSink};
+use obzenflow::stages::sinks::SinkRedeliverySafety;
+use obzenflow::stages::sources;
 use std::path::PathBuf;
 
 pub(crate) fn build(

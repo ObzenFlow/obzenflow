@@ -10,10 +10,10 @@ use super::domain::{
 };
 use super::warehouse::{ReleaseStock, ReserveStock, WarehouseEffects};
 use async_trait::async_trait;
-use obzenflow_core::StageOutputFacts;
-use obzenflow_runtime::effects::{EffectError, Effects, StageCompletion};
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler;
+use obzenflow::effects::{EffectError, Effects, StageCompletion};
+use obzenflow::error::HandlerError;
+use obzenflow::schema::StageOutputFacts;
+use obzenflow::stages::stateful::EffectfulStatefulHandler;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +46,7 @@ impl AllocationState {
 /// It is deliberately not a `TypedPayload`: the enum is never journalled or
 /// routed. Each unary variant contains the first-class domain fact that is.
 #[derive(Clone, Debug, StageOutputFacts)]
+#[stage_output(schema = obzenflow::schema)]
 pub enum AllocationOutput {
     Reserved(StockReserved),
     Released(StockReleased),
@@ -54,7 +55,7 @@ pub enum AllocationOutput {
     CancelIgnored(CancelIgnored),
 }
 
-type AllocationEffects = obzenflow_runtime::effect_set![ReserveStock, ReleaseStock];
+type AllocationEffects = obzenflow::effects::effect_set![ReserveStock, ReleaseStock];
 
 #[derive(Clone, Debug)]
 pub struct Allocator {
@@ -198,7 +199,7 @@ impl EffectfulStatefulHandler for Allocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::{
+    use obzenflow::effects::{
         EffectFailureCause, EffectFailureCode, EffectFailureSource, RetryDisposition,
     };
 

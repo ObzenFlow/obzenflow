@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Ready-to-use source adapters for ingesting data into a flow.
+//! Source constructors and custom typed source handlers.
 //!
 //! Sources are the entry points of every pipeline. This module re-exports the
-//! built-in source implementations from [`obzenflow_adapters::sources`] so that
-//! most applications only need `obzenflow` in their dependency list.
+//! built-in sources and the contracts for implementing application sources.
 //!
 //! ## In-process sources
 //!
@@ -26,8 +25,8 @@
 //! [`HostedIngressSource`] receives admitted push submissions. A user-owned
 //! [`IngressDecoder`] value declares the emitted [`IngressDecoder::Output`],
 //! matching the output ownership used by CSV and HTTP pull decoders. Use the
-//! infra layer's `ingress_source(decoder, config)` or
-//! `http_ingress(decoder, config)` helper to construct it.
+//! [`crate::application::ingress::ingress_source`] or
+//! [`crate::application::ingress::http_ingress`] to construct it.
 //!
 //! ## HTTP pull sources
 //!
@@ -36,8 +35,8 @@
 //! declares the emitted domain type. [`HttpPollSource`] wraps the same logic in
 //! a polling loop controlled by [`HttpPollConfig`].
 //!
-//! Both require the `http-pull` feature flag
-//! (`obzenflow_infra/reqwest-client`).
+//! The default HTTP client requires the `http-pull` feature.
+//! Applications supplying their own [`HttpClient`] do not require that feature.
 
 /// CSV file source, decoder contract, and string-preserving row support.
 pub use obzenflow_adapters::sources::{
@@ -49,6 +48,7 @@ pub use obzenflow_adapters::sources::{
     async_finite, async_infinite, finite, finite_from_fn, infinite, once,
 };
 
+pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
 /// Hosted-ingress source and its application-owned decoder contract.
 pub use obzenflow_adapters::sources::{HostedIngressSource, IngressDecodeError, IngressDecoder};
 
@@ -60,7 +60,21 @@ pub use obzenflow_adapters::sources::{
 };
 
 /// HTTP primitives re-exported from `obzenflow_core` for building request specs.
-pub use obzenflow_core::http_client::{HeaderMap, RequestSpec, Url};
+pub use obzenflow_core::http_client::{
+    Bytes, HeaderMap, HttpClient, HttpClientError, HttpMethod, RequestSpec, Url,
+};
 
 /// Default HTTP pull and poll configuration composed by the infra layer.
-pub use obzenflow_infra::http_client::{http_poll_config, http_pull_config};
+pub use obzenflow_infra::http_client::{
+    http_poll_config, http_pull_config, HttpClientFactoryError,
+};
+
+pub use obzenflow_runtime::stages::common::handlers::{
+    SourceError, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
+    TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+};
+pub use obzenflow_runtime::stages::source::{
+    AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped,
+    FallibleAsyncInfiniteSourceTyped, FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped,
+    FiniteSourceTyped, InfiniteSourceTyped,
+};

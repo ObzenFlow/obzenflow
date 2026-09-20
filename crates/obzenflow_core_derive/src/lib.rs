@@ -55,6 +55,10 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 ///     Ok(SomeFact),
 /// }
 /// ```
+///
+/// A public schema facade can instead supply the narrow compiler support path:
+/// `#[effect_outcome(schema = public_api::schema)]`. This is independent of
+/// the dependency's package name and works with renamed dependencies.
 #[proc_macro_derive(EffectOutcomeFacts, attributes(effect_outcome))]
 pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -84,6 +88,7 @@ pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
 /// The `#[stage_output(crate = <path>)]` attribute mirrors
 /// `#[effect_outcome(crate = <path>)]` when the direct `obzenflow_core`
 /// dependency has been renamed.
+/// Use `#[stage_output(schema = public_api::schema)]` for a schema facade.
 #[proc_macro_derive(StageOutputFacts, attributes(stage_output))]
 pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -92,20 +97,21 @@ pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// The path the generated code resolves `obzenflow_core` through: the
-/// caller's extern-prelude name by default, or the path named by
-/// `#[effect_outcome(crate = <path>)]` when that dependency has been renamed.
-fn core_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
-    attr_core_path(input, "effect_outcome", "FLOWIP-120m")
+/// Select the schema contracts for the effect carrier, through either its
+/// Core owner or a caller-supplied public schema module.
+fn effect_outcome_schema_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
+    attr_schema_path(input, "effect_outcome", "FLOWIP-120m")
 }
 
-/// Shared `#[<attr>(crate = <path>)]` parser for both carrier derives.
-fn attr_core_path(
+/// Select the schema vocabulary without depending on an application facade.
+/// Legacy `crate = <path>` selects a Core crate; `schema = <path>` selects
+/// the narrow compiler-support module below a public schema facade.
+fn attr_schema_path(
     input: &DeriveInput,
     attr_name: &str,
     flowip: &str,
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
-    let mut override_path: Option<syn::Path> = None;
+    let mut override_path: Option<proc_macro2::TokenStream> = None;
     for attr in &input.attrs {
         if !attr.path().is_ident(attr_name) {
             continue;
@@ -118,37 +124,50 @@ fn attr_core_path(
         }
         let path = attr
             .parse_args_with(|stream: syn::parse::ParseStream<'_>| {
-                stream.parse::<syn::Token![crate]>()?;
+                let is_core = if stream.peek(syn::Token![crate]) {
+                    stream.parse::<syn::Token![crate]>()?;
+                    true
+                } else {
+                    let key: Ident = stream.parse()?;
+                    if key != "schema" {
+                        return Err(syn::Error::new(key.span(), "expected `crate` or `schema`"));
+                    }
+                    false
+                };
                 stream.parse::<syn::Token![=]>()?;
                 let path: syn::Path = stream.parse()?;
                 if !stream.is_empty() {
                     return Err(stream.error("unexpected tokens after the path"));
                 }
-                Ok(path)
+                Ok(if is_core {
+                    quote!(#path::event::schema)
+                } else {
+                    quote!(#path::__private)
+                })
             })
             .map_err(|err| {
                 syn::Error::new(
                     err.span(),
-                    format!("expected #[{attr_name}(crate = <path>)]: {err}"),
+                    format!("expected #[{attr_name}(crate = <path>)] or #[{attr_name}(schema = <path>)]: {err}"),
                 )
             })?;
         override_path = Some(path);
     }
     Ok(match override_path {
-        Some(path) => quote!(#path),
-        None => quote!(::obzenflow_core),
+        Some(path) => path,
+        None => quote!(::obzenflow_core::event::schema),
     })
 }
 
 /// Build the nested type-level member list for a carrier's `Members`
 /// projection (FLOWIP-120z).
 fn members_list_type(
-    core: &proc_macro2::TokenStream,
+    schema: &proc_macro2::TokenStream,
     members: &[&Type],
 ) -> proc_macro2::TokenStream {
-    let mut list = quote!(#core::event::schema::EmptySet);
+    let mut list = quote!(#schema::EmptySet);
     for member in members.iter().rev() {
-        list = quote!(#core::event::schema::WithMember<#member, #list>);
+        list = quote!(#schema::WithMember<#member, #list>);
     }
     list
 }
@@ -158,23 +177,23 @@ fn members_list_type(
 /// value-level member metadata, and the const duplicate guard over
 /// `EVENT_TYPE`s.
 fn stage_fact_set_impl(
-    core: &proc_macro2::TokenStream,
+    schema: &proc_macro2::TokenStream,
     name: &Ident,
     members: &[&Type],
 ) -> proc_macro2::TokenStream {
-    let list = members_list_type(core, members);
+    let list = members_list_type(schema, members);
     quote! {
-        impl #core::event::schema::StageFactSet for #name {
+        impl #schema::StageFactSet for #name {
             type Members = #list;
 
-            fn member_fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
+            fn member_fact_types() -> ::std::vec::Vec<#schema::TypedFactType> {
                 ::std::vec![
-                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
+                    #( #schema::TypedFactType::of::<#members>() ),*
                 ]
             }
 
             const MEMBERS_DISTINCT: () =
-                <#list as #core::event::schema::FactList>::DISTINCT_EVENT_TYPES;
+                <#list as #schema::FactList>::DISTINCT_EVENT_TYPES;
         }
     }
 }
@@ -188,10 +207,10 @@ fn expand(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
         ));
     }
 
-    let core = core_path(input)?;
+    let schema = effect_outcome_schema_path(input)?;
     match &input.data {
-        Data::Enum(data) => expand_enum(&input.ident, data, &core),
-        Data::Struct(data) => expand_struct(&input.ident, data, &core),
+        Data::Enum(data) => expand_enum(&input.ident, data, &schema),
+        Data::Struct(data) => expand_struct(&input.ident, data, &schema),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span,
             "EffectOutcomeFacts carriers are enums (sum outcomes) or named-field structs \
@@ -234,7 +253,7 @@ fn reject_duplicate_members(members: &[&Type]) -> Result<(), syn::Error> {
 fn expand_enum(
     name: &Ident,
     data: &syn::DataEnum,
-    core: &proc_macro2::TokenStream,
+    schema: &proc_macro2::TokenStream,
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
     if data.variants.is_empty() {
         return Err(syn::Error::new(name.span(), ENUM_SHAPE_ERROR));
@@ -254,42 +273,42 @@ fn expand_enum(
     }
     reject_duplicate_members(&members)?;
 
-    let stage_fact_set = stage_fact_set_impl(core, name, &members);
+    let stage_fact_set = stage_fact_set_impl(schema, name, &members);
     Ok(quote! {
-        impl #core::event::schema::TypedFactSet for #name {
-            fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
+        impl #schema::TypedFactSet for #name {
+            fn fact_types() -> ::std::vec::Vec<#schema::TypedFactType> {
                 ::std::vec![
-                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
+                    #( #schema::TypedFactType::of::<#members>() ),*
                 ]
             }
 
             fn into_facts(
                 self,
             ) -> ::std::result::Result<
-                ::std::vec::Vec<#core::event::schema::TypedFact>,
-                #core::event::schema::TypedFactSetError,
+                ::std::vec::Vec<#schema::TypedFact>,
+                #schema::TypedFactSetError,
             > {
                 match self {
                     #( Self::#variants(member) => ::std::result::Result::Ok(::std::vec![
-                        #core::event::schema::TypedFact::from_payload(member)?,
+                        #schema::TypedFact::from_payload(member)?,
                     ]), )*
                 }
             }
 
             fn try_from_facts(
-                facts: &[#core::event::schema::TypedFact],
+                facts: &[#schema::TypedFact],
             ) -> ::std::result::Result<
                 Self,
-                #core::event::schema::TypedFactSetError,
+                #schema::TypedFactSetError,
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as #core::event::schema::TypedPayload>::event_type_matches(
+                        #( || <#members as #schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         ) )*;
                     if !declared {
                         return ::std::result::Result::Err(
-                            #core::event::schema::TypedFactSetError::UnexpectedFact {
+                            #schema::TypedFactSetError::UnexpectedFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -298,11 +317,11 @@ fn expand_enum(
                 match facts {
                     [single] => {
                         #(
-                            if <#members as #core::event::schema::TypedPayload>::event_type_matches(
+                            if <#members as #schema::TypedPayload>::event_type_matches(
                                 single.event_type.as_str(),
                             ) {
                                 return ::std::result::Result::Ok(Self::#variants(
-                                    #core::event::schema::decode_member_fact::<#members>(facts)?,
+                                    #schema::decode_member_fact::<#members>(facts)?,
                                 ));
                             }
                         )*
@@ -313,12 +332,12 @@ fn expand_enum(
                         )
                     }
                     [] => ::std::result::Result::Err(
-                        #core::event::schema::missing_fact_group_error(
-                            &<Self as #core::event::schema::TypedFactSet>::fact_types(),
+                        #schema::missing_fact_group_error(
+                            &<Self as #schema::TypedFactSet>::fact_types(),
                         ),
                     ),
                     [first, rest @ ..] => ::std::result::Result::Err(
-                        #core::event::schema::sum_group_arity_error(first, rest),
+                        #schema::sum_group_arity_error(first, rest),
                     ),
                 }
             }
@@ -328,14 +347,14 @@ fn expand_enum(
 
         // A sum carrier lowers to exactly one fact per value, so it also
         // qualifies as an effectful stateful `Output` (FLOWIP-120z).
-        impl #core::event::schema::OneFactStageOutput for #name {}
+        impl #schema::OneFactStageOutput for #name {}
     })
 }
 
 fn expand_struct(
     name: &Ident,
     data: &syn::DataStruct,
-    core: &proc_macro2::TokenStream,
+    schema: &proc_macro2::TokenStream,
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
     let Fields::Named(fields) = &data.fields else {
         return Err(syn::Error::new(data.fields.span(), STRUCT_SHAPE_ERROR));
@@ -352,42 +371,42 @@ fn expand_struct(
     }
     reject_duplicate_members(&members)?;
 
-    let stage_fact_set = stage_fact_set_impl(core, name, &members);
+    let stage_fact_set = stage_fact_set_impl(schema, name, &members);
     Ok(quote! {
-        impl #core::event::schema::TypedFactSet for #name {
-            fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
+        impl #schema::TypedFactSet for #name {
+            fn fact_types() -> ::std::vec::Vec<#schema::TypedFactType> {
                 ::std::vec![
-                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
+                    #( #schema::TypedFactType::of::<#members>() ),*
                 ]
             }
 
             fn into_facts(
                 self,
             ) -> ::std::result::Result<
-                ::std::vec::Vec<#core::event::schema::TypedFact>,
-                #core::event::schema::TypedFactSetError,
+                ::std::vec::Vec<#schema::TypedFact>,
+                #schema::TypedFactSetError,
             > {
                 // Field order is the committed fact order; the committer's
                 // outcome_fact_ordinal preserves it deterministically.
                 ::std::result::Result::Ok(::std::vec![
-                    #( #core::event::schema::TypedFact::from_payload(self.#idents)?, )*
+                    #( #schema::TypedFact::from_payload(self.#idents)?, )*
                 ])
             }
 
             fn try_from_facts(
-                facts: &[#core::event::schema::TypedFact],
+                facts: &[#schema::TypedFact],
             ) -> ::std::result::Result<
                 Self,
-                #core::event::schema::TypedFactSetError,
+                #schema::TypedFactSetError,
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as #core::event::schema::TypedPayload>::event_type_matches(
+                        #( || <#members as #schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         ) )*;
                     if !declared {
                         return ::std::result::Result::Err(
-                            #core::event::schema::TypedFactSetError::UnexpectedFact {
+                            #schema::TypedFactSetError::UnexpectedFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -397,7 +416,7 @@ fn expand_struct(
                 // and each member decode requires exactly one fact of its
                 // type (MissingFact / DuplicateFact otherwise).
                 ::std::result::Result::Ok(Self {
-                    #( #idents: #core::event::schema::decode_member_fact::<#members>(facts)?, )*
+                    #( #idents: #schema::decode_member_fact::<#members>(facts)?, )*
                 })
             }
         }
@@ -409,6 +428,60 @@ fn expand_struct(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_derives_route_through_the_selected_schema() {
+        for attribute in ["stage_output", "effect_outcome"] {
+            for (routing, expected) in [
+                ("", ":: obzenflow_core :: event :: schema"),
+                ("crate = renamed_core", "renamed_core :: event :: schema"),
+                (
+                    "schema = public_api::schema",
+                    "public_api :: schema :: __private",
+                ),
+                (
+                    "schema = ::renamed::schema",
+                    ":: renamed :: schema :: __private",
+                ),
+            ] {
+                let attr = if routing.is_empty() {
+                    String::new()
+                } else {
+                    format!("#[{attribute}({routing})]")
+                };
+                let input: DeriveInput =
+                    syn::parse_str(&format!("{attr} enum Carrier {{ Fact(Fact) }}")).unwrap();
+                let expanded = if attribute == "stage_output" {
+                    stage_output::expand(&input)
+                } else {
+                    expand(&input)
+                }
+                .unwrap()
+                .to_string();
+                assert!(expanded.contains(&format!("{expected} :: TypedFactSet")));
+                if !routing.is_empty() {
+                    assert!(!expanded.contains("obzenflow_core"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schema_routing_rejects_ambiguous_and_malformed_overrides() {
+        for attribute in ["stage_output", "effect_outcome"] {
+            for attributes in [
+                format!("#[{attribute}(schema = one)] #[{attribute}(schema = two)]"),
+                format!("#[{attribute}(crate = one)] #[{attribute}(schema = two)]"),
+                format!("#[{attribute}(schema = one, crate = two)]"),
+                format!("#[{attribute}(schema =)]"),
+                format!("#[{attribute}(unknown = one)]"),
+            ] {
+                let input: DeriveInput =
+                    syn::parse_str(&format!("{attributes} enum Carrier {{ Fact(Fact) }}")).unwrap();
+                assert!(attr_schema_path(&input, attribute, "schema routing").is_err());
+            }
+        }
+    }
 
     #[test]
     fn effect_outcome_rejects_duplicate_member_types() {

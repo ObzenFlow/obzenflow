@@ -4,7 +4,7 @@
 
 //! Product-catalogue regression for first-class stateful accumulators.
 
-use obzenflow::stateful;
+use obzenflow::stages::stateful;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::stateful::strategies::accumulators::{
     Accumulator, Conflate, GroupBy, Reduce, TopN, TopNBy, TopNBySnapshot, TopNSnapshot,

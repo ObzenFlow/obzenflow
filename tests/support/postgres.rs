@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::sinks::postgres::{PostgresConnection, PostgresTransport};
+use obzenflow::stages::sinks::postgres::{PostgresConnection, PostgresTransport};
 use sqlx::PgPool;
 
 pub(crate) fn required_env(name: &str) -> String {

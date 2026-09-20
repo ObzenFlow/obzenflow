@@ -263,7 +263,7 @@ reconstruction matches the original archive fact-for-fact.
 The run directory holds the durable journals as internal framed storage
 (`<len>:<crc>:<json>` records in `.log` files). Read them through the supported
 journal library rather than parsing the files directly. The existing
-`obzenflow_infra::journal::disk::inspect::export_jsonl` function exports one JSON object per
+`obzenflow::journal::disk::inspect::export_jsonl` function exports one JSON object per
 committed record across system, data, and error journals; pass `None` as its output argument to
 write to stdout. The adjacent `inspect` function provides a summary and filtered stage listing.
 

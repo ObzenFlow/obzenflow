@@ -2,6 +2,12 @@
 
 This directory is a runnable example catalog. Each example links to the part of [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/) it demonstrates so you can navigate by capability.
 
+Every example uses the `obzenflow` application facade. The common vocabulary is in
+`obzenflow::prelude`; constructors and custom handler traits live together under
+`obzenflow::stages::{sources, transforms, stateful, joins, sinks}`. Effects,
+middleware, journals, and hosting have separate capability modules. Copy these
+imports into applications without adding direct dependencies on framework layers.
+
 ## How to run examples
 
 Most examples run as:
@@ -12,7 +18,7 @@ cargo run -p obzenflow --example <name>
 
 Some examples require feature flags:
 
-- `--features obzenflow_infra/warp-server` for examples whose `obzenflow.toml` enables HTTP endpoints
+- `--features web-host` for examples whose `obzenflow.toml` enables HTTP endpoints
 - `--features http-pull` for HTTP pull sources
 - `--features ai` for the one-shot AI inference example
 - `--features "http-pull ai postgres"` for the AI digest example, whose output
@@ -58,7 +64,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`product_catalog_enrichment`** — Multi-way enrichment across inner, left, and strict joins. Use this when you want the most realistic catalog-style dimension pipeline in the repo.
   - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it)
   - Run: `cargo run -p obzenflow --example product_catalog_enrichment`
-  - Run with the manual-start control plane: `cargo run -p obzenflow --example product_catalog_enrichment --features obzenflow_infra/warp-server -- --server`
+  - Run with the manual-start control plane: `cargo run -p obzenflow --example product_catalog_enrichment --features web-host -- --server`
   - Code: [`examples/product_catalog_enrichment/flow.rs`](product_catalog_enrichment/flow.rs)
 
 - **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and a user-owned CSV projection whose associated types declare the accepted domain input and output row. Good for ETL-style jobs that still need typed flows and replayable execution.
@@ -69,7 +75,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
 - **`payment_gateway_resilience`** — Per-effect circuit breaking, retry, rate limiting, fail-fast rejection, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and replay-stable failure semantics.
   - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it), and one passive `observers:` attachment
   - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
-  - Run with the web host: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
+  - Run with the web host: `cargo run -p obzenflow --example payment_gateway_resilience --features web-host -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
 - **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, an explicit transport policy, and a repeat-safe UPSERT. Direct configuration defaults to verified TLS; the optional repository service deliberately selects loopback-protected plaintext. Use this to learn the PostgreSQL sink's application-facing surface.
@@ -96,7 +102,7 @@ These examples are intentionally skeletal. Use them when you want to sketch topo
 
 - **`char_transform_skeleton`** — Placeholder-only flow skeleton for event-storming and topology-first inspection. Use this when you want a compilable flow shape before writing any handler logic.
   - Run: `cargo run -p obzenflow --example char_transform_skeleton`
-  - Manual server mode: `cargo run -p obzenflow --features obzenflow_infra/warp-server --example char_transform_skeleton -- --config examples/char_transform_skeleton.manual.obzenflow.toml`
+  - Manual server mode: `cargo run -p obzenflow --features web-host --example char_transform_skeleton -- --config examples/char_transform_skeleton.manual.obzenflow.toml`
   - Code: [`examples/char_transform_skeleton.rs`](char_transform_skeleton.rs)
 
 ## Reference shelf

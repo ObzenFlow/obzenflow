@@ -1018,7 +1018,7 @@ fn default_http_source_transport_stays_cold_until_execute() {
             .expect("read reqwest HTTP client");
 
     let mut guarded = vec![
-        root.join("src/sources.rs"),
+        root.join("src/stages/sources.rs"),
         root.join("crates/obzenflow_infra/src/http_client/mod.rs"),
         root.join("crates/obzenflow_adapters/src/sources/http_pull.rs"),
         root.join("crates/obzenflow_infra/src/web/studio_registration.rs"),

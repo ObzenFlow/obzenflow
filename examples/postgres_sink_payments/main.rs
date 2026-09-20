@@ -18,7 +18,7 @@ mod postgres_transport;
 
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
-use obzenflow::sinks::postgres::PostgresConnection;
+use obzenflow::stages::sinks::postgres::PostgresConnection;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {

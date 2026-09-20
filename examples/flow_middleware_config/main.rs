@@ -7,7 +7,7 @@
 //! This demonstrates targeted policy middleware on a live source intake surface.
 //!
 //! **How to observe rate limiting in real-time:**
-//!   1. Run the example (requires `warp-server` feature):
+//!   1. Run the example (requires `web-host` feature):
 //!      ```
 //!      cargo run -p obzenflow --example flow_middleware_config --features prometheus,web-host
 //!      ```
@@ -29,19 +29,19 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::sources;
-use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{
+use obzenflow::application::{Banner, FlowApplication, Presentation};
+use obzenflow::dsl::{flow, sink, source, transform, FlowDefinition};
+use obzenflow::error::HandlerError;
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::DeliveryMethod;
+use obzenflow::stages::sinks::SinkRedeliverySafety;
+use obzenflow::stages::sinks::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
-    TypedTransformHandler,
 };
+use obzenflow::stages::sources;
+use obzenflow::stages::transforms::TypedTransformHandler;
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -101,7 +101,7 @@ impl InlineSink for CountingSink {
         &mut self,
         event: CounterEvent,
         _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
         self.received += 1;
 
         // Log progress every 20 events
@@ -136,7 +136,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "How to observe in real-time",
-                "1. Run the example (requires warp-server feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features prometheus,web-host\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
+                "1. Run the example (requires web-host feature):\n   cargo run -p obzenflow --example flow_middleware_config \\\n     --features prometheus,web-host\n2. Query metrics while flow runs:\n   curl http://localhost:9090/metrics | grep events_processed_total\n3. Watch the rate differences between stages!",
             )
             .section(
                 "Run duration",

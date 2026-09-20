@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Ready-to-use sink adapters for outputting data from a flow.
+//! Sink constructors, formatting, and custom sink authoring contracts.
 //!
 //! Sinks are the terminal stages of a pipeline. This module re-exports the
-//! built-in sink implementations from [`obzenflow_adapters::sinks`] so that
-//! most applications only need `obzenflow` in their dependency list.
+//! built-in destinations and the contracts for implementing application sinks.
 //!
 //! ## Console sinks
 //!
@@ -20,11 +19,25 @@
 //! [`CsvProjection`] value declares the accepted input and CSV-facing row with
 //! associated types, matching the framework's handler style.
 
+pub use obzenflow_adapters::sinks::csv::CsvWriter;
 /// Console and CSV sinks, formatters, and output configuration.
 pub use obzenflow_adapters::sinks::{
     console, debug, json, json_pretty, table, ConsoleSink, CsvProjection, CsvSink, CsvSinkBuilder,
     DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    TableFormatter,
+    SnapshotTableFormatter, TableFormatter,
+};
+
+pub use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
+pub use obzenflow_runtime::effects::SinkRedeliverySafety;
+pub use obzenflow_runtime::stages::common::handlers::WithRedeliverySafety;
+pub use obzenflow_runtime::stages::sink::{
+    DeliveryContext, DeliveryProvenance, InlineSink, PendingSinkInput, SinkAuditOutcome,
+    SinkBufferedOutcome, SinkCommitReceipt, SinkConnector, SinkDescription,
+    SinkDestinationErrorCode, SinkInputOrder, SinkOperationError,
+    SinkOperationErrorConversionError, SinkOperationResult, SinkPrimaryOutcome,
+    SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteFailure,
+    SinkWriteFailureDisposition, SinkWritePhase, SinkWriteReport, SinkWriteResult, SinkWriter,
+    SinkWriterInitContext, SinkWriterLifecycleReport,
 };
 
 /// Feature-gated PostgreSQL sink and its typed parameter-binding surface.

@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow::stateful;
+use obzenflow::stages::stateful;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainPayload};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;

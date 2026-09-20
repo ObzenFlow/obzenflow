@@ -17,7 +17,7 @@ mod domain;
 mod flow;
 mod warehouse;
 
-use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow::application::{FlowApplication, LogLevel};
 
 fn main() -> std::process::ExitCode {
     let config_file = concat!(
@@ -45,17 +45,16 @@ mod tests {
     };
     use super::warehouse::{WarehouseConfig, WarehouseTestFault};
     use super::{flow, warehouse};
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
-    use obzenflow_core::event::{ChainEvent, ChainPayload, StageFatalRecorded};
-    use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::Journal;
-    use obzenflow_core::{StageId, TypedPayload};
-    use obzenflow_infra::application::FlowApplication;
-    use obzenflow_infra::journal::DiskJournal;
-    use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
-    use obzenflow_runtime::effects::{
-        EffectOutcomePayload, EffectRecord, EFFECT_RECORD_EVENT_TYPE,
-    };
+    use obzenflow::application::FlowApplication;
+    use obzenflow::application::{verify_run_dirs, VerifyOptions, VerifyOutcome};
+    use obzenflow::journal::DiskJournal;
+    use obzenflow::journal::Journal;
+    use obzenflow::journal::JournalOwner;
+    use obzenflow::journal::ProcessingStatus;
+    use obzenflow::journal::StageFatalRecorded;
+    use obzenflow::journal::{EffectOutcomePayload, EffectRecord, EFFECT_RECORD_EVENT_TYPE};
+    use obzenflow::schema::ChainEvent;
+    use obzenflow::schema::{StageId, TypedPayload};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -93,7 +92,7 @@ mod tests {
             .await
             .expect("allocator journal reads")
             .into_iter()
-            .map(|envelope| envelope.event)
+            .map(|record| record.into_authored())
             .collect()
     }
 
@@ -225,14 +224,12 @@ mod tests {
 
         let policy_rejections = events
             .iter()
-            .filter_map(|event| match &event.content {
-                ChainPayload::Data {
-                    event_type,
-                    payload,
-                } if event_type == EFFECT_RECORD_EVENT_TYPE => {
-                    serde_json::from_value::<EffectRecord>(payload.clone()).ok()
-                }
-                _ => None,
+            .filter(|event| event.event_type() == EFFECT_RECORD_EVENT_TYPE)
+            .map(|event| {
+                serde_json::from_value::<EffectRecord>(
+                    event.payload.contract_body().expect("effect record body"),
+                )
+                .expect("valid effect record")
             })
             .filter(|record| {
                 matches!(

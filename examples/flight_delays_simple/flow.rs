@@ -13,11 +13,11 @@ use super::domain::*;
 use super::fixtures;
 use super::handlers::*;
 use anyhow::Result;
-use obzenflow::sources;
-use obzenflow::{joins, sinks};
-use obzenflow_dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use obzenflow::application::FlowApplication;
+use obzenflow::dsl::{flow, join, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::stages::sources;
+use obzenflow::stages::{joins, sinks};
 
 pub fn run_example() -> Result<()> {
     FlowApplication::builder().run_blocking(FlowDefinition::materialize(

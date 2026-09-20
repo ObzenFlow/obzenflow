@@ -1,6 +1,6 @@
 [server]
 # The documented default command is a terminal run and must not require the
-# optional warp-server feature. Pass --server (with that feature enabled) to
+# optional web-host feature. Pass --server (with that feature enabled) to
 # opt into the control plane; the CLI flag takes precedence over this value.
 enabled = false
 # Explicit server runs build the pipeline, expose endpoints, and wait for the

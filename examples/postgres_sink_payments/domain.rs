@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow::sinks::postgres::{PostgresBind, PostgresBindings};
-use obzenflow_core::TypedPayload;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings};
 use serde::{Deserialize, Serialize};
 
 /// A payment that has been authorised for an order.

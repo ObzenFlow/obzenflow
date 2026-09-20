@@ -16,6 +16,10 @@ Where to go next:
 Every ObzenFlow application follows the same shape:
 
 ```rust,ignore
+use obzenflow::prelude::*;
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::rate_limit;
+
 fn build_flow() -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let my_source = build_source();
@@ -33,7 +37,8 @@ fn build_flow() -> FlowDefinition {
             },
 
             topology: {
-                input |> enrich |> output;
+                input |> enrich;
+                enrich |> output;
             }
         })
     })
@@ -97,7 +102,37 @@ No features are enabled by default. Ordinary launches start neither an HTTP host
 
 ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and ports (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.
 
-The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`). The remaining workspace crates, `obzenflow_benchmarks` and `obzenflow_sketches`, are internal support crates outside the public surface.
+Applications depend on `obzenflow` and import capabilities from its facade. Their own uses of Serde, Tokio, and other third-party libraries remain explicit dependencies. The facade re-exports existing implementations; it adds no execution layer.
+
+| Module | Application use |
+| --- | --- |
+| `prelude` | Common flow macros, `FlowDefinition`, `FlowApplication`, handler errors, and schema traits/derives |
+| `schema` | Typed payloads and output/effect fact carriers |
+| `stages::{sources, transforms, stateful, joins, sinks}` | Built-in constructors and custom handler contracts, grouped by stage family |
+| `effects` | External operations and replay-safe bindings |
+| `middleware` | Live-I/O policies and passive observers |
+| `application` | Configuration, execution, replay verification, and `application::ingress` |
+| `journal` | Journal construction, inspection, and export |
+| `ai`, `env`, `error` | AI contracts, typed environment parsing, and shared handler errors |
+
+Import specialised contracts where they are needed. For example, a bank projection uses `obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler}`, while its flow imports `obzenflow::stages::{joins, sinks, sources}` and `obzenflow::middleware::RateLimiterBuilder`.
+
+Carrier derives select the schema facade explicitly:
+
+```rust,ignore
+use obzenflow::schema::StageOutputFacts;
+
+#[derive(Debug, Clone, StageOutputFacts)]
+#[stage_output(schema = obzenflow::schema)]
+enum ValidationOutput {
+    Valid(ValidatedOrder),
+    Invalid { invalid: InvalidOrder, cancelled: OrderCancelled },
+}
+```
+
+`EffectOutcomeFacts` uses `#[effect_outcome(schema = obzenflow::schema)]`. If the dependency is renamed to `of`, use `of::schema` in either attribute. The set macros live at `obzenflow::schema::stage_fact_set!` and `obzenflow::effects::effect_set!`; stage macros live under `obzenflow::dsl` and are also in the prelude.
+
+Direct layer-crate APIs remain available to integration authors. The workspace crates `obzenflow_benchmarks` and `obzenflow_sketches` are internal support crates outside the application surface.
 
 ## License
 
