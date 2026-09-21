@@ -62,6 +62,8 @@ FlowApplication::run(build_flow()).await?;
 
 No features are enabled by default. The [examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md) lists runnable flows and the feature flags and configuration they need, including HTTP services, AI inference, PostgreSQL, and metrics.
 
+To get a feel for ObzenFlow's vocabulary, [Show Me the Code](https://obzenflow.dev/product/show-me-the-code/) walks through stages, effects, journals, replay, and resume using one payment flow.
+
 ## Run and replay a flow
 
 Clone the repository, then run the payment gateway example. It authorizes orders through a simulated unreliable gateway, with a declared effect and a circuit breaker:
@@ -81,7 +83,8 @@ Replay uses the archived inputs and committed effect outcomes without calling th
 
 ## Documentation
 
-- [What is ObzenFlow?](https://obzenflow.dev/product/what-is-obzenflow/) describes the guarantees and intended uses.
+Visit the [ObzenFlow website](https://obzenflow.dev/) for an introduction to the framework, its guarantees, and intended uses.
+
 - [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/) explains flow declarations, effects, journals, and run modes.
 - [Tutorials](https://obzenflow.dev/tutorials/) walk through building flows, modelling bank transactions, and running live AI inference.
 - [Philosophy](https://obzenflow.dev/philosophy/) explains the design principles.

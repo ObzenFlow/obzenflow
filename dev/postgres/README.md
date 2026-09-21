@@ -30,11 +30,13 @@ The first start allocates an available loopback port. Later starts retain the
 port, Compose project, named volume, and rows. `connection` prints the profile
 and a copyable `psql` command; no credential setup is needed.
 
-Run an application with that profile:
+Run an application with that profile. For example, the HN digest can write to
+PostgreSQL (its configured AI provider must also be available):
 
 ```console
 cargo xtask postgres run -- \
-  cargo run -p obzenflow --features postgres --example postgres_sink_payments
+  cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+  --config examples/hn_ai_digest_demo/obzenflow.postgres.toml
 ```
 
 The wrapper supplies `OBZENFLOW_POSTGRES_URL`, `OBZENFLOW_POSTGRES_SCHEMA`, and

@@ -44,9 +44,9 @@
 //! FLOWIP-114c. Authoring patterns that previously reached for an untyped
 //! handler to demux events at runtime are now expressed as joins (two typed
 //! inputs) or per-branch alignment transforms (homogeneous fan-in on an
-//! envelope type); see `examples/multi_source_ingest_demo` for the canonical
-//! pattern and FLOWIP-114c "How to handle heterogeneous fan-in" for the
-//! rationale.
+//! envelope type). The public `obzenflow::flow` API documentation includes an
+//! input-alignment recipe; FLOWIP-114c "How to handle heterogeneous fan-in"
+//! records the rationale.
 //!
 //! Public typed arms dispatch into `#[doc(hidden)]` helper macros
 //! (`__obzenflow_*_typed!`) that handle normalisation, metadata construction,

@@ -2,11 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-114c regression test: structural assertions on the
-//! `multi_source_ingest_demo` example.
+//! FLOWIP-114c regression test for per-branch input alignment.
 //!
-//! We construct the same topology shape as the example (3 sources of 3
-//! different types -> 3 alignment transforms -> 1 aggregator -> 1 sink) and
+//! Three sources with different types feed three alignment transforms,
+//! then one aggregator and one sink. We
 //! assert that:
 //!
 //! 1. Every stage has `typing_metadata().is_some()`.
@@ -161,7 +160,7 @@ impl InlineSink for NullSink {
 }
 
 #[test]
-fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
+fn aligned_inputs_satisfy_typed_fan_in_invariants() {
     let kafka_id = StageId::new();
     let webhook_id = StageId::new();
     let file_id = StageId::new();
@@ -239,7 +238,7 @@ fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
 
     // Invariant 2: stage-metadata validator accepts every stage.
     validate_stage_typing_metadata(&descriptors)
-        .expect("multi_source_ingest_demo: stage typing must validate clean");
+        .expect("aligned inputs: stage typing must validate clean");
 
     // Invariant 3: edge validator returns Ok(()).
     let mut topology = TopologyBuilder::new();
@@ -286,7 +285,7 @@ fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
     let topology = topology.build_unchecked().unwrap();
 
     validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
-        .expect("multi_source_ingest_demo: edge validator must return Ok(())");
+        .expect("aligned inputs: edge validator must return Ok(())");
 
     // Invariant 4: the three alignment transforms emit IngestedEvent.
     let expected = TypeHint::exact_payload::<IngestedEvent>();

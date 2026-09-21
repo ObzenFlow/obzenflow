@@ -22,7 +22,7 @@
 //!
 //! 1. Declare a small test-local `TypedPayload` struct that matches the
 //!    handler's actual payload shape and use it in the macro slot
-//!    (preferred — see `examples/multi_source_ingest_demo/` for the
+//!    (preferred — see the `obzenflow::flow` API documentation for the
 //!    canonical pattern).
 //! 2. If this site genuinely belongs in the allowlist (raw JSON ingress,
 //!    runtime lifecycle test, throughput bench where payload shape is

@@ -213,7 +213,7 @@ async fn public_commands_preserve_rows_and_passwordless_environment_boundaries()
     );
 
     assert_success(
-        "payments example",
+        "payments application fixture",
         xtask(
             &root,
             &token,
@@ -221,13 +221,19 @@ async fn public_commands_preserve_rows_and_passwordless_environment_boundaries()
                 "run",
                 "--",
                 "cargo",
-                "run",
+                "test",
+                "--locked",
                 "-p",
                 "obzenflow",
                 "--features",
-                "postgres",
-                "--example",
-                "postgres_sink_payments",
+                "postgres,e2e",
+                "--test",
+                "postgres_payments_e2e_test",
+                "--",
+                "--exact",
+                "payments_application_process",
+                "--ignored",
+                "--nocapture",
             ],
             &[(
                 "OBZENFLOW_JOURNAL_ROOT",

@@ -2,12 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Black-box verification for the PostgreSQL payments learning example.
+//! Black-box verification for the PostgreSQL payments application fixture.
 //!
-//! The example remains ordinary application code. This test owns process
-//! execution, destination inspection, archive-redelivery proof, and evidence
-//! hygiene.
+//! The fixture runs in a separate process through the public application API.
+//! This test owns destination inspection, archive-redelivery assertions, and
+//! evidence hygiene; the fixture has no database-inspection code.
 
+#[path = "test_support/postgres_payments/mod.rs"]
+mod payments;
 #[path = "support/postgres.rs"]
 mod postgres_support;
 
@@ -22,7 +24,7 @@ use std::{
     process::{Command, Output},
 };
 
-const EXAMPLE: &str = "postgres_sink_payments";
+const FIXTURE_ARGS_ENV: &str = "OBZENFLOW_POSTGRES_TEST_PAYMENTS_ARGS";
 const FORBIDDEN_DURABLE_KEYS: &[&str] = &[
     "certificate",
     "certificate_path",
@@ -50,34 +52,32 @@ const FORBIDDEN_DURABLE_DETAILS: &[&str] = &[
 ];
 
 #[test]
-fn payments_example_defers_managed_connection_resolution() {
-    let source = include_str!("../examples/postgres_sink_payments/main.rs");
+fn payments_application_defers_managed_connection_resolution() {
+    let source = include_str!("test_support/postgres_payments/mod.rs");
     assert!(source.contains("PostgresConnection::deferred_from_env("));
     assert!(!source.contains("PostgresConnection::from_env("));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn payments_example_converges_after_verified_archive_redelivery() {
+async fn payments_application_converges_after_verified_archive_redelivery() {
     let pool = pool().await;
     let schema = required_env("OBZENFLOW_POSTGRES_EXAMPLE_SCHEMA");
-    let journal_directory = tempfile::tempdir().expect("create example journal directory");
+    let journal_directory = tempfile::tempdir().expect("create application journal directory");
     let journal_root = journal_directory.path().join("journals");
-    let binary = example_binary();
 
-    let live = run_example(&binary, &schema, &journal_root, &[]);
-    assert_success("live payments example", &live);
+    let live = run_payments(&schema, &journal_root, &[]);
+    assert_success("live payments application", &live);
     assert_payment_rows(&pool, &schema).await;
 
     let live_runs = run_directories(&journal_root);
     let [live_run] = live_runs.as_slice() else {
         panic!(
-            "the live example must create one run archive, found {}",
+            "the live application must create one run archive, found {}",
             live_runs.len()
         );
     };
 
-    let replay = run_example(
-        &binary,
+    let replay = run_payments(
         &schema,
         &journal_root,
         &[
@@ -86,7 +86,7 @@ async fn payments_example_converges_after_verified_archive_redelivery() {
             OsString::from("--verify"),
         ],
     );
-    assert_success("payments example archive redelivery", &replay);
+    assert_success("payments application archive redelivery", &replay);
     assert_payment_rows(&pool, &schema).await;
 
     let replay_runs = run_directories(&journal_root);
@@ -99,37 +99,60 @@ async fn payments_example_converges_after_verified_archive_redelivery() {
     assert_durable_evidence_is_redacted(&journal_root);
 }
 
-fn example_binary() -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let target = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join("target"));
-    let binary = target
-        .join("debug")
-        .join("examples")
-        .join(format!("{EXAMPLE}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "build the production-feature example before this test: cargo build --locked -p obzenflow --features postgres --example {EXAMPLE}"
-    );
-    binary
+// The same entry point is launched by the development-service lifecycle test.
+#[test]
+#[ignore = "application subprocess; launched by PostgreSQL acceptance tests"]
+fn payments_application_process() {
+    let args = match env::var(FIXTURE_ARGS_ENV) {
+        Ok(args) => serde_json::from_str(&args).expect("decode application arguments"),
+        Err(env::VarError::NotPresent) => vec![OsString::from("postgres-payments")],
+        Err(error) => panic!("read application arguments: {error}"),
+    };
+    payments::run(args).expect("payments application completes");
 }
 
-fn run_example(binary: &Path, schema: &str, journals: &Path, args: &[OsString]) -> Output {
-    Command::new(binary)
+#[test]
+fn payments_application_subprocess_accepts_its_own_cli_arguments() {
+    let journals = tempfile::tempdir().expect("temporary journal root");
+    let output = run_payments(
+        "obzenflow_example",
+        journals.path(),
+        &[OsString::from("--help")],
+    );
+    // FlowApplication currently reports CLI help through its configuration
+    // error path. Check the rendered application help, independently of that
+    // exit convention.
+    let help = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        help.contains("Usage: postgres-payments [OPTIONS]") && help.contains("--replay-from"),
+        "the child must parse application arguments rather than test-harness arguments: {help}"
+    );
+    assert!(!journals.path().join("flows").exists());
+}
+
+fn run_payments(schema: &str, journals: &Path, args: &[OsString]) -> Output {
+    let mut application_args = vec![OsString::from("postgres-payments")];
+    application_args.extend_from_slice(args);
+    Command::new(env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "payments_application_process",
+            "--ignored",
+            "--nocapture",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(args)
+        .env(
+            FIXTURE_ARGS_ENV,
+            serde_json::to_string(&application_args).expect("encode application arguments"),
+        )
         .env("OBZENFLOW_POSTGRES_SCHEMA", schema)
         .env("OBZENFLOW_JOURNAL_ROOT", journals)
         .output()
-        .expect("launch the payments example as a separate process")
+        .expect("launch the payments application as a separate process")
 }
 
 fn assert_success(label: &str, output: &Output) {

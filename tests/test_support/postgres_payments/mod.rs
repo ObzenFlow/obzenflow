@@ -2,26 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Deliver typed payment events to PostgreSQL.
-//!
-//! Supply any PostgreSQL 17 backing service through `OBZENFLOW_POSTGRES_URL` and
-//! optionally `OBZENFLOW_POSTGRES_SCHEMA`. For the repository-managed development
-//! service, run `cargo xtask postgres up`, inspect its connection with
-//! `cargo xtask postgres connection`, then launch this example through
-//! `cargo xtask postgres run -- cargo run -p obzenflow --features postgres
-//! --example postgres_sink_payments`.
+//! Application fixture for PostgreSQL delivery and archive-redelivery tests.
+//! Service setup and destination inspection remain in the acceptance tests.
 
 mod domain;
 mod flow;
-#[path = "../support/postgres_transport.rs"]
+#[path = "../../../examples/support/postgres_transport.rs"]
 mod postgres_transport;
 
 use anyhow::Result;
 use obzenflow::application::FlowApplication;
 use obzenflow::stages::sinks::postgres::PostgresConnection;
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
-fn main() -> Result<()> {
+pub fn run(args: Vec<OsString>) -> Result<()> {
     let connection = PostgresConnection::deferred_from_env(
         "OBZENFLOW_POSTGRES_URL",
         postgres_transport::from_environment()?,
@@ -33,6 +27,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("target/postgres-sink-payments"));
 
     let payment_flow = flow::build(journals, connection, schema)?;
-    FlowApplication::builder().run_blocking(payment_flow)?;
+    FlowApplication::builder()
+        .with_cli_args(args)
+        .run_blocking(payment_flow)?;
     Ok(())
 }
