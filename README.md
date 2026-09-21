@@ -14,7 +14,7 @@ ObzenFlow's superpowers:
 - Built-in resilience patterns like circuit breakers and rate limiters 
 - Optionally serve metrics via Prometheus right out of the box 
 
-ObzenFlow ships as a single binary with built-in disk back journals. (Storage is pluggable so you're free to build your own journal adapter, and other journal backends are coming soon). Out of the box there's no separate platform, broker cluster, or database to operate. 
+ObzenFlow ships as a single binary. Out of the box there's no separate platform, broker cluster, or database to operate. 
 
 Status: **pre-1.0**. APIs are still evolving and may change between releases.
 
