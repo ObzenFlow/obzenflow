@@ -20,7 +20,7 @@ Status: **pre-1.0**. APIs are still evolving and may change between releases.
 
 ## How does ObzenFlow provide durability without coupling? 
 
-Each stage in a flow maintains an append-only output journal. Each output journal contains event-sourced facts that serve as the input tape for downstream stages. Together, journals compose to form a graph of durable processing, which preserves the history needed to reconstruct a flow's execution. Journals are pluggable to avoid coupling. 
+Each stage in a flow maintains an append-only output journal. Each output journal contains event-sourced facts that serve as the input tape for downstream stages. Together, journals compose to form a graph of durable processing, which preserves the history needed to reconstruct a flow's execution. 
 
 ObzenFlow ships with disk-backed journals, plus in-memory journals for testing. Journal backends are pluggable, so you can change how journals are stored without changing processing logic. More journal backends (including object storage) are coming soon.
 
