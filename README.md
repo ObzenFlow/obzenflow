@@ -1,8 +1,12 @@
 # ObzenFlow
 
-ObzenFlow is a durable execution framework written in Rust intended for high-consequence systems. A high-consequence system must process data reliably and account precisely for how each result was produced. It combines typed graph-oriented stream processing with a durable record of events, decisions, and outcomes that drive execution, making this type of system intuitive to build.
+ObzenFlow is a durable execution framework written in Rust intended for high-consequence systems. A high-consequence system must process data reliably and account precisely for how each result was produced. 
 
-How does ObzenFlow provide durability? Each stage in a flow maintains an append-only output journal. Each output journal contains event-sourced facts that serve as the input tape for downstream stages. Together, journals compose to form a graph of durable processing, which preserves the history needed to reconstruct a flow's execution. 
+ObzenFlow combines the developer ergonomics of typed, graph-oriented stream processing, with durable event journals that drive execution forward. It does this without coupling your application to third-party infrastructure or databases. 
+
+How does ObzenFlow provide durability without coupling? 
+
+Each stage in a flow maintains an append-only output journal. Each output journal contains event-sourced facts that serve as the input tape for downstream stages. Together, journals compose to form a graph of durable processing, which preserves the history needed to reconstruct a flow's execution. Journals are pluggable to avoid coupling. We ship with disk-based journals out of the box, plus memory-based journals for testing, and more journal backend adapters are coming soon. 
 
 ObzenFlow's superpowers: 
 
@@ -14,7 +18,7 @@ ObzenFlow's superpowers:
 - Built-in resilience patterns like circuit breakers and rate limiters 
 - Separates effectful operations from deterministic logic for integrating durably with external services
 
-ObzenFlow ships as a single binary with built-in disk back journals. (Storage is pluggable so you're free to build your own journal adapter; other journal backends are coming soon). Out of the box there's no separate platform, broker cluster, or database to operate. 
+ObzenFlow ships as a single binary with built-in disk back journals. (Storage is pluggable so you're free to build your own journal adapter, and other journal backends are coming soon). Out of the box there's no separate platform, broker cluster, or database to operate. 
 
 Status: **pre-1.0**. APIs are still evolving and may change between releases.
 
