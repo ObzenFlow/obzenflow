@@ -1,36 +1,49 @@
 # ObzenFlow Infrastructure
 
-Application authors should depend on `obzenflow` and use `obzenflow::application::FlowApplication`, `obzenflow::application::ingress`, and `obzenflow::journal`. This crate owns their infrastructure implementations. The layer-specific APIs and feature names below are for integration authors working directly with infrastructure.
+Infra assembles the framework into a running application. Application authors
+use `obzenflow::application::FlowApplication`, `obzenflow::application::ingress`,
+`obzenflow::journal`, and the facade's capability features.
 
-**Layer:** Infrastructure (outermost). Depends on all other ObzenFlow workspace crates.
+This outer layer depends on Core, Runtime, Adapters, and flow construction.
+The direct crate APIs and feature names below are for framework integration.
 
-Wires the workspace together into a runnable application, providing journal backends, an optional HTTP server, and the `FlowApplication` entry point that most binaries use directly.
+## Responsibilities
 
-- **`FlowApplication`** runner that turns a `flow! { ... }` definition into a managed process with tracing, CLI parsing, optional HTTP server, Prometheus metrics, and graceful shutdown.
-- **Prometheus hosting.** Application configuration resolves `metrics.enabled`, creates the Adapter read model, samples live host observations, and serves the portable `/metrics` endpoint. The application owns task cleanup; the Adapters crate owns reporting translation. Disabled reporting creates no reporting model, sampler, or endpoint; terminal lifecycle totals remain journaled.
-- **Journal backends.** Disk-backed (`disk_journals`) and in-memory (`memory_journals`) implementations of the journaling traits, plus replay archive support.
-- **Web server and endpoints** (feature `warp-server`). Topology, metrics, health/readiness, flow control, SSE event streaming, and HTTP ingestion endpoints.
-  See [Managed web authentication](src/web/README.md) for deployment choices, credential scopes, and failure behaviour.
-- **Outbound HTTP client** (feature `reqwest-client`). Reqwest-based implementation of the core `HttpClient` trait.
-- **Typed env parsing** (`env`). `env_var`, `env_var_or`, `env_var_required`, and `env_bool` helpers that distinguish missing from malformed environment variables with actionable error messages.
+- Application configuration, tracing, CLI arguments, startup, and shutdown.
+- Disk and memory journals, archive loading, inspection, and replay verification.
+- Managed HTTP hosting, ingress, operational endpoints, and authentication.
+- Prometheus hosting and Studio connections, using Adapter projections.
+- Outbound HTTP clients, AI provider bindings, and tokenization.
+- Typed environment parsing with errors that distinguish missing and malformed values.
 
-## Features
+`FlowApplication::run(flow).await` is the usual entry point. Its builder supplies
+presentation, web surfaces, and other application options. The application owns
+the listener and background tasks and joins them during shutdown.
 
-No default features are enabled. Opt in as needed:
+## Integration features
 
-| Feature | What it enables |
-|---------|-----------------|
-| `warp-server` | HTTP server, `--server` CLI flag, hosting endpoints |
-| `tokio-console` | Tokio Console support for async debugging |
-| `reqwest-client` | Outbound HTTP client for pull/poll sources |
-| `prometheus` | Application wiring and portable `/metrics` endpoint for Prometheus reporting |
+No features are enabled by default. Compiling a capability does not enable its
+configured service.
 
-## `FlowApplication` entry points
+| Infra feature | Capability |
+| --- | --- |
+| `warp-server` | Managed HTTP host. |
+| `reqwest-client` | Default outbound HTTP client. |
+| `prometheus` | Prometheus reporting integration. |
+| `studio-registration` | Studio registration, with HTTP and Prometheus support. |
+| `ai-rig` | AI provider bindings. |
+| `ai-tiktoken` | Tiktoken token counting. |
+| `tokio-console` | Tokio Console instrumentation. |
+| `test-support` | Framework integration-test support. |
 
-- `FlowApplication::run(flow).await` for the common case.
-- `FlowApplication::builder()` for custom log levels, extra web endpoints, or hooks.
+Applications select the corresponding public features on `obzenflow`, such as
+`web-host`, `http-pull`, `ai`, `prometheus`, and `studio`.
 
-CLI flags include `--server`, `--server-port`, `--replay-from`, `--resume-from`, `--verify`, `--cors-mode`, and others. See `FlowConfig` for the full list.
+## References
+
+- [Managed web authentication and lifecycle](https://github.com/obzenflow/obzenflow/blob/main/crates/obzenflow_infra/src/web/README.md)
+- [Journal format](https://github.com/obzenflow/obzenflow/blob/main/crates/obzenflow_infra/src/journal/disk/codec/README.md)
+- [Application configuration](https://github.com/obzenflow/obzenflow/blob/main/crates/obzenflow_infra/src/application/config.rs)
 
 ## License
 

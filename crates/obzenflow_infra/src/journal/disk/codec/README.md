@@ -1,8 +1,9 @@
-# Journal schema 5.0 (FLOWIP-133j)
+# Journal format
 
-Core's `JOURNAL_SCHEMA_VERSION` is the single version for records, frame encoding,
-archive interpretation, and the run manifest. `run_manifest.json` records only
-`journal_schema_version: "5.0"`. Frame markers and disposable observation
+The current schema is **5.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
+version for records, frame encoding, archive interpretation, and the run
+manifest. `run_manifest.json` records `journal_schema_version: "5.0"`.
+Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
 
@@ -148,7 +149,7 @@ Serde implementations. They share the same `layout.rs` slots and scalar rules
 with the metadata/dynamic-value codec, avoiding a second full JSON object tree.
 Payload classification and validation remain Core's `JournalPayload` methods.
 
-## Provider test data
+## Tests and fixtures
 
 `test_data.rs` builds deterministic records using current Core types. Its stream
 contains 16 source facts, 16 transformed facts and 16 delivery receipts, with
@@ -158,11 +159,9 @@ measurements; receipts carry snapshots only. Separate tests exercise boundary
 values and optional application metadata.
 
 The timing test repeats this 48-record stream to compare the compact codec and
-an uncompressed control over identical logical records. This is a warm,
-low-cardinality workload, not the production-flow 100k archive or cache-eviction
-proof. These synthetic measurements are not directly comparable to the previous
-captured corpus. No historical archive, JSONL capture or schema projection is
-needed by the provider tests.
+an uncompressed control over identical logical records. It measures a warm,
+low-cardinality workload; production-flow cost and cache eviction need separate
+measurements.
 
 The current `fixtures/*.frame` files and matching JSON records cover all
 observation families and absent attachments. Tests require byte-for-byte encoding

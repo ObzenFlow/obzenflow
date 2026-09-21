@@ -1,119 +1,63 @@
 # ObzenFlow examples
 
-This directory is a runnable example catalog. Each example links to the part of [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/) it demonstrates so you can navigate by capability.
+Start with the [website tutorials](https://obzenflow.dev/tutorials/) for guided
+walkthroughs. Example names below link to source; local run guides cover setup
+and replay. A dash means there is no dedicated tutorial or run guide yet.
 
-Every example uses the `obzenflow` application facade. The common vocabulary is in
-`obzenflow::prelude`; constructors and custom handler traits live together under
-`obzenflow::stages::{sources, transforms, stateful, joins, sinks}`. Effects,
-middleware, journals, and hosting have separate capability modules. Copy these
-imports into applications without adding direct dependencies on framework layers.
+| Example (source) | Demonstrates | Tutorial or run guide |
+| --- | --- | --- |
+| [char_transform](char_transform.rs) | Stateful text transformation | [Getting started](https://obzenflow.dev/tutorials/getting-started/) |
+| [char_transform_skeleton](char_transform_skeleton.rs) | Flow topology with placeholder handlers | [Getting started](https://obzenflow.dev/tutorials/getting-started/) |
+| [http_ingestion_piggy_bank_demo](http_ingestion_piggy_bank_demo/flow.rs) | HTTP ingress, joins, and a checkbook projection | [Bank transactions](https://obzenflow.dev/tutorials/model-bank-transactions/) |
+| [hn_ai_digest_demo](hn_ai_digest_demo/flow.rs) | HTTP input, token budgeting, and AI summarisation | [Live AI inference](https://obzenflow.dev/tutorials/live-ai-inference/) |
+| [one_shot_inference_demo](one_shot_inference_demo/main.rs) | One bounded input and one model decision | — |
+| [payment_gateway_resilience](payment_gateway_resilience/flow.rs) | Gateway effects with retries, circuit breaking, and rate limiting | [Run guide](payment_gateway_resilience/README.md) |
+| [flash_sale_allocation](flash_sale_allocation/flow.rs) | Stateful stock reservation and cancellation | [Run guide](flash_sale_allocation/README.md) |
+| [postgres_sink_payments](postgres_sink_payments/flow.rs) | Typed payments delivered through a PostgreSQL UPSERT | [Run guide](postgres_sink_payments/README.md) |
+| [prometheus_demo](prometheus_demo/main.rs) | Metrics reporting, circuit breaking, and backpressure | [Run guide](prometheus_demo/README.md) |
+| [product_catalog_enrichment](product_catalog_enrichment/flow.rs) | Multi-way inner, left, and strict joins | — |
+| [flight_delays_simple](flight_delays_simple/flow.rs) | Stream-table reference enrichment | — |
+| [csv_demo_support_sla](csv_demo_support_sla/flow.rs) | CSV input, typed joins, and CSV output | — |
+| [ecommerce_top_products](ecommerce_top_products.rs) | Ranked aggregation with bounded memory | — |
+| [stateful_accumulator_catalog](stateful_accumulator_catalog.rs) | Conflation, custom accumulators, and emission strategies | — |
+| [stateful_emit_within_tumbling](stateful_emit_within_tumbling.rs) | Processing-time tumbling windows | — |
+| [web_analytics_pipeline](web_analytics_pipeline.rs) | Grouping and reduction with different emission strategies | — |
+| [topology_patterns_demo](topology_patterns_demo.rs) | Fan-in and routing for inputs of the same type | — |
+| [multi_source_ingest_demo](multi_source_ingest_demo/flow.rs) | Aligning different input types before fan-in | — |
+| [flow_middleware_config](flow_middleware_config/main.rs) | Per-source middleware configuration | — |
 
-## How to run examples
+## Run
 
-Most examples run as:
+Run commands from the repository root. Most examples use:
 
-```bash
+```sh
 cargo run -p obzenflow --example <name>
 ```
 
-Some examples require feature flags:
+Follow the local run guides above for payments, flash-sale allocation, PostgreSQL,
+and metrics. The bank, middleware, and AI examples use these commands:
 
-- `--features web-host` for examples whose `obzenflow.toml` enables HTTP endpoints
-- `--features http-pull` for HTTP pull sources
-- `--features ai` for the one-shot AI inference example
-- `--features "http-pull ai postgres"` for the AI digest example, whose output
-  uses `console_sink` with `obzenflow.toml` and `postgres_sink` with
-  `obzenflow.postgres.toml`
+```sh
+cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host
 
-Most examples run on framework defaults and do not need a config file. Examples that enable the HTTP server bundle a minimal `obzenflow.toml` in their directory. To override startup config, pass `-- --config <path/to/obzenflow.toml>` after the Cargo arguments.
+cargo run -p obzenflow --example flow_middleware_config --features prometheus,web-host
 
-## Canonical examples
+cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
+  --config examples/one_shot_inference_demo/obzenflow.toml
 
-These are the flagship examples and the best place to start. Each one has a companion [tutorial](https://obzenflow.dev/tutorials/) that walks through how to leverage key features of the framework in detail. The listings below link to both the tutorial and the capabilities each example exercises so you can see which parts of the framework are in play.
+cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
+  --config examples/hn_ai_digest_demo/obzenflow.toml
+```
 
-- **`char_transform`** — The smallest ObzenFlow example. Despite its size, it is a proper stateful flow with accumulation, ordering, and typed reduction across stages.
-  - Tutorial: [Getting Started](https://obzenflow.dev/tutorials/getting-started/)
-  - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it)
-  - Run: `cargo run -p obzenflow --example char_transform`
-  - Code: [`examples/char_transform.rs`](char_transform.rs)
+Both AI configurations require Ollama running with `llama3.1:8b` available.
+The digest uses a local mock news endpoint by default; prefix its command with
+`HN_LIVE=1` to fetch real Hacker News stories. For PostgreSQL output, select
+[the PostgreSQL config](hn_ai_digest_demo/obzenflow.postgres.toml) and supply a
+connection as described in the [local PostgreSQL guide](../dev/postgres/README.md).
 
-- **`http_ingestion_piggy_bank_demo`** — The canonical end-to-end service example: HTTP ingress, joins, stateful projection, and `/metrics` in one journal-backed flow.
-  - Tutorial: [Model Bank Transactions as a Flow](https://obzenflow.dev/tutorials/model-bank-transactions/)
-  - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
-  - Run: `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host`
-  - Auth override: provision `OBZENFLOW_PIGGY_BANK_CONTROL_PLANE_AUTH` out of band with the complete expected `Authorization` header value, then run `cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host -- --config examples/http_ingestion_piggy_bank_demo/obzenflow.auth.toml`. This protects built-in control-plane routes; the demo's ingress POSTs remain unauthenticated unless ingress-local auth is configured. See [Managed web authentication](../crates/obzenflow_infra/src/web/README.md).
-  - Code: [`examples/http_ingestion_piggy_bank_demo/flow.rs`](http_ingestion_piggy_bank_demo/flow.rs)
+The bank example also includes an [authenticated control-plane config](http_ingestion_piggy_bank_demo/obzenflow.auth.toml);
+see [managed web authentication](../crates/obzenflow_infra/src/web/README.md) for setup.
 
-- **`hn_ai_digest_demo`** — The canonical AI example: live HTTP pull, token budgeting, chunking, accumulation, and Rig-backed LLM inference with replayable evidence.
-  - Tutorial: [Run Live AI Inference from a Real Endpoint](https://obzenflow.dev/tutorials/live-ai-inference/)
-  - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
-  - Run (console output): `cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.toml`
-  - Run (PostgreSQL output): supply `OBZENFLOW_POSTGRES_URL` from any PostgreSQL deployment and use `examples/hn_ai_digest_demo/obzenflow.postgres.toml`; the optional local path is `cargo xtask postgres up`, then `cargo xtask postgres run -- cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- --config examples/hn_ai_digest_demo/obzenflow.postgres.toml`
-  - Code: [`examples/hn_ai_digest_demo/flow.rs`](hn_ai_digest_demo/flow.rs)
-
-- **`one_shot_inference_demo`** — One already-bounded input, one declared model effect, and one typed decision. Use this instead of map-reduce when the bounded context has already reduced the evidence.
-  - Shows: a user-owned `InferenceHandler`, the shared `ChatCompletion` capability clause, fixed chat binding, and strict replay without provider access
-  - Run: `cargo run -p obzenflow --example one_shot_inference_demo --features ai -- --config examples/one_shot_inference_demo/obzenflow.toml`
-  - Replay: add `--replay-from <live-run-dir> --verify` after the config argument
-  - Code: [`examples/one_shot_inference_demo/main.rs`](one_shot_inference_demo/main.rs)
-
-## Problem-focused examples
-
-These examples don't have tutorials, but they demonstrate concrete framework concepts that the canonical examples don't cover in isolation: joins, CSV batch processing, resilience middleware, and ranked aggregation. Each one is a self-contained flow you can read and run without extra context.
-
-- **`product_catalog_enrichment`** — Multi-way enrichment across inner, left, and strict joins. Use this when you want the most realistic catalog-style dimension pipeline in the repo.
-  - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it)
-  - Run: `cargo run -p obzenflow --example product_catalog_enrichment`
-  - Run with the manual-start control plane: `cargo run -p obzenflow --example product_catalog_enrichment --features web-host -- --server`
-  - Code: [`examples/product_catalog_enrichment/flow.rs`](product_catalog_enrichment/flow.rs)
-
-- **`csv_demo_support_sla`** — Offline CSV batch processing with typed joins, transforms, and a user-owned CSV projection whose associated types declare the accepted domain input and output row. Good for ETL-style jobs that still need typed flows and replayable execution.
-  - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it)
-  - Run: `cargo run -p obzenflow --example csv_demo_support_sla`
-  - Code: [`examples/csv_demo_support_sla/flow.rs`](csv_demo_support_sla/flow.rs)
-
-- **`payment_gateway_resilience`** — Per-effect circuit breaking, retry, rate limiting, fail-fast rejection, and operator-facing resilience against unreliable dependencies. Use this when you care about runtime protections and replay-stable failure semantics.
-  - Shows: [declared effects](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it), [replay and verification](https://obzenflow.dev/product/how-obzenflow-works/#trust-it), and one passive `observers:` attachment
-  - Run: `cargo run -p obzenflow --example payment_gateway_resilience`
-  - Run with the web host: `cargo run -p obzenflow --example payment_gateway_resilience --features web-host -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
-  - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
-
-- **`postgres_sink_payments`** — Typed payment events delivered to PostgreSQL with parameter binding, batching, an explicit transport policy, and a repeat-safe UPSERT. Direct configuration defaults to verified TLS; the optional repository service deliberately selects loopback-protected plaintext. Use this to learn the PostgreSQL sink's application-facing surface.
-  - Backing service: supply `OBZENFLOW_POSTGRES_URL` directly from any PostgreSQL deployment
-  - Optional local service: `cargo xtask postgres up`, followed by `cargo xtask postgres connection` for its password-free loopback profile
-  - Run through the local environment: `cargo xtask postgres run -- cargo run -p obzenflow --features postgres --example postgres_sink_payments`
-  - Stop while retaining rows: `cargo xtask postgres down`; add `--volumes` only to discard the development database
-  - Guide: [`examples/postgres_sink_payments/README.md`](postgres_sink_payments/README.md)
-  - Code: [`examples/postgres_sink_payments/flow.rs`](postgres_sink_payments/flow.rs)
-
-- **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with source-intake rate limiting. Use this for a realistic Top-N-by-score pattern.
-  - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it), [operational batteries](https://obzenflow.dev/product/how-obzenflow-works/#run-it)
-  - Run: `cargo run -p obzenflow --example ecommerce_top_products`
-  - Code: [`examples/ecommerce_top_products.rs`](ecommerce_top_products.rs)
-
-- **`flight_delays_simple`** — The shortest path to understanding stream-table joins. Use this when you want one clean reference-enrichment example before moving on to larger join graphs.
-  - Shows: [typed flow declaration](https://obzenflow.dev/product/how-obzenflow-works/#build-it)
-  - Run: `cargo run -p obzenflow --example flight_delays_simple`
-  - Code: [`examples/flight_delays_simple/flow.rs`](flight_delays_simple/flow.rs)
-
-## Scaffolding
-
-These examples are intentionally skeletal. Use them when you want to sketch topology first, inspect the shape of a flow, or start from a compilable placeholder before filling in handler logic.
-
-- **`char_transform_skeleton`** — Placeholder-only flow skeleton for event-storming and topology-first inspection. Use this when you want a compilable flow shape before writing any handler logic.
-  - Run: `cargo run -p obzenflow --example char_transform_skeleton`
-  - Manual server mode: `cargo run -p obzenflow --features web-host --example char_transform_skeleton -- --config examples/char_transform_skeleton.manual.obzenflow.toml`
-  - Code: [`examples/char_transform_skeleton.rs`](char_transform_skeleton.rs)
-
-## Reference shelf
-
-More niche examples that target specific API surfaces or topology patterns. We use these to validate the developer experience as we add features, and they're useful if you want to explore a particular capability in isolation.
-
-- **`stateful_emit_within_tumbling`** — Processing-time tumbling windows with `stateful::group_by(...).emit_within(...)` (FLOWIP-054j).
-  - Run: `cargo run -p obzenflow --example stateful_emit_within_tumbling`
-  - Code: [`examples/stateful_emit_within_tumbling.rs`](stateful_emit_within_tumbling.rs)
-- **`web_analytics_pipeline`** — Group/reduce stateful patterns with multiple emission strategies
-- **`topology_patterns_demo`** — Homogeneous fan-in with content-based routing (three sources of the same type into one aggregator, then one router to three priority sinks). Paired with `multi_source_ingest_demo` for the heterogeneous case.
-- **`multi_source_ingest_demo`** — Heterogeneous fan-in via per-branch alignment transforms (three sources of three different types normalised to one envelope, then a typed aggregator). The canonical reference for FLOWIP-114c typed authoring, including a long header comment that doubles as the authoring guide for multi-input stages.
-- **`flow_middleware_config`** — Targeted source middleware configuration
-- **`prometheus_demo`** — [Opt-in Prometheus and disabled metrics reporting](prometheus_demo/README.md) with fixed-input live/replay verification
+To replay a recorded run, add `--replay-from <archive> --verify` to the application
+arguments, after Cargo's `--` separator. Use the archive path printed by the run
+and keep the same configuration.
