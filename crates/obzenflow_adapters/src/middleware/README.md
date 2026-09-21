@@ -1,74 +1,25 @@
-# Typed middleware architecture
+# Typed middleware
 
-ObzenFlow middleware attaches to explicit runtime join points. There is no
-generic handler wrapper or `pre_handle`/`post_handle` chain.
+Application policies and observers are available through `obzenflow::middleware`.
+They attach at defined runtime boundaries.
 
-## Observer hooks
+## Observers
 
-Observe-only behaviour implements a surface-specific trait from
-`obzenflow_runtime::stages::observer` and attaches through its matching
-`*_observer("label", value)` helper.
+Observers receive immutable views and return nothing. The supported surfaces
+are source polling, handlers, stateful processing, joins, effects, sink delivery,
+and stage lifecycle.
 
-Supported observer surfaces are:
+An observer cannot change outputs, settlement, or framework journals through
+its callback. Callbacks run for live work and are suppressed during replay.
+Each attachment has its own unwind boundary: its first panic quarantines it for
+the rest of the stage run. This does not isolate blocking, process termination,
+or side effects performed through application-owned capabilities.
 
-- `SourcePoll`
-- `Handler`
-- `Stateful`
-- `Join`
-- `Effect`
-- `SinkDelivery`
-- `StageLifecycle`
-
-Observers receive immutable, runtime-constructed views and return nothing.
-They cannot use this contract to replace outputs, publish framework records,
-skip, reject, retry, pause, or abort. Runtime dispatches them only for live
-occurrences, never while recorded history is reconstructed.
-
-Each attachment is independently protected by an unwind boundary. Its first
-panic quarantines it for the rest of the stage run; sibling observers and the
-business operation continue. This is not a process or resource sandbox:
-blocking, deadlock, abort, process exit, excessive resource use, and side
-effects through independently held application capabilities remain possible.
-
-## Control policies
-
-Control behaviour protects a concrete live-I/O unit through one of the typed
-ports:
-
-- `SourcePolicy` and `SourceBoundary`
-- `EffectPolicy` and `EffectBoundary`
-- `SinkPolicy` and `SinkDeliveryBoundary`
-- the ingress boundary port
-
-A factory declares the supported surface and materialises exactly one matching
-attachment. Unsupported requests fail during flow construction.
-
-Retry is not a standalone middleware surface. It is an
-`EffectResilienceBuilder::retry` setting owned by the circuit-breaker recovery
-aggregate around a declared effect.
-
-## `MiddlewareContext`
-
-`MiddlewareContext` is an invocation-local carrier used only inside an ordered
-typed policy pass. Policies admit in declaration order and admitted policies
-observe in reverse order over the same context.
-
-The context contains:
-
-- typed slots identified by `MiddlewareContextKey`;
-- a control-event outbox returned through the boundary report and committed by
-  the existing runtime journal path;
-- the execution scope for the typed boundary invocation.
-
-It is not persisted, shared between concurrent invocations, passed to handlers
-or supervisors, or exposed as a replacement generic middleware API.
-
-## Observer shape
+For example, an application can log delivery results:
 
 ```rust,ignore
-use obzenflow_adapters::middleware::sink_delivery_observer;
-use obzenflow_runtime::stages::observer::{
-    SinkDeliveryObserver, SinkDeliveryObserverContext,
+use obzenflow::middleware::{
+    sink_delivery_observer, SinkDeliveryObserver, SinkDeliveryObserverContext,
 };
 
 struct DeliveryTrace;
@@ -86,6 +37,30 @@ impl SinkDeliveryObserver for DeliveryTrace {
 let observer = sink_delivery_observer("delivery-trace", DeliveryTrace);
 ```
 
-The observer layer has no logging, measurement, journal, storage, or exporter
-API. Application diagnostics use standard Rust `tracing`. Any future telemetry
-or SLI producers are owned by the FLOWIP-135 series.
+Pass the resulting attachment in the sink's `observers: [...]` clause.
+Application diagnostics use ordinary Rust tools such as `tracing`.
+
+## Control policies
+
+Control policies protect a concrete live-I/O operation: a source poll, effect
+invocation, sink delivery, or hosted ingress request. Use the corresponding
+policy builders from `obzenflow::middleware`.
+
+Retry is configured through `EffectResilienceBuilder::retry` within effect
+resilience. It is not a standalone middleware attachment.
+
+## Framework integration
+
+Internal policy factories declare supported surfaces and materialise one typed
+attachment for each protected unit. Unsupported requests fail during flow
+construction. The ports include `SourcePolicy`/`SourceBoundary`,
+`EffectPolicy`/`EffectBoundary`, `SinkPolicy`/`SinkDeliveryBoundary`, and ingress.
+
+`MiddlewareContext` belongs to one ordered policy pass. Policies admit in
+declaration order and observe in reverse order over the same context. It holds
+typed slots, the boundary's execution scope, and a control-event outbox that
+the runtime commits through its journal path.
+
+The context is temporary and stays within that invocation. It is neither
+persisted nor passed to handlers or supervisors. See
+[the policy implementations](control/policy/mod.rs) for the individual ports.

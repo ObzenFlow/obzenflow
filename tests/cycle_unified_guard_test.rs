@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::stateful;
+use obzenflow::stages::stateful;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::id::JournalId;

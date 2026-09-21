@@ -53,10 +53,10 @@ pub(crate) fn expand(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
         ));
     }
 
-    let core = crate::attr_core_path(input, "stage_output", "FLOWIP-120z")?;
+    let schema = crate::attr_schema_path(input, "stage_output", "FLOWIP-120z")?;
     match &input.data {
-        Data::Enum(data) => expand_enum(input, data, &core),
-        Data::Struct(data) => expand_struct(&input.ident, data, &core),
+        Data::Enum(data) => expand_enum(input, data, &schema),
+        Data::Struct(data) => expand_struct(&input.ident, data, &schema),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span,
             "StageOutputFacts carriers are enums (sums of products) or named-field structs \
@@ -117,7 +117,7 @@ fn reject_duplicate_leaves(leaves: &[&Type]) -> Result<(), syn::Error> {
 fn expand_enum(
     input: &DeriveInput,
     data: &syn::DataEnum,
-    core: &TokenStream,
+    schema: &TokenStream,
 ) -> Result<TokenStream, syn::Error> {
     let name = &input.ident;
     if data.variants.is_empty() {
@@ -192,7 +192,7 @@ fn expand_enum(
     let into_arms = shapes.iter().map(|shape| match shape {
         Shape::Unary { ident, .. } => quote! {
             Self::#ident(member) => ::std::result::Result::Ok(::std::vec![
-                #core::event::schema::TypedFact::from_payload(member)?,
+                #schema::TypedFact::from_payload(member)?,
             ]),
         },
         Shape::Product { ident, fields } => {
@@ -201,7 +201,7 @@ fn expand_enum(
                 // Field order is the committed fact order; the ordinal
                 // regime preserves it deterministically.
                 Self::#ident { #( #names ),* } => ::std::result::Result::Ok(::std::vec![
-                    #( #core::event::schema::TypedFact::from_payload(#names)?, )*
+                    #( #schema::TypedFact::from_payload(#names)?, )*
                 ]),
             }
         }
@@ -217,12 +217,12 @@ fn expand_enum(
     let dispatch_arms = shapes.iter().map(|shape| match shape {
         Shape::Unary { ident, member } => quote! {
             if facts.len() == 1
-                && <#member as #core::event::schema::TypedPayload>::event_type_matches(
+                && <#member as #schema::TypedPayload>::event_type_matches(
                     facts[0].event_type.as_str(),
                 )
             {
                 return ::std::result::Result::Ok(Self::#ident(
-                    #core::event::schema::decode_member_fact::<#member>(facts)?,
+                    #schema::decode_member_fact::<#member>(facts)?,
                 ));
             }
         },
@@ -233,13 +233,13 @@ fn expand_enum(
             quote! {
                 if facts.len() == #arity
                     #( && facts.iter().any(|fact| {
-                        <#types as #core::event::schema::TypedPayload>::event_type_matches(
+                        <#types as #schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         )
                     }) )*
                 {
                     return ::std::result::Result::Ok(Self::#ident {
-                        #( #names: #core::event::schema::decode_member_fact::<#types>(facts)?, )*
+                        #( #names: #schema::decode_member_fact::<#types>(facts)?, )*
                     });
                 }
             }
@@ -251,7 +251,7 @@ fn expand_enum(
         },
     });
 
-    let stage_fact_set = crate::stage_fact_set_impl(core, name, &leaf_union);
+    let stage_fact_set = crate::stage_fact_set_impl(schema, name, &leaf_union);
     let one_fact_output = if shapes
         .iter()
         .all(|shape| matches!(shape, Shape::Unary { .. }))
@@ -259,25 +259,25 @@ fn expand_enum(
         quote! {
             // Every variant lowers to exactly one fact, so the carrier also
             // qualifies as an effectful stateful `Output` (FLOWIP-120z).
-            impl #core::event::schema::OneFactStageOutput for #name {}
+            impl #schema::OneFactStageOutput for #name {}
         }
     } else {
         quote!()
     };
 
     Ok(quote! {
-        impl #core::event::schema::TypedFactSet for #name {
-            fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
+        impl #schema::TypedFactSet for #name {
+            fn fact_types() -> ::std::vec::Vec<#schema::TypedFactType> {
                 ::std::vec![
-                    #( #core::event::schema::TypedFactType::of::<#leaf_union>() ),*
+                    #( #schema::TypedFactType::of::<#leaf_union>() ),*
                 ]
             }
 
             fn into_facts(
                 self,
             ) -> ::std::result::Result<
-                ::std::vec::Vec<#core::event::schema::TypedFact>,
-                #core::event::schema::TypedFactSetError,
+                ::std::vec::Vec<#schema::TypedFact>,
+                #schema::TypedFactSetError,
             > {
                 match self {
                     #( #into_arms )*
@@ -285,19 +285,19 @@ fn expand_enum(
             }
 
             fn try_from_facts(
-                facts: &[#core::event::schema::TypedFact],
+                facts: &[#schema::TypedFact],
             ) -> ::std::result::Result<
                 Self,
-                #core::event::schema::TypedFactSetError,
+                #schema::TypedFactSetError,
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#leaf_union as #core::event::schema::TypedPayload>::event_type_matches(
+                        #( || <#leaf_union as #schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         ) )*;
                     if !declared {
                         return ::std::result::Result::Err(
-                            #core::event::schema::TypedFactSetError::UnexpectedFact {
+                            #schema::TypedFactSetError::UnexpectedFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -309,7 +309,7 @@ fn expand_enum(
                         .any(|later| later.event_type == fact.event_type)
                     {
                         return ::std::result::Result::Err(
-                            #core::event::schema::TypedFactSetError::DuplicateFact {
+                            #schema::TypedFactSetError::DuplicateFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -317,8 +317,8 @@ fn expand_enum(
                 }
                 #( #dispatch_arms )*
                 ::std::result::Result::Err(
-                    #core::event::schema::missing_fact_group_error(
-                        &<Self as #core::event::schema::TypedFactSet>::fact_types(),
+                    #schema::missing_fact_group_error(
+                        &<Self as #schema::TypedFactSet>::fact_types(),
                     ),
                 )
             }
@@ -378,7 +378,7 @@ fn reject_identical_leaf_sets(
 fn expand_struct(
     name: &Ident,
     data: &syn::DataStruct,
-    core: &TokenStream,
+    schema: &TokenStream,
 ) -> Result<TokenStream, syn::Error> {
     let Fields::Named(fields) = &data.fields else {
         return Err(syn::Error::new(data.fields.span(), STRUCT_SHAPE_ERROR));
@@ -395,42 +395,42 @@ fn expand_struct(
     }
     reject_duplicate_leaves(&members)?;
 
-    let stage_fact_set = crate::stage_fact_set_impl(core, name, &members);
+    let stage_fact_set = crate::stage_fact_set_impl(schema, name, &members);
     Ok(quote! {
-        impl #core::event::schema::TypedFactSet for #name {
-            fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
+        impl #schema::TypedFactSet for #name {
+            fn fact_types() -> ::std::vec::Vec<#schema::TypedFactType> {
                 ::std::vec![
-                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
+                    #( #schema::TypedFactType::of::<#members>() ),*
                 ]
             }
 
             fn into_facts(
                 self,
             ) -> ::std::result::Result<
-                ::std::vec::Vec<#core::event::schema::TypedFact>,
-                #core::event::schema::TypedFactSetError,
+                ::std::vec::Vec<#schema::TypedFact>,
+                #schema::TypedFactSetError,
             > {
                 // Field order is the committed fact order; the ordinal
                 // regime preserves it deterministically.
                 ::std::result::Result::Ok(::std::vec![
-                    #( #core::event::schema::TypedFact::from_payload(self.#idents)?, )*
+                    #( #schema::TypedFact::from_payload(self.#idents)?, )*
                 ])
             }
 
             fn try_from_facts(
-                facts: &[#core::event::schema::TypedFact],
+                facts: &[#schema::TypedFact],
             ) -> ::std::result::Result<
                 Self,
-                #core::event::schema::TypedFactSetError,
+                #schema::TypedFactSetError,
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as #core::event::schema::TypedPayload>::event_type_matches(
+                        #( || <#members as #schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         ) )*;
                     if !declared {
                         return ::std::result::Result::Err(
-                            #core::event::schema::TypedFactSetError::UnexpectedFact {
+                            #schema::TypedFactSetError::UnexpectedFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -440,7 +440,7 @@ fn expand_struct(
                 // and each member decode requires exactly one fact of its
                 // type (MissingFact / DuplicateFact otherwise).
                 ::std::result::Result::Ok(Self {
-                    #( #idents: #core::event::schema::decode_member_fact::<#members>(facts)?, )*
+                    #( #idents: #schema::decode_member_fact::<#members>(facts)?, )*
                 })
             }
         }

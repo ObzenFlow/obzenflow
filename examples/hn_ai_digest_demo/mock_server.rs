@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use anyhow::Result;
-use obzenflow::sources::Url;
+use obzenflow::stages::sources::Url;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};

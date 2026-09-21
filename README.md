@@ -1,21 +1,38 @@
 # ObzenFlow
 
-ObzenFlow is a durable execution runtime in Rust for high-consequence systems. Every stage of a flow writes what happened, including the results of outside actions, to an append-only journal. That record lets the runtime rebuild state, verify a replay against the original run, and resume interrupted work without re-firing a committed effect. Out of the box, ObzenFlow is a single binary with no platform, broker, cluster, or database to run.
+ObzenFlow is a durable execution framework written in Rust for building high-consequence systems. It combines the developer ergonomics of typed, graph-oriented stream processing, with durable event journals that drive execution forward, and does this without coupling your application to third-party infrastructure or databases. 
+
+ObzenFlow's superpowers: 
+
+- Process data through typed transforms, joins, and stateful stages using an ergonomic syntax
+- Ingest live streaming data and batch data in the same flow
+- Ships with advanced stage types for inline inference 
+- Separates effectful operations from deterministic logic for replay-safe integrations 
+- Replay and verify completed flows
+- Trace results through recorded history for auditability and reconstruction
+- Resume interrupted work from a last durable frontier
+- Built-in resilience patterns like circuit breakers and rate limiters 
+- Optionally serve metrics via Prometheus right out of the box 
+
+ObzenFlow ships as a single binary. Out of the box there's no separate platform, broker cluster, or database to operate. 
 
 Status: **pre-1.0**. APIs are still evolving and may change between releases.
 
-Where to go next:
+## How does ObzenFlow provide durability without coupling? 
 
-- [What is ObzenFlow?](https://obzenflow.dev/product/what-is-obzenflow/) covers the guarantees and the systems they are built for.
-- [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/) covers the DSL, effects, journals, and run modes in detail.
-- [Tutorials](https://obzenflow.dev/tutorials/) walk from a first flow to live AI inference.
-- [Philosophy](https://obzenflow.dev/philosophy/) explains the design principles underneath.
+Each stage in a flow maintains an append-only output journal. Each output journal contains event-sourced facts that serve as the input tape for downstream stages. Together, journals compose to form a graph of durable processing, which preserves the history needed to reconstruct a flow's execution. 
 
-## The shape of a flow
+ObzenFlow ships with disk-backed journals, plus in-memory journals for testing. Journal backends are pluggable, so you can change how journals are stored without changing processing logic. More journal backends (including object storage) are coming soon.
 
-Every ObzenFlow application follows the same shape:
+## Build an application
+
+A flow defines its stages, journals, and connections. Running a flow is simple: hand the blueprint to `FlowApplication`, which materializes the blueprint and sets up metrics, endpoints, and other operational integrations, and then runs the flow. 
 
 ```rust,ignore
+use obzenflow::prelude::*;
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::rate_limit;
+
 fn build_flow() -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let my_source = build_source();
@@ -33,7 +50,8 @@ fn build_flow() -> FlowDefinition {
             },
 
             topology: {
-                input |> enrich |> output;
+                input |> enrich;
+                enrich |> output;
             }
         })
     })
@@ -42,63 +60,35 @@ fn build_flow() -> FlowDefinition {
 FlowApplication::run(build_flow()).await?;
 ```
 
-Builder-owned handlers are ordinary Rust locals inside the deferred materialiser;
-stage rows reference those locals by name.
+No features are enabled by default. The [examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md) lists runnable flows and the feature flags and configuration they need, including HTTP services, AI inference, PostgreSQL, and metrics.
 
-For runnable versions with real domain types and handlers, see the
-[repository examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md).
+To get a feel for ObzenFlow's vocabulary, [Show Me the Code](https://obzenflow.dev/product/show-me-the-code/) walks through stages, effects, journals, replay, and resume using one payment flow.
 
-## Quickstart: durable execution in two commands
+## Run and replay a flow
 
-These commands run from a clone of the ObzenFlow repository. Examples are
-repository learning assets and are not included in the crates.io package.
-The `obzenflow` package is a Rust library and installs no operational CLI. Replay and verification
-run through your application's executable.
-
-Run the payment gateway example, a flow that authorizes orders through an unreliable gateway behind a declared effect and a circuit breaker:
+Clone the repository, then run the payment gateway example. It authorizes orders through a simulated unreliable gateway, with a declared effect and a circuit breaker:
 
 ```bash
 cargo run -p obzenflow --example payment_gateway_resilience
 ```
 
-The completion footer prints the run's archive path and the exact replay command. Replay the finished run from its record with verification:
+The completion footer prints the archive path and a replay command. Copy that command and add `--verify`, or replace `<run_id>` below with the recorded run's ID:
 
 ```bash
 cargo run -p obzenflow --example payment_gateway_resilience -- \
     --replay-from target/payment-gateway-logs/flows/<run_id> --verify
 ```
 
-Replay reads the archived inputs instead of polling the sources and substitutes committed effect outcomes instead of calling the gateway again. A certified match prints `output matched the original run, 0 differences`. That is the core of durable execution. The record of a run is sufficient to rebuild it, verify it, and continue it.
+Replay uses the archived inputs and committed effect outcomes without calling the gateway again. A matching replay prints `output matched the original run, 0 differences`.
 
-## More examples
+## Documentation
 
-The full catalog with grouped commands and code pointers is in the
-[repository examples catalog](https://github.com/obzenflow/obzenflow/blob/main/examples/README.md). A few highlights:
+Visit the [ObzenFlow website](https://obzenflow.dev/) for an introduction to the framework, its guarantees, and intended uses.
 
-```bash
-# Framework overview: reference catalogs + joins + stateful summary
-cargo run -p obzenflow --example product_catalog_enrichment
-
-# End-to-end HTTP service: ingress, joins, projections, /metrics
-cargo run -p obzenflow --example http_ingestion_piggy_bank_demo --features prometheus,web-host
-
-# Live AI inference
-cargo run -p obzenflow --example one_shot_inference_demo --features ai -- \
-    --config examples/one_shot_inference_demo/obzenflow.toml
-
-# Chunked AI map-reduce over a live HTTP source
-cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai postgres" -- \
-  --config examples/hn_ai_digest_demo/obzenflow.toml
-```
-
-No features are enabled by default. Ordinary launches start neither an HTTP host nor metrics reporting. `--features web-host` compiles the Warp host; configuration must explicitly enable it. Hosted Prometheus reporting additionally needs `--features prometheus`, `[server] enabled = true`, and `[metrics] enabled = true`. The `studio` capability includes both, and `studio.enabled = true` supplies omitted host and metrics defaults while rejecting explicit conflicts. Compiling capabilities alone activates nothing. Prometheus is the supported reporting format; use `metrics.enabled` without an `exporter` selector. Additional providers require a community request and a separate design. `--features http-pull` enables HTTP pull sources, and `--features postgres` enables the PostgreSQL sink. PostgreSQL applications accept an externally supplied `OBZENFLOW_POSTGRES_URL`; they do not depend on repository tooling to launch the backing service.
-
-## Project organization
-
-ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and ports (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.
-
-The root `obzenflow` crate is a convenience re-export layer for common sources/sinks (`src/sources.rs`, `src/sinks.rs`). The remaining workspace crates, `obzenflow_benchmarks` and `obzenflow_sketches`, are internal support crates outside the public surface.
+- [How ObzenFlow Works](https://obzenflow.dev/product/how-obzenflow-works/) explains flow declarations, effects, journals, and run modes.
+- [Tutorials](https://obzenflow.dev/tutorials/) walk through building flows, modelling bank transactions, and running live AI inference.
+- [Philosophy](https://obzenflow.dev/philosophy/) explains the design principles.
 
 ## License
 
-Dual-licensed under MIT OR Apache-2.0. See `LICENSE-MIT` and `LICENSE-APACHE`.
+Dual-licensed under [MIT](https://github.com/obzenflow/obzenflow/blob/main/LICENSE-MIT) OR [Apache-2.0](https://github.com/obzenflow/obzenflow/blob/main/LICENSE-APACHE).

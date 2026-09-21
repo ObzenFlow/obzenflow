@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_infra::application::{Banner, Footer, RunMode, RunPresentationOutcome};
+use obzenflow::application::{Banner, Footer, RunMode, RunPresentationOutcome};
 
 fn live_banner() -> Banner {
     let inject_bad_payment = std::env::var("INJECT_BAD_PAYMENT").is_ok();

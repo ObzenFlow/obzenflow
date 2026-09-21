@@ -1,38 +1,42 @@
 # ObzenFlow Core Derive
 
-This compiler-host crate is the procedural-macro half of the logical ObzenFlow Core component. Its direct package API is an internal implementation detail; users invoke its derives through `obzenflow_core`.
+This crate implements Core's procedural macros. Application authors use the
+derives re-exported by `obzenflow::schema`; they do not need a direct dependency
+on this compiler crate.
 
-**Layer:** Core compiler satellite (host-side leaf). No dependencies on other ObzenFlow workspace crates.
+| Derive | Contract |
+| --- | --- |
+| `EffectOutcomeFacts` | Declares the typed facts an effect outcome can contain. |
+| `StageOutputFacts` | Declares a stage output carrier and its fact-set projections. |
 
-Derive macros for Core-owned contracts:
+## Application use
 
-- `#[derive(EffectOutcomeFacts)]` defines an effect outcome carrier (FLOWIP-120m): an enum for a closed sum outcome (exactly one persisted fact per variant) or a named-field struct for a product outcome (one fact per field, recorded together). The derive generates the exact, fail-closed `TypedFactSet` implementation.
-- `#[derive(StageOutputFacts)]` defines a typed stage output carrier (FLOWIP-120z) and its Core-owned fact-set projections.
+For application payload types `PaymentAuthorized` and `PaymentDeclined`:
 
-Use it through `obzenflow_core`, which re-exports the derive next to the `EffectOutcomeFacts` trait, the same way serde re-exports its derives:
-
-```rust
-use obzenflow_core::{EffectOutcomeFacts, TypedPayload};
+```rust,ignore
+use obzenflow::schema::EffectOutcomeFacts;
 
 #[derive(Debug, Clone, EffectOutcomeFacts)]
+#[effect_outcome(schema = obzenflow::schema)]
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),
 }
 ```
 
-Generated code resolves `::obzenflow_core` in the deriving crate. If a direct
-Core dependency is renamed in Cargo.toml, the existing path override points at
-that extern-prelude name:
+`StageOutputFacts` uses `#[stage_output(schema = obzenflow::schema)]`.
+If the facade dependency is renamed to `of`, use `of::schema` in either attribute.
 
-```rust
-#[derive(Debug, Clone, EffectOutcomeFacts)]
-#[effect_outcome(crate = flow_core)]
-pub enum Outcome {
-    Ok(SomeFact),
-}
-```
+## Compiler integration
+
+The generated implementations use Core's schema contracts. The compiler crate
+has no dependency on the facade or other ObzenFlow workspace crates.
+
+Direct Core consumers can use its re-exported derives with the default
+`::obzenflow_core` path. A renamed Core dependency retains the
+`#[effect_outcome(crate = flow_core)]` and `#[stage_output(crate = flow_core)]`
+overrides.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+Dual-licensed under MIT OR Apache-2.0. See `LICENSE-MIT` and `LICENSE-APACHE`.

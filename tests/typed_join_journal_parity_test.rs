@@ -923,7 +923,7 @@ async fn invalid_authored_join_forms_fail_before_journal_provider_evaluation() {
                 let catalog = ReferenceSource::new(reads.clone());
                 let stream = ReferenceSource::new(reads.clone());
                 let other = ReferenceSource::new(reads);
-                let joiner = obzenflow::joins::inner(
+                let joiner = obzenflow::stages::joins::inner(
                     |row: &ReferenceItem| row.key.clone(),
                     |row: &ReferenceItem| row.key.clone(),
                     |reference: ReferenceItem, _stream: ReferenceItem| reference,

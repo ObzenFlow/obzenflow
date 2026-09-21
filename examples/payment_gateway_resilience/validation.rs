@@ -27,15 +27,16 @@ use super::domain::{
     CancelledOrder, CustomerOrderPlaced, InvalidOrder, InvalidOrderReason, OrderCancellationReason,
     PaymentMethodState, ValidatedOrder,
 };
-use obzenflow_core::StageOutputFacts;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
+use obzenflow::error::HandlerError;
+use obzenflow::schema::StageOutputFacts;
+use obzenflow::stages::transforms::TypedTransformHandler;
 
 /// In-memory carrier for the flat facts authored by local validation.
 ///
 /// The carrier itself is never journalled. Its selected variant is lowered to
 /// one `ValidatedOrder`, or to `InvalidOrder` followed by `CancelledOrder`.
 #[derive(Debug, Clone, StageOutputFacts)]
+#[stage_output(schema = obzenflow::schema)]
 pub enum ValidationOutcome {
     Validated(ValidatedOrder),
     Invalid {

@@ -4,12 +4,11 @@
 
 //! Product-catalogue regression for first-class stateful accumulators.
 
-use obzenflow::stateful;
-use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::stateful::strategies::accumulators::{
-    Accumulator, Conflate, GroupBy, Reduce, TopN, TopNBy, TopNBySnapshot, TopNSnapshot,
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::stateful::{
+    self, Accumulator, Conflate, EmissionStrategy, GroupBy, Reduce, StatefulEmission, TopN, TopNBy,
+    TopNBySnapshot, TopNSnapshot, TypedStatefulHandler,
 };
-use obzenflow_runtime::stages::TypedStatefulHandler;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -230,5 +229,148 @@ fn top_n_replacement_and_top_n_by_aggregation_are_distinct_contracts() {
             keys: vec!["a".into(), "b".into()],
             scores: vec![14.0, 8.0],
         }]
+    );
+}
+
+fn emit_and_advance<H: TypedStatefulHandler>(handler: &H, state: &mut H::State) -> Vec<H::Output> {
+    let (next_state, outputs) = match handler.emit(state).expect("emit typed values") {
+        StatefulEmission::RetainEpoch {
+            next_state,
+            outputs,
+        }
+        | StatefulEmission::ResetEpoch {
+            next_state,
+            outputs,
+        } => (next_state, outputs),
+    };
+    *state = next_state;
+    outputs
+}
+
+#[test]
+fn conflate_emit_always_retains_the_latest_value_for_every_key() {
+    let handler = stateful::conflate(|score: &Score| score.key.clone()).emit_always();
+    let mut state = handler.initial_state();
+    let mut snapshots = Vec::new();
+    for (key, score) in [("a", 10.0), ("b", 8.0), ("a", 4.0)] {
+        handler.accumulate(
+            &mut state,
+            Score {
+                key: key.into(),
+                score,
+            },
+        );
+        assert!(handler.should_emit(&state));
+        snapshots.push(
+            emit_and_advance(&handler, &mut state)
+                .into_iter()
+                .map(|score| (score.key, score.score))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !handler.should_emit(&state),
+            "emission consumes the cadence"
+        );
+    }
+    assert_eq!(
+        snapshots,
+        vec![
+            vec![("a".into(), 10.0)],
+            vec![("a".into(), 10.0), ("b".into(), 8.0)],
+            vec![("a".into(), 4.0), ("b".into(), 8.0)],
+        ]
+    );
+    assert_eq!(
+        handler.drain(&state).expect("drain the retained view"),
+        vec![
+            Score {
+                key: "a".into(),
+                score: 4.0
+            },
+            Score {
+                key: "b".into(),
+                score: 8.0
+            },
+        ]
+    );
+}
+
+#[derive(Clone, Debug)]
+struct EveryTwoScores;
+
+impl EmissionStrategy for EveryTwoScores {
+    fn should_emit(&self, events_seen: u64, _elapsed: Option<std::time::Duration>) -> bool {
+        events_seen >= 2
+    }
+}
+
+#[test]
+fn custom_emission_resets_its_cadence_and_retains_the_fold() {
+    let handler = stateful::reduce(Count::default(), |count: &mut Count, _: &Score| {
+        count.0 += 1;
+    })
+    .with_emission(EveryTwoScores);
+    let mut state = handler.initial_state();
+    let mut outputs = Vec::new();
+    for index in 1..=5 {
+        handler.accumulate(
+            &mut state,
+            Score {
+                key: "a".into(),
+                score: 1.0,
+            },
+        );
+        assert_eq!(handler.should_emit(&state), index % 2 == 0);
+        if handler.should_emit(&state) {
+            outputs.extend(emit_and_advance(&handler, &mut state));
+        }
+    }
+    assert_eq!(outputs, vec![Count(2), Count(4)]);
+    assert_eq!(
+        handler.drain(&state).expect("flush the partial period"),
+        vec![Count(5)]
+    );
+}
+
+#[derive(Clone, Debug)]
+struct CountScores;
+
+impl Accumulator for CountScores {
+    type State = u64;
+    type Input = Score;
+    type Output = Count;
+
+    fn initial_state(&self) -> u64 {
+        0
+    }
+
+    fn accumulate(&self, total: &mut u64, _: Score) {
+        *total += 1;
+    }
+
+    fn outputs(&self, total: &u64) -> Vec<Count> {
+        vec![Count(*total)]
+    }
+}
+
+#[test]
+fn custom_accumulator_composes_with_the_public_emission_wrapper() {
+    let handler = stateful::StatefulWithEmission::new(CountScores, stateful::OnEOF);
+    let mut state = handler.initial_state();
+    for key in ["a", "b", "a"] {
+        handler.accumulate(
+            &mut state,
+            Score {
+                key: key.into(),
+                score: 1.0,
+            },
+        );
+        assert!(!handler.should_emit(&state), "OnEOF waits for drain");
+    }
+    assert_eq!(
+        handler
+            .drain(&state)
+            .expect("project the custom accumulator"),
+        vec![Count(3)]
     );
 }

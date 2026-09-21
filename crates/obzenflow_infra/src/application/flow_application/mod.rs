@@ -461,7 +461,7 @@ impl FlowApplicationBuilder {
         #[cfg(not(feature = "tokio-console"))]
         if self.console_subscriber {
             eprintln!("⚠️  Console subscriber requested but 'tokio-console' feature not enabled");
-            eprintln!("   Recompile with --features obzenflow_infra/tokio-console");
+            eprintln!("   Recompile with the obzenflow feature: --features tokio-console");
         }
 
         // Standard tracing setup (no console-subscriber)

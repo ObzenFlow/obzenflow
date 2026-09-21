@@ -9,8 +9,8 @@
 //! heterogeneous inline and resource-owning sinks in one compiled flow.
 
 use obzenflow::application::{ApplicationError, FlowApplication};
-use obzenflow::sinks::{self, CsvProjection, CsvSink};
-use obzenflow::sources;
+use obzenflow::stages::sinks::{self, CsvProjection, CsvSink};
+use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::journal::memory_journals;

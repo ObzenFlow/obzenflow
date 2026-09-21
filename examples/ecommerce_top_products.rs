@@ -11,14 +11,14 @@
 //! Run with: cargo run --package obzenflow --example ecommerce_top_products
 
 use anyhow::Result;
-use obzenflow::sources;
-use obzenflow::stateful;
-use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow::application::{Banner, FlowApplication, Presentation};
+use obzenflow::flow::{flow, sink, source, stateful, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::sources;
+use obzenflow::stages::stateful;
 use serde::{Deserialize, Serialize};
 
 // FLOWIP-082a: Strongly-typed event with schema version

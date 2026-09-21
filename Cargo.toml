@@ -37,7 +37,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.93.0"
 license = "MIT OR Apache-2.0"
@@ -46,14 +46,13 @@ homepage = "https://obzenflow.dev"
 
 [workspace.dependencies]
 # Workspace crates
-obzenflow_core_derive = { version = "=0.2.1", path = "crates/obzenflow_core_derive" }
-obzenflow_core = { version = "=0.2.1", path = "crates/obzenflow_core" }
-obzenflow_runtime = { version = "=0.2.1", path = "crates/obzenflow_runtime" }
-obzenflow_adapters = { version = "=0.2.1", path = "crates/obzenflow_adapters" }
-obzenflow_dsl = { version = "=0.2.1", path = "crates/obzenflow_dsl" }
-obzenflow_infra = { version = "=0.2.1", path = "crates/obzenflow_infra" }
-obzenflow_benchmarks = { version = "=0.2.1", path = "crates/obzenflow_benchmarks" }
-obzenflow_sketches = { version = "=0.2.1", path = "crates/obzenflow_sketches" }
+obzenflow_core_derive = { version = "=0.2.3", path = "crates/obzenflow_core_derive" }
+obzenflow_core = { version = "=0.2.3", path = "crates/obzenflow_core" }
+obzenflow_runtime = { version = "=0.2.3", path = "crates/obzenflow_runtime" }
+obzenflow_adapters = { version = "=0.2.3", path = "crates/obzenflow_adapters" }
+obzenflow_dsl = { version = "=0.2.3", path = "crates/obzenflow_dsl" }
+obzenflow_infra = { version = "=0.2.3", path = "crates/obzenflow_infra" }
+obzenflow_benchmarks = { version = "=0.2.3", path = "crates/obzenflow_benchmarks" }
 
 # External ObzenFlow crates
 obzenflow-topology = "0.5.1"
@@ -213,10 +212,6 @@ name = "char_transform_skeleton"
 path = "examples/char_transform_skeleton.rs"
 
 [[example]]
-name = "flow_middleware_config"
-path = "examples/flow_middleware_config/main.rs"
-
-[[example]]
 name = "prometheus_demo"
 path = "examples/prometheus_demo/main.rs"
 
@@ -255,15 +250,6 @@ required-features = ["http-pull", "ai", "postgres", "test-support"]
 name = "standalone_ai_effect_replay_test"
 path = "tests/standalone_ai_effect_replay_test.rs"
 required-features = ["ai"]
-
-[[example]]
-name = "multi_source_ingest_demo"
-path = "examples/multi_source_ingest_demo/main.rs"
-
-[[example]]
-name = "postgres_sink_payments"
-path = "examples/postgres_sink_payments/main.rs"
-required-features = ["postgres"]
 
 [[test]]
 name = "stateful_metrics_integration_test"
@@ -356,8 +342,8 @@ path = "tests/postgres_sink_application_conformance_test.rs"
 required-features = ["postgres", "test-support"]
 
 [[test]]
-name = "postgres_sink_example_e2e_test"
-path = "tests/postgres_sink_example_e2e_test.rs"
+name = "postgres_payments_e2e_test"
+path = "tests/postgres_payments_e2e_test.rs"
 required-features = ["postgres", "e2e"]
 
 [[test]]

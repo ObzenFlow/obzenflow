@@ -13,12 +13,12 @@
 //! Run with: `cargo run -p obzenflow --example char_transform`
 
 use anyhow::Result;
-use obzenflow::sources;
-use obzenflow::{sinks, stateful, transforms};
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use obzenflow::application::FlowApplication;
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sources;
+use obzenflow::stages::{sinks, stateful, transforms};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

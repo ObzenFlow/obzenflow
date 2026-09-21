@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use super::domain::*;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{StatefulEmission, TypedStatefulHandler};
+use obzenflow::error::HandlerError;
+use obzenflow::stages::stateful::{StatefulEmission, TypedStatefulHandler};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Default)]

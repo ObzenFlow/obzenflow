@@ -15,7 +15,7 @@
 //! `CancelledOrder`.
 
 use super::domain::{CancelledOrder, PaymentAuthorizationUnavailable, PaymentAuthorized};
-use obzenflow_runtime::stages::sink::DeliveryProvenance;
+use obzenflow::stages::sinks::DeliveryProvenance;
 
 /// FLOWIP-120i: archived outcomes re-emitted during replay are labelled, so
 /// the console never implies a delivery happened again. The label is stdout

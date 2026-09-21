@@ -6,8 +6,8 @@ use super::mock_server::{spawn_mock_hn_server, MockHnServer};
 use anyhow::{anyhow, Result};
 use obzenflow::ai::TokenCount;
 use obzenflow::env::{env_bool_or, env_var, env_var_or};
-use obzenflow::sinks::postgres::PostgresConnection;
-use obzenflow::sources::Url;
+use obzenflow::stages::sinks::postgres::PostgresConnection;
+use obzenflow::stages::sources::Url;
 
 #[path = "../support/postgres_transport.rs"]
 mod postgres_transport;

@@ -29,22 +29,22 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow::env::env_var_or;
-use obzenflow::{stateful, transforms};
-use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
-use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::dsl::backpressure_clause::enforced;
-use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::SinkRedeliverySafety;
-use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
-use obzenflow_runtime::stages::sink::{
+use obzenflow::flow::backpressure::enforced;
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::{CircuitBreaker, RateLimiterBuilder};
+use obzenflow::schema::TypedPayload;
+use obzenflow::stages::sinks::DeliveryMethod;
+use obzenflow::stages::sinks::SinkRedeliverySafety;
+use obzenflow::stages::sinks::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkTyped, SinkWriteContext, SinkWriteReport,
 };
-use obzenflow_runtime::stages::transform::TryMapTyped;
-use obzenflow_runtime::stages::SourceError;
+use obzenflow::stages::sources::SourceError;
+use obzenflow::stages::sources::TypedFiniteSourceHandler;
+use obzenflow::stages::transforms::TryMapTyped;
+use obzenflow::stages::{stateful, transforms};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 const CONFIG_FILE: &str = concat!(
@@ -210,7 +210,7 @@ impl InlineSink for CompletionSink {
         &mut self,
         _event: ProcessedEvent,
         _context: SinkWriteContext,
-    ) -> obzenflow_runtime::stages::sink::SinkWriteResult {
+    ) -> obzenflow::stages::sinks::SinkWriteResult {
         Ok(SinkWriteReport::terminal(SinkTerminalOutcome::success_via(
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),

@@ -1486,9 +1486,9 @@ fn hn_witness_uses_materialization_and_deferred_port_contract() {
 
 #[test]
 fn hn_postgres_sink_description_is_truthful_without_selection_instrumentation() {
-    let postgres_connection = obzenflow::sinks::postgres::PostgresConnection::from_url(
+    let postgres_connection = obzenflow::stages::sinks::postgres::PostgresConnection::from_url(
         "postgres://obzenflow:sentinel@localhost/obzenflow?sslmode=verify-full",
-        obzenflow::sinks::postgres::PostgresTransport::VerifiedTls,
+        obzenflow::stages::sinks::postgres::PostgresTransport::VerifiedTls,
     )
     .expect("cold verified-TLS fixture URL is valid without I/O");
     let postgres_config = config::HnDigestPostgresConfig {

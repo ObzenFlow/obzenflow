@@ -11,8 +11,8 @@
 mod postgres_support;
 
 use obzenflow::application::FlowApplication;
-use obzenflow::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
-use obzenflow::sources;
+use obzenflow::stages::sinks::postgres::{PostgresBind, PostgresBindings, PostgresSink};
+use obzenflow::stages::sources;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;

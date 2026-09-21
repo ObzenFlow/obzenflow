@@ -23,7 +23,7 @@
 //! the pipeline does not run until you press Play:
 //!
 //! ```sh
-//! cargo run -p obzenflow --features obzenflow_infra/warp-server \
+//! cargo run -p obzenflow --features web-host \
 //!     --example char_transform_skeleton -- \
 //!     --config examples/char_transform_skeleton.manual.obzenflow.toml
 //! ```
@@ -32,10 +32,10 @@
 //! immediately, and the pipeline drains and exits quickly.
 
 use anyhow::Result;
-use obzenflow_core::TypedPayload;
-use obzenflow_dsl::{flow, sink, source, stateful, transform, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+use obzenflow::application::FlowApplication;
+use obzenflow::flow::{flow, sink, source, stateful, transform, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

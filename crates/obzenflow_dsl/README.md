@@ -1,87 +1,96 @@
-# ObzenFlow DSL
+# ObzenFlow flow construction
 
-This crate is an internal implementation detail of the ObzenFlow project. Most users access the DSL through the top-level `obzenflow` crate.
+`obzenflow_dsl` implements the flow construction API exposed by `obzenflow::flow`.
+Applications import flow definitions and stage macros from that facade, or its
+common `obzenflow::prelude`, and run them with
+`obzenflow::application::FlowApplication`.
 
-**Layer:** DSL/orchestration (outer). Depends on `obzenflow_adapters`, `obzenflow_runtime`, `obzenflow_core`, and `obzenflow-topology`.
+This is the composition layer. It uses Core contracts, Runtime stage builders,
+Adapters, and `obzenflow-topology`. Infra supplies persistence and the application
+runner.
 
-The composition root for flow construction. The `flow!` macro turns a declarative block into a `FlowDefinition`; ordinary crate-owned Rust coordinates topology validation, journal allocation, stage-authored middleware binding, and stage wiring when the host builds it.
+## Authoring contract
 
-- `flow!` macro and topology parsing helpers
-- Stage descriptor macros (`source!`, `transform!`, `sink!`, `stateful!`, `join!`, `effectful_transform!`, `effectful_stateful!`, `inference!`, `ai_map_reduce!`, and async variants)
-- Stage-authored middleware binding to typed runtime surfaces
-- `FlowDefinition` deferred build wrapper (what `flow!` returns)
-- Structured build errors
+`flow!` declares a name, journals, stages, and topology. Optional backpressure and
+effect-port sections configure construction; middleware attaches to the stage
+and live-I/O boundary it protects.
 
-## Usage
+Construct handlers, connectors, and policies inside
+`FlowDefinition::materialize`, using the resolved runtime configuration supplied
+to that closure. Stage handler and composite-role slots take local names or
+identifier-only qualified paths. Calls, closures, builder chains, and struct
+literals belong in the preceding bindings. Async source polling timeouts are
+handler configuration through `poll_timeout()`.
 
-Most applications should run flows through `FlowApplication` rather than awaiting `FlowHandle` directly:
+## Construction pipeline
 
-```rust,ignore
-use obzenflow_dsl::{flow, source, sink, FlowDefinition};
-use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk_journals;
+The macros collect descriptors and edges, lower composites, and return a
+deferred `FlowDefinition`. The host resolves configuration before building it.
+Ordinary Rust in `flow_builder.rs` owns validation and wiring:
 
-fn build_flow() -> FlowDefinition {
-    FlowDefinition::materialize(move |_runtime_config| {
-        let my_source = build_source();
-        let my_sink = build_sink();
+```mermaid
+sequenceDiagram
+  participant Host as FlowApplication
+  participant Def as FlowDefinition
+  participant Build as flow_builder
+  participant Topology as obzenflow-topology
+  participant Journals as FlowJournalFactory
+  participant Runtime
 
-        Ok(flow! {
-            name: "my_flow",
-            journals: disk_journals("target/my-flow-logs".into()),
-
-            stages: {
-                // Every stage declares its types. See
-                // `examples/multi_source_ingest_demo/` for the canonical
-                // heterogeneous-fan-in pattern.
-                src = source!(MyPayload => my_source);
-                out = sink!(MyPayload => my_sink);
-            },
-
-            topology: {
-                src |> out;
-            }
-        })
-    })
-}
-
-FlowApplication::run(build_flow()).await?;
+  Host->>Def: build(context).await
+  Def->>Def: materialise handlers from resolved configuration
+  Def->>Build: build collected descriptors and edges
+  Build->>Build: validate types, bindings, and join tuples
+  Build->>Topology: validate graph and cycles
+  Build->>Journals: create system, stage, and error journals
+  Build->>Journals: persist run manifest when supported
+  Build->>Runtime: assemble StageResourcesSet and stage handles
+  Build->>Runtime: build pipeline
+  Runtime-->>Host: FlowHandle
 ```
 
-Supported handler and composite-role slots take a local name or identifier-only
-qualified path. Construct builder-owned handlers and sink adapters inside the deferred
-materialiser immediately above `flow!`; calls, closures, builder chains, and struct
-literals are rejected in the slots. Async-source poll timeout is handler
-configuration exposed through `poll_timeout()`, not stage syntax.
+Build failures retain the known run-substrate state so the application can
+report partial journals. Exported macros resolve their compiler support through
+`$crate`; application callers need only the facade dependency.
 
-The DSL has four core sections: optional `name` (flow identifier), `journals` (persistence backend), `stages` (bindings producing stage descriptors), and `topology` (edges connecting stages with `|>` and `<|` operators). Optional flow backpressure and effect-port sections sit between `journals` and `stages`. Middleware is declared only on the stage where it applies.
+## Join topology
 
-## AI stage shapes
-
-Use `inference!` when each input is already bounded and needs exactly one model decision:
+Every forward input to a join uses a catalog-first tuple:
 
 ```rust,ignore
-brief = inference!(
-    ReducedEvidence -> DecisionBrief
-    uses at_least_once(ChatCompletion)
-        via chat
-        with ai_resilience()
-    => generate_brief
-);
+posted = join!(catalog accounts: Account, Transaction -> Posted => post);
+// Inside topology:
+(accounts, api_transactions) |> posted;
+(accounts, imported_transactions) |> posted;
 ```
 
-`generate_brief` is a user-owned type implementing the runtime `InferenceHandler`
-trait. Its `Input` and `Output` associated types witness the arrow, while its
-`prepare` and `interpret` methods provide the scalar inference hooks. The value to the
-right of the arrow is therefore an ordinary stage handler, as it is for the other stage
-macros. A hidden adapter performs the declared chat effect between those two hooks.
+The catalog clause declares the reference binding and type; tuples create the
+edges. Multiple stream tuples share one catalog edge. Duplicate tuples, plain
+inputs, swapped roles, and unknown bindings fail before journals are created.
+Composite outputs resolve against their role types. A composite input port
+cannot belong to a join; internal composite joins use
+`CompositeBuildContext::join`.
 
-Use `ai_map_reduce!` when the input must be token-budgeted, fanned out, collected, and finalised. Its map and reduce roles use the same trailing `uses` clause shown above. The lexical `via chat` operand is an `EffectBinding<ChatCompletion>`, not a registry name; normal configuration obtains it directly with `ChatEffectBinding::from_config(...)`, and the flow builder collects its private binding package.
+## AI stages
 
-Inference handlers and map-reduce roles prepare a target-free `ChatRequestSpec`. The
-framework retains that exact value, binds the configured target only at the effect
-boundary, records `ChatCompletionReply` as framework replay evidence, and passes the
-retained spec plus reply to interpretation. The reply is not a selectable stage output.
+- `inference!` makes one model decision for each already-bounded input.
+- `ai_map_reduce!` budgets and chunks input, collects map results, and finalises them.
+
+Both use a declared chat effect and a lexical `EffectBinding<ChatCompletion>`
+through `via`. Handlers and roles prepare a `ChatRequestSpec`; the effect boundary
+binds the configured target and records the reply for replay. Interpretation
+receives the retained spec and reply. The reply itself is framework evidence,
+not a selectable stage output.
+
+## Implementation map
+
+| File | Responsibility |
+| --- | --- |
+| `src/dsl/dsl.rs`, `stage_macros.rs` | Flow and stage macro expansion. |
+| `src/dsl/flow_definition.rs` | Deferred construction and build failures. |
+| `src/dsl/flow_builder.rs` | Validation, journal allocation, and stage wiring. |
+| `src/dsl/typing.rs` | Stage, edge, and effect-fact checks. |
+| `src/dsl/composition.rs` | Composite construction contracts. |
 
 ## License
 

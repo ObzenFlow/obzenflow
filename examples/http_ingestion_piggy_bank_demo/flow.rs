@@ -42,12 +42,12 @@
 
 use super::domain::*;
 use super::handlers::Checkbook;
-use obzenflow::sources::{HostedIngressSource, IngressDecoder};
-use obzenflow::{joins, sinks};
-use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_adapters::sinks::SnapshotTableFormatter;
-use obzenflow_dsl::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
-use obzenflow_infra::journal::disk_journals;
+use obzenflow::flow::{async_infinite_source, flow, join, sink, stateful, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::stages::sinks::SnapshotTableFormatter;
+use obzenflow::stages::sources::{HostedIngressSource, IngressDecoder};
+use obzenflow::stages::{joins, sinks};
 use std::path::PathBuf;
 
 /// The ingress decoder owns the domain output emitted by this source.

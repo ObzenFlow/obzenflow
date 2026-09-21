@@ -233,10 +233,10 @@ fn first_class_accumulator_catalogue_cannot_be_collapsed_or_shrunk() {
         fs::read_to_string(root.join("crates/obzenflow_runtime/src/stages/stateful/mod.rs"))
             .expect("read runtime-owned stateful constructors");
     let facade_source =
-        fs::read_to_string(root.join("src/stateful.rs")).expect("read stateful facade");
+        fs::read_to_string(root.join("src/stages/stateful.rs")).expect("read stateful facade");
     assert!(
         facade_source.contains("pub use obzenflow_runtime::stages::stateful"),
-        "obzenflow::stateful must remain a runtime-backed re-export facade"
+        "obzenflow::stages::stateful must remain a runtime-backed re-export facade"
     );
 
     for (module, concept) in [

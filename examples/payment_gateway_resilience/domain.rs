@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::TypedPayload;
+use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 
 /// High-level phase of the traffic pattern.

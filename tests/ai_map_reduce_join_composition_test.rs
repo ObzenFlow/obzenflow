@@ -393,7 +393,7 @@ fn build_flow(
 
         Ok(match placement {
             Placement::Before => {
-                let joined = obzenflow::joins::inner(
+                let joined = obzenflow::stages::joins::inner(
                     |scale: &Scale| scale.key,
                     |seed: &Seed| seed.key,
                     |scale: Scale, mut seed: Seed| {
@@ -422,7 +422,7 @@ fn build_flow(
                 }
             }
             Placement::Stream => {
-                let joined = obzenflow::joins::inner(
+                let joined = obzenflow::stages::joins::inner(
                     |scale: &Scale| scale.key,
                     |row: &Row| row.key,
                     |scale: Scale, mut row: Row| {
@@ -449,7 +449,7 @@ fn build_flow(
                 }
             }
             Placement::Catalog => {
-                let joined = obzenflow::joins::inner(
+                let joined = obzenflow::stages::joins::inner(
                     |reference: &Row| reference.key,
                     |query: &Row| query.key,
                     |reference: Row, mut query: Row| {

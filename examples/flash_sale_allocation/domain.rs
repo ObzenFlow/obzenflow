@@ -4,7 +4,7 @@
 
 //! User-owned facts for the flash-sale allocation process.
 
-use obzenflow_core::TypedPayload;
+use obzenflow::schema::TypedPayload;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

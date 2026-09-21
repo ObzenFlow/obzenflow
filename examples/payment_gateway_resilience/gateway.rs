@@ -20,12 +20,12 @@ use super::domain::{
     PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
-use obzenflow_core::EffectOutcomeFacts;
-use obzenflow_runtime::effects::{
+use obzenflow::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow::error::HandlerError;
+use obzenflow::schema::EffectOutcomeFacts;
+use obzenflow::stages::transforms::EffectfulTransformHandler;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -58,6 +58,7 @@ impl AuthorizePayment {
 /// itself is transient `fx.perform` machinery the handler matches
 /// exhaustively. There is no persisted gateway-decision wrapper.
 #[derive(Debug, Clone, EffectOutcomeFacts)]
+#[effect_outcome(schema = obzenflow::schema)]
 pub enum AuthorizePaymentOutcome {
     Authorized(PaymentAuthorized),
     Declined(PaymentDeclined),
@@ -70,10 +71,10 @@ impl Effect for AuthorizePayment {
     // A charge is never idempotent on its own, so the effect must carry a key
     // the gateway can dedupe on. The runtime enforces this before any I/O.
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type BindingMode = obzenflow_runtime::effects::Portless;
+    type BindingMode = obzenflow::effects::Portless;
 
     type Outcome = AuthorizePaymentOutcome;
-    type OutcomeSemantics = obzenflow_runtime::effects::DomainFacts;
+    type OutcomeSemantics = obzenflow::effects::DomainFacts;
 
     fn label(&self) -> &str {
         "authorize_payment"
@@ -165,13 +166,13 @@ pub struct GatewayTransform {
     recovery_pause_claimed: Arc<AtomicBool>,
 }
 
-type GatewayOutput = obzenflow_core::stage_fact_set![
+type GatewayOutput = obzenflow::schema::stage_fact_set![
     PaymentAuthorized,
     PaymentDeclined,
     CancelledOrder,
     PaymentAuthorizationUnavailable
 ];
-type GatewayAllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
+type GatewayAllowedEffects = obzenflow::effects::effect_set![AuthorizePayment];
 
 impl GatewayTransform {
     /// Pace the first live recovery authorization after the scripted outage.
@@ -225,7 +226,7 @@ impl EffectfulTransformHandler for GatewayTransform {
         &self,
         order: ValidatedOrder,
         fx: &mut Effects<Self::Output, Self::AllowedEffects>,
-    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+    ) -> Result<obzenflow::effects::StageCompletion<Self::Output>, HandlerError> {
         if matches!(
             order.payment_method_state,
             PaymentMethodState::InvalidNumber
@@ -328,7 +329,7 @@ async fn emit_authorization_unavailable(
 #[cfg(test)]
 mod tests {
     use super::{authorization_unavailable_reason, EffectError};
-    use obzenflow_runtime::effects::RetryDisposition;
+    use obzenflow::effects::RetryDisposition;
 
     /// FLOWIP-120i: the recorded payload carries the semantic reason, never
     /// the Display wrapper, so live and replayed failures project to the same

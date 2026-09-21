@@ -5,7 +5,7 @@
 //! FLOWIP-122a hard archive-epoch gate at the application boundary.
 
 use async_trait::async_trait;
-use obzenflow::sources;
+use obzenflow::stages::sources;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};

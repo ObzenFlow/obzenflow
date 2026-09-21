@@ -7,14 +7,14 @@ use super::domain::{
 };
 use super::fixtures;
 use anyhow::{Context, Result};
-use obzenflow::sinks::{CsvProjection, CsvSink};
-use obzenflow::sources::{CsvDecoder, CsvSource};
-use obzenflow_dsl::{flow, join, sink, source, transform, FlowDefinition};
-use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
-use obzenflow_runtime::stages::{JoinReferenceView, TypedJoinHandler};
+use obzenflow::application::{FlowApplication, LogLevel, Presentation};
+use obzenflow::error::HandlerError;
+use obzenflow::flow::{flow, join, sink, source, transform, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
+use obzenflow::stages::sinks::{CsvProjection, CsvSink};
+use obzenflow::stages::sources::{CsvDecoder, CsvSource};
+use obzenflow::stages::transforms::TypedTransformHandler;
 use std::path::PathBuf;
 
 pub struct DemoPaths {

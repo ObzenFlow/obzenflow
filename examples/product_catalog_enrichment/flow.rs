@@ -3,11 +3,11 @@
 // https://obzenflow.dev
 
 use super::{console, domain::*, handlers, sources::*};
-use obzenflow::{joins, stateful};
-use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_dsl::{flow, join, sink, source, stateful, FlowDefinition};
-use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow::flow::{flow, join, sink, source, stateful, FlowDefinition};
+use obzenflow::journal::disk_journals;
+use obzenflow::middleware::RateLimiterBuilder;
+use obzenflow::stages::sinks::SinkTyped;
+use obzenflow::stages::{joins, stateful};
 use std::path::PathBuf;
 
 pub fn build_flow(journal_root: PathBuf) -> FlowDefinition {

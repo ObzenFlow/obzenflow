@@ -7,7 +7,7 @@
 
 use crate::product_catalog_enrichment::{console, domain::*, handlers, sources::*};
 use anyhow::Result;
-use obzenflow::{joins, stateful};
+use obzenflow::stages::{joins, stateful};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_dsl::{flow, join, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;

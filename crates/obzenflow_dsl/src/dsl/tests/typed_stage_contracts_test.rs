@@ -2955,7 +2955,7 @@ mod tests {
     ///
     /// The correct pattern is per-branch alignment with concrete
     /// `TypedPayload` structs that normalise to one common envelope
-    /// type, demonstrated in `examples/multi_source_ingest_demo/`.
+    /// type, as shown in the `obzenflow::flow` input-alignment recipe.
     #[test]
     fn validate_edge_typing_accepts_shared_envelope_silently_documenting_anti_pattern() {
         // Two distinct semantic events the test author "should" model as
@@ -3014,7 +3014,7 @@ mod tests {
         validate_edge_typing(&topology, &descriptors, &name_to_id, &[]).expect(
             "one shared envelope collapses every payload into one TypeId and event descriptor, \
              so the validator accepts this flow even though the two sources semantically emit \
-             different events. This is the wrong answer. See examples/multi_source_ingest_demo/ \
+             different events. See the obzenflow::flow API documentation \
              for the correct per-branch alignment pattern.",
         );
     }

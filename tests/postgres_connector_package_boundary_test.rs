@@ -84,17 +84,17 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         "the public consumer fixture must not import SQLx"
     );
 
-    let example_files = [
-        "examples/postgres_sink_payments/main.rs",
-        "examples/postgres_sink_payments/domain.rs",
-        "examples/postgres_sink_payments/flow.rs",
+    let fixture_files = [
+        "tests/test_support/postgres_payments/mod.rs",
+        "tests/test_support/postgres_payments/domain.rs",
+        "tests/test_support/postgres_payments/flow.rs",
     ];
-    let mut example_source = String::new();
-    for example in example_files {
+    let mut fixture_source = String::new();
+    for fixture in fixture_files {
         let source =
-            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(example))
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture))
                 .unwrap_or_else(|error| {
-                    panic!("read shipped PostgreSQL example {example}: {error}")
+                    panic!("read PostgreSQL application fixture {fixture}: {error}")
                 });
         let upper_source = source.to_ascii_uppercase();
         for forbidden in [
@@ -111,10 +111,10 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         ] {
             assert!(
                 !upper_source.contains(forbidden),
-                "shipped PostgreSQL example {example} must not own DDL `{forbidden}`"
+                "PostgreSQL application fixture {fixture} must not own DDL `{forbidden}`"
             );
         }
-        example_source.push_str(&source);
+        fixture_source.push_str(&source);
     }
     for forbidden in [
         "test-support",
@@ -126,8 +126,8 @@ fn postgres_stays_in_the_feature_gated_adapter_boundary() {
         "inspect_destination",
     ] {
         assert!(
-            !example_source.contains(forbidden),
-            "the PostgreSQL learning example must not contain proof concern `{forbidden}`"
+            !fixture_source.contains(forbidden),
+            "the PostgreSQL application fixture must not contain proof concern `{forbidden}`"
         );
     }
 

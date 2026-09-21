@@ -1,22 +1,26 @@
 # ObzenFlow Adapters
 
-This crate is an internal implementation detail of the ObzenFlow project. Most users should depend on the top-level `obzenflow` crate instead.
+Adapters provides concrete sources, sinks, policies, observers, and reporting
+projections. Application authors use them through `obzenflow::stages`,
+`obzenflow::middleware`, and the other facade modules.
 
-**Layer:** Adapters (outer). Depends on `obzenflow_runtime` and `obzenflow_core`.
+This layer depends on Core and Runtime. Infra assembles adapters with network
+clients, configuration, and hosting.
 
-Provides concrete typed policy, observer, source, sink, and monitoring implementations.
+## Responsibilities
 
-- **Typed policy and observer attachments.** Control factories for rate limiting, circuit breaking, and effect resilience bind at supported live-I/O surfaces. Seven ordinary observer helpers bind read-only, live-only callbacks at framework-owned interception points through the `flow!` macro.
-- **Source adapters.** Ready-to-use source handlers: CSV file reader, HTTP pull/poll sources with pluggable decoders, and an HTTP ingestion source for server-mode flows.
-- **Sink adapters.** Console sink (with JSON, debug, and table formatters), CSV file sink, and the feature-gated PostgreSQL sink. The PostgreSQL connector accepts a typed transport policy, one generated and quoted primary target, an explicit post-target SQL body, and a separate parameter binder. It opens one isolated one-slot pool per materialised writer and prepares the statement before accepting input.
-- **Prometheus reporting.** `MetricsReadModel` retains snapshots published through Core’s `MetricsSnapshotExporter`; `PrometheusProjection` owns names, labels, state encodings, and exposition text. Infra assembles and hosts this concrete path. Prometheus is the supported format; reporting is opt-in and terminal lifecycle totals remain independent.
-- **Studio updates.** `studio::StudioProjection` turns journal entries into status messages for Studio and remembers current state for browsers that connect later. Infra reads the journal and delivers the messages over HTTP. Start with `studio/mod.rs` for the responsibilities and `studio/messages.rs` for the payloads.
+- **Sources:** CSV input, HTTP pull and polling with pluggable decoders, and hosted ingress sources.
+- **Sinks:** console formatting, CSV output, and optional PostgreSQL delivery.
+- **Policies:** rate limiting, circuit breaking, and retry within effect resilience.
+- **Observers:** passive callbacks at source, handler, stateful, join, effect, delivery, and lifecycle boundaries.
+- **Prometheus:** a read model and projection that turn measurement snapshots into metrics.
+- **Studio:** projections that turn journal records into status messages for connected clients.
 
-The built-in adapters are intentionally small in number. To create a source,
-sink, transform, stateful stage, or join, implement its runtime handler trait,
-wire it into a `flow!` block with the stage macros, and let the runtime handle
-journalling, lifecycle, and supervision. Custom cross-cutting behaviour binds
-through the typed factory attachment surfaces, not a generic handler wrapper.
+Runtime owns execution and measurement collection. Infra owns listeners and
+background-task cleanup. Reporting projections do not acquire execution authority.
+
+See the [middleware guide](https://github.com/obzenflow/obzenflow/blob/main/crates/obzenflow_adapters/src/middleware/README.md)
+for policy boundaries and an application-owned observer.
 
 ## License
 

@@ -100,20 +100,7 @@ const COMMANDS: &[CommandSpec] = &[
         ],
     },
     CommandSpec {
-        label: "production-feature payments example build",
-        cargo_args: &[
-            "build",
-            "--locked",
-            "-p",
-            "obzenflow",
-            "--features",
-            "postgres",
-            "--example",
-            "postgres_sink_payments",
-        ],
-    },
-    CommandSpec {
-        label: "payments example black-box test",
+        label: "payments application black-box test",
         cargo_args: &[
             "test",
             "--locked",
@@ -122,7 +109,7 @@ const COMMANDS: &[CommandSpec] = &[
             "--features",
             "postgres,e2e",
             "--test",
-            "postgres_sink_example_e2e_test",
+            "postgres_payments_e2e_test",
         ],
     },
     CommandSpec {
