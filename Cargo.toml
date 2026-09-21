@@ -53,7 +53,6 @@ obzenflow_adapters = { version = "=0.2.1", path = "crates/obzenflow_adapters" }
 obzenflow_dsl = { version = "=0.2.1", path = "crates/obzenflow_dsl" }
 obzenflow_infra = { version = "=0.2.1", path = "crates/obzenflow_infra" }
 obzenflow_benchmarks = { version = "=0.2.1", path = "crates/obzenflow_benchmarks" }
-obzenflow_sketches = { version = "=0.2.1", path = "crates/obzenflow_sketches" }
 
 # External ObzenFlow crates
 obzenflow-topology = "0.5.1"

@@ -207,7 +207,7 @@
 //! - [`application`] configures and runs the application, including ingress.
 //! - [`journal`] constructs, inspects, and exports recorded runs.
 //! - [`ai`] provides inference, model bindings, and budget planning.
-//! - [`env`] reads typed application environment values.
+//! - [`mod@env`] reads typed application environment values.
 
 pub mod ai;
 pub mod application;

@@ -4,9 +4,24 @@
 
 //! Typed application payloads, stage output carriers, and effect outcome facts.
 //!
-//! Derives explicitly select this schema path, including when the dependency is
-//! renamed: `#[stage_output(schema = obzenflow::schema)]` or
-//! `#[effect_outcome(schema = obzenflow::schema)]`.
+//! Carrier derives select the schema facade explicitly. For an application with
+//! `ValidatedOrder`, `InvalidOrder`, and `OrderCancelled` payloads:
+//!
+//! ```rust,ignore
+//! use obzenflow::schema::StageOutputFacts;
+//!
+//! #[derive(Debug, Clone, StageOutputFacts)]
+//! #[stage_output(schema = obzenflow::schema)]
+//! enum ValidationOutput {
+//!     Valid(ValidatedOrder),
+//!     Invalid { invalid: InvalidOrder, cancelled: OrderCancelled },
+//! }
+//! ```
+//!
+//! `EffectOutcomeFacts` uses `#[effect_outcome(schema = obzenflow::schema)]`.
+//! If the dependency is renamed to `of`, use `of::schema` in either attribute.
+//! Declare fact sets with [`stage_fact_set!`]; effect sets use
+//! [`crate::effects::effect_set!`].
 
 pub use obzenflow_core::event::schema::{
     DeclaredStageFactSet, EffectOutcomeFacts, Member, OneFactStageOutput, StageFactSet,
