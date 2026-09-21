@@ -7,7 +7,7 @@ ObzenFlow's superpowers:
 - Process data through typed transforms, joins, and stateful stages using an ergonomic syntax
 - Ingest live streaming data and batch data in the same flow
 - Ships with advanced stage types for inline inference 
-- Separates effectful operations from deterministic logic for integrating durably with external services
+- Separates effectful operations from deterministic logic for replay-safe integrations 
 - Replay and verify completed flows
 - Trace results through recorded history for auditability and reconstruction
 - Resume interrupted work from a last durable frontier
