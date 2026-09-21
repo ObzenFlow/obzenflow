@@ -10,9 +10,25 @@ use crate::journal::disk::inspect::load_manifest;
 use crate::journal::disk::scanner::{
     classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
 };
+use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::payloads::JournalPayload;
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use std::io::BufReader;
 use std::path::Path;
+
+/// Encode a standalone fixture with the production codec and complete local
+/// definitions. Returns bytes without writing any files.
+pub fn encode_record_fixture<P: JournalPayload>(
+    record: &JournalRecord<P>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(codec::prepare(
+        std::slice::from_ref(record),
+        None,
+        Path::new("fixture.log"),
+        DefinitionStore::default(),
+    )?
+    .bytes)
+}
 
 /// Re-encode a sealed test archive with selected optional observations removed.
 /// Decode every source before replacing any carrier, since another journal may

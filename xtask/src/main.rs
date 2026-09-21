@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod journal_fixtures;
 mod postgres;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -129,6 +130,9 @@ fn run() -> Result<()> {
         }
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
         [cmd, rest @ ..] if cmd == "postgres" => postgres::run(rest),
+        [cmd, rest @ ..] if cmd == "regenerate-journal-fixtures" => {
+            journal_fixtures::run(&workspace_root()?, rest).map_err(|error| error as Box<dyn Error>)
+        }
         _ => Err(error(format!("unknown xtask command: {}", args.join(" ")))),
     }
 }
@@ -767,6 +771,7 @@ fn print_help() {
     println!("usage:");
     println!("  cargo xtask studio-jobs <up|down|status>");
     println!("  cargo xtask postgres <up|status|connection|run|test|logs|down|cleanup>");
+    println!("  cargo xtask regenerate-journal-fixtures");
 }
 
 fn print_studio_jobs_help() {

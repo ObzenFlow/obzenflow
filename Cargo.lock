@@ -4013,7 +4013,10 @@ name = "xtask"
 version = "0.2.3"
 dependencies = [
  "libc",
+ "obzenflow_core",
+ "obzenflow_infra",
  "ring",
+ "serde_json",
  "sqlx",
  "tokio",
  "url",

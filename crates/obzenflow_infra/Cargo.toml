@@ -12,9 +12,6 @@ publish = true
 include = [
     "/src/**/*.rs",
     "/src/**/README.md",
-    # Golden bytes and logical records used by inline codec tests.
-    "/src/journal/disk/codec/fixtures/*.frame",
-    "/src/journal/disk/codec/fixtures/*.json",
     "/Cargo.toml",
     "/README.md",
     "/TRADEMARKS.md",
