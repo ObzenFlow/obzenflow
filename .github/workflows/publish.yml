@@ -118,7 +118,7 @@ jobs:
         with:
           toolchain: 1.93.0
 
-      - name: Verify the selected package
+      - name: Verify every release package
         run: |
           set -euo pipefail
 
@@ -128,30 +128,20 @@ jobs:
           }
 
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          if ! package="$(
-            jq -ce --arg name "$REQUESTED_PACKAGE" \
-              '.packages[] | select(.name == $name)' <<< "$metadata"
-          )"; then
-            fail "package '$REQUESTED_PACKAGE' is absent from the tagged workspace"
-          fi
-
-          package_version="$(jq -r '.version' <<< "$package")"
           workspace_version="$(
             jq -r '.packages[] | select(.name == "obzenflow") | .version' <<< "$metadata"
           )"
-          package_license="$(jq -r '.license // ""' <<< "$package")"
-          package_root="$(dirname "$(jq -r '.manifest_path' <<< "$package")")"
-
           [[ "$workspace_version" == "$REQUESTED_VERSION" ]] || \
             fail "tag v$REQUESTED_VERSION has workspace version $workspace_version"
-          [[ "$package_version" == "$REQUESTED_VERSION" ]] || \
-            fail "$REQUESTED_PACKAGE has version $package_version, expected $REQUESTED_VERSION"
-          [[ "$package_license" == "MIT OR Apache-2.0" ]] || \
-            fail "$REQUESTED_PACKAGE has unexpected license metadata: '$package_license'"
 
-          package_files="$(
-            cargo package --package "$REQUESTED_PACKAGE" --locked --list
+          # Match cargo publish --workspace: publish = false is represented by
+          # an empty array in metadata. Check the whole release before allowing
+          # even its first crate to upload.
+          release_packages="$(
+            jq -r '.packages[] | select(.publish != []) | .name' <<< "$metadata"
           )"
+          grep -Fqx -- "$REQUESTED_PACKAGE" <<< "$release_packages" || \
+            fail "package '$REQUESTED_PACKAGE' is absent from the publishable workspace"
 
           required_files=(
             Cargo.toml
@@ -161,36 +151,62 @@ jobs:
             LICENSE-APACHE
             NOTICE
           )
-          for file in "${required_files[@]}"; do
-            grep -Fqx -- "$file" <<< "$package_files" || \
-              fail "$REQUESTED_PACKAGE archive is missing $file"
-          done
+          while IFS= read -r package_name; do
+            package="$(
+              jq -ce --arg name "$package_name" \
+                '.packages[] | select(.name == $name)' <<< "$metadata"
+            )"
+            package_version="$(jq -r '.version' <<< "$package")"
+            package_license="$(jq -r '.license // ""' <<< "$package")"
+            package_root="$(dirname "$(jq -r '.manifest_path' <<< "$package")")"
 
-          while IFS= read -r file; do
-            case "$file" in
-              .cargo_vcs_info.json|Cargo.lock|Cargo.toml|Cargo.toml.orig|README.md|TRADEMARKS.md|LICENSE-MIT|LICENSE-APACHE|NOTICE|src/*.rs|src/README.md|src/*/README.md)
-                ;;
-              *)
-                fail "$REQUESTED_PACKAGE archive contains unexpected file: $file"
-                ;;
-            esac
-          done <<< "$package_files"
+            [[ "$package_version" == "$REQUESTED_VERSION" ]] || \
+              fail "$package_name has version $package_version, expected $REQUESTED_VERSION"
+            [[ "$package_license" == "MIT OR Apache-2.0" ]] || \
+              fail "$package_name has unexpected license metadata: '$package_license'"
 
-          for file in TRADEMARKS.md LICENSE-MIT LICENSE-APACHE NOTICE; do
-            cmp -s "$GITHUB_WORKSPACE/$file" "$package_root/$file" || \
-              fail "$REQUESTED_PACKAGE/$file differs from the canonical root copy"
-          done
+            package_files="$(
+              cargo package --package "$package_name" --locked --list
+            )"
 
-          printf 'package=%s requested=%s workspace=%s\n' \
-            "$REQUESTED_PACKAGE" "$REQUESTED_VERSION" "$workspace_version"
-          printf '%s\n' "$package_files"
+            for file in "${required_files[@]}"; do
+              grep -Fqx -- "$file" <<< "$package_files" || \
+                fail "$package_name archive is missing $file"
+            done
 
-          {
-            printf '### %s %s files\n\n' "$REQUESTED_PACKAGE" "$REQUESTED_VERSION"
-            printf 'Tag: v%s\n\n' "$REQUESTED_VERSION"
-            printf 'Commit: %s\n\n' "$(git rev-parse HEAD)"
-            printf '```text\n%s\n```\n' "$package_files"
-          } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r file; do
+              case "$file" in
+                .cargo_vcs_info.json|Cargo.lock|Cargo.toml|Cargo.toml.orig|README.md|TRADEMARKS.md|LICENSE-MIT|LICENSE-APACHE|NOTICE|src/*.rs|src/README.md|src/*/README.md)
+                  ;;
+                *)
+                  fail "$package_name archive contains unexpected file: $file"
+                  ;;
+              esac
+            done <<< "$package_files"
+
+            for file in TRADEMARKS.md LICENSE-MIT LICENSE-APACHE NOTICE; do
+              cmp -s "$GITHUB_WORKSPACE/$file" "$package_root/$file" || \
+                fail "$package_name/$file differs from the canonical root copy"
+            done
+
+            printf 'package=%s requested=%s workspace=%s\n' \
+              "$package_name" "$REQUESTED_VERSION" "$workspace_version"
+            printf '%s\n' "$package_files"
+
+            {
+              printf '### %s %s files\n\n' "$package_name" "$REQUESTED_VERSION"
+              printf 'Tag: v%s\n\n' "$REQUESTED_VERSION"
+              printf 'Commit: %s\n\n' "$(git rev-parse HEAD)"
+              printf '```text\n%s\n```\n' "$package_files"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$release_packages"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Dry-run the entire release before any upload
+        # Cargo stages unpublished workspace dependencies together, so this
+        # verifies every archive even on the first per-crate dispatch.
+        run: cargo publish --workspace --locked --dry-run
 
   publish:
     needs: preflight
