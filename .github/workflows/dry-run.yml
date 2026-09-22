@@ -84,6 +84,143 @@ jobs:
             core.setOutput("run_url", run.html_url);
             core.setOutput("run_number", run.run_number);
 
+      - name: Validate release manifests
+        id: manifests
+        # Keep the validator inline so a fresh dispatch can use corrected checks
+        # against an existing release tag without cutting a new crate release.
+        shell: python
+        run: |
+          import glob
+          import os
+          from pathlib import Path
+          import tomllib
+
+          def validate_workspace(root, requested_version):
+              def read_manifest(directory):
+                  with (directory / "Cargo.toml").open("rb") as source:
+                      return tomllib.load(source)
+
+              root_manifest = read_manifest(root)
+              workspace = root_manifest["workspace"]
+              version = workspace["package"]["version"]
+              exact_requirement = f"={version}"
+              workspace_dependencies = workspace.get("dependencies", {})
+              private_cli = (root.parent / "obzenflow-cli").resolve()
+              cli_names = {"obzenflow_cli", "obzenflow-cli"}
+              errors = []
+              if version != requested_version:
+                  errors.append(f"workspace version is {version}, expected {requested_version}")
+
+              def dependency_spec(alias, specification, directory):
+                  if isinstance(specification, dict) and specification.get("workspace") is True:
+                      if alias not in workspace_dependencies:
+                          raise ValueError(f"{directory}: missing workspace dependency {alias}")
+                      specification = workspace_dependencies[alias]
+                      directory = root
+                  if isinstance(specification, str):
+                      specification = {"version": specification}
+                  return specification, directory
+
+              def dependencies(manifest, directory):
+                  tables = [("", manifest), *manifest.get("target", {}).items()]
+                  for target, table in tables:
+                      for kind in ("dependencies", "build-dependencies", "dev-dependencies",
+                                   "build_dependencies", "dev_dependencies"):
+                          for alias, specification in table.get(kind, {}).items():
+                              specification, base = dependency_spec(alias, specification, directory)
+                              name = specification.get("package", alias)
+                              path = (base / specification["path"]).resolve() if "path" in specification else None
+                              location = f"{directory / 'Cargo.toml'} [{kind}] {alias}"
+                              if target:
+                                  location += f" (target {target})"
+                              yield kind.replace("_", "-"), name, specification.get("version"), path, location
+
+              excluded = {
+                  Path(path).resolve()
+                  for pattern in workspace.get("exclude", [])
+                  for path in glob.glob(str(root / pattern), recursive=True)
+              }
+
+              def is_excluded(directory):
+                  return any(directory.is_relative_to(path) for path in excluded)
+
+              pending = {root}
+              for pattern in workspace.get("members", []):
+                  matches = glob.glob(str(root / pattern), recursive=True)
+                  if not matches:
+                      errors.append(f"workspace member pattern matches no paths: {pattern}")
+                  pending.update(Path(path).resolve() for path in matches)
+
+              manifests = {}
+              package_dependencies = {}
+              while pending:
+                  directory = min(pending)
+                  pending.remove(directory)
+                  if directory in manifests or (directory != root and is_excluded(directory)):
+                      continue
+                  manifest = read_manifest(directory)
+                  manifests[directory] = manifest
+                  package_dependencies[directory] = list(dependencies(manifest, directory))
+                  # Cargo also includes in-workspace path dependencies as members.
+                  for _, _, _, path, _ in package_dependencies[directory]:
+                      if path is not None and path.is_relative_to(root) and not is_excluded(path):
+                          pending.add(path)
+
+              workspace_names = {manifest["package"]["name"] for manifest in manifests.values()}
+              for directory, manifest in sorted(manifests.items()):
+                  package = manifest["package"]
+                  name = package["name"]
+                  if package.get("version") != {"workspace": True}:
+                      errors.append(f"{name}: must declare version.workspace = true")
+                  if name in cli_names or directory.is_relative_to(private_cli):
+                      errors.append(f"{name}: the private CLI must not be a workspace member")
+                  if name == "obzenflow":
+                      if package.get("autobins") is not False or "bin" in manifest:
+                          errors.append("obzenflow: must set autobins = false and declare no binary targets")
+
+                  for kind, dependency_name, requirement, path, location in package_dependencies[directory]:
+                      if dependency_name in cli_names or (path is not None and path.is_relative_to(private_cli)):
+                          errors.append(f"{location}: must not depend on the private CLI")
+                      if name == "obzenflow" and dependency_name in {"clap", "reqwest"}:
+                          errors.append(f"{location}: CLI-only dependencies must not be in the facade")
+                      # Cargo strips versionless dev-dependencies when packaging.
+                      # Allow them, including self-references used by test fixtures.
+                      if kind == "dev-dependencies" and requirement is None:
+                          continue
+                      if dependency_name in workspace_names and requirement != exact_requirement:
+                          errors.append(f"{location}: must require {exact_requirement}, got {requirement!r}")
+
+              # Check unused versioned workspace declarations too. A versionless
+              # declaration is allowed; each consumer above determines whether it
+              # is a development dependency that Cargo will omit when packaging.
+              for alias, specification in workspace_dependencies.items():
+                  specification, _ = dependency_spec(alias, specification, root)
+                  name = specification.get("package", alias)
+                  requirement = specification.get("version")
+                  if name in workspace_names and requirement is not None and requirement != exact_requirement:
+                      errors.append(f"workspace.dependencies.{alias}: must require {exact_requirement}, got {requirement!r}")
+
+              return errors, len(manifests)
+
+          def main():
+              report_dir = Path(os.environ["REPORT_DIR"])
+              report_dir.mkdir(parents=True, exist_ok=True)
+              try:
+                  errors, count = validate_workspace(
+                      Path(os.environ["GITHUB_WORKSPACE"]).resolve(), os.environ["REQUESTED_VERSION"],
+                  )
+              except (OSError, KeyError, TypeError, ValueError) as error:
+                  errors = [f"Could not validate release manifests: {error}"]
+              if errors:
+                  (report_dir / "failure.txt").write_text("\n".join(errors) + "\n")
+                  for error in errors:
+                      print(f"::error::{error}")
+                  raise SystemExit(1)
+              print(f"Verified {count} workspace manifests: versions, dependency pins, and facade/CLI boundary")
+
+          if __name__ == "__main__":
+              main()
+
       - uses: dtolnay/rust-toolchain@stable
         id: toolchain
         with:
@@ -211,6 +348,7 @@ jobs:
               ("checkout", "Release tag checkout"),
               ("resolve", "Release commit SHA"),
               ("ci", "Successful full main CI for the release SHA"),
+              ("manifests", "Workspace versions, dependency pins, and facade/CLI boundary"),
               ("toolchain", "Rust 1.93.0 setup"),
               ("packages", "Package versions, archive rules, and licenses"),
               ("dry_run", "Cargo packaging, dependency resolution, and build verification"),
@@ -242,7 +380,8 @@ jobs:
           for package in packages:
               name, version = package["name"], package["version"]
               archive_name = f"{name}-{version}"
-              archive = Path(metadata["target_directory"]) / "package" / f"{archive_name}.crate"
+              # Cargo 1.93 publish keeps archives in build-dir/package/tmp-crate.
+              archive = Path(metadata["build_directory"]) / "package" / "tmp-crate" / f"{archive_name}.crate"
               listing = report_dir / f"{name}.files"
               files = listing.read_text().splitlines() if listing.exists() else []
               source = "Preflight file list; no packaged archive available"
@@ -340,6 +479,7 @@ jobs:
               ["Crate", "Version", "License", "Archive rules", "License metadata/copies", "Files"], overview,
           )
           lines += [
+              "Manifest checks: workspace version inheritance, exact internal dependency pins, and facade/CLI separation. Versionless development dependencies are allowed.", "",
               "Archive rules: required files and allowed file types, matching the individual publisher.", "",
               "License checks: MIT OR Apache-2.0 metadata; TRADEMARKS.md, LICENSE-MIT, LICENSE-APACHE, and NOTICE match root copies.", "",
               "File counts include Cargo-generated files. Dependency tables include normal, build, development, and target-specific ObzenFlow dependencies.", "",
