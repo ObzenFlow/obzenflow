@@ -668,20 +668,12 @@ fn warm_caches_cannot_hide_missing_or_edited_carriers_and_archives_are_relocatab
 }
 
 #[test]
+#[ignore = "requires fixture files omitted from the published crate; CI runs this explicitly"]
 fn current_schema_fixtures_preserve_bytes_and_logical_records() {
-    for (name, json, bytes) in [
-        (
-            "observations",
-            include_str!("fixtures/observations.json"),
-            include_bytes!("fixtures/observations.frame").as_slice(),
-        ),
-        (
-            "plain",
-            include_str!("fixtures/plain.json"),
-            include_bytes!("fixtures/plain.frame").as_slice(),
-        ),
-    ] {
-        let record: JournalRecord<ChainPayload> = serde_json::from_str(json).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/journal/disk/codec/fixtures");
+    for name in ["observations", "plain"] {
+        let json = std::fs::read_to_string(fixtures.join(format!("{name}.json"))).unwrap();
+        let record: JournalRecord<ChainPayload> = serde_json::from_str(&json).unwrap();
         let prepared = prepare(
             std::slice::from_ref(&record),
             None,
@@ -689,17 +681,12 @@ fn current_schema_fixtures_preserve_bytes_and_logical_records() {
             DefinitionStore::default(),
         )
         .unwrap();
-        // Regenerate these current-schema fixtures after an intentional schema
-        // bump using this existing test, never a legacy frame converter.
-        if std::env::var_os("UPDATE_JOURNAL_FIXTURES").is_some() {
-            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("src/journal/disk/codec/fixtures/{name}.frame"));
-            std::fs::write(fixture, &prepared.bytes).unwrap();
-        } else {
-            assert_eq!(prepared.bytes, bytes);
-        }
-        let bytes = prepared.bytes.as_slice();
-        let restored = decode(Path::new("fixture.log"), 0, bytes).unwrap();
+        let bytes = std::fs::read(fixtures.join(format!("{name}.frame"))).unwrap();
+        assert_eq!(
+            prepared.bytes, bytes,
+            "{name} fixture differs from the codec"
+        );
+        let restored = decode(Path::new("fixture.log"), 0, &bytes).unwrap();
         assert_eq!(
             serde_json::to_vec(&record).unwrap(),
             serde_json::to_vec(&restored).unwrap()

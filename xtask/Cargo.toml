@@ -8,7 +8,10 @@ publish = false
 
 [dependencies]
 libc = { workspace = true }
+obzenflow_core = { workspace = true }
+obzenflow_infra = { workspace = true, features = ["test-support"] }
 ring = { workspace = true }
+serde_json = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 

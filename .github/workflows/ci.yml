@@ -226,6 +226,14 @@ jobs:
             cargo nextest run --workspace --locked --profile "${profile}"
           fi
 
+      - name: Journal codec fixtures
+        if: matrix.name == 'default'
+        run: |
+          set -euo pipefail
+          # These files are kept in the repository and omitted from crates.io.
+          cargo nextest run --package obzenflow_infra --lib --locked \
+            --run-ignored only current_schema_fixtures_preserve_bytes_and_logical_records
+
   test-test-support:
     needs: fmt
     runs-on: ubuntu-latest

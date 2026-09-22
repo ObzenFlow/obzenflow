@@ -164,8 +164,22 @@ low-cardinality workload; production-flow cost and cache eviction need separate
 measurements.
 
 The current `fixtures/*.frame` files and matching JSON records cover all
-observation families and absent attachments. Tests require byte-for-byte encoding
-and exact logical decoding within the current schema. After a deliberate schema
-bump, regenerate frames from the JSON records with the existing
-`current_schema_fixtures_preserve_bytes_and_logical_records` test and
-`UPDATE_JOURNAL_FIXTURES=1`, then run it normally to check the captured bytes.
+observation families and absent attachments. They remain in the repository and
+are excluded from the published crate. Their test reads them at runtime and is
+ignored by default; CI runs it explicitly to require byte-for-byte encoding and
+exact logical decoding within the current schema. To run it locally:
+
+```sh
+cargo test -p obzenflow_infra --lib current_schema_fixtures_preserve_bytes_and_logical_records -- --ignored
+```
+
+The verification test always compares the committed frames and never updates
+them. After a deliberate schema bump, regenerate both frames from the JSON
+records with the separate development command:
+
+```sh
+cargo xtask regenerate-journal-fixtures
+```
+
+Then run the verification test above and review the changes before committing.
+The regeneration command lives in the unpublished `xtask` development tooling.
