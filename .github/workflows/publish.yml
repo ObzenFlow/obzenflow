@@ -61,6 +61,7 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Verify the release SHA passed full CI on main
+        id: ci
         uses: actions/github-script@v7
         env:
           RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
@@ -97,22 +98,18 @@ jobs:
             }
 
             core.info(`Release SHA ${releaseSha} is sealed by ${run.html_url}`);
-            await core.summary
-              .addHeading("Release CI seal", 3)
-              .addTable([
-                [
-                  { data: "Release SHA", header: true },
-                  { data: "Main CI run", header: true },
-                ],
-                [releaseSha, `<a href="${run.html_url}">#${run.run_number}</a>`],
-              ])
-              .write();
+            core.setOutput("run_url", run.html_url);
+            core.setOutput("run_number", run.run_number);
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
 
       - name: Verify the selected package
+        env:
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          MAIN_CI_URL: ${{ steps.ci.outputs.run_url }}
+          MAIN_CI_NUMBER: ${{ steps.ci.outputs.run_number }}
         run: |
           set -euo pipefail
 
@@ -179,11 +176,36 @@ jobs:
             "$REQUESTED_PACKAGE" "$REQUESTED_VERSION" "$workspace_version"
           printf '%s\n' "$package_files"
 
+          file_count="$(wc -l <<< "$package_files" | tr -d '[:space:]')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          # Match the dry-run report: one outer code block makes the whole
+          # Markdown report copyable, including its nested file-list block.
           {
-            printf '### %s %s files\n\n' "$REQUESTED_PACKAGE" "$REQUESTED_VERSION"
-            printf 'Tag: v%s\n\n' "$REQUESTED_VERSION"
-            printf 'Commit: %s\n\n' "$(git rev-parse HEAD)"
-            printf '```text\n%s\n```\n' "$package_files"
+            printf '## Publish preflight: PASSED\n\n'
+            printf 'Copy the report below for review before approving publication.\n\n'
+            printf '````markdown\n'
+            printf '# Publish preflight report: %s %s\n\n' "$REQUESTED_PACKAGE" "$REQUESTED_VERSION"
+            printf '**Preflight checks: PASSED**\n\n'
+            printf 'Prepared before manual publish approval.\n\n'
+            printf 'Repository: %s\n\n' "$GITHUB_REPOSITORY"
+            printf 'Tag: `v%s`\n\n' "$REQUESTED_VERSION"
+            printf 'Release commit SHA: `%s`\n\n' "$RELEASE_SHA"
+            printf 'Publish workflow: %s\n\n' "$run_url"
+            printf 'Main CI seal: [#%s](%s)\n\n' "$MAIN_CI_NUMBER" "$MAIN_CI_URL"
+            printf 'License: `%s`\n\n' "$package_license"
+            printf '## Verification\n\n'
+            printf '| Check | Result |\n| --- | --- |\n'
+            printf '| Release inputs and package/workspace versions | Passed |\n'
+            printf '| Release tag checkout and commit SHA | Passed |\n'
+            printf '| Successful full main CI for the release SHA | Passed |\n'
+            printf '| Required archive files and allowed file types | Passed |\n'
+            printf '| License metadata and canonical license/notice copies | Passed |\n\n'
+            printf 'This preflight does not check whether dependencies are already published on crates.io.\n\n'
+            printf '## Files (%s)\n\n' "$file_count"
+            printf 'Source: `cargo package --package %s --locked --list`\n\n' "$REQUESTED_PACKAGE"
+            printf '```text\n%s\n```\n\n' "$package_files"
+            printf 'Publish this crate after its dependencies have published successfully.\n'
+            printf '````\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
