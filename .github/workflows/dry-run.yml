@@ -9,10 +9,6 @@ on:
         required: true
         type: string
 
-concurrency:
-  group: dry-run-${{ inputs.version }}
-  cancel-in-progress: false
-
 permissions:
   actions: read
   contents: read
