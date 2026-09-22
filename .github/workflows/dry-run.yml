@@ -22,8 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REQUESTED_VERSION: ${{ inputs.version }}
+      REPORT_DIR: ${{ runner.temp }}/dry-run-report
     steps:
       - name: Validate release version
+        id: version
         run: |
           set -euo pipefail
 
@@ -33,6 +35,7 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+        id: checkout
         with:
           ref: refs/tags/v${{ inputs.version }}
 
@@ -41,6 +44,7 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Verify the release SHA passed full CI on main
+        id: ci
         uses: actions/github-script@v7
         env:
           RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
@@ -77,31 +81,32 @@ jobs:
             }
 
             core.info(`Release SHA ${releaseSha} is sealed by ${run.html_url}`);
-            await core.summary
-              .addHeading("Release CI seal", 3)
-              .addTable([
-                [
-                  { data: "Release SHA", header: true },
-                  { data: "Main CI run", header: true },
-                ],
-                [releaseSha, `<a href="${run.html_url}">#${run.run_number}</a>`],
-              ])
-              .write();
+            core.setOutput("run_url", run.html_url);
+            core.setOutput("run_number", run.run_number);
 
       - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
         with:
           toolchain: 1.93.0
 
       - name: Verify every release package
+        id: packages
         run: |
           set -euo pipefail
 
+          mkdir -p "$REPORT_DIR"
+          : > "$REPORT_DIR/checks.tsv"
+          rustc --version > "$REPORT_DIR/toolchain.txt"
+          cargo --version >> "$REPORT_DIR/toolchain.txt"
+
           fail() {
             echo "::error::$1"
+            printf '%s\n' "$1" > "$REPORT_DIR/failure.txt"
             exit 1
           }
 
           metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          printf '%s\n' "$metadata" > "$REPORT_DIR/metadata.json"
           workspace_version="$(
             jq -r '.packages[] | select(.name == "obzenflow") | .version' <<< "$metadata"
           )"
@@ -140,6 +145,7 @@ jobs:
             package_files="$(
               cargo package --package "$package_name" --locked --list
             )"
+            printf '%s\n' "$package_files" > "$REPORT_DIR/$package_name.files"
 
             for file in "${required_files[@]}"; do
               grep -Fqx -- "$file" <<< "$package_files" || \
@@ -155,17 +161,20 @@ jobs:
                   ;;
               esac
             done <<< "$package_files"
+            printf '%s\tarchive\n' "$package_name" >> "$REPORT_DIR/checks.tsv"
 
             for file in TRADEMARKS.md LICENSE-MIT LICENSE-APACHE NOTICE; do
               cmp -s "$GITHUB_WORKSPACE/$file" "$package_root/$file" || \
                 fail "$package_name/$file differs from the canonical root copy"
             done
+            printf '%s\tlicense\n' "$package_name" >> "$REPORT_DIR/checks.tsv"
 
             printf 'Verified metadata and archive contents: %s %s\n' \
               "$package_name" "$package_version"
           done <<< "$release_packages"
 
       - name: Dry-run the entire release
+        id: dry_run
         # Cargo stages unpublished workspace dependencies together, so every
         # crate can be verified before any crate is uploaded.
         run: |
@@ -173,10 +182,189 @@ jobs:
 
           cargo publish --workspace --locked --dry-run
 
-          {
-            printf '### Dry run passed\n\n'
-            printf 'Tag: v%s\n\n' "$REQUESTED_VERSION"
-            printf 'Commit: %s\n\n' "$(git rev-parse HEAD)"
-            printf 'All publishable workspace crates passed metadata, archive, and build checks.\n\n'
-            printf 'No crates were uploaded. Use Publish to crates.io to publish one crate at a time.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Write the dry-run report
+        if: always()
+        # Keep this inline: the checked-out release tag may predate this workflow.
+        env:
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          MAIN_CI_URL: ${{ steps.ci.outputs.run_url }}
+          MAIN_CI_NUMBER: ${{ steps.ci.outputs.run_number }}
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import tarfile
+          import tomllib
+
+          report_dir = Path(os.environ["REPORT_DIR"])
+          report_dir.mkdir(parents=True, exist_ok=True)
+          steps = json.loads(os.environ["STEP_RESULTS"])
+          release_sha = os.environ["RELEASE_SHA"]
+          run_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+              f"/actions/runs/{os.environ['GITHUB_RUN_ID']}/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
+          checks = [
+              ("version", "Version input"),
+              ("checkout", "Release tag checkout"),
+              ("resolve", "Release commit SHA"),
+              ("ci", "Successful full main CI for the release SHA"),
+              ("toolchain", "Rust 1.93.0 setup"),
+              ("packages", "Package versions, archive rules, and licenses"),
+              ("dry_run", "Cargo packaging, dependency resolution, and build verification"),
+          ]
+
+          def outcome(step):
+              return steps.get(step, {}).get("outcome", "not run")
+
+          def table(headers, rows):
+              def row(values):
+                  return "| " + " | ".join(
+                      str(value).replace("|", "\\|").replace("\n", " ") for value in values
+                  ) + " |"
+              return [row(headers), row(["---"] * len(headers)), *(row(values) for values in rows), ""]
+
+          metadata_path = report_dir / "metadata.json"
+          metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+          packages = sorted(
+              (package for package in metadata.get("packages", []) if package["publish"] != []),
+              key=lambda package: package["name"],
+          )
+          workspace_names = {package["name"] for package in metadata.get("packages", [])}
+          checks_path = report_dir / "checks.tsv"
+          completed = set(checks_path.read_text().splitlines()) if checks_path.exists() else set()
+          inspection_errors = []
+          overview = []
+          details = []
+
+          for package in packages:
+              name, version = package["name"], package["version"]
+              archive_name = f"{name}-{version}"
+              archive = Path(metadata["target_directory"]) / "package" / f"{archive_name}.crate"
+              listing = report_dir / f"{name}.files"
+              files = listing.read_text().splitlines() if listing.exists() else []
+              source = "Preflight file list; no packaged archive available"
+              manifest = None
+              vcs_sha = "Unavailable"
+              details += [f"## {name} {version}", ""]
+              if archive.exists():
+                  try:
+                      with tarfile.open(archive, "r:gz") as crate:
+                          prefix = archive_name + "/"
+                          files = sorted(member.name.removeprefix(prefix) for member in crate if member.isfile())
+                          manifest = tomllib.loads(crate.extractfile(prefix + "Cargo.toml").read().decode())
+                          vcs = json.load(crate.extractfile(prefix + ".cargo_vcs_info.json"))
+                          vcs_sha = vcs["git"]["sha1"]
+                          if vcs_sha != release_sha or vcs["git"].get("dirty", False):
+                              raise ValueError("packaged VCS identity does not match the clean release SHA")
+                          if manifest["package"]["name"] != name or manifest["package"]["version"] != version:
+                              raise ValueError("packaged name/version differs from workspace metadata")
+                          if sorted(files) != sorted(listing.read_text().splitlines()):
+                              raise ValueError("packaged file list differs from the checked preflight list")
+                      source = f"Generated archive: {archive_name}.crate"
+                  except (OSError, KeyError, ValueError, tarfile.TarError) as error:
+                      message = f"{name}: {error}"
+                      inspection_errors.append(message)
+                      source = "Archive inspection incomplete"
+                      details += [f"**Archive inspection error:** {message}", ""]
+              elif outcome("dry_run") == "success":
+                  inspection_errors.append(f"{name}: expected archive {archive_name}.crate is missing")
+
+              archive_check = "Passed" if f"{name}\tarchive" in completed else "Not completed"
+              license_check = "Passed" if f"{name}\tlicense" in completed else "Not completed"
+              overview.append([name, version, package["license"], archive_check, license_check, len(files)])
+              details += [f"File source: {source}", "", f"Packaged commit SHA: `{vcs_sha}`", ""]
+              dependency_rows = []
+              if manifest is not None:
+                  dependency_source = "Packaged Cargo.toml"
+                  tables = [("all", manifest), *sorted(manifest.get("target", {}).items())]
+                  for target, manifest_table in tables:
+                      for kind in ("dependencies", "build-dependencies", "dev-dependencies"):
+                          for alias, dependency in sorted(manifest_table.get(kind, {}).items()):
+                              if isinstance(dependency, str):
+                                  dependency = {"version": dependency}
+                              dependency_name = dependency.get("package", alias)
+                              if dependency_name in workspace_names or dependency_name.startswith("obzenflow"):
+                                  dependency_rows.append([
+                                      kind, dependency_name, dependency.get("version", "unspecified"),
+                                      target, dependency.get("optional", False),
+                                      dependency.get("default-features", True),
+                                      ", ".join(dependency.get("features", [])) or "none",
+                                  ])
+              else:
+                  dependency_source = "Workspace metadata; packaged Cargo.toml unavailable"
+                  for dependency in package["dependencies"]:
+                      if dependency["name"] in workspace_names or dependency["name"].startswith("obzenflow"):
+                          dependency_rows.append([
+                              {None: "dependencies", "build": "build-dependencies", "dev": "dev-dependencies"}[dependency["kind"]],
+                              dependency["name"], dependency["req"], dependency["target"] or "all",
+                              dependency["optional"], dependency["uses_default_features"],
+                              ", ".join(dependency["features"]) or "none",
+                          ])
+              details += ["### ObzenFlow dependencies", "", f"Source: {dependency_source}", ""]
+              details += table(
+                  ["Kind", "Crate", "Version requirement", "Target", "Optional", "Default features", "Features"],
+                  dependency_rows,
+              ) if dependency_rows else ["None.", ""]
+              details += [f"### Files ({len(files)})", "", "```text", *files, "```", ""]
+
+          passed = all(outcome(step) == "success" for step, _ in checks) and bool(packages) and not inspection_errors
+          result = "PASSED" if passed else "FAILED OR INCOMPLETE"
+          lines = [
+              f"# Dry run report: v{os.environ['REQUESTED_VERSION']}", "",
+              f"**Result: {result}**", "", "No crates were uploaded.", "",
+              f"Repository: {os.environ['GITHUB_REPOSITORY']}", "",
+              f"Tag: `v{os.environ['REQUESTED_VERSION']}`", "",
+              f"Release commit SHA: `{release_sha or 'Unavailable'}`", "",
+              f"Dry-run workflow: {run_url}", "",
+          ]
+          if os.environ["MAIN_CI_URL"]:
+              lines += [f"Main CI seal: [#{os.environ['MAIN_CI_NUMBER']}]({os.environ['MAIN_CI_URL']})", ""]
+          else:
+              lines += ["Main CI seal: unavailable; see verification results.", ""]
+          toolchain_path = report_dir / "toolchain.txt"
+          lines += ["## Verification", ""] + table(["Check", "Result"], [(label, outcome(step)) for step, label in checks])
+          lines += ["Command: `cargo publish --workspace --locked --dry-run`", "", "Features: Cargo defaults.", ""]
+          if toolchain_path.exists():
+              lines += ["```text", toolchain_path.read_text().strip(), "```", ""]
+          failure_path = report_dir / "failure.txt"
+          if failure_path.exists():
+              lines += ["Validation error:", "", "```text", failure_path.read_text().strip(), "```", ""]
+          if inspection_errors:
+              lines += ["Archive inspection errors:", "", *(f"- {error}" for error in inspection_errors), ""]
+          if not passed:
+              lines += [f"**This report is partial. Review the failed or incomplete steps in the [run logs]({run_url}).**", ""]
+          lines += ["## Packages", ""] + table(
+              ["Crate", "Version", "License", "Archive rules", "License metadata/copies", "Files"], overview,
+          )
+          lines += [
+              "Archive rules: required files and allowed file types, matching the individual publisher.", "",
+              "License checks: MIT OR Apache-2.0 metadata; TRADEMARKS.md, LICENSE-MIT, LICENSE-APACHE, and NOTICE match root copies.", "",
+              "File counts include Cargo-generated files. Dependency tables include normal, build, development, and target-specific ObzenFlow dependencies.", "",
+              *details,
+              "Publish one crate at a time in dependency order, using this tag and release SHA.", "",
+          ]
+          report = "\n".join(lines)
+          report_path = report_dir / f"dry-run-report-{os.environ['GITHUB_RUN_ATTEMPT']}.md"
+          report_path.write_text(report)
+          summary = f"## Dry run: {result}\n\nCopy the report below, or download `{report_path.name}` from this run's artifacts.\n\n"
+          # GitHub limits each step summary to 1 MiB. Keep the download complete.
+          copyable = f"````markdown\n{report}\n````\n"
+          if len((summary + copyable).encode()) <= 1024 * 1024:
+              summary += copyable
+          else:
+              summary += "The full report exceeds the summary size limit; download the Markdown artifact.\n"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(summary)
+          if inspection_errors:
+              raise SystemExit("Packaged archive inspection failed; see the dry-run report.")
+
+      - name: Upload the dry-run report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.REPORT_DIR }}/dry-run-report-${{ github.run_attempt }}.md
+          archive: false
+          if-no-files-found: error
