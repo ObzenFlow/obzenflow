@@ -22,8 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REQUESTED_VERSION: ${{ inputs.version }}
-      REPORT_DIR: ${{ runner.temp }}/dry-run-report
     steps:
+      - name: Configure report directory
+        run: echo "REPORT_DIR=$RUNNER_TEMP/dry-run-report" >> "$GITHUB_ENV"
+
       - name: Validate release version
         id: version
         run: |
