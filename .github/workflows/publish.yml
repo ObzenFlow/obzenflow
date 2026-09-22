@@ -21,12 +21,6 @@ on:
           - obzenflow_infra
           - obzenflow
 
-# A workspace version is published one crate at a time. A second dispatch for the
-# same version queues instead of racing the currently selected crate.
-concurrency:
-  group: publish-${{ inputs.version }}
-  cancel-in-progress: false
-
 permissions:
   actions: read
   contents: read
