@@ -268,7 +268,7 @@ mod tests {
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
-            (Some(serde_json::json!("6.0")), "6.0"),
+            (Some(serde_json::json!("7.0")), "7.0"),
         ] {
             let temp = tempfile::tempdir().expect("temporary archive");
             let mut manifest = serde_json::json!({

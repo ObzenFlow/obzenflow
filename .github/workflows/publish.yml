@@ -157,6 +157,15 @@ jobs:
               fail "$REQUESTED_PACKAGE archive is missing $file"
           done
 
+          if [[ "$REQUESTED_PACKAGE" == "obzenflow" ]]; then
+            grep -Fqx -- src/bin/obzenflow.rs <<< "$package_files" || \
+              fail "obzenflow archive is missing the facade executable"
+            jq -e '.targets | map(select(.kind == ["bin"])) | length == 1 and .[0].name == "obzenflow" and .[0]["required-features"] == ["cli"]' \
+              <<< "$package" > /dev/null || fail "unexpected facade executable target"
+            cargo check -p obzenflow --locked --no-default-features --lib
+            cargo check -p obzenflow --locked --features cli --bin obzenflow
+          fi
+
           while IFS= read -r file; do
             case "$file" in
               .cargo_vcs_info.json|Cargo.lock|Cargo.toml|Cargo.toml.orig|README.md|TRADEMARKS.md|LICENSE-MIT|LICENSE-APACHE|NOTICE|src/*.rs|src/README.md|src/*/README.md)
@@ -230,6 +239,58 @@ jobs:
         id: auth
 
       - name: Publish the selected crate
-        run: cargo publish --package "$REQUESTED_PACKAGE" --locked
+        run: |
+          if [[ "$REQUESTED_PACKAGE" == "obzenflow" ]]; then
+            cargo publish --package "$REQUESTED_PACKAGE" --locked --features cli
+          else
+            cargo publish --package "$REQUESTED_PACKAGE" --locked
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  cli-artifacts:
+    if: inputs.package == 'obzenflow'
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            binary: obzenflow
+          - os: macos-14
+            platform: macos-aarch64
+            binary: obzenflow
+          - os: windows-latest
+            platform: windows-x86_64
+            binary: obzenflow.exe
+    runs-on: ${{ matrix.os }}
+    env:
+      CLI_BINARY: ${{ matrix.binary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and check the facade executable
+        shell: bash
+        run: |
+          cargo build -p obzenflow --locked --release --features cli --bin obzenflow
+          "target/release/$CLI_BINARY" --version
+          "target/release/$CLI_BINARY" show --help
+          cd target/release
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$CLI_BINARY" > "$CLI_BINARY.sha256"
+          else
+            shasum -a 256 "$CLI_BINARY" > "$CLI_BINARY.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obzenflow-${{ inputs.version }}-${{ matrix.platform }}
+          path: |
+            target/release/${{ matrix.binary }}
+            target/release/${{ matrix.binary }}.sha256
+          if-no-files-found: error

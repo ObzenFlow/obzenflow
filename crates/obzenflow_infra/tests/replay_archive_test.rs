@@ -63,6 +63,7 @@ fn write_manifest(dir: &Path) {
 
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
+        pipeline_writer_id: SystemId::new().into(),
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
         replay: None,
@@ -130,7 +131,7 @@ fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access(
             (None, "<missing>"),
             (Some(serde_json::json!(5.0)), "5.0"),
             (Some(serde_json::json!("4.0")), "4.0"),
-            (Some(serde_json::json!("6.0")), "6.0"),
+            (Some(serde_json::json!("7.0")), "7.0"),
             (Some(serde_json::json!({"major": 5})), r#"{"major":5}"#),
             (Some(serde_json::Value::Null), "null"),
         ] {
@@ -439,7 +440,7 @@ async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
         (None, "<missing>"),
         (Some(serde_json::json!(3.0)), "3.0"),
         (Some(serde_json::json!("2.0")), "2.0"),
-        (Some(serde_json::json!("6.0")), "6.0"),
+        (Some(serde_json::json!("7.0")), "7.0"),
     ] {
         let dir = tempdir().unwrap();
         let mut manifest = serde_json::json!({

@@ -66,7 +66,7 @@ mod tests {
             (serde_json::json!({"journal_schema_version": 3.0}), "3.0"),
             (serde_json::json!({"journal_schema_version": "3.0"}), "3.0"),
             (serde_json::json!({"journal_schema_version": "2.0"}), "2.0"),
-            (serde_json::json!({"journal_schema_version": "6.0"}), "6.0"),
+            (serde_json::json!({"journal_schema_version": "7.0"}), "7.0"),
         ] {
             let error = require_current_journal_schema_version(&value)
                 .expect_err("non-exact version must fail");

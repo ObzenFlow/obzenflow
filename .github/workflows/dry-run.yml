@@ -173,14 +173,18 @@ jobs:
                   if name in cli_names or directory.is_relative_to(private_cli):
                       errors.append(f"{name}: the private CLI must not be a workspace member")
                   if name == "obzenflow":
-                      if package.get("autobins") is not False or "bin" in manifest:
-                          errors.append("obzenflow: must set autobins = false and declare no binary targets")
+                      expected_bins = [{"name": "obzenflow", "path": "src/bin/obzenflow.rs", "required-features": ["cli"]}]
+                      if package.get("autobins") is not False or manifest.get("bin") != expected_bins:
+                          errors.append("obzenflow: must declare only the explicit cli-gated facade executable")
+                      for dependency in ("clap", "reqwest", "tokio"):
+                          if manifest.get("dependencies", {}).get(dependency, {}).get("optional") is not True:
+                              errors.append(f"obzenflow: executable dependency {dependency} must be optional")
+                          if f"dep:{dependency}" not in manifest.get("features", {}).get("cli", []):
+                              errors.append(f"obzenflow: cli must enable dep:{dependency}")
 
                   for kind, dependency_name, requirement, path, location in package_dependencies[directory]:
                       if dependency_name in cli_names or (path is not None and path.is_relative_to(private_cli)):
                           errors.append(f"{location}: must not depend on the private CLI")
-                      if name == "obzenflow" and dependency_name in {"clap", "reqwest"}:
-                          errors.append(f"{location}: CLI-only dependencies must not be in the facade")
                       # Cargo strips versionless dev-dependencies when packaging.
                       # Allow them, including self-references used by test fixtures.
                       if kind == "dev-dependencies" and requirement is None:
@@ -287,6 +291,11 @@ jobs:
                 fail "$package_name archive is missing $file"
             done
 
+            if [[ "$package_name" == "obzenflow" ]]; then
+              grep -Fqx -- src/bin/obzenflow.rs <<< "$package_files" || \
+                fail "obzenflow archive is missing the facade executable"
+            fi
+
             while IFS= read -r file; do
               case "$file" in
                 .cargo_vcs_info.json|Cargo.lock|Cargo.toml|Cargo.toml.orig|README.md|TRADEMARKS.md|LICENSE-MIT|LICENSE-APACHE|NOTICE|src/*.rs|src/README.md|src/*/README.md)
@@ -315,7 +324,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo publish --workspace --locked --dry-run
+          cargo publish --workspace --locked --dry-run --features obzenflow/cli
+
+      - name: Verify the facade executable
+        run: |
+          cargo test -p obzenflow --locked --features cli,web-host --test obzenflow_cli_test
+          cargo run -p obzenflow --locked --features cli --bin obzenflow -- --version
 
       - name: Write the dry-run report
         if: always()
@@ -477,7 +491,7 @@ jobs:
               ["Crate", "Version", "License", "Archive rules", "License metadata/copies", "Files"], overview,
           )
           lines += [
-              "Manifest checks: workspace version inheritance, exact internal dependency pins, and facade/CLI separation. Versionless development dependencies are allowed.", "",
+              "Manifest checks: workspace version inheritance, exact internal dependency pins, and the explicit cli-gated facade executable. Versionless development dependencies are allowed.", "",
               "Archive rules: required files and allowed file types, matching the individual publisher.", "",
               "License checks: MIT OR Apache-2.0 metadata; TRADEMARKS.md, LICENSE-MIT, LICENSE-APACHE, and NOTICE match root copies.", "",
               "File counts include Cargo-generated files. Dependency tables include normal, build, development, and target-specific ObzenFlow dependencies.", "",

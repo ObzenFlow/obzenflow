@@ -137,7 +137,7 @@ jobs:
             features: ""
           - name: production-features
             # Keep this list in sync with the workspace root production features.
-            features: "tokio-console,http-pull,ai,postgres,prometheus,web-host,studio"
+            features: "tokio-console,http-pull,ai,postgres,prometheus,web-host,studio,cli"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

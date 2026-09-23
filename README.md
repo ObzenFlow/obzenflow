@@ -81,6 +81,74 @@ cargo run -p obzenflow --example payment_gateway_resilience -- \
 
 Replay uses the archived inputs and committed effect outcomes without calling the gateway again. A matching replay prints `output matched the original run, 0 differences`.
 
+## Observe and control a running application
+
+The `obzenflow` package includes a CLI behind the `cli` feature. This capability
+ships with the next framework release; from this checkout, install it with:
+
+```bash
+cargo install --path . --features cli --locked
+```
+
+After that release is published, install the same package with
+`cargo install obzenflow --features cli --locked`. Library users do not need the
+`cli` feature. `obzenflow --version` reports package, archive schema and record
+JSONL versions.
+
+Start the application in terminal A with its `web-host` feature enabled:
+
+```bash
+cargo run -p obzenflow --features web-host --example payment_gateway_resilience -- \
+    --server --startup-mode manual --server-port 9090
+```
+
+In terminal B, request Play and observe its committed journals:
+
+```bash
+obzenflow start --server http://127.0.0.1:9090 --follow
+```
+
+The application prints its PID, run directory, and copyable SIGTERM/SIGKILL
+commands. Ctrl-C in terminal A cancels execution. SIGTERM requests graceful
+drain; SIGKILL stops abruptly. Ctrl-C in terminal B only detaches the viewer.
+The viewer remains independent of the application and can inspect committed
+records after it exits. A crash without settlement evidence leaves follow
+pending until you detach.
+
+Observe an existing archive without requesting execution:
+
+```bash
+obzenflow show /path/to/run
+obzenflow show /path/to/run --follow --json
+obzenflow show /path/to/run --detail
+obzenflow journal inspect /path/to/run
+obzenflow journal export-jsonl /path/to/run --output records.jsonl
+obzenflow verify --baseline /path/to/original --candidate /path/to/replay
+```
+
+`show` reads fixed committed prefixes; `--follow` keeps reading until terminal
+outcome, pipeline drain and this reader's coverage are all confirmed. Its exit
+code is 0 for successful observation and 4 for an operational error; the recorded
+pipeline outcome is reported separately. Verification retains codes 0 match,
+1 divergence, 2 uncertified, 3 refused and 4 operational error.
+
+`show --json` writes version-1 JSONL records containing `version`, `run`, `journal`,
+`position`, `kind` and the canonical `record` envelope/payload. Diagnostics go to
+stderr. Positions are append ordinals within each journal, without a global
+ordering across journals. `journal export-jsonl` keeps its existing canonical
+envelope/payload format. Schema 6.0 requires the manifest's pipeline writer
+identity; older archives require a matching older framework/CLI.
+
+`start --follow` requires the server's admitted disk archive to be accessible on
+the client filesystem. It checks the archive and host identities before Play.
+Bare `start` also works with ephemeral runs. Neither command retries an uncertain
+Play request. For an authenticated host, set `OBZENFLOW_CONTROL_AUTHORIZATION`
+to the complete Authorization header value expected by its control-plane policy.
+
+Applications and future Studio/SSE consumers can use the same read service through
+`obzenflow::journal::read::{open_disk_run, RunSnapshot, RunTail}`. They receive
+concrete read-only handles; implementing readers is a journal backend concern.
+
 ## Documentation
 
 Visit the [ObzenFlow website](https://obzenflow.dev/) for an introduction to the framework, its guarantees, and intended uses.

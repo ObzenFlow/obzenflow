@@ -83,6 +83,11 @@ fn root_library_source_contains_only_facade_items() {
 
     let mut violations = Vec::new();
     for source_path in sources {
+        // The explicitly declared executable is an outer adapter. Library
+        // modules retain the facade-only ownership rule.
+        if source_path == root.join("src/bin/obzenflow.rs") {
+            continue;
+        }
         let source = fs::read_to_string(&source_path).expect("read root library source");
         let syntax = syn::parse_file(&source)
             .unwrap_or_else(|error| panic!("parse {}: {error}", source_path.display()));

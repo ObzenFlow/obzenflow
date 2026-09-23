@@ -4,7 +4,7 @@
 
 //! Runtime incarnation identity for Studio phonebook and SSE fencing.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Per-process runtime incarnation identity.
@@ -12,7 +12,7 @@ use std::fmt;
 /// This is an opaque equality/fencing token, not an auth secret and not a
 /// persisted flow/job identity. Its wire representation is a string so it can
 /// cross JSON, SSE, and query parameters unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RuntimeInstanceId(String);
 

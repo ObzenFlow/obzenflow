@@ -122,6 +122,7 @@ mod tests {
 
             obzenflow_version: "0.1.2".to_string(),
             flow_id: "flow_test".to_string(),
+            pipeline_writer_id: obzenflow_core::SystemId::new().into(),
             flow_name: "test".to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay: None,

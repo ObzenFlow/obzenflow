@@ -8,6 +8,10 @@
 //! operators (or the UI) can start and stop the pipeline without
 //! restarting the process.
 
+use crate::web::run_control::{
+    RunControlTarget, TargetedFlowControlRequest, TargetedFlowControlResponse,
+    RUN_CONTROL_PROTOCOL_VERSION,
+};
 use async_trait::async_trait;
 use obzenflow_core::web::{
     EndpointError, HttpEndpoint, HttpMethod, ManagedResponse, Request, Response,
@@ -38,6 +42,7 @@ pub enum FlowStopMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlowControlRequest {
     pub action: FlowControlAction,
     /// Optional stop mode for `action=stop` (defaults to `cancel`).
@@ -66,16 +71,49 @@ pub struct FlowControlResponse {
 /// HTTP endpoint that controls a single flow via FlowHandle.
 pub struct FlowControlEndpoint {
     flow_handle: Arc<dyn FlowControlTarget>,
+    target: Option<RunControlTarget>,
 }
 
 impl FlowControlEndpoint {
     pub fn new(flow_handle: Arc<FlowHandle>) -> Self {
-        Self { flow_handle }
+        Self {
+            flow_handle,
+            target: None,
+        }
     }
 
     #[cfg(test)]
     fn new_for_target(flow_handle: Arc<dyn FlowControlTarget>) -> Self {
-        Self { flow_handle }
+        Self {
+            flow_handle,
+            target: None,
+        }
+    }
+
+    /// Bind conditional control to this host incarnation and its existing handle.
+    pub fn with_target(mut self, target: RunControlTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    fn response(
+        &self,
+        status: u16,
+        versioned: bool,
+        result: FlowControlResponse,
+    ) -> Result<ManagedResponse, EndpointError> {
+        let response = Response::new(status);
+        let encoded = match (versioned, &self.target) {
+            (true, Some(target)) => response.with_json(&TargetedFlowControlResponse {
+                protocol_version: RUN_CONTROL_PROTOCOL_VERSION,
+                target: target.clone(),
+                result,
+            }),
+            _ => response.with_json(&result),
+        };
+        encoded
+            .map(Into::into)
+            .map_err(|error| EndpointError::with_source("Serialising flow control", error))
     }
 }
 
@@ -117,21 +155,62 @@ impl HttpEndpoint for FlowControlEndpoint {
     }
 
     async fn handle(&self, request: Request) -> Result<ManagedResponse, EndpointError> {
-        // Parse JSON body
-        let req: FlowControlRequest = match serde_json::from_slice(&request.body) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = FlowControlResponse {
-                    status: FlowControlStatus::Rejected,
-                    message: format!("Invalid request body: {e}"),
-                    state: None,
-                };
-                return Response::new(400)
-                    .with_json(&resp)
-                    .map_err(|err| EndpointError::with_source("Serialising endpoint response", err))
-                    .map(Into::into);
+        let reject = |message: String| FlowControlResponse {
+            status: FlowControlStatus::Rejected,
+            message,
+            state: None,
+        };
+        let value: serde_json::Value = match serde_json::from_slice(&request.body) {
+            Ok(value) => value,
+            Err(error) => {
+                return self.response(400, false, reject(format!("Invalid request body: {error}")))
             }
         };
+        let versioned = ["protocol_version", "target", "control"]
+            .iter()
+            .any(|field| value.get(field).is_some());
+        let req: FlowControlRequest = if versioned {
+            let envelope: TargetedFlowControlRequest = match serde_json::from_value(value) {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    return self.response(
+                        400,
+                        true,
+                        reject(format!("Invalid conditional control: {error}")),
+                    )
+                }
+            };
+            if envelope.protocol_version != RUN_CONTROL_PROTOCOL_VERSION
+                || !envelope.target.pipeline_writer_id.is_system()
+            {
+                return self.response(
+                    400,
+                    true,
+                    reject("Unsupported protocol or invalid pipeline writer".into()),
+                );
+            }
+            if self.target.as_ref() != Some(&envelope.target) {
+                tracing::warn!(expected = ?envelope.target, actual = ?self.target, "run_target_mismatch");
+                return self.response(
+                    409,
+                    true,
+                    reject("Selected host/run has changed; no control was submitted".into()),
+                );
+            }
+            envelope.control
+        } else {
+            match serde_json::from_value(value) {
+                Ok(control) => control,
+                Err(error) => {
+                    return self.response(
+                        400,
+                        false,
+                        reject(format!("Invalid request body: {error}")),
+                    )
+                }
+            }
+        };
+        let ok_json_response = |body| self.response(200, versioned, body);
 
         fn default_grace_timeout() -> Duration {
             obzenflow_runtime::bootstrap::shutdown_timeout()
@@ -244,13 +323,6 @@ impl HttpEndpoint for FlowControlEndpoint {
             }
         }
     }
-}
-
-fn ok_json_response(body: FlowControlResponse) -> Result<ManagedResponse, EndpointError> {
-    Response::ok()
-        .with_json(&body)
-        .map_err(|e| EndpointError::with_source("Serialising endpoint response", e))
-        .map(Into::into)
 }
 
 fn state_diagnostic_label(state: &PipelineState) -> &'static str {
@@ -450,5 +522,127 @@ mod tests {
         assert_eq!(response.status, FlowControlStatus::Rejected);
         assert_eq!(response.state.as_deref(), Some("materialized"));
         assert_eq!(target.play_calls.load(Ordering::Relaxed), 0);
+    }
+
+    fn binding() -> RunControlTarget {
+        RunControlTarget {
+            runtime_instance_id: crate::web::RuntimeInstanceId::new(),
+            pipeline_writer_id: obzenflow_core::SystemId::new().into(),
+        }
+    }
+
+    fn conditional(target: &RunControlTarget) -> serde_json::Value {
+        json!({ "protocol_version": 1, "target": target, "control": { "action": "play" } })
+    }
+
+    async fn post_json(endpoint: &FlowControlEndpoint, body: serde_json::Value) -> Response {
+        let request = Request::new(HttpMethod::Post, "/api/flow/control".into())
+            .with_body(serde_json::to_vec(&body).unwrap());
+        match endpoint.handle(request).await.unwrap() {
+            ManagedResponse::Unary(response) => response,
+            ManagedResponse::Sse(_) => panic!("expected unary response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_control_checks_both_identities_before_any_runtime_call() {
+        let runtime = TestFlowTarget::new(PipelineState::ReadyForRun);
+        let actual = binding();
+        let endpoint =
+            FlowControlEndpoint::new_for_target(runtime.clone()).with_target(actual.clone());
+        for stale in [
+            RunControlTarget {
+                runtime_instance_id: binding().runtime_instance_id,
+                ..actual.clone()
+            },
+            RunControlTarget {
+                pipeline_writer_id: binding().pipeline_writer_id,
+                ..actual.clone()
+            },
+        ] {
+            let response = post_json(&endpoint, conditional(&stale)).await;
+            assert_eq!(response.status, 409);
+            let response: TargetedFlowControlResponse =
+                serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(response.target, actual);
+            assert_eq!(response.result.status, FlowControlStatus::Rejected);
+        }
+        assert_eq!(runtime.play_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.stop_cancels.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.stop_gracefuls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_mixed_envelopes_never_fall_back_to_legacy_control() {
+        let runtime = TestFlowTarget::new(PipelineState::ReadyForRun);
+        let actual = binding();
+        let endpoint =
+            FlowControlEndpoint::new_for_target(runtime.clone()).with_target(actual.clone());
+        let mut mixed = conditional(&actual);
+        mixed["action"] = json!("play");
+        let mut future = conditional(&actual);
+        future["protocol_version"] = json!(2);
+        let mut unknown = conditional(&actual);
+        unknown["control"]["unexpected"] = json!(true);
+        let mut wrong_writer = conditional(&actual);
+        wrong_writer["target"]["pipeline_writer_id"] = serde_json::to_value(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+        )
+        .unwrap();
+        for body in [
+            mixed,
+            future,
+            unknown,
+            wrong_writer,
+            json!({"action":"play", "target":actual}),
+            json!({"action":"play", "protocol_version":1}),
+            json!({"action":"play", "control":null}),
+        ] {
+            assert_eq!(post_json(&endpoint, body).await.status, 400);
+        }
+        assert_eq!(runtime.play_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.stop_cancels.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.stop_gracefuls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn conditional_response_echoes_binding_and_preserves_typed_runtime_result() {
+        let runtime = TestFlowTarget::with_play_outcome(
+            PipelineState::ReadyForRun,
+            FlowStartControlOutcome::Submitted {
+                observed_state: PipelineState::ReadyForRun,
+            },
+        );
+        let target = binding();
+        let endpoint =
+            FlowControlEndpoint::new_for_target(runtime.clone()).with_target(target.clone());
+        let response = post_json(&endpoint, conditional(&target)).await;
+        assert_eq!(response.status, 200);
+        let response: TargetedFlowControlResponse = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.protocol_version, 1);
+        assert_eq!(response.target, target);
+        assert_eq!(response.result.status, FlowControlStatus::Accepted);
+        *runtime.play_outcome.lock().unwrap() = FlowStartControlOutcome::Rejected {
+            state: PipelineState::Drained,
+            reason: "finished",
+        };
+        let response = post_json(&endpoint, conditional(&target)).await;
+        assert_eq!(response.status, 200);
+        let response: TargetedFlowControlResponse = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.result.status, FlowControlStatus::Rejected);
+        assert_eq!(runtime.play_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn conditional_play_is_inert_for_a_legacy_server_decoder() {
+        #[derive(serde::Deserialize)]
+        struct LegacyRequest {
+            #[allow(dead_code)]
+            action: FlowControlAction,
+        }
+        let error = serde_json::from_value::<LegacyRequest>(conditional(&binding()))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("missing field `action`"));
     }
 }

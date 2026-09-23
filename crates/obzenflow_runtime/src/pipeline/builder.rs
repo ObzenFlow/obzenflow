@@ -62,6 +62,7 @@ fn derive_expected_contract_keys(topology: &Topology, feed_plan: &FeedPlan) -> H
 
 /// Builder for creating a pipeline with proper FSM lifecycle
 pub struct PipelineBuilder {
+    pipeline_system_id: SystemId,
     topology: Arc<Topology>,
     system_journal: Arc<dyn Journal<SystemEvent>>,
     flow_id: FlowId,
@@ -83,6 +84,12 @@ pub struct PipelineBuilder {
 }
 
 impl PipelineBuilder {
+    /// Use the identity allocated by the composition root for the run manifest.
+    pub fn with_pipeline_system_id(mut self, system_id: SystemId) -> Self {
+        self.pipeline_system_id = system_id;
+        self
+    }
+
     pub fn with_runtime_execution(mut self, execution: crate::execution::RuntimeExecution) -> Self {
         self.runtime_execution = Some(execution);
         self
@@ -105,6 +112,7 @@ impl PipelineBuilder {
         flow_id: FlowId,
     ) -> Self {
         Self {
+            pipeline_system_id: SystemId::new(),
             topology,
             system_journal,
             flow_id,
@@ -249,7 +257,7 @@ impl PipelineBuilder {
         }
 
         // Create pipeline context with all mutable state
-        let system_id = SystemId::new();
+        let system_id = self.pipeline_system_id;
 
         // DEBUG: Print topology information
         tracing::debug!("=== TOPOLOGY DEBUG ===");

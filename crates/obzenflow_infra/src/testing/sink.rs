@@ -1799,7 +1799,7 @@ mod tests {
             r#"{}"#,
             r#"{"journal_schema_version":3.0}"#,
             r#"{"journal_schema_version":"2.0"}"#,
-            r#"{"journal_schema_version":"6.0"}"#,
+            r#"{"journal_schema_version":"7.0"}"#,
             r#"{"journal_schema_version":null}"#,
         ] {
             let error = parse_current_manifest(raw).expect_err("non-exact epoch must fail");

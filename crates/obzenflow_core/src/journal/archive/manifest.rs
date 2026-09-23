@@ -17,7 +17,7 @@ pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 /// One version for the journal records, physical frames, and run manifest.
 /// Breaking any of these contracts requires a bump here and fresh archives.
 /// Framework package versions are provenance only, never archive admission gates.
-pub const JOURNAL_SCHEMA_VERSION: &str = "5.0";
+pub const JOURNAL_SCHEMA_VERSION: &str = "6.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -30,6 +30,8 @@ pub struct RunManifest {
     pub journal_schema_version: String,
     pub obzenflow_version: String,
     pub flow_id: String,
+    /// Authoritative pipeline lifecycle writer allocated for this output run.
+    pub pipeline_writer_id: crate::event::WriterId,
     pub flow_name: String,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
