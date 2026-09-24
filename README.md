@@ -191,9 +191,9 @@ with `--verbose`.
   shortening note; field names and numbers are retained. `--detail` and `--json`
   preserve complete evidence. Quiet rows use a compact JSON preview and an
   explicit `… [--detail]` marker when the row exceeds the display width.
-- At snapshot end, confirmed settlement or Ctrl-C, a grayscale footer reports how
+- At snapshot end, confirmed settlement or Ctrl-C, a grayscale footer ends with how
   many journal entries the CLI observed, the recorded run outcome and where reading
-  stopped. A compact `run_manifest.json` summary describes the run, followed by the
+  stopped. A compact `run_manifest.json` summary first describes the run, followed by the
   referenced system journal and each stage's separate data and error journals.
   Journal counts include every observed entry, even hidden runtime entries; empty
   journals remain visible with zero observed entries in the inventory. Each journal
@@ -202,8 +202,10 @@ with `--verbose`.
   journal filename), and **Subscribers**. Connections come from the manifest's
   forward stage topology; an em dash means no recorded connection in that direction.
   System and error journals retain their exact filename headings; error journals
-  also identify their stage. Data and error journals stay separate. A paragraph
-  below the tables explains the subscription and fold notation. Columns fit each
+  also identify their stage. Data and error journals stay separate. A short note
+  below the tables explains journal ownership, control forwarding and EOF completion.
+  The observation count and
+  run outcome are the final lines. Columns fit each
   journal's contents, and author types use compact
   labels such as `FiniteSource`, `Sink` and `MetricsAggregator`.
   Counts are grouped by event type and recorded writer within each

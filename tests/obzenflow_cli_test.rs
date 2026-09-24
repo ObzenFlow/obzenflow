@@ -194,7 +194,7 @@ async fn runtime_writer_columns_use_journaled_registration() {
             String::from_utf8_lossy(&shown.stderr)
         );
         let text = String::from_utf8(shown.stdout).unwrap();
-        let summary = text.split_once("CLI observed").unwrap().1;
+        let summary = text.split_once("MANIFEST     run_manifest.json").unwrap().1;
         for line in summary.lines().skip(1) {
             assert!(
                 line.chars().count() <= width,
@@ -325,7 +325,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         "human settlement uses the footer, not raw diagnostics"
     );
     let human = String::from_utf8(human.stdout).unwrap();
-    assert!(human.contains("Run completed. CLI reached the recorded end of execution."));
+    assert!(human.ends_with("Run completed. CLI reached the recorded end of execution.\n"));
     assert!(human.contains("cli_verify.tick.v1 ← ticks()"), "{human}");
     assert!(
         human.contains("sink.delivery ← out(cli_verify.tick.v1)"),
@@ -511,8 +511,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "underline only digits: {digits:?}"
             );
         }
-        let footer = text.split_once("CLI observed").unwrap().1;
-        assert!(footer.contains("\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m"));
+        let manifest_heading = "\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m";
+        let footer = &text[text.find(manifest_heading).unwrap()..];
         for escape in footer.split("\x1b[").skip(1) {
             let code = escape.split_once('m').unwrap().0;
             assert!(
@@ -655,11 +655,14 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "\nStage: authorize_payment\n  Subscribes to: validate_order\n",
         "  Subscribers: cancelled_orders, manual_review, paid_orders\n",
         "  Subscribers: —\n",
-        "Read (subscribers) = stage(inputs) as a dataflow shorthand:",
+        "Each stage writes business outputs to its own data journal for subscribers to read.",
+        "- Forwarded control signals keep their original Author.",
+        "- EOF from all required upstreams lets a supervisor drain and complete.",
         "Run completed. CLI reached the end of its snapshot.",
     ] {
         assert!(human.contains(teaching), "missing teaching cue {teaching}");
     }
+    assert!(!human.contains("Read (subscribers) = stage(inputs)"));
     assert!(human.lines().any(|line| line == "TRANSFORM"));
     assert!(human.lines().any(|line| line == "DELIVERY"));
     assert!(!human.contains("RUNTIME"));
@@ -688,8 +691,8 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_record_outputs(&explicit, &rows);
     assert_fact_origins(&human);
     assert!(!human.contains("← cause") && !human.contains("root (no recorded parent)"));
-    assert!(human.contains(&format!(
-        "CLI observed {} journal entries across 15 journals.",
+    assert!(human.ends_with(&format!(
+        "CLI observed {} journal entries across 15 journals.\nRun completed. CLI reached the end of its snapshot.\n",
         rows.len()
     )));
     let manifest: serde_json::Value =

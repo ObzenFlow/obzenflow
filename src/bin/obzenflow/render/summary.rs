@@ -29,6 +29,23 @@ impl Renderer {
                 serde_json::json!({"event":"run_observation_summary", "run":run, "reason":end.label(), "records":self.records, "journals":self.journals, "event_types":self.event_types, "other_event_types":self.other_event_types, "progress":progress})
             )?;
         } else {
+            if !self.quiet {
+                if self.shown_records < self.records {
+                    self.summary_line(
+                        output,
+                        MUTED,
+                        &format!(
+                            "{} displayed; {} runtime entries hidden (--verbose).",
+                            self.shown_records,
+                            self.records - self.shown_records,
+                        ),
+                    )?;
+                }
+                self.manifest_summary(output, manifest)?;
+                self.journal_summary(output, manifest)?;
+                self.event_summary(output, manifest)?;
+                writeln!(output)?;
+            }
             self.summary_line(
                 output,
                 HEADING,
@@ -56,22 +73,6 @@ impl Renderer {
                 ObservationEnd::Detached => "CLI stopped observing; execution is independent.",
             };
             self.summary_line(output, BODY, &format!("{outcome} {coverage}"))?;
-            if !self.quiet {
-                if self.shown_records < self.records {
-                    self.summary_line(
-                        output,
-                        MUTED,
-                        &format!(
-                            "{} displayed; {} runtime entries hidden (--verbose).",
-                            self.shown_records,
-                            self.records - self.shown_records,
-                        ),
-                    )?;
-                }
-                self.manifest_summary(output, manifest)?;
-                self.journal_summary(output, manifest)?;
-                self.event_summary(output, manifest)?;
-            }
         }
         output.flush()?;
         diagnostics.flush()?;
@@ -323,8 +324,15 @@ impl Renderer {
         self.summary_line(
             output,
             MUTED,
-            "Read (subscribers) = stage(inputs) as a dataflow shorthand: the stage folds events from the journals named by Subscribes to into recorded outputs in Writes to, which its Subscribers consume. Subscriptions show forward stage connections recorded in the manifest. Author identifies each event's original author, preserved when records are forwarded.",
+            "Each stage writes business outputs to its own data journal for subscribers to read.",
         )?;
+        writeln!(output)?;
+        for line in [
+            "- Forwarded control signals keep their original Author.",
+            "- EOF from all required upstreams lets a supervisor drain and complete.",
+        ] {
+            self.summary_line(output, MUTED, line)?;
+        }
         Ok(())
     }
 
