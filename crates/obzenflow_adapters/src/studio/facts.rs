@@ -30,6 +30,11 @@ pub(super) fn frame(
 ) -> Option<SseFrame> {
     let at = observation(envelope);
     let message = match &envelope.payload {
+        SystemPayload::SupervisorRegistered { descriptor } => StudioMessage::SupervisorRegistered {
+            writer_id: envelope.writer_id(),
+            descriptor,
+            at,
+        },
         SystemPayload::StageLifecycle { .. } => stage_message(envelope)?,
         SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
         SystemPayload::ReplayLifecycle(event) => StudioMessage::ReplayLifecycle {

@@ -7,7 +7,13 @@
 //! This module provides shared types and traits used by both self-supervised
 //! and handler-supervised state machine implementations.
 
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisionMode, SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
+use obzenflow_core::journal::Journal;
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
+use std::sync::Arc;
 
 /// Directives that control a state's event loop
 #[derive(Debug, Clone)]
@@ -46,4 +52,34 @@ pub trait Supervisor {
 
     /// Get the name of this supervised component
     fn name(&self) -> &str;
+
+    /// The actual supervisor family, independent of its task name or event types.
+    fn supervisor_kind(&self) -> SupervisorKind;
+
+    /// Existing journal owned by this run. Registration is ordinary journal
+    /// evidence, published through the same supervised publication scope.
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>>;
+}
+
+pub(super) async fn register<S: Supervisor>(
+    supervisor: &S,
+    context: &S::Context,
+    writer: WriterId,
+    supervision: SupervisionMode,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let descriptor = SupervisorDescriptor {
+        name: supervisor.name().to_owned(),
+        kind: supervisor.supervisor_kind(),
+        supervision,
+    };
+    descriptor
+        .validate(&writer)
+        .map_err(std::io::Error::other)?;
+    super::publication::append(
+        &supervisor.system_journal(context),
+        SystemEvent::new(writer, SystemPayload::SupervisorRegistered { descriptor }),
+        Default::default(),
+    )
+    .await?;
+    Ok(())
 }

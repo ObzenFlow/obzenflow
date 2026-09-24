@@ -1795,11 +1795,17 @@ mod tests {
 
     #[test]
     fn outward_manifest_gate_rejects_every_non_exact_raw_shape() {
+        use obzenflow_core::journal::archive::manifest::JOURNAL_SCHEMA_VERSION;
+
+        let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
+        let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
+        let future_manifest =
+            serde_json::json!({"journal_schema_version": future_version}).to_string();
         for raw in [
             r#"{}"#,
             r#"{"journal_schema_version":3.0}"#,
             r#"{"journal_schema_version":"2.0"}"#,
-            r#"{"journal_schema_version":"6.0"}"#,
+            future_manifest.as_str(),
             r#"{"journal_schema_version":null}"#,
         ] {
             let error = parse_current_manifest(raw).expect_err("non-exact epoch must fail");

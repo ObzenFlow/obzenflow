@@ -13,6 +13,7 @@ pub mod execution_payload;
 pub mod flow_control_payload;
 pub mod sink_operation_payload;
 pub mod stage_fatal_payload;
+pub mod supervisor_descriptor;
 
 pub mod journal_payload;
 pub mod system_payload;

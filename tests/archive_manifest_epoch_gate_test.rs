@@ -96,7 +96,7 @@ async fn every_non_current_manifest_shape_fails_before_materialisation_or_connec
                 "legacy-fields",
                 r#"{"manifest_version":"4.0","journal_format_version":4}"#,
             ),
-            ("future", r#"{"journal_schema_version":"6.0"}"#),
+            ("future", r#"{"journal_schema_version":"7.0"}"#),
             ("object", r#"{"journal_schema_version":{"major":3}}"#),
             ("malformed", r#"{"journal_schema_version":"3.0""#),
         ] {

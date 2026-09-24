@@ -453,11 +453,16 @@ mod tests {
 
     #[test]
     fn inspection_rejects_non_current_manifest_before_output_or_journal_access() {
+        let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
+        let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
         for (version, expected) in [
             (None, "<missing>"),
             (Some(serde_json::json!(3.0)), "3.0"),
             (Some(serde_json::json!("2.0")), "2.0"),
-            (Some(serde_json::json!("6.0")), "6.0"),
+            (
+                Some(serde_json::json!(future_version)),
+                future_version.as_str(),
+            ),
         ] {
             let temp = tempfile::tempdir().expect("temporary archive");
             let mut manifest = serde_json::json!({

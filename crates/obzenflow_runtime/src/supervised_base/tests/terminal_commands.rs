@@ -20,6 +20,83 @@ pub(super) struct TestJournal {
     attempts: AtomicUsize,
     first_append_gate: Option<(Arc<Notify>, Arc<Notify>)>,
     fail: bool,
+    allow_registration: bool,
+}
+
+impl TestJournal {
+    pub(super) fn assert_registered(&self) {
+        assert!(
+            matches!(
+                self.records
+                    .lock()
+                    .unwrap()
+                    .first()
+                    .map(|record| &record.payload),
+                Some(SystemPayload::SupervisorRegistered { .. })
+            ),
+            "registration must precede FSM dispatch and actions"
+        );
+    }
+}
+
+#[tokio::test]
+async fn registration_failure_prevents_both_supervisor_runners_from_executing() {
+    for handler_supervised in [false, true] {
+        let journal = Arc::new(TestJournal {
+            fail: true,
+            ..Default::default()
+        });
+        let publications = PublicationScope::new();
+        let actions = Arc::new(AtomicUsize::new(0));
+        let completions = Arc::new(AtomicUsize::new(0));
+        let context = TestContext {
+            system_journal: journal.clone(),
+            failure_actions_executed: actions.clone(),
+            publications: publications.clone(),
+        };
+        let (sender, _receiver, watcher) =
+            ChannelBuilder::<TestEvent, TestState>::new().build(TestState::Running);
+        let task = if handler_supervised {
+            SupervisorTaskBuilder::new("handler")
+                .with_publications(publications)
+                .spawn_handler_supervised(
+                    TestHandlerSupervisor {
+                        name: "handler".into(),
+                        completion_writes: completions.clone(),
+                        stage_id: StageId::new_const(1),
+                    },
+                    TestState::Running,
+                    context,
+                )
+        } else {
+            SupervisorTaskBuilder::new("runtime")
+                .with_publications(publications)
+                .spawn_self_supervised(
+                    TestSelfSupervisor {
+                        name: "runtime".into(),
+                        completion_writes: completions.clone(),
+                    },
+                    TestState::Running,
+                    context,
+                )
+        };
+        let handle = HandleBuilder::new()
+            .with_event_sender(sender)
+            .with_state_watcher(watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .unwrap();
+        assert!(handle
+            .wait_for_completion()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Journal is full"));
+        assert_eq!(journal.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(actions.load(Ordering::SeqCst), 0);
+        assert_eq!(completions.load(Ordering::SeqCst), 0);
+        assert!(journal.records.lock().unwrap().is_empty());
+    }
 }
 
 #[async_trait::async_trait]
@@ -45,7 +122,10 @@ impl Journal<SystemEvent> for TestJournal {
                 release.notified().await;
             }
         }
-        if self.fail {
+        if self.fail
+            && !(self.allow_registration
+                && matches!(&event.payload, SystemPayload::SupervisorRegistered { .. }))
+        {
             return Err(JournalError::Full);
         }
         let record = JournalRecord::new(JournalWriterId::from(self.id), event);
@@ -299,6 +379,16 @@ impl Supervisor for CompletionSupervisor {
         }
     }
 
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    }
+
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
+        Arc::new(TestJournal::default())
+    }
+
     fn name(&self) -> &str {
         "completion-worker"
     }
@@ -396,9 +486,13 @@ async fn terminal_mailbox_records_errors_arriving_during_completion_actions() {
             assert_eq!(state, ExternalEventTestState::Drained);
         }
         let records = journal.read_all_unordered().await.unwrap();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
+        assert!(matches!(
+            &records[0].payload,
+            SystemPayload::SupervisorRegistered { .. }
+        ));
         assert!(
-            matches!(&records[1].payload, SystemPayload::SupervisorCommandDiscarded { terminal_state, disposition: CommandDiscardDisposition::UnexpectedError, error: Some(error), .. } if terminal_state == state.variant_name() && error == "late external failure")
+            matches!(&records[2].payload, SystemPayload::SupervisorCommandDiscarded { terminal_state, disposition: CommandDiscardDisposition::UnexpectedError, error: Some(error), .. } if terminal_state == state.variant_name() && error == "late external failure")
         );
     }
 }
@@ -407,6 +501,7 @@ async fn terminal_mailbox_records_errors_arriving_during_completion_actions() {
 async fn terminal_mailbox_journal_failure_is_retained_by_supervisor_join() {
     let journal = Arc::new(TestJournal {
         fail: true,
+        allow_registration: true,
         ..Default::default()
     });
     let (sender, receiver, watcher) = ChannelBuilder::new().build(ExternalEventTestState::Drained);
@@ -440,8 +535,13 @@ async fn terminal_mailbox_journal_failure_is_retained_by_supervisor_join() {
     assert!(error.to_string().contains("Journal is full"), "{error}");
     assert_eq!(
         journal.attempts.load(Ordering::SeqCst),
-        1,
+        2,
         "failed appends must not be retried"
     );
-    assert!(journal.read_all_unordered().await.unwrap().is_empty());
+    let records = journal.read_all_unordered().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        &records[0].payload,
+        SystemPayload::SupervisorRegistered { .. }
+    ));
 }

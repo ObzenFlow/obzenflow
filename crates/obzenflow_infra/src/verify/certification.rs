@@ -107,6 +107,7 @@ mod tests {
                 RunManifestStage {
                     dsl_var: key.to_string(),
                     stage_type: StageType::Transform,
+                    is_effectful: Some(false),
                     stage_id: format!("stage_{key}"),
                     stage_logic_version: "1".to_string(),
                     data_journal_file: format!("{key}.log"),
@@ -122,6 +123,7 @@ mod tests {
 
             obzenflow_version: "0.1.2".to_string(),
             flow_id: "flow_test".to_string(),
+            pipeline_writer_id: obzenflow_core::SystemId::new().into(),
             flow_name: "test".to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay: None,

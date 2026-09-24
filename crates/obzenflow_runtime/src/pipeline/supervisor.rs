@@ -457,6 +457,20 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
     fn build_state_machine(&self, initial_state: Self::State) -> super::fsm::PipelineFsm {
         super::fsm::build_pipeline_fsm_with_initial(initial_state)
     }
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
+    }
+
+    fn system_journal(
+        &self,
+        context: &Self::Context,
+    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
+    {
+        context.system_journal.clone()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

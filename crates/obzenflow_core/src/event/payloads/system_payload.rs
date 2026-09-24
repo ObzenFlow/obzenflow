@@ -109,6 +109,11 @@ pub enum CommandDiscardDisposition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
 pub enum SystemPayload {
+    /// Published by the shared supervisor runner before its FSM starts.
+    /// The envelope's writer identifies the registered supervisor instance.
+    SupervisorRegistered {
+        descriptor: super::supervisor_descriptor::SupervisorDescriptor,
+    },
     /// A terminal supervisor closed its mailbox without executing this accepted
     /// command. The envelope's writer identifies the supervisor's stage. This
     /// records the disposition without replacing the existing terminal outcome.
@@ -439,6 +444,7 @@ pub enum MetricsCoordinationEvent {
 impl SystemPayload {
     pub fn event_type(&self) -> &'static str {
         match self {
+            SystemPayload::SupervisorRegistered { .. } => "system.supervisor.registered",
             SystemPayload::SupervisorCommandDiscarded { .. } => {
                 "system.supervisor.command_discarded"
             }

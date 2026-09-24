@@ -18,6 +18,7 @@ pub(crate) mod endpoint_tags;
 pub mod endpoints;
 #[cfg(feature = "warp-server")]
 pub(crate) mod routing;
+pub mod run_control;
 pub mod runtime_instance_id;
 #[cfg(feature = "warp-server")]
 pub(crate) mod surface_metrics;

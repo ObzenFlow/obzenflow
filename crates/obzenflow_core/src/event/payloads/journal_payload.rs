@@ -182,6 +182,11 @@ impl JournalPayload for SystemPayload {
         {
             return Err(descriptor_mismatch());
         }
+        if let Self::SupervisorRegistered { descriptor } = self {
+            descriptor
+                .validate(&provenance.writer_id)
+                .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        }
         Ok(())
     }
 }

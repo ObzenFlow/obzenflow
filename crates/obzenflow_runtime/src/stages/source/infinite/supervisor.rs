@@ -355,6 +355,20 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
         }
     }
 
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::InfiniteSource
+    }
+
+    fn system_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
+    {
+        self.system_journal.clone()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

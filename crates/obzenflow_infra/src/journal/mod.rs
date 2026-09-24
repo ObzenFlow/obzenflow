@@ -12,6 +12,7 @@ pub mod memory;
 mod metrics_tail;
 mod observability;
 mod observation_index;
+pub mod read;
 
 // Re-export implementations
 pub use disk::DiskJournal;

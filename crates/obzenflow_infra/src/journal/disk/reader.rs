@@ -73,6 +73,13 @@ fn open_existing_std_file(path: &Path) -> Result<StdFile, JournalError> {
     })
 }
 
+fn observer_io(error: std::io::Error) -> JournalError {
+    JournalError::Implementation {
+        message: "Failed to read admitted journal".into(),
+        source: error.into(),
+    }
+}
+
 /// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
     decoder: Decoder,
@@ -111,6 +118,10 @@ pub struct DiskJournalReader<T: JournalEvent> {
     read_write_lock: Arc<RwLock<()>>,
     /// Whether a live reader may create a missing empty file.
     create_if_missing: bool,
+    /// Observers never turn an unfinished append into corruption by timing out.
+    observer: bool,
+    /// Retain the admitted file identity, refusing replacement on a later poll.
+    pinned_file: Option<Arc<StdFile>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -150,6 +161,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 at_end: true,
                 read_write_lock: read_write_lock.clone(),
                 create_if_missing: true,
+                observer: false,
+                pinned_file: None,
                 _phantom: std::marker::PhantomData,
             });
         }
@@ -188,6 +201,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             at_end: false,
             read_write_lock,
             create_if_missing: true,
+            observer: false,
+            pinned_file: None,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -233,8 +248,74 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             at_end: false,
             read_write_lock,
             create_if_missing: false,
+            observer: false,
+            pinned_file: None,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    /// Read-only consumer admission with a fixed, verified committed prefix.
+    pub(crate) async fn open_observer(
+        path: PathBuf,
+        journal_id: JournalId,
+    ) -> Result<Self, JournalError> {
+        let scan_path = path.clone();
+        let (file, end) = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let file = open_existing_std_file(&scan_path)?;
+            let scan = || -> Result<u64, JournalError> {
+                let length = file.metadata().map_err(observer_io)?.len();
+                let mut input =
+                    std::io::BufReader::new(file.try_clone().map_err(observer_io)?.take(length));
+                let mut decoder = Decoder::new(&scan_path);
+                let mut buf = Vec::new();
+                let mut end = 0;
+                while let Some((consumed, termination)) =
+                    super::scanner::read_frame_sync(&mut input, &mut buf).map_err(observer_io)?
+                {
+                    match dispose(
+                        classify_frame::<T>(&buf, &mut decoder, end),
+                        termination,
+                        ReadPolicy::LiveTail,
+                    ) {
+                        Disposition::Yield(_) => end += consumed as u64,
+                        Disposition::Skip | Disposition::EndOfCommittedRecords => break,
+                        Disposition::Corrupt(problem) => {
+                            return Err(JournalError::Implementation {
+                                message: format!(
+                                    "Corrupt journal {} at offset {end}: {problem}",
+                                    scan_path.display()
+                                ),
+                                source: std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    problem.to_string(),
+                                )
+                                .into(),
+                            })
+                        }
+                    }
+                }
+                Ok(end)
+            };
+            let end = scan()?;
+            Ok::<_, JournalError>((file, end))
+        })
+        .await
+        .map_err(|error| JournalError::Implementation {
+            message: "Journal snapshot admission task failed".into(),
+            source: error.into(),
+        })??;
+        let mut reader = Self::open_existing(
+            path,
+            journal_id,
+            Arc::new(RwLock::new(())),
+            ReadPolicy::LiveTail,
+        )
+        .await?;
+        reader.initial_end = Some(end);
+        reader.observer = true;
+        reader.pinned_file = Some(Arc::new(file));
+        Ok(reader)
     }
 
     /// Create a new live-tail reader advanced to a specific append position.
@@ -425,6 +506,30 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         } else {
             open_existing_std_file(&self.path)?
         };
+        if let Some(pinned) = &self.pinned_file {
+            let actual = std_file.metadata().map_err(observer_io)?;
+            let expected = pinned.metadata().map_err(observer_io)?;
+            #[cfg(unix)]
+            let replaced = {
+                use std::os::unix::fs::MetadataExt;
+                actual.dev() != expected.dev() || actual.ino() != expected.ino()
+            };
+            #[cfg(not(unix))]
+            let replaced = actual.created().ok() != expected.created().ok();
+            if replaced || actual.len() < self.read_offset {
+                return Err(JournalError::Implementation {
+                    message: format!(
+                        "Admitted journal was replaced or truncated: {}",
+                        self.path.display()
+                    ),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "journal identity changed",
+                    )
+                    .into(),
+                });
+            }
+        }
         let mut reader = BufReader::with_capacity(READ_BUFFER_BYTES, File::from_std(std_file));
         reader
             .seek(SeekFrom::Start(self.read_offset))
@@ -498,8 +603,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                 // record start, so the next poll re-reads it once the writer
                 // completes it.
                 self.at_end = false;
-                self.stall_polls += 1;
-                if self.stall_polls > MAX_STALL_POLLS {
+                self.stall_polls = self.stall_polls.saturating_add(1);
+                if !self.observer && self.stall_polls > MAX_STALL_POLLS {
                     let msg = format!(
                         "Partial read retries exceeded at offset {} in {}",
                         self.read_offset,
@@ -579,104 +684,111 @@ mod tests {
     async fn cancelled_buffered_read_reopens_at_committed_cursor_and_preserves_group_members() {
         use crate::journal::disk::DiskJournal;
         use obzenflow_core::Journal;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cancelled.log");
-        let stage = StageId::new();
-        let journal = DiskJournal::<ChainEvent>::with_owner(
-            path.clone(),
-            obzenflow_core::JournalOwner::stage(stage),
-        )
-        .unwrap();
-        let first = journal
-            .append(
-                ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
-                Default::default(),
+        for observer in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("cancelled.log");
+            let stage = StageId::new();
+            let journal = DiskJournal::<ChainEvent>::with_owner(
+                path.clone(),
+                obzenflow_core::JournalOwner::stage(stage),
             )
-            .await
             .unwrap();
-        let large = journal
-            .append(
-                ChainEventFactory::data_event(
-                    stage.into(),
-                    "large",
-                    serde_json::json!({"body": "x".repeat(READ_BUFFER_BYTES * 3)}),
-                ),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        let group = journal
-            .append_group(
-                "after-cancel",
-                (0..2)
-                    .map(|i| {
-                        ChainEventFactory::data_event(
-                            stage.into(),
-                            "member",
-                            serde_json::json!({"i": i}),
-                        )
-                    })
-                    .collect(),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        let mut reader =
-            DiskJournalReader::<ChainEvent>::new(path, *journal.id(), Arc::new(RwLock::new(())))
+            let first = journal
+                .append(
+                    ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
+                    Default::default(),
+                )
                 .await
                 .unwrap();
-        assert_eq!(
-            reader
-                .next()
+            let large = journal
+                .append(
+                    ChainEventFactory::data_event(
+                        stage.into(),
+                        "large",
+                        serde_json::json!({"body": "x".repeat(READ_BUFFER_BYTES * 3)}),
+                    ),
+                    Default::default(),
+                )
                 .await
-                .unwrap()
-                .unwrap()
-                .envelope
-                .provenance
-                .event
-                .id,
-            first.envelope.provenance.event.id
-        );
-        let gate = Arc::new(FrameReadGate::default());
-        reader.frame_read_gate = Some(gate.clone());
-        tokio::select! {
-            result = reader.next() => panic!("read must pause before cursor commitment: {result:?}"),
-            _ = gate.entered.notified() => {}
-        }
-        assert_eq!(reader.position(), 1);
-        assert!(
-            reader.buffered_reader.is_none(),
-            "cancellation must not retain a stream positioned after the unconsumed frame"
-        );
-        assert_eq!(
-            reader
-                .next()
+                .unwrap();
+            let group = journal
+                .append_group(
+                    "after-cancel",
+                    (0..2)
+                        .map(|i| {
+                            ChainEventFactory::data_event(
+                                stage.into(),
+                                "member",
+                                serde_json::json!({"i": i}),
+                            )
+                        })
+                        .collect(),
+                    Default::default(),
+                )
                 .await
-                .unwrap()
-                .unwrap()
-                .envelope
-                .provenance
-                .event
-                .id,
-            large.envelope.provenance.event.id
-        );
-        for (index, expected) in group.iter().enumerate() {
-            let row = reader.next().await.unwrap().unwrap();
+                .unwrap();
+            let mut reader = if observer {
+                DiskJournalReader::<ChainEvent>::open_observer(path, *journal.id())
+                    .await
+                    .unwrap()
+            } else {
+                DiskJournalReader::<ChainEvent>::new(path, *journal.id(), Arc::new(RwLock::new(())))
+                    .await
+                    .unwrap()
+            };
             assert_eq!(
-                row.envelope.provenance.event.id,
-                expected.envelope.provenance.event.id
+                reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .provenance
+                    .event
+                    .id,
+                first.envelope.provenance.event.id
+            );
+            let gate = Arc::new(FrameReadGate::default());
+            reader.frame_read_gate = Some(gate.clone());
+            tokio::select! {
+                result = reader.next() => panic!("read must pause before cursor commitment: {result:?}"),
+                _ = gate.entered.notified() => {}
+            }
+            assert_eq!(reader.position(), 1);
+            assert!(
+                reader.buffered_reader.is_none(),
+                "cancellation must not retain a stream positioned after the unconsumed frame"
             );
             assert_eq!(
-                row.envelope.provenance.journal.journal_group_member,
-                Some(JournalGroupMember {
-                    index: index as u32,
-                    size: 2
-                })
+                reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .provenance
+                    .event
+                    .id,
+                large.envelope.provenance.event.id
             );
+            for (index, expected) in group.iter().enumerate() {
+                let row = reader.next().await.unwrap().unwrap();
+                assert_eq!(
+                    row.envelope.provenance.event.id,
+                    expected.envelope.provenance.event.id
+                );
+                assert_eq!(
+                    row.envelope.provenance.journal.journal_group_member,
+                    Some(JournalGroupMember {
+                        index: index as u32,
+                        size: 2
+                    })
+                );
+            }
+            assert_eq!(reader.position(), 4);
+            assert!(reader.next().await.unwrap().is_none());
+            assert!(reader.is_at_end());
         }
-        assert_eq!(reader.position(), 4);
-        assert!(reader.next().await.unwrap().is_none());
-        assert!(reader.is_at_end());
     }
 
     #[tokio::test]

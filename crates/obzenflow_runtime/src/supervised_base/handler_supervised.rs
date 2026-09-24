@@ -84,6 +84,14 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         let supervisor_stage = self.stage_id();
         let mut context = context;
 
+        super::base::register(
+            &self,
+            &context,
+            supervisor_writer,
+            obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode::HandlerSupervised,
+        )
+        .await?;
+
         // Build the state machine via the Supervisor API
         let mut machine = self.build_state_machine(initial_state);
         let mut loop_iteration: u64 = 0;

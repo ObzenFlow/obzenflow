@@ -296,13 +296,25 @@ pub(crate) async fn bind_managed_host(
             super::endpoints::studio::StudioUpdatesEndpoint::new(
                 journal,
                 projection,
-                Some(runtime_instance_id),
+                Some(runtime_instance_id.clone()),
                 shutdown.subscribe(),
             )
             .with_observation_interval(observation_interval),
         ))?;
     }
-    server.register_endpoint(Box::new(FlowControlEndpoint::new(flow_handle)))?;
+    let control_target = super::run_control::RunControlTarget {
+        runtime_instance_id,
+        pipeline_writer_id: flow_handle.pipeline_writer_id(),
+    };
+    server.register_endpoint(Box::new(
+        super::endpoints::run_discovery::RunDiscoveryEndpoint::new(
+            &flow_handle,
+            control_target.clone(),
+        ),
+    ))?;
+    server.register_endpoint(Box::new(
+        FlowControlEndpoint::new(flow_handle.clone()).with_target(control_target),
+    ))?;
 
     for endpoint in extra_endpoints {
         server.register_endpoint(endpoint)?;
@@ -311,7 +323,19 @@ pub(crate) async fn bind_managed_host(
     // Add health and ready endpoints
     server.register_endpoint(Box::new(SimpleHealthEndpoint))?;
     server.register_endpoint(Box::new(PipelineReadyEndpoint::new(pipeline_state)))?;
-    server.bind(server_config, shutdown).await
+    let host = server.bind(server_config, shutdown).await?;
+    eprintln!("ObzenFlow application PID: {}", std::process::id());
+    if let Some(locator) = flow_handle.run_substrate().locator() {
+        let path =
+            std::path::absolute(locator.path()).unwrap_or_else(|_| locator.path().to_path_buf());
+        eprintln!("Run archive: {}", path.display());
+    }
+    #[cfg(unix)]
+    {
+        eprintln!("Graceful stop: kill -TERM {}", std::process::id());
+        eprintln!("Abrupt stop:   kill -KILL {}", std::process::id());
+    }
+    Ok(host)
 }
 
 // Built-in health and readiness endpoints

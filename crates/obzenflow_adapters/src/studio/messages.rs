@@ -59,6 +59,13 @@ pub(super) enum StudioMessage<'a> {
         #[serde(flatten)]
         at: Observation<'a>,
     },
+    SupervisorRegistered {
+        writer_id: &'a obzenflow_core::WriterId,
+        descriptor:
+            &'a obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+        #[serde(flatten)]
+        at: Observation<'a>,
+    },
     SupervisorCommandDiscarded {
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_id: Option<String>,
@@ -180,6 +187,7 @@ impl StudioMessage<'_> {
             Self::ReplayLifecycle { .. } => "replay_lifecycle",
             Self::SourceCleanupFailed { .. } => "source_cleanup_failed",
             Self::SupervisorCommandDiscarded { .. } => "supervisor_command_discarded",
+            Self::SupervisorRegistered { .. } => "supervisor_registered",
             Self::MiddlewareLifecycle { .. } | Self::MiddlewareMeasurements { .. } => {
                 "middleware_lifecycle"
             }

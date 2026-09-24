@@ -14,6 +14,7 @@ pub use obzenflow_infra::application::{
     StartupMode, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext,
 };
 
+pub mod control;
 pub mod ingress;
 
 pub use obzenflow_core::config::{

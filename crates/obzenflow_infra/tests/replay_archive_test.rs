@@ -47,6 +47,7 @@ fn write_manifest(dir: &Path) {
         RunManifestStage {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
+            is_effectful: Some(false),
             stage_id: "stage_01H000000000000000000000000".to_string(),
             stage_logic_version: "1".to_string(),
             data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
@@ -63,6 +64,7 @@ fn write_manifest(dir: &Path) {
 
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
+        pipeline_writer_id: SystemId::new().into(),
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
         replay: None,
@@ -125,12 +127,17 @@ fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access(
         audit_archive, corrupt_chain_frame, omit_observations, retain_archive_frames,
     };
 
+    let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
+    let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
     for complete in [false, true] {
         for (version, expected) in [
             (None, "<missing>"),
             (Some(serde_json::json!(5.0)), "5.0"),
             (Some(serde_json::json!("4.0")), "4.0"),
-            (Some(serde_json::json!("6.0")), "6.0"),
+            (
+                Some(serde_json::json!(future_version)),
+                future_version.as_str(),
+            ),
             (Some(serde_json::json!({"major": 5})), r#"{"major":5}"#),
             (Some(serde_json::Value::Null), "null"),
         ] {
@@ -435,11 +442,16 @@ async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
 
 #[tokio::test]
 async fn open_rejects_every_non_current_manifest_shape_before_journal_access() {
+    let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
+    let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
     for (version, expected) in [
         (None, "<missing>"),
         (Some(serde_json::json!(3.0)), "3.0"),
         (Some(serde_json::json!("2.0")), "2.0"),
-        (Some(serde_json::json!("6.0")), "6.0"),
+        (
+            Some(serde_json::json!(future_version)),
+            future_version.as_str(),
+        ),
     ] {
         let dir = tempdir().unwrap();
         let mut manifest = serde_json::json!({

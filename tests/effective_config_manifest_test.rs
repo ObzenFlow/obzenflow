@@ -489,8 +489,8 @@ fn checked_schema_v3_studio_fixture_is_a_complete_run_manifest() {
         manifest.journal_schema_version,
         obzenflow_core::journal::JOURNAL_SCHEMA_VERSION
     );
-    // This retained Studio fixture checks structural decoding of manifest 3.0,
-    // whose journals used format 2; it is not a current replay archive.
+    // This retained Studio fixture checks structural decoding of the current
+    // manifest, including effective-config evidence; it is not a replay archive.
     let evidence = manifest
         .effective_config
         .expect("Studio fixture must carry effective-config evidence");

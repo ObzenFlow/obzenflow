@@ -497,6 +497,30 @@ fn discarded_commands_remain_visible_as_journal_backed_studio_facts() {
 }
 
 #[test]
+fn supervisor_registration_preserves_writer_identity_in_studio() {
+    use obzenflow_core::event::payloads::supervisor_descriptor::{
+        SupervisionMode, SupervisorDescriptor, SupervisorKind,
+    };
+    let writer = WriterId::from(obzenflow_core::SystemId::new());
+    let descriptor = SupervisorDescriptor {
+        name: "metrics_aggregator".into(),
+        kind: SupervisorKind::MetricsAggregator,
+        supervision: SupervisionMode::SelfSupervised,
+    };
+    let expected = json!({"writer_id": writer, "descriptor": descriptor});
+    let envelope = JournalRecord::new(
+        JournalWriterId::from(JournalId::new()),
+        SystemEvent::new(writer, SystemPayload::SupervisorRegistered { descriptor }),
+    );
+    assert_fact_payload(
+        envelope,
+        "supervisor_registered",
+        Some("supervisor_registered"),
+        expected,
+    );
+}
+
+#[test]
 fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() {
     use obzenflow_core::event::observability::*;
     let stage = StageId::new();

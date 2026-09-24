@@ -906,6 +906,7 @@ where
 
         // Create stage-local journals using the builder pattern (FLOWIP-008)
         let flow_id = FlowId::new();
+        let pipeline_system_id = obzenflow_core::SystemId::new();
         let pipeline_id = SystemId::new();
 
         // Get the journal factory for this specific flow
@@ -1053,6 +1054,7 @@ where
                 obzenflow_core::journal::archive::manifest::RunManifestStage {
                     dsl_var: name.clone(),
                     stage_type: descriptor.stage_type(),
+                    is_effectful: Some(descriptor.is_effectful()),
                     stage_id: stage_id.to_string(),
                     stage_logic_version: descriptor.stage_logic_version(),
                     data_journal_file,
@@ -1150,6 +1152,7 @@ where
 
             obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
             flow_id: flow_id.to_string(),
+            pipeline_writer_id: pipeline_system_id.into(),
             flow_name: flow_name.to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay: replay_manifest,
@@ -1597,6 +1600,7 @@ where
                 stage_resources_set.system_journal.clone(),
                 stage_resources_set.flow_id,
             )
+            .with_pipeline_system_id(pipeline_system_id)
             .with_flow_name(flow_name)
             .with_stages(stages)
             .with_sources(sources)

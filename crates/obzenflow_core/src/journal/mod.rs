@@ -16,6 +16,7 @@ pub mod journal_name;
 pub mod journal_owner;
 pub mod journal_trait;
 pub mod metrics_tail;
+pub mod read;
 pub mod reader;
 
 pub use append::{AppendOptions, JournalCapture, ObservationCapture};
