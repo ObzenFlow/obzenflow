@@ -107,6 +107,70 @@ fn execution(event: u64, parents: &[u64], payload: ExecutionPayload) -> RunRecor
 }
 
 #[test]
+fn human_and_jsonl_select_the_same_records() {
+    let records = [
+        fact(1, 100, &[], json!({"n": 1})),
+        execution(
+            102,
+            &[100],
+            ExecutionPayload::AccumulatorProgress {
+                inputs_since_last_report: 1,
+            },
+        ),
+        fact(2, 103, &[102], json!({"n": 2})),
+    ];
+    for include_runtime in [false, true] {
+        for jsonl in [false, true] {
+            let view = ViewArgs {
+                jsonl,
+                include_runtime,
+                ..ViewArgs::default()
+            };
+            let mut renderer = Renderer::new(
+                &view,
+                false,
+                false,
+                records.iter().map(|record| &record.journal),
+            );
+            let mut output = Vec::new();
+            for record in &records {
+                renderer.record(&mut output, record.clone()).unwrap();
+            }
+            renderer.flush_pending(&mut output).unwrap();
+            let expected = if include_runtime {
+                vec![100, 102, 103]
+            } else {
+                vec![100, 103]
+            };
+            assert_eq!(renderer.records, 3, "hidden records are still consumed");
+            assert_eq!(renderer.shown_records, expected.len() as u64);
+            assert_eq!(
+                renderer.shown_journals.values().sum::<u64>(),
+                expected.len() as u64
+            );
+            let output = String::from_utf8(output).unwrap();
+            if jsonl {
+                let positions: Vec<u64> = output
+                    .lines()
+                    .map(|line| {
+                        let record: RunRecord = serde_json::from_str(line).unwrap();
+                        serde_json::to_value(record.position)
+                            .unwrap()
+                            .as_u64()
+                            .unwrap()
+                    })
+                    .collect();
+                assert_eq!(positions, expected);
+            } else {
+                assert_eq!(output.contains("RUNTIME"), include_runtime);
+                assert!(output.contains("sensor.reading.v1 ←"));
+                assert!(output.contains("sensor.classified.v1 ←"));
+            }
+        }
+    }
+}
+
+#[test]
 fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() {
     let mut renderer = renderer();
     let mut output = Vec::new();
@@ -172,7 +236,7 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
     for verbose in [false, true] {
         let mut renderer = renderer();
         renderer.color = true;
-        renderer.verbose = verbose;
+        renderer.include_runtime = verbose;
         let mut output = Vec::new();
         for record in [
             fact(1, 100, &[], json!({"celsius":38})),

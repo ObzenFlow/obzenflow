@@ -181,7 +181,7 @@ async fn runtime_writer_columns_use_journaled_registration() {
             .args([
                 "show",
                 run.to_str().unwrap(),
-                "--verbose",
+                "--include-runtime",
                 "--color",
                 "never",
             ])
@@ -246,16 +246,20 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         );
     }
 
+    let mut exported_records = Vec::new();
     // Both views consume the shared projection, including settlement evidence.
-    for follow in [false, true] {
+    for (follow, include_runtime) in [(false, true), (true, true), (false, false), (true, false)] {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"));
         command
             .arg("show")
             .arg(&baseline)
-            .args(["--json", "--color", "always"])
+            .args(["--jsonl", "--color", "always"])
             .kill_on_drop(true);
         if follow {
             command.arg("--follow");
+        }
+        if include_runtime {
+            command.arg("--include-runtime");
         }
         let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
             .await
@@ -287,19 +291,28 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         assert!(rows.iter().all(|r| r.version == 1));
         let mut positions = std::collections::BTreeMap::new();
         for row in &rows {
-            let next = positions.entry(row.journal.id).or_insert(0);
-            assert_eq!(
-                row.position.0, *next,
-                "no skipped or repeated logical records"
-            );
-            *next += 1;
+            if include_runtime {
+                let next = positions.entry(row.journal.id).or_insert(0);
+                assert_eq!(
+                    row.position.0, *next,
+                    "no skipped or repeated logical records"
+                );
+                *next += 1;
+            }
             assert_eq!(
                 serde_json::to_value(row).unwrap(),
                 expected[&(row.journal.id, row.position)]
             );
         }
-        if !follow {
+        if !follow && include_runtime {
             assert_eq!(rows.len(), expected.len());
+            exported_records = rows
+                .iter()
+                .map(|row| serde_json::to_value(&row.record).unwrap())
+                .collect();
+        }
+        if !include_runtime {
+            assert!(rows.len() < expected.len(), "runtime records are omitted");
         }
         if follow {
             assert!(String::from_utf8_lossy(&output.stderr).contains("run_observation_covered"));
@@ -333,22 +346,52 @@ async fn cli_verify_exit_codes_follow_the_contract() {
     );
     assert!(human.contains("\"n\": 1") && human.contains("\"n\": 3"));
 
-    let export = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
-        .args(["journal", "export-jsonl"])
+    let inspection = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+        .arg("inspect")
         .arg(&baseline)
+        .args(["--stage", "ticks", "--event-type", "cli_verify.tick.v1"])
         .output()
-        .expect("journal export process");
+        .expect("archive inspection process");
     assert!(
-        export.status.success(),
+        inspection.status.success(),
         "{}",
-        String::from_utf8_lossy(&export.stderr)
+        String::from_utf8_lossy(&inspection.stderr)
     );
-    let records: Vec<serde_json::Value> = String::from_utf8(export.stdout)
+    let inspection = String::from_utf8(inspection.stdout).unwrap();
+    assert!(inspection.contains("flow_name:  cli_verify"));
+    assert!(inspection.contains("[ticks]") && !inspection.contains("[out]"));
+    let listing: Vec<_> = inspection
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .collect();
+    assert_eq!(listing.len(), 3);
+    for line in listing {
+        let mut columns = line.split_whitespace();
+        columns.next().unwrap().parse::<u64>().expect("byte offset");
+        assert_eq!(columns.next(), Some("cli_verify.tick.v1"));
+        assert!(columns.next().is_none());
+    }
+
+    // JSONL show retains every canonical envelope and payload. Only the outer
+    // run/journal context and cross-journal presentation order differ.
+    let canonical_export = temp.path().join("canonical.jsonl");
+    obzenflow::journal::export_jsonl(&baseline, Some(&canonical_export)).unwrap();
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(canonical_export)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).expect("canonical record JSON"))
         .collect();
     assert!(!records.is_empty());
+    let sorted_records = |rows: &[serde_json::Value]| {
+        let mut records: Vec<_> = rows.iter().map(ToString::to_string).collect();
+        records.sort_unstable();
+        records
+    };
+    assert_eq!(
+        sorted_records(&exported_records),
+        sorted_records(&records),
+        "show --jsonl --include-runtime exports every complete canonical record"
+    );
     for record in &records {
         let roots = record.as_object().unwrap();
         assert_eq!(roots.len(), 2);
@@ -667,7 +710,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert!(human.lines().any(|line| line == "DELIVERY"));
     assert!(!human.contains("RUNTIME"));
     assert!(!human.contains("system.metrics.exported"));
-    let (verbose, _) = show(&baseline, &["--verbose"]);
+    let (verbose, _) = show(&baseline, &["--include-runtime"]);
     assert!(verbose.contains("RUNTIME"));
     assert!(verbose.contains("control.eof") && !human.contains("control.eof"));
     // This demo's keyed effect records successful domain facts. Explicit
@@ -676,7 +719,10 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         !human.contains("[read from journal]"),
         "live facts are not labeled replayed"
     );
-    let (json, diagnostics) = show(&baseline, &["--json", "--color", "always"]);
+    let (json, diagnostics) = show(
+        &baseline,
+        &["--jsonl", "--include-runtime", "--color", "always"],
+    );
     assert_json_summary(&json, &diagnostics);
     let rows: Vec<RunRecord> = json
         .lines()
@@ -966,8 +1012,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "{selected} displayed; {} runtime entries hidden",
         rows.len() - selected
     )));
+    let (selected_jsonl, diagnostics) = show(&baseline, &["--jsonl"]);
+    assert_json_summary(&selected_jsonl, &diagnostics);
+    assert_eq!(selected_jsonl.lines().count(), selected);
     assert!(!verbose.contains("runtime entries hidden"));
-    let (quiet, _) = show(&baseline, &["--quiet"]);
+    let (quiet, _) = show(&baseline, &["--compact"]);
     assert_record_outputs(&quiet, &rows);
     assert_eq!(
         quiet.lines().count(),
@@ -981,9 +1030,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .all(|line| line.chars().count() <= 90));
     assert!(!quiet.contains("Effects are data:") && !quiet.contains("MANIFEST"));
     assert!(!quiet.contains('⟨'), "quiet still omits clocks");
-    let (quiet_verbose, _) = show(&baseline, &["--quiet", "--verbose"]);
+    let (quiet_verbose, _) = show(&baseline, &["--compact", "--include-runtime"]);
     assert_eq!(quiet_verbose.lines().count(), rows.len() + 2);
-    let (detail, _) = show(&baseline, &["--detail"]);
+    let (detail, _) = show(&baseline, &["--full"]);
     assert_record_outputs(&detail, &rows);
     assert!(detail.contains("\"envelope\": {") && detail.contains("\"causality\": {"));
     assert_eq!(detail.matches("\"envelope\": {").count(), selected);
@@ -998,9 +1047,9 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(full_manifest).unwrap(),
         manifest,
-        "--detail prints the complete recorded manifest, separate from journal counts"
+        "--full prints the complete recorded manifest, separate from journal counts"
     );
-    let (detail_verbose, _) = show(&baseline, &["--detail", "--verbose"]);
+    let (detail_verbose, _) = show(&baseline, &["--full", "--include-runtime"]);
     assert_eq!(
         detail_verbose.matches("\"envelope\": {").count(),
         rows.len()
@@ -1035,11 +1084,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .collect::<Vec<_>>()
         .join(" ")
         .contains("does not establish that the effect fired again"));
-    let (detail, _) = show(&replay, &["--detail"]);
+    let (detail, _) = show(&replay, &["--full"]);
     assert!(detail.contains("original_flow_id") && detail.contains("original_event_id"));
     let (colored, _) = show(&replay, &["--color", "always"]);
     assert_palette(&colored);
-    let (json, diagnostics) = show(&replay, &["--json"]);
+    let (json, diagnostics) = show(&replay, &["--jsonl"]);
     assert_json_summary(&json, &diagnostics);
     let rows: Vec<RunRecord> = json
         .lines()
@@ -1073,7 +1122,7 @@ fn cli_version_commands_and_admission_errors_are_public() {
     let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .arg("show")
         .arg(dir.path())
-        .arg("--json")
+        .arg("--jsonl")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(4));
@@ -1104,11 +1153,17 @@ mod control_client {
         json!({"protocol_version":1,"target":target(host),"result":{"status":status,"message":"fixture control result","state":"ready_for_run"}})
     }
 
+    struct RecordedRequest {
+        request_line: String,
+        body: Value,
+        authorization: bool,
+    }
+
     // A scripted HTTP peer tests transport failures at the executable boundary.
     // None drops the connection after receiving a request, modelling a lost reply.
     async fn peer(
         replies: Vec<(u16, Option<Value>)>,
-    ) -> (String, tokio::task::JoinHandle<Vec<(String, Value)>>) {
+    ) -> (String, tokio::task::JoinHandle<Vec<RecordedRequest>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -1121,6 +1176,7 @@ mod control_client {
                 let mut first = String::new();
                 reader.read_line(&mut first).await.unwrap();
                 let mut length = 0;
+                let mut authorization = false;
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).await.unwrap();
@@ -1131,11 +1187,16 @@ mod control_client {
                         if key.eq_ignore_ascii_case("content-length") {
                             length = value.trim().parse().unwrap();
                         }
+                        authorization |= key.eq_ignore_ascii_case("authorization");
                     }
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).await.unwrap();
-                requests.push((first, serde_json::from_slice(&body).unwrap_or(Value::Null)));
+                requests.push(RecordedRequest {
+                    request_line: first,
+                    body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+                    authorization,
+                });
                 let (status, reply) = replies
                     .next()
                     .unwrap_or((500, Some(json!({"error":"unexpected extra request"}))));
@@ -1153,15 +1214,19 @@ mod control_client {
         (url, task)
     }
 
-    async fn start(url: &str, follow: bool) -> std::process::Output {
+    fn start_command(url: &str, follow: bool) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"));
         command
-            .args(["start", "--server", url, "--timeout-secs", "2", "--json"])
+            .args(["start", "--server", url, "--timeout-secs", "2"])
             .kill_on_drop(true);
         if follow {
-            command.arg("--follow");
+            command.args(["--follow", "--jsonl"]);
         }
-        tokio::time::timeout(Duration::from_secs(5), command.output())
+        command
+    }
+
+    async fn start(url: &str, follow: bool) -> std::process::Output {
+        tokio::time::timeout(Duration::from_secs(5), start_command(url, follow).output())
             .await
             .unwrap()
             .unwrap()
@@ -1188,11 +1253,62 @@ mod control_client {
         );
         let requests = requests.await.unwrap();
         assert_eq!(requests.len(), 2);
-        assert!(requests[0].0.starts_with("GET /api/flow/run "));
-        assert!(requests[1].0.starts_with("POST /api/flow/control "));
-        assert_eq!(requests[1].1["target"], target("host-a"));
-        assert_eq!(requests[1].1["control"]["action"], "play");
-        assert!(requests[1].1.get("action").is_none());
+        assert!(requests[0].request_line.starts_with("GET /api/flow/run "));
+        assert!(requests[1]
+            .request_line
+            .starts_with("POST /api/flow/control "));
+        assert_eq!(requests[1].body["target"], target("host-a"));
+        assert_eq!(requests[1].body["control"]["action"], "play");
+        assert!(requests[1].body.get("action").is_none());
+    }
+
+    #[tokio::test]
+    async fn local_control_ignores_credentials_and_bypasses_proxies() {
+        let (url, requests) = peer(vec![
+            (
+                200,
+                Some(discovery(
+                    json!({"kind":"unavailable","reason":"ephemeral"}),
+                )),
+            ),
+            (200, Some(result("host-a", "accepted"))),
+        ])
+        .await;
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let mut command = start_command(&url, false);
+        command.env("OBZENFLOW_CONTROL_AUTHORIZATION", "unused-test-credential");
+        for name in ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] {
+            command.env(name, &proxy_url);
+        }
+        command.env("NO_PROXY", "").env("no_proxy", "");
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let requests = requests.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| !request.authorization));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), proxy.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_origin_is_refused_before_connecting() {
+        let (url, requests) = peer(vec![]).await;
+        let output = start(&format!("{url}/not-an-origin"), false).await;
+        assert_eq!(output.status.code(), Some(4));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("loopback HTTP origin"));
+        assert!(requests.await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1422,7 +1538,7 @@ mod hosted {
             let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
                 .arg("show")
                 .arg(&path)
-                .arg("--json")
+                .arg("--jsonl")
                 .current_dir(dir.path())
                 .output()
                 .await
@@ -1453,7 +1569,14 @@ mod hosted {
             let rows = dir.path().join("viewer.jsonl");
             let diagnostics = dir.path().join("viewer.stderr");
             let mut viewer = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
-                .args(["start", "--server", &url, "--follow", "--json"])
+                .args([
+                    "start",
+                    "--server",
+                    &url,
+                    "--follow",
+                    "--jsonl",
+                    "--include-runtime",
+                ])
                 .stdout(std::fs::File::create(&rows).unwrap())
                 .stderr(std::fs::File::create(&diagnostics).unwrap())
                 .kill_on_drop(true)

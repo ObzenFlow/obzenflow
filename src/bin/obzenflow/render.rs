@@ -105,10 +105,10 @@ impl ObservationEnd {
 }
 
 pub(super) struct Renderer {
-    json: bool,
-    detail: bool,
-    quiet: bool,
-    verbose: bool,
+    jsonl: bool,
+    full: bool,
+    compact: bool,
+    include_runtime: bool,
     color: bool,
     explain: bool,
     width: usize,
@@ -117,6 +117,7 @@ pub(super) struct Renderer {
     records: u64,
     shown_records: u64,
     journals: BTreeMap<String, u64>,
+    shown_journals: BTreeMap<String, u64>,
     event_types: BTreeMap<String, u64>,
     other_event_types: u64,
     event_counts: event_counts::EventCounts,
@@ -130,11 +131,11 @@ impl Renderer {
         journals: impl Iterator<Item = &'a RunJournal>,
     ) -> Self {
         Self {
-            json: view.json,
-            detail: view.detail,
-            quiet: view.quiet,
-            verbose: view.verbose,
-            color: !view.json
+            jsonl: view.jsonl,
+            full: view.full,
+            compact: view.compact,
+            include_runtime: view.include_runtime,
+            color: !view.jsonl
                 && match view.color {
                     ColorMode::Auto => terminal && !no_color,
                     ColorMode::Always => true,
@@ -151,6 +152,7 @@ impl Renderer {
             records: 0,
             shown_records: 0,
             journals: BTreeMap::new(),
+            shown_journals: BTreeMap::new(),
             event_types: BTreeMap::new(),
             other_event_types: 0,
             event_counts: event_counts::EventCounts::default(),
@@ -163,7 +165,7 @@ impl Renderer {
         run: &RunIdentity,
         follow: bool,
     ) -> Result<(), Error> {
-        if !self.json && !self.quiet {
+        if !self.jsonl && !self.compact {
             writeln!(
                 output,
                 "Observing {} · {}",
@@ -188,10 +190,10 @@ impl Renderer {
                 output,
                 "{}",
                 self.dim(
-                    "Counters track writer history, including hidden runtime records (--verbose)."
+                    "Counters track writer history, including hidden runtime records (--include-runtime)."
                 )
             )?;
-            writeln!(output, "{}\n", self.dim("Headings name stage kinds, or EFFECT/DELIVERY evidence. … marks shortened values; --detail shows complete records."))?;
+            writeln!(output, "{}\n", self.dim("Headings name stage kinds, or EFFECT/DELIVERY evidence. … marks shortened values; --full shows complete records."))?;
         }
         output.flush()?;
         Ok(())
@@ -209,12 +211,13 @@ impl Renderer {
             .map_or("system", |s| s.key.as_str());
         let journal = format!("{stage}/{}", journal_label(record.journal.kind));
         self.records += 1;
-        *self.journals.entry(journal).or_default() += 1;
-        if !self.json {
+        *self.journals.entry(journal.clone()).or_default() += 1;
+        if !self.jsonl {
             self.context.register_supervisor(&record)?;
         }
         if self.visible(&record) {
             self.shown_records += 1;
+            *self.shown_journals.entry(journal).or_default() += 1;
             let event_type = event_type(&record);
             if let Some(count) = self.event_types.get_mut(event_type) {
                 *count += 1;
@@ -223,13 +226,15 @@ impl Renderer {
             } else {
                 self.other_event_types += 1;
             }
-            if !self.json {
+            if !self.jsonl {
                 self.event_counts.record(&record);
             }
         }
-        if self.json {
-            serde_json::to_writer(&mut *output, &record)?;
-            writeln!(output)?;
+        if self.jsonl {
+            if self.visible(&record) {
+                serde_json::to_writer(&mut *output, &record)?;
+                writeln!(output)?;
+            }
         } else {
             // Hidden rows still supply causal context and journal boundaries.
             // Filtering them before buffering could join non-adjacent facts.
@@ -286,7 +291,7 @@ impl Renderer {
     fn group_indices(&self, first: usize) -> (Vec<usize>, bool) {
         let record = &self.pending[first];
         let mut indices = vec![first];
-        if self.quiet || self.detail || !branchable(record) {
+        if self.compact || self.full || !branchable(record) {
             return (indices, true);
         }
         for (index, next) in self.pending.iter().enumerate().skip(first + 1) {
@@ -342,7 +347,7 @@ impl Renderer {
             if fact_error(record).is_some() {
                 relation.push_str(" [processing error]");
             }
-            if self.quiet {
+            if self.compact {
                 let line = abbreviated(
                     &format!("{heading}  {relation}  {}", compact(&value)),
                     self.width,
@@ -369,7 +374,7 @@ impl Renderer {
                     writeln!(output, "{}", self.dim(&line))?;
                 }
             }
-            if self.detail {
+            if self.full {
                 // Serialized JSON escapes untrusted text; it is never styled.
                 serde_json::to_writer_pretty(&mut *output, record)?;
                 writeln!(output)?;
@@ -417,7 +422,7 @@ impl Renderer {
             writeln!(
                 output,
                 "{}",
-                self.dim("Payload shortened; --detail shows complete values.")
+                self.dim("Payload shortened; --full shows complete values.")
             )?;
         }
         Ok(())
@@ -501,7 +506,7 @@ impl Renderer {
     }
 
     fn visible(&self, record: &RunRecord) -> bool {
-        self.json || self.verbose || Category::of(record) != Category::Runtime
+        self.include_runtime || Category::of(record) != Category::Runtime
     }
 
     fn dim(&self, text: &str) -> String {
@@ -591,7 +596,7 @@ fn display_payload(record: &RunRecord) -> Result<Value, Error> {
     Ok(match &record.record {
         RunRecordData::Chain(row) => match &row.payload {
             // The outcome is the teaching surface. Cursor hashes and descriptor
-            // plumbing remain available in --detail and canonical --json.
+            // plumbing remain available in --full and --jsonl records.
             ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
                 let mut payload = serde_json::to_value(&effect.outcome)?;
                 if let Value::Object(fields) = &mut payload {
@@ -623,7 +628,7 @@ fn gloss(record: &RunRecord, context: &Context) -> &'static str {
     }
     match &record.record {
         RunRecordData::Chain(row) => match &row.payload {
-            ChainPayload::Fact(_) if replayed(record) => "This fact carries replay provenance; the original flow and event are available in --detail.",
+            ChainPayload::Fact(_) if replayed(record) => "This fact carries replay provenance; the original flow and event are available in --full.",
             ChainPayload::Fact(_) => match record.journal.stage.as_ref().map(|s| s.stage_type) {
                 Some(StageType::FiniteSource | StageType::InfiniteSource) => "Source stage admitted a domain fact into this run.",
                 Some(StageType::Stateful) if context.is_effectful(record) => "Effectful stateful stage committed a domain fact; apply folds committed facts into state.",
@@ -649,7 +654,7 @@ fn gloss(record: &RunRecord, context: &Context) -> &'static str {
                 DeliveryResult::Failed { .. } => "The sink recorded a failed delivery outcome.",
                 DeliveryResult::Partial { .. } => "The sink recorded a mixture of successful and failed deliveries.",
             },
-            ChainPayload::CompositeData(_) => "A composite stage recorded protocol data; the original envelope and payload remain available in --detail.",
+            ChainPayload::CompositeData(_) => "A composite stage recorded protocol data; the original envelope and payload remain available in --full.",
         },
         RunRecordData::System(row) if matches!(row.payload, SystemPayload::PipelineLifecycle(_)) && *row.writer_id() != record.run.pipeline_writer_id => "This lifecycle row is from another writer; it does not establish this run's pipeline outcome.",
         RunRecordData::System(row) => match &row.payload {

@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use obzenflow::application::control::*;
 use obzenflow::application::{render_verdict, verify_run_dirs, VerifyOptions};
 use obzenflow::journal::read::*;
-use obzenflow::journal::{export_jsonl, inspect, JOURNAL_SCHEMA_VERSION};
+use obzenflow::journal::{inspect, JOURNAL_SCHEMA_VERSION};
 use std::io::{BufWriter, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -19,8 +19,12 @@ use std::time::Duration;
 mod render;
 use render::{ColorMode, ObservationEnd, Renderer};
 
+#[cfg(test)]
+#[path = "obzenflow/args_tests.rs"]
+mod args_tests;
+
 #[derive(Parser)]
-#[command(name = "obzenflow", version, long_version = version(), about = "Observe and inspect ObzenFlow journals")]
+#[command(name = "obzenflow", version, long_version = version(), about = "Show durable execution history and verify recorded output")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -43,16 +47,14 @@ fn version() -> &'static str {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Read a run's committed records without starting or changing execution.
+    /// Show a run's recorded execution without starting or changing it.
     Show(ShowArgs),
-    /// Request Play in an independently running application.
+    /// Request execution in a running application; --follow shows its progress.
+    #[command(mut_args = require_follow_for_view_option)]
     Start(StartArgs),
-    /// Inspect or export the canonical journal envelopes and payloads.
-    Journal {
-        #[command(subcommand)]
-        command: JournalCommand,
-    },
-    /// Compare a recorded run against a baseline using the shared verifier.
+    /// Inspect run metadata, stage data journal files and record byte offsets.
+    Inspect(InspectArgs),
+    /// Verify a candidate run's recorded output against a baseline.
     Verify(VerifyArgs),
 }
 
@@ -66,7 +68,7 @@ struct ShowArgs {
 
 #[derive(Args)]
 struct StartArgs {
-    /// Existing application origin, e.g. http://127.0.0.1:9090.
+    /// Unauthenticated loopback HTTP origin, e.g. http://127.0.0.1:9090.
     #[arg(long)]
     server: reqwest::Url,
     /// HTTP discovery/control timeout; does not limit execution or observation.
@@ -78,43 +80,48 @@ struct StartArgs {
 
 #[derive(Args, Default)]
 struct ViewArgs {
-    /// Follow until the execution is settled and covered, or Ctrl-C detaches.
+    /// Continue until recorded execution is settled and fully read, or Ctrl-C detaches.
     #[arg(long)]
     follow: bool,
-    /// Emit all records as versioned JSONL without human output on stdout.
+    /// Emit the selected records as versioned JSONL, with diagnostics on stderr.
     #[arg(long)]
-    json: bool,
-    /// Include runtime, lifecycle, signal and system records in the human view.
-    #[arg(long, conflicts_with = "json")]
-    verbose: bool,
+    jsonl: bool,
+    /// Include runtime, lifecycle, signal and system records in either output format.
+    #[arg(long)]
+    include_runtime: bool,
     /// Show complete envelopes, payloads and the recorded run manifest.
-    #[arg(long, conflicts_with = "json")]
-    detail: bool,
+    #[arg(long, conflicts_with = "jsonl")]
+    full: bool,
     /// Add teaching notes beneath the operation and payload.
-    #[arg(long, conflicts_with_all = ["quiet", "json"])]
+    #[arg(long, conflicts_with_all = ["compact", "jsonl"])]
     explain: bool,
     /// One line per selected record, without clocks, teaching notes or count tables.
-    #[arg(long, conflicts_with_all = ["explain", "detail", "json"])]
-    quiet: bool,
+    #[arg(long, conflicts_with_all = ["explain", "full", "jsonl"])]
+    compact: bool,
     /// Semantic colors; auto respects terminal detection and NO_COLOR.
     #[arg(long, value_enum, default_value = "auto")]
     color: ColorMode,
 }
 
-#[derive(Subcommand)]
-enum JournalCommand {
-    ExportJsonl {
-        run_dir: PathBuf,
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-    Inspect {
-        run_dir: PathBuf,
-        #[arg(long)]
-        stage: Option<String>,
-        #[arg(long)]
-        event_type: Option<String>,
-    },
+fn require_follow_for_view_option(arg: clap::Arg) -> clap::Arg {
+    match arg.get_id().as_str() {
+        "jsonl" | "include_runtime" | "full" | "explain" | "compact" | "color" => {
+            arg.requires("follow")
+        }
+        _ => arg,
+    }
+}
+
+#[derive(Args)]
+struct InspectArgs {
+    /// Directory containing run_manifest.json.
+    run_dir: PathBuf,
+    /// Limit the listing to one stage key.
+    #[arg(long)]
+    stage: Option<String>,
+    /// Limit the listing to one event type.
+    #[arg(long)]
+    event_type: Option<String>,
 }
 
 #[derive(Args)]
@@ -164,18 +171,13 @@ async fn run(command: Command) -> Result<u8, Error> {
             })
             .await?
         }
-        Command::Journal { command } => {
+        Command::Inspect(args) => {
             tokio::task::spawn_blocking(move || {
-                match command {
-                    JournalCommand::ExportJsonl { run_dir, output } => {
-                        export_jsonl(&run_dir, output.as_deref())?
-                    }
-                    JournalCommand::Inspect {
-                        run_dir,
-                        stage,
-                        event_type,
-                    } => inspect(&run_dir, stage.as_deref(), event_type.as_deref())?,
-                }
+                inspect(
+                    &args.run_dir,
+                    args.stage.as_deref(),
+                    args.event_type.as_deref(),
+                )?;
                 Ok::<_, Error>(0)
             })
             .await?
@@ -183,29 +185,36 @@ async fn run(command: Command) -> Result<u8, Error> {
     }
 }
 
-async fn start(args: StartArgs) -> Result<u8, Error> {
-    if !matches!(args.server.scheme(), "http" | "https")
-        || !args.server.username().is_empty()
-        || args.server.password().is_some()
-        || args.server.path() != "/"
-        || args.server.query().is_some()
-        || args.server.fragment().is_some()
+fn validate_server_origin(server: &reqwest::Url) -> Result<(), Error> {
+    let host = server.host_str().unwrap_or_default();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if server.scheme() != "http"
+        || !loopback
+        || !server.username().is_empty()
+        || server.password().is_some()
+        || server.path() != "/"
+        || server.query().is_some()
+        || server.fragment().is_some()
     {
         return Err(
-            "--server must be an HTTP(S) origin without credentials, path, query or fragment"
+            "--server must be a loopback HTTP origin without credentials, path, query or fragment"
                 .into(),
         );
     }
-    let mut headers = reqwest::header::HeaderMap::new();
-    // Credentials never appear in arguments, URLs, logs or journal output.
-    if let Ok(authorization) = std::env::var("OBZENFLOW_CONTROL_AUTHORIZATION") {
-        let mut value = reqwest::header::HeaderValue::from_str(&authorization)
-            .map_err(|_| "invalid OBZENFLOW_CONTROL_AUTHORIZATION value")?;
-        value.set_sensitive(true);
-        headers.insert(reqwest::header::AUTHORIZATION, value);
-    }
+    Ok(())
+}
+
+async fn start(args: StartArgs) -> Result<u8, Error> {
+    validate_server_origin(&args.server)?;
     let client = reqwest::Client::builder()
-        .default_headers(headers)
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .timeout(Duration::from_secs(args.timeout_secs))
@@ -275,11 +284,7 @@ async fn start(args: StartArgs) -> Result<u8, Error> {
     if let Some(snapshot) = snapshot {
         observe(snapshot, &args.view).await
     } else {
-        if args.view.json {
-            println!("{}", serde_json::to_string(&response)?);
-        } else {
-            println!("{}", response.result.message);
-        }
+        println!("{}", response.result.message);
         Ok(0)
     }
 }
@@ -387,7 +392,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
             TailRead::Pending => renderer.flush_pending(&mut output)?,
         }
         if tail.progress().settled_prefix.is_some() {
-            if view.json {
+            if view.jsonl {
                 eprintln!(
                     "{}",
                     serde_json::json!({"event":"run_observation_covered", "run":tail.identity(), "progress":tail.progress()})

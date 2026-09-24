@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::fmt::Write;
 
 /// Preserve JSON structure and scalar types. Callers label any string value
-/// shortened for the terminal and offer the complete record via --detail.
+/// shortened for the terminal and offer the complete record via --full.
 pub(super) fn pretty(value: &Value, width: usize) -> (String, bool) {
     let mut preview = value.clone();
     let mut shortened = false;
@@ -135,7 +135,7 @@ pub(super) fn safe_text(text: &str) -> String {
 }
 
 pub(super) fn abbreviated(text: &str, limit: usize) -> String {
-    const SUFFIX: &str = "… [--detail]";
+    const SUFFIX: &str = "… [--full]";
     if text.chars().count() <= limit {
         return text.into();
     }

@@ -22,20 +22,20 @@ impl Renderer {
         progress: &RunReadProgress,
     ) -> Result<(), Error> {
         self.flush_pending(output)?;
-        if self.json {
+        if self.jsonl {
             writeln!(
                 diagnostics,
                 "{}",
-                serde_json::json!({"event":"run_observation_summary", "run":run, "reason":end.label(), "records":self.records, "journals":self.journals, "event_types":self.event_types, "other_event_types":self.other_event_types, "progress":progress})
+                serde_json::json!({"event":"run_observation_summary", "run":run, "reason":end.label(), "records":self.shown_records, "journals":self.shown_journals, "event_types":self.event_types, "other_event_types":self.other_event_types, "progress":progress})
             )?;
         } else {
-            if !self.quiet {
+            if !self.compact {
                 if self.shown_records < self.records {
                     self.summary_line(
                         output,
                         MUTED,
                         &format!(
-                            "{} displayed; {} runtime entries hidden (--verbose).",
+                            "{} displayed; {} runtime entries hidden (--include-runtime).",
                             self.shown_records,
                             self.records - self.shown_records,
                         ),
@@ -90,8 +90,8 @@ impl Renderer {
             HEADING,
             &format!("{:<13}{RUN_MANIFEST_FILENAME}", "MANIFEST"),
         )?;
-        if self.detail {
-            // No shortening: --detail exposes the recorded fields, including
+        if self.full {
+            // No shortening: --full exposes the recorded fields, including
             // exact filenames. JSON escapes keep terminal controls inert.
             let (json, _) = pretty(&serde_json::to_value(manifest)?, usize::MAX);
             for line in json.lines() {
@@ -193,8 +193,8 @@ impl Renderer {
             MUTED,
             "The manifest identifies those files and describes the run.",
         )?;
-        if !self.detail {
-            self.summary_line(output, MUTED, "Use --detail for the complete manifest.")?;
+        if !self.full {
+            self.summary_line(output, MUTED, "Use --full for the complete manifest.")?;
         }
         Ok(())
     }
