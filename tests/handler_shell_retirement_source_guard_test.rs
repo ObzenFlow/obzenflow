@@ -1050,8 +1050,10 @@ fn default_http_source_transport_stays_cold_until_execute() {
     let sites = production_http_constructor_sites(&root);
     let mut source_client_sites = Vec::new();
     let mut allowed_ai_sites = 0;
+    let mut allowed_cli_sites = 0;
     let native_embedding = Path::new("crates/obzenflow_infra/src/ai/native_embedding_client.rs");
     let ai_preflight = Path::new("crates/obzenflow_infra/src/ai/rig/preflight.rs");
+    let cli = Path::new("src/bin/obzenflow.rs");
     for site @ (path, constructor, context) in &sites {
         let allowed_ai_site = (path == native_embedding
             && constructor == "reqwest::Client::builder"
@@ -1064,6 +1066,9 @@ fn default_http_source_transport_stays_cold_until_execute() {
                 ));
         if allowed_ai_site {
             allowed_ai_sites += 1;
+        } else if path == cli && constructor == "reqwest::Client::builder" && context == "start" {
+            // The CLI owns the client for explicit discovery and Play requests.
+            allowed_cli_sites += 1;
         } else {
             source_client_sites.push(site);
         }
@@ -1073,9 +1078,13 @@ fn default_http_source_transport_stays_cold_until_execute() {
         "the three explicit AI-owned reqwest constructors must remain accounted for: {sites:?}"
     );
     assert_eq!(
+        allowed_cli_sites, 1,
+        "the CLI must own exactly one control client constructed in start: {sites:?}"
+    );
+    assert_eq!(
         source_client_sites.len(),
         2,
-        "only the two infra-owned default-source constructors may exist beyond the explicit AI owners; found {sites:?}"
+        "only the two infra-owned default-source constructors may exist beyond the explicit AI and CLI owners; found {sites:?}"
     );
     for (path, _constructor, context) in source_client_sites {
         assert_eq!(
