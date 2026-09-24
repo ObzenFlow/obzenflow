@@ -85,7 +85,9 @@ fn root_library_source_contains_only_facade_items() {
     for source_path in sources {
         // The explicitly declared executable is an outer adapter. Library
         // modules retain the facade-only ownership rule.
-        if source_path == root.join("src/bin/obzenflow.rs") {
+        if source_path == root.join("src/bin/obzenflow.rs")
+            || source_path.starts_with(root.join("src/bin/obzenflow"))
+        {
             continue;
         }
         let source = fs::read_to_string(&source_path).expect("read root library source");

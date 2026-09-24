@@ -191,6 +191,10 @@ impl RunSnapshot {
     pub fn identity(&self) -> &RunIdentity {
         &self.state.identity
     }
+    /// Manifest-selected journal identities, available before reading any rows.
+    pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
+        self.state.journals.iter().map(|selected| &selected.journal)
+    }
     pub async fn next(&mut self) -> Result<Option<RunRecord>, JournalReadError> {
         self.state.next(true).await
     }
@@ -202,6 +206,10 @@ impl RunSnapshot {
 impl RunTail {
     pub fn identity(&self) -> &RunIdentity {
         &self.state.identity
+    }
+    /// The same fixed journal selection admitted by the snapshot.
+    pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
+        self.state.journals.iter().map(|selected| &selected.journal)
     }
     pub fn progress(&self) -> &RunReadProgress {
         &self.state.progress

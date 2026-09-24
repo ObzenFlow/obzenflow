@@ -21,6 +21,50 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "../examples/payment_gateway_resilience/support.rs"]
+pub mod gateway_demo;
+
+fn assert_json_summary(stdout: &str, stderr: &str) {
+    use obzenflow::journal::read::{RunJournalKind, RunRecord, RunRecordData};
+    use std::collections::BTreeMap;
+
+    let rows: Vec<RunRecord> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("stdout contains only typed NDJSON records"))
+        .collect();
+    let summaries: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["event"] == "run_observation_summary")
+        .collect();
+    assert_eq!(summaries.len(), 1, "one exit summary on stderr: {stderr}");
+    let summary = &summaries[0];
+    assert_eq!(summary["records"], rows.len());
+    let mut journals = BTreeMap::<String, usize>::new();
+    let mut types = BTreeMap::<String, usize>::new();
+    for row in rows {
+        let stage = row
+            .journal
+            .stage
+            .as_ref()
+            .map_or("system", |s| s.key.as_str());
+        let kind = match row.journal.kind {
+            RunJournalKind::System => "system",
+            RunJournalKind::Data => "data",
+            RunJournalKind::Error => "error",
+        };
+        *journals.entry(format!("{stage}/{kind}")).or_default() += 1;
+        let event_type = match &row.record {
+            RunRecordData::Chain(record) => record.event_type_name(),
+            RunRecordData::System(record) => record.event_type_name(),
+        };
+        *types.entry(event_type.to_owned()).or_default() += 1;
+    }
+    assert_eq!(summary["journals"], serde_json::to_value(journals).unwrap());
+    assert_eq!(summary["event_types"], serde_json::to_value(types).unwrap());
+    assert_eq!(summary["other_event_types"], 0);
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Tick {
     n: u64,
@@ -127,7 +171,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         command
             .arg("show")
             .arg(&baseline)
-            .arg("--json")
+            .args(["--json", "--color", "always"])
             .kill_on_drop(true);
         if follow {
             command.arg("--follow");
@@ -142,8 +186,13 @@ async fn cli_verify_exit_codes_follow_the_contract() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let rows: Vec<obzenflow::journal::read::RunRecord> = String::from_utf8(output.stdout)
-            .unwrap()
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_json_summary(&stdout, &String::from_utf8_lossy(&output.stderr));
+        assert!(
+            !stdout.contains('\x1b'),
+            "JSON never contains presentation escapes"
+        );
+        let rows: Vec<obzenflow::journal::read::RunRecord> = stdout
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
@@ -182,6 +231,25 @@ async fn cli_verify_exit_codes_follow_the_contract() {
             "observation cannot change archive evidence"
         );
     }
+
+    let human = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+        .arg("show")
+        .arg(&baseline)
+        .args(["--color", "never", "--follow"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(
+        human.stderr.is_empty(),
+        "human settlement uses the footer, not raw diagnostics"
+    );
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("cli_verify.tick.v1 ← ticks()"), "{human}");
+    assert!(
+        human.contains("sink.delivery ← out(cli_verify.tick.v1)"),
+        "{human}"
+    );
+    assert!(human.contains("n: 1") && human.contains("n: 3"));
 
     let export = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .args(["journal", "export-jsonl"])
@@ -257,6 +325,331 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         stdout.contains("verification refused"),
         "the refusal names its reason: {stdout}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() {
+    use gateway_demo::domain::{
+        CustomerOrderPlaced, OrderChannel, PaymentMethodState, TrafficPhase,
+    };
+    use obzenflow::journal::read::{RunRecord, RunRecordData, RunRecordKind};
+
+    fn build_gateway(root: PathBuf) -> FlowDefinition {
+        let valid = CustomerOrderPlaced {
+            order_id: "cli-teaching-valid".into(),
+            customer_id: "cli-teaching-customer".into(),
+            channel: OrderChannel::Web,
+            amount_cents: 1_000,
+            payment_method_state: PaymentMethodState::Valid,
+            phase: TrafficPhase::Warmup,
+        };
+        let mut invalid = valid.clone();
+        invalid.order_id = "cli-teaching-invalid".into();
+        invalid.payment_method_state = PaymentMethodState::InvalidNumber;
+        let mut declined = valid.clone();
+        declined.order_id = "cli-teaching-declined".into();
+        declined.payment_method_state = PaymentMethodState::AddressMismatch;
+        gateway_demo::flow::assemble_flow(
+            vec![valid, invalid, declined],
+            Vec::new(),
+            gateway_demo::gateway::GatewayTransform::default(),
+            1_000.0,
+            root,
+        )
+    }
+
+    fn show(run: &Path, args: &[&str]) -> (String, String) {
+        let output = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .arg("show")
+            .arg(run)
+            .args(args)
+            .env("NO_COLOR", "1")
+            .env("COLUMNS", "160")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+
+    fn assert_palette(text: &str) {
+        let facts: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("mSOURCE\x1b") || line.contains("mTRANSFORM\x1b"))
+            .collect();
+        assert!(!facts.is_empty());
+        for line in facts {
+            assert!(line.starts_with("\x1b[1;38;5;208m"));
+        }
+        let deliveries: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("mDELIVERY\x1b"))
+            .collect();
+        assert!(!deliveries.is_empty());
+        for line in deliveries {
+            assert_eq!(line, "\x1b[38;5;217mDELIVERY\x1b[0m");
+        }
+        for line in text.lines().filter(|line| !line.contains('⟨')) {
+            assert!(
+                line.matches('\x1b').count() <= 2,
+                "each header, equation and payload line has one color: {line}"
+            );
+        }
+        assert!(
+            text.contains("\x1b[1;38;5;208mSOURCE\x1b[0m\n\x1b[1;38;5;208mcommerce.customer_order_placed.v1 ← web_orders()")
+        );
+        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.order_validated.v1 ← validate_order(commerce.customer_order_placed.v1)"));
+        assert!(text
+            .contains("\x1b[38;5;217mDELIVERY\x1b[0m\n\x1b[38;5;217msink.delivery ← paid_orders(payment.authorized.v1)\x1b[0m"));
+        assert!(
+            text.contains("\x1b[1;4;38;5;208m") && text.contains("\x1b[1;4;38;5;217m"),
+            "{text}"
+        );
+        for underlined in text.split("\x1b[1;4;38;5;").skip(1) {
+            let digits = underlined
+                .split_once('m')
+                .unwrap()
+                .1
+                .split_once("\x1b[0m")
+                .unwrap()
+                .0;
+            assert!(
+                digits.chars().all(|c| c.is_ascii_digit()),
+                "underline only digits: {digits:?}"
+            );
+        }
+    }
+
+    fn assert_record_outputs(text: &str, rows: &[RunRecord]) {
+        let mut expected = std::collections::BTreeMap::new();
+        for row in rows {
+            match row.kind {
+                RunRecordKind::SourceFact
+                | RunRecordKind::StageOutput
+                | RunRecordKind::Effect
+                | RunRecordKind::Delivery => {}
+                _ => continue,
+            };
+            let RunRecordData::Chain(chain) = &row.record else {
+                panic!("selected record must be a chain record");
+            };
+            *expected
+                .entry(chain.envelope.provenance.event.event_type.clone())
+                .or_insert(0) += 1;
+        }
+        let mut actual = std::collections::BTreeMap::new();
+        for line in text.lines() {
+            let Some((left, _)) = line.split_once(" ← ") else {
+                continue;
+            };
+            if left.starts_with(' ') || left == "Output" {
+                continue; // Payload values, detail JSON and the legend are not equations.
+            }
+            // Quiet mode prefixes the equation with its one-word heading.
+            let output = left.split_whitespace().last().unwrap().to_owned();
+            *actual.entry(output).or_insert(0) += 1;
+        }
+        assert_eq!(
+            actual, expected,
+            "the left side must name every recorded output exactly once"
+        );
+    }
+
+    fn assert_fact_origins(text: &str) {
+        for (event_type, input, stage, order) in [
+            (
+                "payment.order_validated.v1",
+                "commerce.customer_order_placed.v1",
+                "validate_order",
+                "cli-teaching-valid",
+            ),
+            (
+                "order.invalid.v1",
+                "commerce.customer_order_placed.v1",
+                "validate_order",
+                "cli-teaching-invalid",
+            ),
+            (
+                "order.cancelled.v1",
+                "commerce.customer_order_placed.v1",
+                "validate_order",
+                "cli-teaching-invalid",
+            ),
+            (
+                "payment.declined.v1",
+                "payment.order_validated.v1",
+                "authorize_payment",
+                "cli-teaching-declined",
+            ),
+            (
+                "order.cancelled.v1",
+                "payment.order_validated.v1",
+                "authorize_payment",
+                "cli-teaching-declined",
+            ),
+        ] {
+            let block = text
+                .split("\n\n")
+                .find(|block| {
+                    block.starts_with(&format!("TRANSFORM\n{event_type} ← "))
+                        && block.contains(&format!("order_id: {order}"))
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing {event_type} with its own payload for {order}: {text}")
+                });
+            let lines: Vec<_> = block.lines().collect();
+            assert!(
+                lines[2].starts_with('⟨'),
+                "output clock follows its equation: {block}"
+            );
+            assert!(
+                lines[1].starts_with(&format!("{event_type} ← {stage}({input})")),
+                "second line names the recorded output and its origin: {block}"
+            );
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    FlowApplication::builder()
+        .with_cli_args(["gateway"])
+        .run_async(build_gateway(temp.path().to_path_buf()))
+        .await
+        .unwrap();
+    let baseline = latest_run_dir(temp.path());
+    let (human, _) = show(&baseline, &[]);
+    let (explicit, _) = show(&baseline, &["--explain", "--color", "never"]);
+    assert!(explicit.contains("Effects are data:"));
+    assert!(
+        !human.contains("Effects are data:"),
+        "default rows use operations and payloads"
+    );
+    assert!(
+        !human.contains('\x1b'),
+        "piped output and NO_COLOR use plain text"
+    );
+    for teaching in [
+        "commerce.customer_order_placed.v1 ← web_orders()",
+        "payment.order_validated.v1 ← validate_order(commerce.customer_order_placed.v1)",
+        "payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)",
+        "sink.delivery ← paid_orders(payment.authorized.v1)",
+        "Clocks ⟨",
+        "reason: InvalidPaymentMethod",
+        "order.cancelled.v1 ← validate_order(commerce.customer_order_placed.v1)",
+        "By journal",
+        "By event type",
+        "Recorded pipeline outcome: completed.",
+    ] {
+        assert!(human.contains(teaching), "missing teaching cue {teaching}");
+    }
+    assert!(human.lines().any(|line| line == "TRANSFORM"));
+    assert!(human.lines().any(|line| line == "DELIVERY"));
+    assert!(!human.contains("RUNTIME"));
+    assert!(!human.contains("system.metrics.exported"));
+    let (verbose, _) = show(&baseline, &["--verbose"]);
+    assert!(verbose.contains("RUNTIME"));
+    assert!(verbose.contains("control.eof") && !human.contains("control.eof"));
+    // This demo's keyed effect records successful domain facts. Explicit
+    // attempt-start records belong to affine effects, not every physical call.
+    assert!(
+        !human.contains("[read from journal]"),
+        "live facts are not labeled replayed"
+    );
+    let (json, diagnostics) = show(&baseline, &["--json", "--color", "always"]);
+    assert_json_summary(&json, &diagnostics);
+    let rows: Vec<RunRecord> = json
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_record_outputs(&human, &rows);
+    assert_record_outputs(&explicit, &rows);
+    assert_fact_origins(&human);
+    assert!(!human.contains("← cause") && !human.contains("root (no recorded parent)"));
+    assert!(human.contains(&format!("Observed {} records", rows.len())));
+    let selected = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind,
+                RunRecordKind::SourceFact
+                    | RunRecordKind::StageOutput
+                    | RunRecordKind::Effect
+                    | RunRecordKind::Delivery
+            )
+        })
+        .count();
+    assert!(selected < rows.len(), "fixture includes runtime evidence");
+    assert_eq!(
+        human.lines().filter(|line| line.starts_with('⟨')).count(),
+        selected,
+        "one left-aligned output clock per selected record, including each grouped output"
+    );
+    assert!(human.contains(&format!(
+        "{selected} shown; {} runtime records hidden",
+        rows.len() - selected
+    )));
+    assert!(!verbose.contains("runtime records hidden"));
+    let (quiet, _) = show(&baseline, &["--quiet"]);
+    assert_record_outputs(&quiet, &rows);
+    assert_eq!(
+        quiet.lines().count(),
+        selected + 2,
+        "compact rows and two-line outcome summary"
+    );
+    assert!(quiet.contains("payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)"));
+    assert!(!quiet.contains("Effects are data:") && !quiet.contains("By journal"));
+    assert!(!quiet.contains('⟨'), "quiet still omits clocks");
+    let (quiet_verbose, _) = show(&baseline, &["--quiet", "--verbose"]);
+    assert_eq!(quiet_verbose.lines().count(), rows.len() + 2);
+    let (detail, _) = show(&baseline, &["--detail"]);
+    assert_record_outputs(&detail, &rows);
+    assert!(detail.contains("\"envelope\": {") && detail.contains("\"causality\": {"));
+    assert_eq!(detail.matches("\"envelope\": {").count(), selected);
+    let (detail_verbose, _) = show(&baseline, &["--detail", "--verbose"]);
+    assert_eq!(
+        detail_verbose.matches("\"envelope\": {").count(),
+        rows.len()
+    );
+    let (colored, _) = show(&baseline, &["--color", "always"]);
+    assert_palette(&colored);
+
+    FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("gateway"),
+            OsString::from("--replay-from"),
+            baseline.as_os_str().to_owned(),
+        ])
+        .run_async(build_gateway(temp.path().to_path_buf()))
+        .await
+        .unwrap();
+    let replay = latest_run_dir(temp.path());
+    assert_ne!(baseline, replay);
+    let (human, _) = show(&replay, &[]);
+    assert_fact_origins(&human);
+    assert!(
+        human.lines().any(|line| line
+            .contains("payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)")
+            && line.contains("[read from journal]")),
+        "{human}"
+    );
+    let (explained, _) = show(&replay, &["--explain"]);
+    assert!(explained.contains("does not establish that the effect fired again"));
+    let (detail, _) = show(&replay, &["--detail"]);
+    assert!(detail.contains("original_flow_id") && detail.contains("original_event_id"));
+    let (colored, _) = show(&replay, &["--color", "always"]);
+    assert_palette(&colored);
+    let (json, diagnostics) = show(&replay, &["--json"]);
+    assert_json_summary(&json, &diagnostics);
+    let rows: Vec<RunRecord> = json
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_record_outputs(&human, &rows);
 }
 
 #[test]
@@ -760,8 +1153,12 @@ mod hosted {
                     std::fs::read_to_string(&diagnostics).unwrap()
                 );
             }
-            for line in std::fs::read_to_string(&rows).unwrap().lines() {
+            let stdout = std::fs::read_to_string(&rows).unwrap();
+            for line in stdout.lines() {
                 serde_json::from_str::<RunRecord>(line).expect("stdout contains records only");
+            }
+            if mode != "reader_error" {
+                assert_json_summary(&stdout, &std::fs::read_to_string(&diagnostics).unwrap());
             }
         }
     }

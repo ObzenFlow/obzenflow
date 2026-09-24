@@ -10,10 +10,14 @@ use obzenflow::application::control::*;
 use obzenflow::application::{render_verdict, verify_run_dirs, VerifyOptions};
 use obzenflow::journal::read::*;
 use obzenflow::journal::{export_jsonl, inspect, JOURNAL_SCHEMA_VERSION};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
+
+#[path = "obzenflow/render.rs"]
+mod render;
+use render::{ColorMode, ObservationEnd, Renderer};
 
 #[derive(Parser)]
 #[command(name = "obzenflow", version, long_version = version(), about = "Observe and inspect ObzenFlow journals")]
@@ -77,12 +81,24 @@ struct ViewArgs {
     /// Follow until the execution is settled and covered, or Ctrl-C detaches.
     #[arg(long)]
     follow: bool,
-    /// Emit versioned record JSONL without human output on stdout.
+    /// Emit all records as versioned JSONL without human output on stdout.
     #[arg(long)]
     json: bool,
-    /// Show complete envelopes and payloads in the human view.
+    /// Include runtime, lifecycle, signal and system records in the human view.
+    #[arg(long, conflicts_with = "json")]
+    verbose: bool,
+    /// Show complete envelopes and payloads for the selected records.
     #[arg(long, conflicts_with = "json")]
     detail: bool,
+    /// Add teaching notes beneath the operation and payload.
+    #[arg(long, conflicts_with_all = ["quiet", "json"])]
+    explain: bool,
+    /// One line per selected record, without clocks, teaching notes or count tables.
+    #[arg(long, conflicts_with_all = ["explain", "detail", "json"])]
+    quiet: bool,
+    /// Semantic colors; auto respects terminal detection and NO_COLOR.
+    #[arg(long, value_enum, default_value = "auto")]
+    color: ColorMode,
 }
 
 #[derive(Subcommand)]
@@ -306,20 +322,46 @@ async fn observe(snapshot: RunSnapshot, view: &ViewArgs) -> Result<u8, Error> {
 
 async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u8, Error> {
     let mut output = BufWriter::new(std::io::stdout());
+    let mut diagnostics = std::io::stderr();
+    let mut renderer = Renderer::new(
+        view,
+        std::io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        snapshot.journals(),
+    );
+    renderer.begin(&mut output, snapshot.identity(), view.follow)?;
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
     if !view.follow {
         loop {
             let record = tokio::select! { biased;
-                result = &mut interrupt => { result?; return Ok(0); }
-                record = snapshot.next() => record?,
+                result = &mut interrupt => {
+                    result?;
+                    let tail = snapshot.into_tail();
+                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), ObservationEnd::Detached, tail.progress())?;
+                    return Ok(0);
+                }
+                record = snapshot.next() => match record {
+                    Ok(record) => record,
+                    Err(error) => {
+                        renderer.flush_pending(&mut output)?;
+                        return Err(error.into());
+                    }
+                },
             };
             let Some(record) = record else {
                 break;
             };
-            render(&mut output, &record, view)?;
+            renderer.record(&mut output, record)?;
         }
-        output.flush()?;
+        let tail = snapshot.into_tail();
+        renderer.finish(
+            &mut output,
+            &mut diagnostics,
+            tail.identity(),
+            ObservationEnd::Snapshot,
+            tail.progress(),
+        )?;
         return Ok(0);
     }
     let mut tail = snapshot.into_tail();
@@ -327,87 +369,47 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         let next = tokio::select! { biased;
             result = &mut interrupt => {
                 result?;
-                output.flush()?;
-                eprintln!("Detached; application execution is independent.");
+                renderer.finish(&mut output, &mut diagnostics, tail.identity(), ObservationEnd::Detached, tail.progress())?;
                 return Ok(0);
             }
-            next = tail.read_next() => next?,
+            next = tail.read_next() => match next {
+                Ok(next) => next,
+                Err(error) => {
+                    renderer.flush_pending(&mut output)?;
+                    return Err(error.into());
+                }
+            },
         };
         let pending = matches!(next, TailRead::Pending);
         match next {
-            TailRead::Record(record) => render(&mut output, &record, view)?,
-            TailRead::Pending => {}
+            TailRead::Record(record) => renderer.record(&mut output, record)?,
+            TailRead::Pending => renderer.flush_pending(&mut output)?,
         }
         if tail.progress().settled_prefix.is_some() {
-            output.flush()?;
-            eprintln!(
-                "{}",
-                serde_json::json!({"event":"run_observation_covered", "run":tail.identity(), "progress":tail.progress()})
-            );
+            if view.json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"event":"run_observation_covered", "run":tail.identity(), "progress":tail.progress()})
+                );
+            }
+            renderer.finish(
+                &mut output,
+                &mut diagnostics,
+                tail.identity(),
+                ObservationEnd::Settled,
+                tail.progress(),
+            )?;
             return Ok(0);
         }
         if pending {
             tokio::select! { biased;
-                result = &mut interrupt => { result?; output.flush()?; eprintln!("Detached; application execution is independent."); return Ok(0); }
+                result = &mut interrupt => {
+                    result?;
+                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), ObservationEnd::Detached, tail.progress())?;
+                    return Ok(0);
+                }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
         }
     }
-}
-
-fn render(output: &mut impl Write, record: &RunRecord, view: &ViewArgs) -> Result<(), Error> {
-    if view.json {
-        serde_json::to_writer(&mut *output, record)?;
-        writeln!(output)?;
-    } else if view.detail {
-        serde_json::to_writer_pretty(&mut *output, record)?;
-        writeln!(output)?;
-    } else {
-        let stage = record
-            .journal
-            .stage
-            .as_ref()
-            .map(|stage| stage.key.as_str())
-            .unwrap_or("system");
-        let kind = serde_json::to_value(record.kind)?;
-        let (event_type, payload) = match &record.record {
-            RunRecordData::Chain(row) => {
-                (row.event_type_name(), serde_json::to_value(&row.payload)?)
-            }
-            RunRecordData::System(row) => {
-                (row.event_type_name(), serde_json::to_value(&row.payload)?)
-            }
-        };
-        let provenance = match &record.record {
-            RunRecordData::Chain(row) => row
-                .envelope
-                .provenance
-                .event
-                .replay_context
-                .as_ref()
-                .map(|context| {
-                    format!(
-                        " [replay {}:{}]",
-                        context.original_flow_id, context.original_event_id
-                    )
-                })
-                .unwrap_or_default(),
-            RunRecordData::System(_) => String::new(),
-        };
-        let journal_kind = serde_json::to_value(record.journal.kind)?;
-        let summary: String = payload.to_string().chars().take(160).collect();
-        writeln!(
-            output,
-            "{:>8} {:<20} {:<6} {:<14} {}{} {}",
-            record.position.0,
-            stage,
-            journal_kind.as_str().unwrap_or("journal"),
-            kind.as_str().unwrap_or("record"),
-            event_type,
-            provenance,
-            summary
-        )?;
-    }
-    output.flush()?;
-    Ok(())
 }
