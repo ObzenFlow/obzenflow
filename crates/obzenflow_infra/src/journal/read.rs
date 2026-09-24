@@ -122,6 +122,7 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
             key,
             id,
             stage_type: stage.stage_type,
+            is_effectful: stage.is_effectful,
         };
         files.push((
             stage.data_journal_file,

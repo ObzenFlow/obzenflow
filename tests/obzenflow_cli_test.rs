@@ -249,7 +249,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         human.contains("sink.delivery ← out(cli_verify.tick.v1)"),
         "{human}"
     );
-    assert!(human.contains("n: 1") && human.contains("n: 3"));
+    assert!(human.contains("\"n\": 1") && human.contains("\"n\": 3"));
 
     let export = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
         .args(["journal", "export-jsonl"])
@@ -381,7 +381,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     fn assert_palette(text: &str) {
         let facts: Vec<_> = text
             .lines()
-            .filter(|line| line.contains("mSOURCE\x1b") || line.contains("mTRANSFORM\x1b"))
+            .filter(|line| {
+                line.contains("mSOURCE\x1b")
+                    || line.contains("mTRANSFORM\x1b")
+                    || line.contains("mEFFECTFUL TRANSFORM\x1b")
+            })
             .collect();
         assert!(!facts.is_empty());
         for line in facts {
@@ -405,6 +409,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             text.contains("\x1b[1;38;5;208mSOURCE\x1b[0m\n\x1b[1;38;5;208mcommerce.customer_order_placed.v1 ← web_orders()")
         );
         assert!(text.contains("\x1b[1;38;5;208mTRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.order_validated.v1 ← validate_order(commerce.customer_order_placed.v1)"));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.authorized.v1 ← authorize_payment(payment.order_validated.v1)"));
         assert!(text
             .contains("\x1b[38;5;217mDELIVERY\x1b[0m\n\x1b[38;5;217msink.delivery ← paid_orders(payment.authorized.v1)\x1b[0m"));
         assert!(
@@ -451,7 +456,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             if left.starts_with(' ') || left == "Output" {
                 continue; // Payload values, detail JSON and the legend are not equations.
             }
-            // Quiet mode prefixes the equation with its one-word heading.
+            // Quiet mode prefixes the equation with its stage-kind heading.
             let output = left.split_whitespace().last().unwrap().to_owned();
             *actual.entry(output).or_insert(0) += 1;
         }
@@ -494,23 +499,33 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "cli-teaching-declined",
             ),
         ] {
+            let heading = if stage == "authorize_payment" {
+                "EFFECTFUL TRANSFORM"
+            } else {
+                "TRANSFORM"
+            };
             let block = text
                 .split("\n\n")
                 .find(|block| {
-                    block.starts_with(&format!("TRANSFORM\n{event_type} ← "))
-                        && block.contains(&format!("order_id: {order}"))
+                    block.starts_with(&format!("{heading}\n{event_type} ← "))
+                        && block.contains(&format!("\"order_id\": \"{order}\""))
                 })
                 .unwrap_or_else(|| {
                     panic!("missing {event_type} with its own payload for {order}: {text}")
                 });
             let lines: Vec<_> = block.lines().collect();
+            let clock = lines.iter().position(|line| line.starts_with('⟨')).unwrap();
+            let expression = lines[1..clock].join(" ");
             assert!(
-                lines[2].starts_with('⟨'),
-                "output clock follows its equation: {block}"
-            );
-            assert!(
-                lines[1].starts_with(&format!("{event_type} ← {stage}({input})")),
+                expression.starts_with(&format!("{event_type} ← {stage}({input})")),
                 "second line names the recorded output and its origin: {block}"
+            );
+            assert_eq!(lines[clock + 1], "{", "payload starts at the left margin");
+            assert!(
+                lines[clock + 2..]
+                    .iter()
+                    .all(|line| line.chars().count() <= 100),
+                "{block}"
             );
         }
     }
@@ -539,7 +554,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)",
         "sink.delivery ← paid_orders(payment.authorized.v1)",
         "Clocks ⟨",
-        "reason: InvalidPaymentMethod",
+        "\"reason\": \"InvalidPaymentMethod\"",
         "order.cancelled.v1 ← validate_order(commerce.customer_order_placed.v1)",
         "By journal",
         "By event type",
@@ -566,6 +581,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    for row in &rows {
+        if let Some(stage) = &row.journal.stage {
+            assert_eq!(stage.is_effectful, Some(stage.key == "authorize_payment"));
+        }
+    }
     assert_record_outputs(&human, &rows);
     assert_record_outputs(&explicit, &rows);
     assert_fact_origins(&human);
@@ -601,7 +621,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         selected + 2,
         "compact rows and two-line outcome summary"
     );
-    assert!(quiet.contains("payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)"));
+    assert!(quiet.contains("EFFECTFUL TRANSFORM  payment.authorized.v1 ←"));
+    assert!(quiet
+        .lines()
+        .take(selected)
+        .all(|line| line.chars().count() <= 100));
     assert!(!quiet.contains("Effects are data:") && !quiet.contains("By journal"));
     assert!(!quiet.contains('⟨'), "quiet still omits clocks");
     let (quiet_verbose, _) = show(&baseline, &["--quiet", "--verbose"]);
@@ -632,13 +656,19 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let (human, _) = show(&replay, &[]);
     assert_fact_origins(&human);
     assert!(
-        human.lines().any(|line| line
-            .contains("payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)")
-            && line.contains("[read from journal]")),
+        human.split("\n\n").any(|block| {
+            let text = block.split_whitespace().collect::<Vec<_>>().join(" ");
+            text.contains("payment.authorized.v1 ← authorize_payment(payment.order_validated.v1)")
+                && text.contains("[read from journal]")
+        }),
         "{human}"
     );
     let (explained, _) = show(&replay, &["--explain"]);
-    assert!(explained.contains("does not establish that the effect fired again"));
+    assert!(explained
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .contains("does not establish that the effect fired again"));
     let (detail, _) = show(&replay, &["--detail"]);
     assert!(detail.contains("original_flow_id") && detail.contains("original_event_id"));
     let (colored, _) = show(&replay, &["--color", "always"]);

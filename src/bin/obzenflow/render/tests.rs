@@ -152,20 +152,133 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
             fact(1, 100, &[], json!({"celsius":38})),
             failed.clone(),
             progress.clone(),
+            fact(2, 103, &[100], json!({"reason":"unavailable"})),
         ] {
             renderer.record(&mut output, record).unwrap();
         }
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("\x1b[38;5;217mEFFECT\x1b[0m\n\x1b[38;5;217mobzenflow.effect_record.v1 ← classify(sensor.reading.v1)\x1b[0m"));
-        assert!(text.contains("outcome: failed") && text.contains("effect_type: sensor.calibrate"));
-        assert!(text.contains("error_message: calibration unavailable"));
+        assert!(
+            text.contains("\"outcome\": \"failed\"")
+                && text.contains("\"effect_type\": \"sensor.calibrate\"")
+        );
+        assert!(text.contains("\"error_message\": \"calibration unavailable\""));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM\x1b[0m\n\x1b[1;38;5;208msensor.classified.v1 ← classify(sensor.reading.v1)\x1b[0m"));
         assert_eq!(text.contains("RUNTIME"), verbose);
         if verbose {
-            let runtime = text.split("\x1b[38;5;245mRUNTIME").nth(1).unwrap();
-            assert!(runtime.contains("\x1b[38;5;245mexecution_type:"));
+            let runtime = text
+                .split("\x1b[38;5;245mRUNTIME")
+                .nth(1)
+                .unwrap()
+                .split("\n\n")
+                .next()
+                .unwrap();
+            assert!(runtime.contains("\x1b[38;5;245m  \"execution_type\":"));
             assert!(!runtime.contains("38;5;208m") && !runtime.contains("38;5;217m"));
         }
+    }
+}
+
+#[test]
+fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
+    for (stage_type, heading, color) in [
+        (StageType::Transform, "EFFECTFUL TRANSFORM", 208),
+        (StageType::Stateful, "EFFECTFUL STATEFUL", 114),
+    ] {
+        let mut renderer = renderer();
+        renderer.color = true;
+        let mut result = fact(2, 101, &[100], json!({"reason":"no_effect_needed"}));
+        let stage = result.journal.stage.as_mut().unwrap();
+        stage.stage_type = stage_type;
+        stage.is_effectful = Some(true);
+        let mut output = Vec::new();
+        renderer
+            .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
+            .unwrap();
+        renderer.record(&mut output, result).unwrap();
+        renderer.flush_pending(&mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains(&format!(
+            "\x1b[1;38;5;{color}m{heading}\x1b[0m\n\x1b[1;38;5;{color}msensor.classified.v1 ← classify(sensor.reading.v1)\x1b[0m"
+        )), "{text}");
+        assert!(
+            !text.contains("mEFFECT\x1b"),
+            "capability is not an effect invocation"
+        );
+    }
+}
+
+#[test]
+fn older_archives_learn_effectful_capability_only_from_the_owning_stage() {
+    for (declared, effect_stage, expected) in [
+        (None, "classify", "EFFECTFUL TRANSFORM"),
+        (None, "upstream", "TRANSFORM"),
+        (Some(false), "classify", "TRANSFORM"),
+    ] {
+        let mut renderer = renderer();
+        let mut result = fact(2, 101, &[100], json!({"result":"calibrated"}));
+        result.journal.stage.as_mut().unwrap().is_effectful = declared;
+        if let RunRecordData::Chain(row) = &mut result.record {
+            row.envelope.provenance.event.effect_provenance = Some(serde_json::from_value(json!({
+                "cursor":{"recorded_flow_id":id(10), "stage_key":effect_stage, "input_seq":1, "effect_ordinal":0},
+                "descriptor_hash":"fixture",
+                "descriptor":{
+                    "effect_type":"sensor.calibrate", "label":"calibrate", "schema_version":1,
+                    "stage_logic_version":"v1", "canonical_input_hash":"fixture", "binding":{"mode":"portless"}
+                },
+                "outcome_fact_ordinal":0, "outcome_fact_count":1
+            })).unwrap());
+        }
+        let mut derived = fact(2, 102, &[100], json!({"notice":"calibration_complete"}));
+        derived.journal.stage.as_mut().unwrap().is_effectful = declared;
+        let mut output = Vec::new();
+        for record in [fact(1, 100, &[], json!({"celsius":38})), result, derived] {
+            renderer.record(&mut output, record).unwrap();
+        }
+        renderer.flush_pending(&mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let headings: Vec<_> = text
+            .split("\n\n")
+            .filter_map(|block| block.lines().next())
+            .collect();
+        assert_eq!(headings, ["SOURCE", expected, expected]);
+    }
+}
+
+#[test]
+fn hundred_columns_keeps_long_output_expressions_together_and_narrow_views_still_wrap() {
+    let expression =
+        "payment.authorization_unavailable.v1 ← authorize_payment(payment.order_validated.v1)";
+    for width in [80, 100] {
+        let mut renderer = renderer();
+        renderer.width = width;
+        let mut input = fact(1, 100, &[], json!({}));
+        if let RunRecordData::Chain(row) = &mut input.record {
+            row.envelope.provenance.event.event_type = "payment.order_validated.v1".into();
+        }
+        let mut result = fact(2, 101, &[100], json!({"reason":"unavailable"}));
+        let stage = result.journal.stage.as_mut().unwrap();
+        stage.key = "authorize_payment".into();
+        stage.is_effectful = Some(true);
+        if let RunRecordData::Chain(row) = &mut result.record {
+            row.envelope.provenance.event.event_type =
+                "payment.authorization_unavailable.v1".into();
+        }
+        let mut output = Vec::new();
+        renderer.record(&mut output, input).unwrap();
+        renderer.record(&mut output, result).unwrap();
+        renderer.flush_pending(&mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text.lines().any(|line| line == expression),
+            width == 100,
+            "{text}"
+        );
+        assert!(
+            text.lines().all(|line| line.chars().count() <= width),
+            "{text}"
+        );
     }
 }
 
@@ -223,25 +336,24 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         "each grouped fact retains its own clock below its typed equation"
     );
     assert_eq!(
-        text.matches("sensor: A").count(),
+        text.matches("\"sensor\": \"A\"").count(),
         2,
         "each fact keeps its own payload, even when fields match: {text}"
     );
     for (event_type, reason) in [
-        ("sensor.classified.v1", "reason: too_hot"),
+        ("sensor.classified.v1", json!("too_hot")),
         (
             "sensor.cooling_requested.v1",
-            "reason: {cooling: requested}",
+            json!({"cooling":"requested"}),
         ),
     ] {
         let block = text
             .split("\n\n")
             .find(|block| block.starts_with(&format!("TRANSFORM\n{event_type} ← ")))
             .unwrap();
-        assert!(
-            block.contains("sensor: A") && block.contains(reason),
-            "{block}"
-        );
+        let payload_start = block.find("\n{\n").unwrap() + 1;
+        let payload: Value = serde_json::from_str(&block[payload_start..]).unwrap();
+        assert_eq!(payload, json!({"sensor":"A", "reason":reason}));
     }
     assert_eq!(
         renderer.records, 3,
@@ -462,24 +574,48 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
             "\x1b[1;38;5;114m{heading}\x1b[0m\n\x1b[1;38;5;114msensor.classified.v1 ← classify(sensor.calibration.v1, sensor.reading.v1)\x1b[0m"
         )), "{text}");
         assert!(text.contains("\x1b[1;4;38;5;114m101\x1b[0m"));
-        assert!(text.contains("  celsius: 40"));
+        assert!(text.contains("  \"celsius\": 40"));
         assert!(!text.contains("state =") && !text.contains("state'"));
     }
 }
 
 #[test]
 fn arbitrary_payload_shapes_keep_types_units_and_escape_terminal_controls() {
-    let parts = fields(&json!({
-        "amount_cents":1234, "nested":{"label":"a\u{1b}[2J\nb"},
+    let value = json!({
+        "amount_cents":1234, "nested":{"label":"a\u{1b}[2J\nb\u{202e}"},
         "items":[1,2,3,4,5], "numeric_string":"1234", "enabled":true
-    }));
-    let text = wrap_fields(&parts, 60).join("\n");
-    assert!(text.contains("amount_cents: 1234") && !text.contains('$'));
-    assert!(text.contains("numeric_string: \"1234\""));
-    assert!(text.contains("… 1 more") && text.contains("enabled: true"));
-    assert!(!text.contains('\x1b') && text.contains("\\u{1b}[2J\\nb"));
-    assert_eq!(fields(&json!(42)), ["42"]);
-    assert_eq!(fields(&Value::Null), ["null"]);
+    });
+    let (text, shortened) = pretty(&value, 80);
+    assert!(!shortened);
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+    assert!(text.starts_with("{\n  \"amount_cents\": 1234,"));
+    assert!(!text.contains('·') && !text.contains('\x1b') && !text.contains('\u{202e}'));
+    assert!(text.lines().all(|line| line.chars().count() <= 80));
+    assert_eq!(pretty(&json!(42), 80), ("42".into(), false));
+    assert_eq!(pretty(&Value::Null, 80), ("null".into(), false));
+    assert_eq!(pretty(&json!({}), 80), ("{}".into(), false));
+    assert_eq!(pretty(&json!([]), 80), ("[]".into(), false));
+}
+
+#[test]
+fn long_json_strings_fit_the_width_without_splitting_escapes_or_mutating_the_record() {
+    let value = json!({"reason":{"nested":["é\"\\\n\u{202e}".repeat(30)]}});
+    let original = value.clone();
+    for width in [40, 60, 80, 100] {
+        let (text, shortened) = pretty(&value, width);
+        assert!(shortened);
+        assert!(
+            text.lines().all(|line| line.chars().count() <= width),
+            "{text}"
+        );
+        let preview: Value = serde_json::from_str(&text).unwrap();
+        let preview = preview["reason"]["nested"][0].as_str().unwrap();
+        assert!(original["reason"]["nested"][0]
+            .as_str()
+            .unwrap()
+            .starts_with(preview.strip_suffix('…').unwrap()));
+        assert_eq!(value, original);
+    }
 }
 
 #[test]
@@ -500,5 +636,5 @@ fn failed_processing_remains_distinct_from_a_successfully_produced_fact() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("[processing error]"));
     assert!(text.contains("processing error: calibration unavailable"));
-    assert!(text.contains("sensor: A"));
+    assert!(text.contains("\"sensor\": \"A\""));
 }

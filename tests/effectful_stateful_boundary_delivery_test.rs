@@ -379,6 +379,32 @@ async fn running_input_delivers_descriptor_boundary_to_decide() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (handle, sender, probe, gate) = build_running_flow(temp.path().join("running")).await?;
 
+    let snapshot = obzenflow_infra::journal::read::open_disk_run(
+        handle
+            .run_substrate()
+            .locator()
+            .expect("durable run")
+            .path(),
+    )
+    .await?;
+    for stage in snapshot
+        .journals()
+        .filter_map(|journal| journal.stage.as_ref())
+    {
+        assert_eq!(stage.is_effectful, Some(stage.key == "guarded"));
+        if stage.key == "guarded" {
+            assert_eq!(
+                stage.stage_type,
+                obzenflow_core::event::context::StageType::Stateful
+            );
+        }
+    }
+    assert_eq!(
+        gate.calls(),
+        0,
+        "capability is recorded before the first effect"
+    );
+
     sender.send(1)?;
     probe.wait_for_admission().await;
     gate.wait_for_start().await;

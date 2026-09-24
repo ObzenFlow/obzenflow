@@ -47,6 +47,7 @@ fn write_manifest(dir: &Path) {
         RunManifestStage {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
+            is_effectful: Some(false),
             stage_id: "stage_01H000000000000000000000000".to_string(),
             stage_logic_version: "1".to_string(),
             data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"

@@ -55,6 +55,7 @@ impl Run {
                 RunManifestStage {
                     dsl_var: "source".into(),
                     stage_type: StageType::FiniteSource,
+                    is_effectful: Some(false),
                     stage_id: stage.to_string(),
                     stage_logic_version: "1".into(),
                     data_journal_file: "data.log".into(),
@@ -118,6 +119,33 @@ async fn available(tail: &mut RunTail) -> Vec<RunRecord> {
         assert!(records.len() < 100, "fixture must be finite");
     }
     records
+}
+
+#[tokio::test]
+async fn stage_effectful_capability_survives_manifest_projection_without_records() {
+    for stage_type in [StageType::Transform, StageType::Stateful] {
+        for capability in [None, Some(false), Some(true)] {
+            let mut run = Run::new();
+            let stage = run.manifest.stages.get_mut("source").unwrap();
+            stage.stage_type = stage_type;
+            stage.is_effectful = capability;
+            run.save_manifest();
+            let snapshot = run.open().await;
+            let stages: Vec<_> = snapshot
+                .journals()
+                .filter_map(|journal| journal.stage.as_ref())
+                .collect();
+            assert_eq!(
+                stages.len(),
+                2,
+                "data and error journals share stage metadata"
+            );
+            for stage in stages {
+                assert_eq!(stage.stage_type, stage_type);
+                assert_eq!(stage.is_effectful, capability);
+            }
+        }
+    }
 }
 
 #[tokio::test]

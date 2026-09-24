@@ -88,6 +88,11 @@ pub struct RunManifestResumeConfig {
 pub struct RunManifestStage {
     pub dsl_var: String,
     pub stage_type: StageType,
+    /// Authoring capability from `StageDescriptor::is_effectful()`, distinct
+    /// from the runtime stage family. Omission means this archive did not
+    /// record the distinction, not that the stage was pure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_effectful: Option<bool>,
     pub stage_id: String,
     /// FLOWIP-120a: the stage logic version, sourced at flow build from
     /// `StageDescriptor::stage_logic_version()` and folded into the effect

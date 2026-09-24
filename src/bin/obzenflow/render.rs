@@ -17,10 +17,9 @@ mod context;
 #[path = "render/payload.rs"]
 mod payload;
 use context::{clock, event_id, event_type, parent_ids, writer_id, Context};
-use payload::{abbreviated, fields, safe_text, wrap_fields};
+use payload::{abbreviated, compact, pretty, safe_text, wrap_fields};
 
 const MAX_PENDING: usize = 128;
-const PAYLOAD_INDENT: &str = "  ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Category {
@@ -56,13 +55,15 @@ impl Category {
         }
     }
 
-    fn heading(self, record: &RunRecord) -> &'static str {
+    fn heading(self, record: &RunRecord, context: &Context) -> &'static str {
         if self != Self::Fact {
             return self.label();
         }
         match record.journal.stage.as_ref().map(|stage| stage.stage_type) {
             Some(StageType::FiniteSource | StageType::InfiniteSource) => "SOURCE",
+            Some(StageType::Transform) if context.is_effectful(record) => "EFFECTFUL TRANSFORM",
             Some(StageType::Transform) => "TRANSFORM",
+            Some(StageType::Stateful) if context.is_effectful(record) => "EFFECTFUL STATEFUL",
             Some(StageType::Stateful) => "STATEFUL",
             Some(StageType::Join) => "JOIN",
             Some(StageType::Sink) => "SINK",
@@ -138,8 +139,8 @@ impl Renderer {
             width: std::env::var("COLUMNS")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(120)
-                .clamp(60, 240),
+                .unwrap_or(100)
+                .clamp(40, 100),
             context: Context::new(journals),
             pending: VecDeque::new(),
             records: 0,
@@ -312,7 +313,7 @@ impl Renderer {
         let stage = safe_text(&self.speaker(first));
         let input = self.input_name(first);
         for record in records {
-            let heading = category.heading(record);
+            let heading = category.heading(record, &self.context);
             let value = display_payload(record)?;
             // The recorded output leads once; the arrow explains its origin.
             // Sources have no upstream event argument. This is observation,
@@ -329,25 +330,10 @@ impl Renderer {
             if fact_error(record).is_some() {
                 relation.push_str(" [processing error]");
             }
-            let mut parts = if value.as_object().is_some_and(|object| object.is_empty()) {
-                Vec::new()
-            } else {
-                fields(&value)
-            };
-            if let Some(message) = fact_error(record) {
-                parts.insert(
-                    0,
-                    format!(
-                        "processing error: {}",
-                        abbreviated(&safe_text(message), 200)
-                    ),
-                );
-            }
             if self.quiet {
-                // A compact record is still one uninterrupted category color.
-                let line = format!(
-                    "{heading}  {relation}  {}",
-                    abbreviated(&parts.join(" · "), 240)
+                let line = abbreviated(
+                    &format!("{heading}  {relation}  {}", compact(&value)),
+                    self.width,
                 );
                 writeln!(output, "{}", self.record_text(record, &line, false))?;
                 continue;
@@ -357,9 +343,19 @@ impl Renderer {
                 writeln!(output, "{}", self.record_text(record, &line, false))?;
             }
             writeln!(output, "{}", self.record_clock(record))?;
-            self.payload_lines(output, &parts, category)?;
+            if let Some(message) = fact_error(record) {
+                for line in wrap_fields(
+                    &[format!("processing error: {}", safe_text(message))],
+                    self.width,
+                ) {
+                    writeln!(output, "{line}")?;
+                }
+            }
+            self.payload_lines(output, &value, category)?;
             if self.explain {
-                writeln!(output, "{PAYLOAD_INDENT}{}", self.dim(gloss(record)))?;
+                for line in wrap_fields(&[gloss(record, &self.context).into()], self.width) {
+                    writeln!(output, "{}", self.dim(&line))?;
+                }
             }
             if self.detail {
                 // Serialized JSON escapes untrusted text; it is never styled.
@@ -393,16 +389,24 @@ impl Renderer {
     fn payload_lines(
         &self,
         output: &mut impl Write,
-        parts: &[String],
+        value: &Value,
         category: Category,
     ) -> Result<(), Error> {
-        for line in wrap_fields(parts, self.width.saturating_sub(PAYLOAD_INDENT.len())) {
+        let (json, shortened) = pretty(value, self.width);
+        for line in json.lines() {
             let line = if category == Category::Runtime {
-                self.dim(&line)
+                self.dim(line)
             } else {
-                line
+                line.into()
             };
-            writeln!(output, "{PAYLOAD_INDENT}{line}")?;
+            writeln!(output, "{line}")?;
+        }
+        if shortened {
+            writeln!(
+                output,
+                "{}",
+                self.dim("Payload shortened; --detail shows complete values.")
+            )?;
         }
         Ok(())
     }
@@ -664,7 +668,7 @@ fn display_payload(record: &RunRecord) -> Result<Value, Error> {
     })
 }
 
-fn gloss(record: &RunRecord) -> &'static str {
+fn gloss(record: &RunRecord, context: &Context) -> &'static str {
     if replayed(record) && (record.kind == RunRecordKind::Effect || effect_fact(record)) {
         return "Read from journal with replay provenance; this row does not establish that the effect fired again.";
     }
@@ -676,8 +680,10 @@ fn gloss(record: &RunRecord) -> &'static str {
             ChainPayload::Fact(_) if replayed(record) => "This fact carries replay provenance; the original flow and event are available in --detail.",
             ChainPayload::Fact(_) => match record.journal.stage.as_ref().map(|s| s.stage_type) {
                 Some(StageType::FiniteSource | StageType::InfiniteSource) => "Source stage admitted a domain fact into this run.",
+                Some(StageType::Stateful) if context.is_effectful(record) => "Effectful stateful stage committed a domain fact; apply folds committed facts into state.",
                 Some(StageType::Stateful) => "Stateful stage emitted a fact from its accumulated state.",
                 Some(StageType::Join) => "Join stage emitted a fact using its recorded inputs.",
+                Some(StageType::Transform) if context.is_effectful(record) => "Effectful transform emitted a domain fact; this fact alone does not imply an external call.",
                 Some(StageType::Transform) => "Transform stage derived a fact from upstream input.",
                 _ => "This stage recorded a domain fact; its recorded parents appear on the input side when available.",
             },

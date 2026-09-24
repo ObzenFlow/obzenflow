@@ -5,56 +5,84 @@
 //! Domain-neutral payload formatting. Field names and units stay as recorded.
 
 use serde_json::Value;
+use std::fmt::Write;
 
-pub(super) fn fields(value: &Value) -> Vec<String> {
+/// Preserve JSON structure and scalar types. Callers label any string value
+/// shortened for the terminal and offer the complete record via --detail.
+pub(super) fn pretty(value: &Value, width: usize) -> (String, bool) {
+    let mut preview = value.clone();
+    let mut shortened = false;
+    fit_strings(&mut preview, 0, 0, width, &mut shortened);
+    (
+        json_text(&serde_json::to_string_pretty(&preview).unwrap()),
+        shortened,
+    )
+}
+
+pub(super) fn compact(value: &Value) -> String {
+    json_text(&value.to_string())
+}
+
+fn fit_strings(
+    value: &mut Value,
+    indent: usize,
+    column: usize,
+    width: usize,
+    shortened: &mut bool,
+) {
     match value {
-        Value::Object(object) if !object.is_empty() => object
-            .iter()
-            .map(|(key, value)| format!("{}: {}", safe_text(key), compact(value, 0)))
-            .collect(),
-        _ => vec![compact(value, 0)],
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                let key_width = compact(&Value::String(key.clone())).chars().count();
+                fit_strings(
+                    value,
+                    indent + 2,
+                    indent + 2 + key_width + 2,
+                    width,
+                    shortened,
+                );
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                fit_strings(value, indent + 2, indent + 2, width, shortened);
+            }
+        }
+        Value::String(text) => {
+            let available = width.saturating_sub(column + 1); // Room for a comma.
+            if compact(&Value::String(text.clone())).chars().count() > available {
+                let mut prefix = String::new();
+                let mut remaining = available.saturating_sub(3); // Quotes and ellipsis.
+                for ch in text.chars() {
+                    let encoded_width = compact(&Value::String(ch.to_string())).chars().count() - 2;
+                    if encoded_width > remaining {
+                        break;
+                    }
+                    prefix.push(ch);
+                    remaining -= encoded_width;
+                }
+                prefix.push('…');
+                *text = prefix;
+                *shortened = true;
+            }
+        }
+        _ => {}
     }
 }
 
-fn compact(value: &Value, depth: usize) -> String {
-    let text = match value {
-        Value::String(value) => {
-            let value = abbreviated(&safe_text(value), 200);
-            // Keep strings distinguishable from numbers, booleans and null.
-            if value.is_empty()
-                || value.trim() != value
-                || serde_json::from_str::<Value>(&value).is_ok()
-            {
-                serde_json::to_string(&value).unwrap()
-            } else {
-                value
-            }
+/// Escape terminal controls and bidi overrides with valid JSON escapes.
+fn json_text(text: &str) -> String {
+    let mut safe = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if (ch.is_control() && ch != '\n')
+            || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            write!(&mut safe, "\\u{:04x}", ch as u32).unwrap();
+        } else {
+            safe.push(ch);
         }
-        Value::Array(values) if depth < 3 => {
-            let mut items: Vec<_> = values
-                .iter()
-                .take(4)
-                .map(|v| compact(v, depth + 1))
-                .collect();
-            if values.len() > 4 {
-                items.push(format!("… {} more", values.len() - 4));
-            }
-            format!("[{}]", items.join(", "))
-        }
-        Value::Object(values) if depth < 3 => {
-            let mut items: Vec<_> = values
-                .iter()
-                .take(8)
-                .map(|(k, v)| format!("{}: {}", safe_text(k), compact(v, depth + 1)))
-                .collect();
-            if values.len() > 8 {
-                items.push(format!("… {} more fields", values.len() - 8));
-            }
-            format!("{{{}}}", items.join(", "))
-        }
-        _ => abbreviated(&safe_text(&value.to_string()), 200),
-    };
-    abbreviated(&text, 240)
+    }
+    safe
 }
 
 pub(super) fn wrap_fields(fields: &[String], width: usize) -> Vec<String> {
@@ -79,7 +107,7 @@ pub(super) fn wrap_fields(fields: &[String], width: usize) -> Vec<String> {
                 .map_or(rest.len(), |(i, _)| i);
             let split = rest[..boundary]
                 .rfind(' ')
-                .filter(|index| *index > remaining / 2)
+                .filter(|index| *index > 0)
                 .unwrap_or(boundary);
             line.push_str(&rest[..split]);
             lines.push(std::mem::take(&mut line));
@@ -107,10 +135,14 @@ pub(super) fn safe_text(text: &str) -> String {
 }
 
 pub(super) fn abbreviated(text: &str, limit: usize) -> String {
-    let mut chars = text.chars();
-    let mut short: String = chars.by_ref().take(limit).collect();
-    if chars.next().is_some() {
-        short.push_str("… [--detail]");
+    const SUFFIX: &str = "… [--detail]";
+    if text.chars().count() <= limit {
+        return text.into();
     }
+    let mut short: String = text
+        .chars()
+        .take(limit.saturating_sub(SUFFIX.chars().count()))
+        .collect();
+    short.push_str(SUFFIX);
     short
 }

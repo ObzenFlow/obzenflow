@@ -1054,6 +1054,7 @@ where
                 obzenflow_core::journal::archive::manifest::RunManifestStage {
                     dsl_var: name.clone(),
                     stage_type: descriptor.stage_type(),
+                    is_effectful: Some(descriptor.is_effectful()),
                     stage_id: stage_id.to_string(),
                     stage_logic_version: descriptor.stage_logic_version(),
                     data_journal_file,

@@ -130,7 +130,7 @@ obzenflow verify --baseline /path/to/original --candidate /path/to/replay
 
 The default human view shows business facts, effects and deliveries with a
 stage-kind heading, `output type ← stage name(input type)`, a compact vector
-clock, and payload fields underneath. The output appears once, on the left of
+clock, and a formatted JSON payload underneath. The output appears once, on the left of
 the arrow; the right side explains which stage and recorded input produced it.
 `--verbose` also shows runtime, lifecycle, signal and system records.
 `--explain` adds teaching notes. `--quiet` uses one line per selected
@@ -144,8 +144,13 @@ payloads for those records. Both can be combined with `--verbose`.
   change the output's journal type. Effect and delivery evidence use softer pink,
   borrowing the external-system color. Runtime records stay gray.
   Each heading and its entire output expression share the same color.
-  `SOURCE`, `TRANSFORM`, `STATEFUL` and `JOIN` name the recorded stage kind for facts;
+  `SOURCE`, `TRANSFORM`, `EFFECTFUL TRANSFORM`, `STATEFUL`, `EFFECTFUL STATEFUL`
+  and `JOIN` name the recorded stage kind for facts;
   `EFFECT` and `DELIVERY` distinguish execution evidence in plain text too.
+  New runs record the descriptor's effectful capability, including stages that
+  emit facts without invoking an effect. For archives without this metadata,
+  the viewer recognizes effectful stages after observing their own effect
+  provenance or execution evidence; until then it shows the broader stage kind.
   Color is automatic in terminals;
   pipes and `NO_COLOR` use plain text. Override with `--color always` or
   `--color never`.
@@ -177,10 +182,14 @@ payloads for those records. Both can be combined with `--verbose`.
   structured rejection causes. Replay provenance says **read from journal**;
   observation never executes an effect. `DELIVERY` rows distinguish success,
   failure, buffering and partial delivery.
-- Payloads work for arbitrary examples: objects become field/value rows; nested
-  objects, arrays and scalars remain readable. Shortened values are marked with
-  `…`; `--detail` and `--json` retain complete evidence. `COLUMNS` controls the
-  human view's preferred width (default 120).
+- Payloads use JSON with braces at the left margin, one field per line, quoted
+  strings and keys, and two-space indentation for nested objects and arrays.
+  Numbers, booleans and null retain their types. The normal human view targets
+  100 columns; `COLUMNS` can narrow it to 40–100 columns, and wider terminals do
+  not stretch the output. Oversized string values end in `…` with a separate
+  shortening note; field names and numbers are retained. `--detail` and `--json`
+  preserve complete evidence. Quiet rows use a compact JSON preview and an
+  explicit `… [--detail]` marker when the row exceeds the display width.
 - At snapshot end, confirmed settlement or Ctrl-C, the viewer reports counts by
   journal and event type for the displayed records, plus the recorded pipeline
   outcome and the number of hidden runtime records. Grouped facts are counted
