@@ -135,7 +135,8 @@ the arrow; the right side explains which stage and recorded input produced it.
 `--verbose` also shows runtime, lifecycle, signal and system records.
 `--explain` adds teaching notes. `--quiet` uses one line per selected
 record without clocks or count tables; `--detail` adds complete envelopes and
-payloads for those records. Both can be combined with `--verbose`.
+payloads for those records and the full recorded run manifest. Both can be combined
+with `--verbose`.
 
 - The palette draws on [Event Storming](https://kevinwebber.ca/series/domain-modelling-in-practice/part-2/):
   source and transform facts are bold orange, including declines and cancellations.
@@ -190,12 +191,16 @@ payloads for those records. Both can be combined with `--verbose`.
   shortening note; field names and numbers are retained. `--detail` and `--json`
   preserve complete evidence. Quiet rows use a compact JSON preview and an
   explicit `… [--detail]` marker when the row exceeds the display width.
-- At snapshot end, confirmed settlement or Ctrl-C, the viewer reports counts by
-  journal and event type for the displayed records, plus the recorded pipeline
-  outcome and the number of hidden runtime records. Grouped facts are counted
-  individually. Counts include replayed evidence; an unconfirmed outcome stays
-  unconfirmed when you detach. Hidden records still contribute causal context
-  and settlement evidence.
+- At snapshot end, confirmed settlement or Ctrl-C, a grayscale footer reports how
+  many journal entries the CLI observed, the recorded run outcome and where reading
+  stopped. A compact `run_manifest.json` summary describes the run, followed by the
+  referenced system journal and each stage's separate data and error journals.
+  Journal counts include every observed entry, even hidden runtime entries; empty
+  journals remain visible with zero observed entries. Event-type counts cover only
+  displayed entries. Counts include replayed evidence, with grouped facts counted
+  individually. The manifest is recorded during flow construction; completion comes
+  from the system journal. Detaching does not turn missing outcome evidence into a
+  completed run. `--detail` prints the full manifest, including exact filenames.
 
 This is an append-only teaching and demo interface. Journal search, storage and
 analysis can develop independently in RustFS/Quickwit; the CLI has no full-screen

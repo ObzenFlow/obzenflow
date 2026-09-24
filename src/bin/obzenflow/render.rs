@@ -16,6 +16,8 @@ use std::io::Write;
 mod context;
 #[path = "render/payload.rs"]
 mod payload;
+#[path = "render/summary.rs"]
+mod summary;
 use context::{clock, event_id, event_type, parent_ids, writer_id, Context};
 use payload::{abbreviated, compact, pretty, safe_text, wrap_fields};
 
@@ -203,9 +205,9 @@ impl Renderer {
             .map_or("system", |s| s.key.as_str());
         let journal = format!("{stage}/{}", journal_label(record.journal.kind));
         self.records += 1;
+        *self.journals.entry(journal).or_default() += 1;
         if self.visible(&record) {
             self.shown_records += 1;
-            *self.journals.entry(journal).or_default() += 1;
             let event_type = event_type(&record);
             if let Some(count) = self.event_types.get_mut(event_type) {
                 *count += 1;
@@ -490,72 +492,6 @@ impl Renderer {
 
     fn visible(&self, record: &RunRecord) -> bool {
         self.json || self.verbose || Category::of(record) != Category::Runtime
-    }
-
-    pub(super) fn finish(
-        &mut self,
-        output: &mut impl Write,
-        diagnostics: &mut impl Write,
-        run: &RunIdentity,
-        end: ObservationEnd,
-        progress: &RunReadProgress,
-    ) -> Result<(), Error> {
-        self.flush_pending(output)?;
-        if self.json {
-            writeln!(
-                diagnostics,
-                "{}",
-                serde_json::json!({"event":"run_observation_summary", "run":run, "reason":end.label(), "records":self.records, "journals":self.journals, "event_types":self.event_types, "other_event_types":self.other_event_types, "progress":progress})
-            )?;
-        } else {
-            let selection = if self.shown_records < self.records {
-                format!(
-                    " · {} shown; {} runtime records hidden (--verbose)",
-                    self.shown_records,
-                    self.records - self.shown_records
-                )
-            } else {
-                String::new()
-            };
-            writeln!(
-                output,
-                "Observed {} records · {}{selection}.",
-                self.records,
-                end.label()
-            )?;
-            if let Some(recorded) = &progress.outcome {
-                let outcome = match &recorded.outcome {
-                    RunOutcome::Completed => "completed".into(),
-                    RunOutcome::NotStarted => "not started".into(),
-                    RunOutcome::Failed { reason } => format!("failed: {}", safe_text(reason)),
-                    RunOutcome::Cancelled { reason } => format!("cancelled: {}", safe_text(reason)),
-                };
-                writeln!(output, "Recorded pipeline outcome: {outcome}.")?;
-            } else {
-                writeln!(output, "Recorded pipeline outcome: unconfirmed.")?;
-            }
-            if !self.quiet {
-                writeln!(output, "\nBy journal")?;
-                for (journal, count) in &self.journals {
-                    writeln!(output, "  {count:>7}  {}", safe_text(journal))?;
-                }
-                writeln!(output, "\nBy event type")?;
-                for (event_type, count) in &self.event_types {
-                    writeln!(output, "  {count:>7}  {}", safe_text(event_type))?;
-                }
-                if self.other_event_types > 0 {
-                    writeln!(
-                        output,
-                        "  {:>7}  other event types (summary limit reached)",
-                        self.other_event_types
-                    )?;
-                }
-                writeln!(output, "{}", self.dim("Counts cover displayed records, including replayed evidence; grouped facts count individually, not as physical calls."))?;
-            }
-        }
-        output.flush()?;
-        diagnostics.flush()?;
-        Ok(())
     }
 
     fn dim(&self, text: &str) -> String {

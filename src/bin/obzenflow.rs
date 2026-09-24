@@ -87,7 +87,7 @@ struct ViewArgs {
     /// Include runtime, lifecycle, signal and system records in the human view.
     #[arg(long, conflicts_with = "json")]
     verbose: bool,
-    /// Show complete envelopes and payloads for the selected records.
+    /// Show complete envelopes, payloads and the recorded run manifest.
     #[arg(long, conflicts_with = "json")]
     detail: bool,
     /// Add teaching notes beneath the operation and payload.
@@ -338,7 +338,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
                 result = &mut interrupt => {
                     result?;
                     let tail = snapshot.into_tail();
-                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), ObservationEnd::Detached, tail.progress())?;
+                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
                     return Ok(0);
                 }
                 record = snapshot.next() => match record {
@@ -359,6 +359,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
             &mut output,
             &mut diagnostics,
             tail.identity(),
+            tail.manifest(),
             ObservationEnd::Snapshot,
             tail.progress(),
         )?;
@@ -369,7 +370,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         let next = tokio::select! { biased;
             result = &mut interrupt => {
                 result?;
-                renderer.finish(&mut output, &mut diagnostics, tail.identity(), ObservationEnd::Detached, tail.progress())?;
+                renderer.finish(&mut output, &mut diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
                 return Ok(0);
             }
             next = tail.read_next() => match next {
@@ -396,6 +397,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
                 &mut output,
                 &mut diagnostics,
                 tail.identity(),
+                tail.manifest(),
                 ObservationEnd::Settled,
                 tail.progress(),
             )?;
@@ -405,7 +407,7 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
             tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), ObservationEnd::Detached, tail.progress())?;
+                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
                     return Ok(0);
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}

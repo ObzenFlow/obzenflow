@@ -12,7 +12,7 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::id::{FlowId, JournalId, StageId};
 use obzenflow_core::journal::read::*;
-use obzenflow_core::journal::{JournalError, JournalReader};
+use obzenflow_core::journal::{JournalError, JournalReader, RunManifest};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path};
 
@@ -83,6 +83,7 @@ pub struct RunTail {
 
 struct ReadState {
     identity: RunIdentity,
+    manifest: RunManifest,
     journals: Vec<SelectedJournal>,
     next_journal: usize,
     progress: RunReadProgress,
@@ -106,9 +107,13 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
         flow_id,
         pipeline_writer_id: manifest.pipeline_writer_id,
     };
-    let mut files = vec![(manifest.system_journal_file, RunJournalKind::System, None)];
-    let mut stages: Vec<_> = manifest.stages.into_iter().collect();
-    stages.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut files = vec![(
+        manifest.system_journal_file.clone(),
+        RunJournalKind::System,
+        None,
+    )];
+    let mut stages: Vec<_> = manifest.stages.iter().collect();
+    stages.sort_by(|a, b| a.0.cmp(b.0));
     let mut stage_ids = HashSet::new();
     for (key, stage) in stages {
         let id: StageId = stage
@@ -119,18 +124,18 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
             return Err(JournalReadError::Invalid("duplicate stage identity".into()));
         }
         let stage_info = RunStage {
-            key,
+            key: key.clone(),
             id,
             stage_type: stage.stage_type,
             is_effectful: stage.is_effectful,
         };
         files.push((
-            stage.data_journal_file,
+            stage.data_journal_file.clone(),
             RunJournalKind::Data,
             Some(stage_info.clone()),
         ));
         files.push((
-            stage.error_journal_file,
+            stage.error_journal_file.clone(),
             RunJournalKind::Error,
             Some(stage_info),
         ));
@@ -179,6 +184,7 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
     Ok(RunSnapshot {
         state: ReadState {
             identity,
+            manifest,
             journals,
             next_journal: 0,
             progress: RunReadProgress::default(),
@@ -191,6 +197,10 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
 impl RunSnapshot {
     pub fn identity(&self) -> &RunIdentity {
         &self.state.identity
+    }
+    /// Persisted manifest admitted with this handle. Run outcomes come from journals.
+    pub fn manifest(&self) -> &RunManifest {
+        &self.state.manifest
     }
     /// Manifest-selected journal identities, available before reading any rows.
     pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {
@@ -207,6 +217,10 @@ impl RunSnapshot {
 impl RunTail {
     pub fn identity(&self) -> &RunIdentity {
         &self.state.identity
+    }
+    /// The same persisted manifest admitted by the snapshot; no live state lookup.
+    pub fn manifest(&self) -> &RunManifest {
+        &self.state.manifest
     }
     /// The same fixed journal selection admitted by the snapshot.
     pub fn journals(&self) -> impl ExactSizeIterator<Item = &RunJournal> {

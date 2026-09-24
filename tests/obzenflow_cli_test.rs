@@ -244,6 +244,7 @@ async fn cli_verify_exit_codes_follow_the_contract() {
         "human settlement uses the footer, not raw diagnostics"
     );
     let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Run completed. CLI reached the recorded end of execution."));
     assert!(human.contains("cli_verify.tick.v1 ← ticks()"), "{human}");
     assert!(
         human.contains("sink.delivery ← out(cli_verify.tick.v1)"),
@@ -429,6 +430,15 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "underline only digits: {digits:?}"
             );
         }
+        let footer = text.split_once("CLI observed").unwrap().1;
+        assert!(footer.contains("\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m"));
+        for escape in footer.split("\x1b[").skip(1) {
+            let code = escape.split_once('m').unwrap().0;
+            assert!(
+                matches!(code, "0" | "1;38;5;255" | "38;5;252" | "38;5;245"),
+                "the archive summary uses grayscale only: {code}"
+            );
+        }
     }
 
     fn assert_record_outputs(text: &str, rows: &[RunRecord]) {
@@ -556,9 +566,11 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "Clocks ⟨",
         "\"reason\": \"InvalidPaymentMethod\"",
         "order.cancelled.v1 ← validate_order(commerce.customer_order_placed.v1)",
-        "By journal",
+        "MANIFEST     run_manifest.json",
+        "\nJOURNALS\n",
+        "Each stage has separate data and error journal files.",
         "By event type",
-        "Recorded pipeline outcome: completed.",
+        "Run completed. CLI reached the end of its snapshot.",
     ] {
         assert!(human.contains(teaching), "missing teaching cue {teaching}");
     }
@@ -590,7 +602,52 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_record_outputs(&explicit, &rows);
     assert_fact_origins(&human);
     assert!(!human.contains("← cause") && !human.contains("root (no recorded parent)"));
-    assert!(human.contains(&format!("Observed {} records", rows.len())));
+    assert!(human.contains(&format!(
+        "CLI observed {} journal entries across 15 journals.",
+        rows.len()
+    )));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(baseline.join("run_manifest.json")).unwrap())
+            .unwrap();
+    assert!(human.contains(manifest["flow_name"].as_str().unwrap()));
+    assert!(human.contains(manifest["flow_id"].as_str().unwrap()));
+    let inventory = human.split_once("\nJOURNALS\n").unwrap().1;
+    let system_line = inventory
+        .lines()
+        .find(|line| line.trim_start().starts_with("system.log"))
+        .unwrap();
+    let system_count = rows
+        .iter()
+        .filter(|row| row.journal.kind == obzenflow::journal::read::RunJournalKind::System)
+        .count();
+    assert_eq!(
+        system_line.split_whitespace().last().unwrap(),
+        system_count.to_string()
+    );
+    for stage in manifest["stages"].as_object().unwrap().keys() {
+        let counts: Vec<_> = inventory
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+            .find(|columns| columns.first().copied() == Some(stage.as_str()))
+            .unwrap();
+        for (column, kind) in [
+            (1, obzenflow::journal::read::RunJournalKind::Data),
+            (2, obzenflow::journal::read::RunJournalKind::Error),
+        ] {
+            let observed = rows
+                .iter()
+                .filter(|row| {
+                    row.journal.kind == kind
+                        && row
+                            .journal
+                            .stage
+                            .as_ref()
+                            .is_some_and(|owner| owner.key == *stage)
+                })
+                .count();
+            assert_eq!(counts[column], observed.to_string(), "inventory includes all journal entries, even hidden runtime rows and empty journals");
+        }
+    }
     let selected = rows
         .iter()
         .filter(|row| {
@@ -610,10 +667,10 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "one left-aligned output clock per selected record, including each grouped output"
     );
     assert!(human.contains(&format!(
-        "{selected} shown; {} runtime records hidden",
+        "{selected} displayed; {} runtime entries hidden",
         rows.len() - selected
     )));
-    assert!(!verbose.contains("runtime records hidden"));
+    assert!(!verbose.contains("runtime entries hidden"));
     let (quiet, _) = show(&baseline, &["--quiet"]);
     assert_record_outputs(&quiet, &rows);
     assert_eq!(
@@ -626,7 +683,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .lines()
         .take(selected)
         .all(|line| line.chars().count() <= 100));
-    assert!(!quiet.contains("Effects are data:") && !quiet.contains("By journal"));
+    assert!(!quiet.contains("Effects are data:") && !quiet.contains("MANIFEST"));
     assert!(!quiet.contains('⟨'), "quiet still omits clocks");
     let (quiet_verbose, _) = show(&baseline, &["--quiet", "--verbose"]);
     assert_eq!(quiet_verbose.lines().count(), rows.len() + 2);
@@ -634,6 +691,19 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert_record_outputs(&detail, &rows);
     assert!(detail.contains("\"envelope\": {") && detail.contains("\"causality\": {"));
     assert_eq!(detail.matches("\"envelope\": {").count(), selected);
+    let full_manifest = detail
+        .split_once("MANIFEST     run_manifest.json\n")
+        .unwrap()
+        .1
+        .split_once("\nJOURNALS\n")
+        .unwrap()
+        .0
+        .trim();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(full_manifest).unwrap(),
+        manifest,
+        "--detail prints the complete recorded manifest, separate from journal counts"
+    );
     let (detail_verbose, _) = show(&baseline, &["--detail", "--verbose"]);
     assert_eq!(
         detail_verbose.matches("\"envelope\": {").count(),
