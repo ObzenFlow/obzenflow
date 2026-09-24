@@ -12,6 +12,9 @@ pub mod read {
         ExecutionPayload, StageLifecycleFact,
     };
     pub use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+    pub use obzenflow_core::event::payloads::supervisor_descriptor::{
+        SupervisionMode, SupervisorDescriptor, SupervisorKind,
+    };
     pub use obzenflow_core::event::{ChainPayload, PipelineLifecycleEvent, SystemPayload};
     pub use obzenflow_core::journal::read::*;
     pub use obzenflow_core::journal::{RunManifest, RUN_MANIFEST_FILENAME};

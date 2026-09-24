@@ -124,6 +124,16 @@ where
         self.inner.build_state_machine(initial_state)
     }
 
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        self.inner.supervisor_kind()
+    }
+
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
+        self.system_journal.clone()
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -255,6 +265,16 @@ where
         initial_state: Self::State,
     ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         self.inner.build_state_machine(initial_state)
+    }
+
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        self.inner.supervisor_kind()
+    }
+
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
+        self.system_journal.clone()
     }
 
     fn name(&self) -> &str {

@@ -418,7 +418,7 @@ async fn terminal_and_drain_cannot_settle_over_an_incomplete_stage_group() {
 #[tokio::test]
 async fn admission_requires_all_files_current_schema_and_pipeline_writer() {
     let mut run = Run::new();
-    for version in ["5.0", "7.0"] {
+    for version in ["5.0", "6.0", "8.0"] {
         run.manifest.journal_schema_version = version.into();
         run.save_manifest();
         assert!(open_disk_run(run.dir.path()).await.is_err());

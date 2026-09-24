@@ -137,6 +137,87 @@ fn latest_run_dir(base: &Path) -> PathBuf {
     entries.pop().expect("run should have produced an archive")
 }
 
+#[cfg(feature = "web-host")]
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_writer_columns_use_journaled_registration() {
+    use obzenflow::journal::read::{RunRecordData, SupervisionMode, SupervisorKind, SystemPayload};
+    let temp = tempfile::tempdir().unwrap();
+    FlowApplication::builder()
+        .with_cli_args(["writer-registration", "--server", "--server-port", "0"])
+        .run_async(build_flow(temp.path().to_owned()))
+        .await
+        .unwrap();
+    let run = latest_run_dir(temp.path());
+    let mut snapshot = obzenflow::journal::read::open_disk_run(&run).await.unwrap();
+    let pipeline = snapshot.identity().pipeline_writer_id;
+    let mut registered = std::collections::BTreeMap::new();
+    while let Some(record) = snapshot.next().await.unwrap() {
+        if let RunRecordData::System(row) = record.record {
+            if let SystemPayload::SupervisorRegistered { descriptor } = &row.payload {
+                assert!(registered
+                    .insert(row.writer_id().to_string(), descriptor.clone())
+                    .is_none());
+            } else {
+                assert!(
+                    registered.contains_key(&row.writer_id().to_string()),
+                    "a writer registers before its first operational system event"
+                );
+            }
+        }
+    }
+    assert_eq!(registered.len(), 4); // Two stages, pipeline, metrics aggregator.
+    assert_eq!(
+        registered[&pipeline.to_string()].kind,
+        SupervisorKind::Pipeline
+    );
+    let metrics = registered
+        .values()
+        .find(|descriptor| descriptor.kind == SupervisorKind::MetricsAggregator)
+        .unwrap();
+    assert_eq!(metrics.name, "metrics_aggregator");
+    assert_eq!(metrics.supervision, SupervisionMode::SelfSupervised);
+    for width in [90, 40] {
+        let shown = Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .args([
+                "show",
+                run.to_str().unwrap(),
+                "--verbose",
+                "--color",
+                "never",
+            ])
+            .env("COLUMNS", width.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            shown.status.success(),
+            "{}",
+            String::from_utf8_lossy(&shown.stderr)
+        );
+        let text = String::from_utf8(shown.stdout).unwrap();
+        let summary = text.split_once("CLI observed").unwrap().1;
+        for line in summary.lines().skip(1) {
+            assert!(
+                line.chars().count() <= width,
+                "summary exceeds {width} columns: {line}"
+            );
+        }
+        let table = text.split_once("\nsystem.log\n").unwrap().1;
+        if width == 90 {
+            assert!(table
+                .lines()
+                .any(|line| line.contains("system.metrics.exported")
+                    && line.contains("metrics_aggregator")
+                    && line.contains("MetricsAggregator")));
+            assert!(table
+                .lines()
+                .any(|line| line.contains("system.metrics.drain_requested")
+                    && line.contains("pipeline_supervisor")
+                    && line.contains("Pipeline")));
+        }
+        assert!(!table.contains("Not recorded"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_verify_exit_codes_follow_the_contract() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -534,7 +615,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             assert!(
                 lines[clock + 2..]
                     .iter()
-                    .all(|line| line.chars().count() <= 100),
+                    .all(|line| line.chars().count() <= 90),
                 "{block}"
             );
         }
@@ -569,7 +650,12 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "MANIFEST     run_manifest.json",
         "\nJOURNALS\n",
         "Each stage has separate data and error journal files.",
-        "By event type",
+        "\nStage: web_orders\n  Subscribes to: —\n",
+        "\nStage: validate_order\n  Subscribes to: store_orders, web_orders\n",
+        "\nStage: authorize_payment\n  Subscribes to: validate_order\n",
+        "  Subscribers: cancelled_orders, manual_review, paid_orders\n",
+        "  Subscribers: —\n",
+        "Read (subscribers) = stage(inputs) as a dataflow shorthand:",
         "Run completed. CLI reached the end of its snapshot.",
     ] {
         assert!(human.contains(teaching), "missing teaching cue {teaching}");
@@ -661,6 +747,213 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         })
         .count();
     assert!(selected < rows.len(), "fixture includes runtime evidence");
+    fn event_table(
+        text: &str,
+        heading: &str,
+    ) -> std::collections::BTreeMap<(String, String, String), usize> {
+        let body = text
+            .split_once(&format!("\n{heading}\n"))
+            .or_else(|| text.split_once(&format!("\n  Writes to: {heading}\n")))
+            .unwrap()
+            .1;
+        body.lines()
+            .skip_while(|line| !line.trim_start().starts_with("Count "))
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| {
+                let mut columns = line.split_whitespace();
+                let count = columns.next()?.parse::<usize>().ok()?;
+                let event_type = columns.next()?.to_owned();
+                let writer = columns.next().unwrap().to_owned();
+                let kind = columns.next().unwrap().to_owned();
+                assert!(
+                    columns.next().is_none(),
+                    "four columns with a compact author type: {line}"
+                );
+                Some(((event_type, writer, kind), count))
+            })
+            .collect()
+    }
+    let mut expected_journals = std::collections::BTreeMap::<
+        String,
+        std::collections::BTreeMap<(String, String, String), usize>,
+    >::new();
+    let mut displayed_journals = expected_journals.clone();
+    let registrations: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter_map(|row| {
+            if let RunRecordData::System(record) = &row.record {
+                if let obzenflow::journal::read::SystemPayload::SupervisorRegistered {
+                    descriptor,
+                } = &record.payload
+                {
+                    return Some((record.writer_id().to_string(), descriptor));
+                }
+            }
+            None
+        })
+        .collect();
+    assert_eq!(
+        registrations.len(),
+        8,
+        "seven stage supervisors and pipeline register themselves"
+    );
+    let stage_names: std::collections::BTreeMap<_, _> = manifest["stages"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(key, stage)| {
+            (
+                format!("writer_{}", stage["stage_id"].as_str().unwrap()),
+                key.as_str(),
+            )
+        })
+        .collect();
+    for row in &rows {
+        let heading = match row.journal.kind {
+            obzenflow::journal::read::RunJournalKind::System => {
+                manifest["system_journal_file"].as_str().unwrap().to_owned()
+            }
+            kind => {
+                let stage = &row.journal.stage.as_ref().unwrap().key;
+                let field = if kind == obzenflow::journal::read::RunJournalKind::Data {
+                    "data_journal_file"
+                } else {
+                    "error_journal_file"
+                };
+                manifest["stages"][stage][field]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            }
+        };
+        let (event_type, writer) = match &row.record {
+            RunRecordData::Chain(record) => {
+                (record.event_type_name(), record.writer_id().to_string())
+            }
+            RunRecordData::System(record) => {
+                (record.event_type_name(), record.writer_id().to_string())
+            }
+        };
+        let descriptor = registrations[&writer];
+        let writer_name = stage_names
+            .get(&writer)
+            .copied()
+            .unwrap_or(&descriptor.name);
+        let key = (
+            event_type.to_owned(),
+            writer_name.to_owned(),
+            descriptor.kind.label().to_owned(),
+        );
+        *expected_journals
+            .entry(heading.clone())
+            .or_default()
+            .entry(key.clone())
+            .or_default() += 1;
+        if matches!(
+            row.kind,
+            RunRecordKind::SourceFact
+                | RunRecordKind::StageOutput
+                | RunRecordKind::Effect
+                | RunRecordKind::Delivery
+        ) {
+            *displayed_journals
+                .entry(heading)
+                .or_default()
+                .entry(key)
+                .or_insert(0usize) += 1;
+        }
+    }
+    for (heading, expected) in &expected_journals {
+        assert_eq!(
+            &event_table(&verbose, heading),
+            expected,
+            "{heading} counts only its own journal entries, regardless of writer or payload stage"
+        );
+    }
+    for (heading, expected) in &displayed_journals {
+        assert_eq!(&event_table(&human, heading), expected);
+    }
+    assert_eq!(
+        displayed_journals
+            .values()
+            .flat_map(|counts| counts.values())
+            .sum::<usize>(),
+        selected
+    );
+    assert!(
+        !human.contains("\nsystem.log\n"),
+        "hidden journals need no event table"
+    );
+    for stage in manifest["stages"].as_object().unwrap().values() {
+        let error_file = stage["error_journal_file"].as_str().unwrap();
+        assert!(
+            !verbose.contains(&format!("\n{error_file}\n")),
+            "empty journals stay in the inventory only"
+        );
+    }
+    let system_counts = event_table(&verbose, "system.log");
+    assert_eq!(system_counts.values().sum::<usize>(), system_count);
+    for event_type in [
+        "system.stage.running",
+        "system.stage.completed",
+        "system.contract.pass",
+    ] {
+        assert_eq!(
+            system_counts
+                .iter()
+                .filter(|((kind, _, _), _)| kind == event_type)
+                .map(|(_, count)| count)
+                .sum::<usize>(),
+            7
+        );
+    }
+    assert_eq!(
+        system_counts[&(
+            "system.pipeline.completed".into(),
+            "pipeline_supervisor".into(),
+            "Pipeline".into()
+        )],
+        1
+    );
+    let data_file = |stage: &str| {
+        manifest["stages"][stage]["data_journal_file"]
+            .as_str()
+            .unwrap()
+    };
+    let manual_review = event_table(&verbose, data_file("manual_review"));
+    for source in ["store_orders", "web_orders"] {
+        assert_eq!(
+            manual_review[&(
+                "control.source_contract".into(),
+                source.into(),
+                "FiniteSource".into()
+            )],
+            1,
+            "forwarded declarations retain their author, not the sink journal owner"
+        );
+    }
+    assert_eq!(
+        event_table(&verbose, data_file("validate_order"))[&(
+            "order.cancelled.v1".into(),
+            "validate_order".into(),
+            "Transform".into()
+        )],
+        1
+    );
+    assert_eq!(
+        event_table(&verbose, data_file("authorize_payment"))[&(
+            "order.cancelled.v1".into(),
+            "authorize_payment".into(),
+            "Transform".into()
+        )],
+        1
+    );
+    assert!(
+        !verbose.contains("By event type")
+            && !verbose.contains("Stage journals")
+            && !verbose.contains("System journals")
+    );
     assert_eq!(
         human.lines().filter(|line| line.starts_with('⟨')).count(),
         selected,
@@ -682,7 +975,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert!(quiet
         .lines()
         .take(selected)
-        .all(|line| line.chars().count() <= 100));
+        .all(|line| line.chars().count() <= 90));
     assert!(!quiet.contains("Effects are data:") && !quiet.contains("MANIFEST"));
     assert!(!quiet.contains('⟨'), "quiet still omits clocks");
     let (quiet_verbose, _) = show(&baseline, &["--quiet", "--verbose"]);

@@ -64,6 +64,32 @@ fn renderer() -> Renderer {
     renderer
 }
 
+#[test]
+fn event_counts_keep_physical_journals_separate_for_the_same_event_type() {
+    let source = fact(1, 100, &[], json!({"n": 1}));
+    let mut forwarded = source.clone();
+    forwarded.journal = fact(2, 101, &[100], json!({})).journal;
+    let mut error = forwarded.clone();
+    error.journal.id = serde_json::from_value(json!(id(3))).unwrap();
+    error.journal.kind = RunJournalKind::Error;
+    let mut counts = event_counts::EventCounts::default();
+    for record in [&source, &source, &forwarded, &error] {
+        counts.record(record);
+    }
+    assert_eq!(counts.journals().count(), 3);
+    for (record, expected) in [(&source, 2), (&forwarded, 1), (&error, 1)] {
+        let journal = counts
+            .journals()
+            .find(|counts| counts.journal.id == record.journal.id)
+            .unwrap();
+        assert_eq!(
+            journal.event_types[&("sensor.reading.v1".into(), writer_id(record))],
+            expected
+        );
+        assert_eq!(journal.omitted, 0);
+    }
+}
+
 fn execution(event: u64, parents: &[u64], payload: ExecutionPayload) -> RunRecord {
     let mut record = fact(2, event, parents, json!({}));
     record.kind = if matches!(payload, ExecutionPayload::EffectRecord(_)) {
@@ -247,10 +273,10 @@ fn older_archives_learn_effectful_capability_only_from_the_owning_stage() {
 }
 
 #[test]
-fn hundred_columns_keeps_long_output_expressions_together_and_narrow_views_still_wrap() {
+fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_wrap() {
     let expression =
         "payment.authorization_unavailable.v1 ← authorize_payment(payment.order_validated.v1)";
-    for width in [80, 100] {
+    for width in [80, 90] {
         let mut renderer = renderer();
         renderer.width = width;
         let mut input = fact(1, 100, &[], json!({}));
@@ -272,7 +298,7 @@ fn hundred_columns_keeps_long_output_expressions_together_and_narrow_views_still
         let text = String::from_utf8(output).unwrap();
         assert_eq!(
             text.lines().any(|line| line == expression),
-            width == 100,
+            width == 90,
             "{text}"
         );
         assert!(
@@ -601,7 +627,7 @@ fn arbitrary_payload_shapes_keep_types_units_and_escape_terminal_controls() {
 fn long_json_strings_fit_the_width_without_splitting_escapes_or_mutating_the_record() {
     let value = json!({"reason":{"nested":["é\"\\\n\u{202e}".repeat(30)]}});
     let original = value.clone();
-    for width in [40, 60, 80, 100] {
+    for width in [40, 60, 80, 90] {
         let (text, shortened) = pretty(&value, width);
         assert!(shortened);
         assert!(

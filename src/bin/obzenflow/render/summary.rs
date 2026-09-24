@@ -70,22 +70,7 @@ impl Renderer {
                 }
                 self.manifest_summary(output, manifest)?;
                 self.journal_summary(output, manifest)?;
-                writeln!(output)?;
-                self.summary_line(output, HEADING, "By event type")?;
-                for (event_type, count) in &self.event_types {
-                    self.summary_line(output, BODY, &format!("  {count:>7}  {event_type}"))?;
-                }
-                if self.other_event_types > 0 {
-                    self.summary_line(
-                        output,
-                        MUTED,
-                        &format!(
-                            "  {:>7}  other event types (summary limit reached)",
-                            self.other_event_types
-                        ),
-                    )?;
-                }
-                self.summary_line(output, MUTED, "Event-type counts cover displayed entries, including replayed evidence; not physical calls.")?;
+                self.event_summary(output, manifest)?;
             }
         }
         output.flush()?;
@@ -208,17 +193,182 @@ impl Renderer {
             "The manifest identifies those files and describes the run.",
         )?;
         if !self.detail {
-            self.summary_line(
-                output,
-                MUTED,
-                "Use --detail for the complete manifest and exact journal filenames.",
-            )?;
+            self.summary_line(output, MUTED, "Use --detail for the complete manifest.")?;
         }
         Ok(())
     }
 
     fn observed(&self, journal: &str) -> u64 {
         self.journals.get(journal).copied().unwrap_or(0)
+    }
+
+    fn event_summary(&self, output: &mut impl Write, manifest: &RunManifest) -> Result<(), Error> {
+        let mut journals: Vec<_> = self.event_counts.journals().collect();
+        // Follow the inventory order: system first, then each stage's data and
+        // error journals. Only journals with displayed entries need a table.
+        journals.sort_by_key(|counts| {
+            let stage_order = counts.journal.stage.as_ref().map_or(0, |owner| {
+                self.context
+                    .stages
+                    .iter()
+                    .position(|stage| stage.key == owner.key)
+                    .unwrap_or(self.context.stages.len())
+                    + 1
+            });
+            (
+                stage_order,
+                counts.journal.kind == RunJournalKind::Error,
+                counts.journal.id,
+            )
+        });
+        if journals.is_empty() {
+            return Ok(());
+        }
+        writeln!(output)?;
+        self.summary_line(
+            output,
+            MUTED,
+            "Event counts cover displayed entries in each journal, including replayed evidence.",
+        )?;
+        for counts in journals {
+            // Size each journal's columns to its own contents, leaving only
+            // the two-space gutters needed to distinguish adjacent columns.
+            let count_width = counts
+                .event_types
+                .values()
+                .map(|count| count.to_string().len())
+                .max()
+                .unwrap_or(0)
+                .max(5);
+            let minimums = [10, 6, 11]; // Event type, Author, Author type.
+            let mut widths = minimums;
+            for (event_type, writer) in counts.event_types.keys() {
+                let kind = self
+                    .context
+                    .supervisors
+                    .get(writer)
+                    .map_or("Not recorded", |descriptor| descriptor.kind.label());
+                for (width, text) in widths.iter_mut().zip([
+                    event_type.as_str(),
+                    self.context.writer_name(writer),
+                    kind,
+                ]) {
+                    *width = (*width).max(safe_text(text).chars().count());
+                }
+            }
+            let available = self.width.saturating_sub(count_width + 8);
+            while widths.iter().sum::<usize>() > available {
+                let column = (0..3)
+                    .max_by_key(|&index| widths[index] - minimums[index])
+                    .unwrap();
+                if widths[column] == minimums[column] {
+                    break;
+                }
+                widths[column] -= 1;
+            }
+            let [type_width, writer_width, kind_width] = widths;
+            writeln!(output)?;
+            self.event_journal_heading(output, &counts.journal, manifest)?;
+            self.summary_write(
+                output,
+                MUTED,
+                &format!(
+                    "  {:>count_width$}  {:<type_width$}  {:<writer_width$}  Author type",
+                    "Count", "Event type", "Author"
+                ),
+            )?;
+            let mut rows: Vec<_> = counts.event_types.iter().collect();
+            rows.sort_by_key(|((event_type, writer), _)| {
+                (
+                    event_type.as_str(),
+                    self.context.writer_name(writer),
+                    writer.as_str(),
+                )
+            });
+            for ((event_type, writer), count) in rows {
+                let kind = self
+                    .context
+                    .supervisors
+                    .get(writer)
+                    .map_or("Not recorded", |descriptor| descriptor.kind.label());
+                let types = cell_lines(&safe_text(event_type), type_width);
+                let writers =
+                    cell_lines(&safe_text(self.context.writer_name(writer)), writer_width);
+                let kinds = cell_lines(kind, kind_width);
+                for index in 0..types.len().max(writers.len()).max(kinds.len()) {
+                    let count = if index == 0 {
+                        count.to_string()
+                    } else {
+                        String::new()
+                    };
+                    let event_type = types.get(index).map_or("", String::as_str);
+                    let writer = writers.get(index).map_or("", String::as_str);
+                    let kind = kinds.get(index).map_or("", String::as_str);
+                    let line = format!("  {count:>count_width$}  {event_type:<type_width$}  {writer:<writer_width$}  {kind}");
+                    self.summary_write(output, BODY, line.trim_end())?;
+                }
+            }
+            if counts.omitted > 0 {
+                self.summary_line(
+                    output,
+                    MUTED,
+                    &format!(
+                        "  {} additional entries omitted (event summary limit reached).",
+                        counts.omitted,
+                    ),
+                )?;
+            }
+        }
+        writeln!(output)?;
+        self.summary_line(
+            output,
+            MUTED,
+            "Read (subscribers) = stage(inputs) as a dataflow shorthand: the stage folds events from the journals named by Subscribes to into recorded outputs in Writes to, which its Subscribers consume. Subscriptions show forward stage connections recorded in the manifest. Author identifies each event's original author, preserved when records are forwarded.",
+        )?;
+        Ok(())
+    }
+
+    fn event_journal_heading(
+        &self,
+        output: &mut impl Write,
+        journal: &RunJournal,
+        manifest: &RunManifest,
+    ) -> Result<(), Error> {
+        if journal.kind == RunJournalKind::System {
+            return self.summary_line(output, HEADING, &manifest.system_journal_file);
+        }
+        let owner = journal
+            .stage
+            .as_ref()
+            .ok_or("stage journal is missing its recorded stage identity")?;
+        let stage = manifest
+            .stages
+            .get(&owner.key)
+            .ok_or("stage journal is missing its manifest entry")?;
+        if journal.kind == RunJournalKind::Error {
+            self.summary_line(output, HEADING, &stage.error_journal_file)?;
+            return self.summary_line(output, BODY, &format!("  Stage: {}", owner.key));
+        }
+
+        let mut inputs: Vec<_> = stage.inbound.iter().map(String::as_str).collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        let mut subscribers: Vec<_> = manifest
+            .stages
+            .iter()
+            .filter(|(_, candidate)| candidate.inbound.contains(&owner.key))
+            .map(|(key, _)| key.as_str())
+            .collect();
+        subscribers.sort_unstable();
+        self.summary_line(output, HEADING, &format!("Stage: {}", owner.key))?;
+        for (label, value) in [
+            ("Subscribes to", stage_list(&inputs)),
+            ("Writes to", stage.data_journal_file.clone()),
+            ("Subscribers", stage_list(&subscribers)),
+        ] {
+            self.summary_line(output, BODY, &format!("  {label}: {value}"))?;
+        }
+        Ok(())
     }
 
     fn summary_line(&self, output: &mut impl Write, shade: &str, text: &str) -> Result<(), Error> {
@@ -238,6 +388,14 @@ impl Renderer {
     }
 }
 
+fn stage_list(stages: &[&str]) -> String {
+    if stages.is_empty() {
+        "—".into()
+    } else {
+        stages.join(", ")
+    }
+}
+
 fn fit(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         text.into()
@@ -247,4 +405,12 @@ fn fit(text: &str, width: usize) -> String {
             .chain(['…'])
             .collect()
     }
+}
+
+fn cell_lines(text: &str, width: usize) -> Vec<String> {
+    text.chars()
+        .collect::<Vec<_>>()
+        .chunks(width)
+        .map(|part| part.iter().collect())
+        .collect()
 }

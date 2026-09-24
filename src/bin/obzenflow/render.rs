@@ -14,6 +14,8 @@ use std::io::Write;
 
 #[path = "render/context.rs"]
 mod context;
+#[path = "render/event_counts.rs"]
+mod event_counts;
 #[path = "render/payload.rs"]
 mod payload;
 #[path = "render/summary.rs"]
@@ -117,6 +119,7 @@ pub(super) struct Renderer {
     journals: BTreeMap<String, u64>,
     event_types: BTreeMap<String, u64>,
     other_event_types: u64,
+    event_counts: event_counts::EventCounts,
 }
 
 impl Renderer {
@@ -141,8 +144,8 @@ impl Renderer {
             width: std::env::var("COLUMNS")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(100)
-                .clamp(40, 100),
+                .unwrap_or(90)
+                .clamp(40, 90),
             context: Context::new(journals),
             pending: VecDeque::new(),
             records: 0,
@@ -150,6 +153,7 @@ impl Renderer {
             journals: BTreeMap::new(),
             event_types: BTreeMap::new(),
             other_event_types: 0,
+            event_counts: event_counts::EventCounts::default(),
         }
     }
 
@@ -206,6 +210,9 @@ impl Renderer {
         let journal = format!("{stage}/{}", journal_label(record.journal.kind));
         self.records += 1;
         *self.journals.entry(journal).or_default() += 1;
+        if !self.json {
+            self.context.register_supervisor(&record)?;
+        }
         if self.visible(&record) {
             self.shown_records += 1;
             let event_type = event_type(&record);
@@ -215,6 +222,9 @@ impl Renderer {
                 self.event_types.insert(event_type.into(), 1);
             } else {
                 self.other_event_types += 1;
+            }
+            if !self.json {
+                self.event_counts.record(&record);
             }
         }
         if self.json {

@@ -30,6 +30,7 @@ pub(super) struct ClockComponent<'a> {
 
 pub(super) struct Context {
     pub stages: Vec<Stage>,
+    pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     references: BTreeMap<String, Reference>,
     insertion_order: VecDeque<String>,
 }
@@ -61,6 +62,7 @@ impl Context {
                 })
                 .collect(),
             references: BTreeMap::new(),
+            supervisors: BTreeMap::new(),
             insertion_order: VecDeque::new(),
         }
     }
@@ -137,7 +139,32 @@ impl Context {
         self.stages
             .iter()
             .find(|stage| stage.writer == writer)
-            .map_or(writer, |stage| stage.key.as_str())
+            .map(|stage| stage.key.as_str())
+            .or_else(|| {
+                self.supervisors
+                    .get(writer)
+                    .map(|descriptor| descriptor.name.as_str())
+            })
+            .unwrap_or(writer)
+    }
+
+    pub fn register_supervisor(&mut self, record: &RunRecord) -> Result<(), super::Error> {
+        if let RunRecordData::System(row) = &record.record {
+            if let SystemPayload::SupervisorRegistered { descriptor } = &row.payload {
+                let writer = writer_id(record);
+                if self
+                    .supervisors
+                    .get(&writer)
+                    .is_some_and(|known| known != descriptor)
+                {
+                    return Err(
+                        format!("conflicting recorded supervisor identities for {writer}").into(),
+                    );
+                }
+                self.supervisors.insert(writer, descriptor.clone());
+            }
+        }
+        Ok(())
     }
 
     pub fn clock_components<'a>(

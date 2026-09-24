@@ -55,6 +55,20 @@ impl Supervisor for MetricsAggregatorSupervisor {
         crate::metrics::fsm::build_metrics_aggregator_fsm()
     }
 
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::MetricsAggregator
+    }
+
+    fn system_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
+    {
+        self.system_journal.clone()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -270,9 +284,13 @@ mod tests {
 
         async fn append(
             &self,
-            _event: T,
+            event: T,
             _options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            // Exercise a dispatch failure after successful registration.
+            if event.event_type_name() == "system.supervisor.registered" {
+                return Ok(JournalRecord::new(self.id.into(), event));
+            }
             Err(JournalError::Implementation {
                 message: "append failed".to_string(),
                 source: Box::new(std::io::Error::other("append failed")),

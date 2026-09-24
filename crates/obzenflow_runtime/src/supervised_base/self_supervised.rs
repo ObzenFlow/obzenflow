@@ -76,6 +76,13 @@ pub trait SelfSupervisedExt: SelfSupervised {
     {
         let supervisor_name = self.name().to_string();
         let supervisor_writer = self.writer_id();
+        super::base::register(
+            &self,
+            &context,
+            supervisor_writer,
+            obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode::SelfSupervised,
+        )
+        .await?;
         tracing::info!(
             supervisor = %supervisor_name,
             writer_id = ?supervisor_writer,

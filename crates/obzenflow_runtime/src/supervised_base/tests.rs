@@ -35,6 +35,7 @@ enum TestAction {
 }
 
 struct TestContext {
+    system_journal: Arc<terminal_commands::TestJournal>,
     failure_actions_executed: Arc<AtomicUsize>,
     publications: Arc<PublicationScope>,
 }
@@ -43,6 +44,7 @@ impl FsmContext for TestContext {}
 
 impl TestContext {
     fn assert_publication_owner(&self) {
+        self.system_journal.assert_registered();
         let current =
             PublicationScope::current().expect("the shared runner must install its owner");
         assert!(Arc::ptr_eq(&self.publications, &current));
@@ -120,6 +122,19 @@ impl Supervisor for TestSelfSupervisor {
         build_test_machine(initial_state)
     }
 
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
+    }
+
+    fn system_journal(
+        &self,
+        context: &Self::Context,
+    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+        context.system_journal.clone()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -140,7 +155,7 @@ impl SelfSupervised for TestSelfSupervisor {
     }
 
     fn writer_id(&self) -> WriterId {
-        WriterId::from(StageId::new_const(1))
+        WriterId::from(obzenflow_core::SystemId::new_const(1))
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -171,6 +186,19 @@ impl Supervisor for TestHandlerSupervisor {
         initial_state: Self::State,
     ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         build_test_machine(initial_state)
+    }
+
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    }
+
+    fn system_journal(
+        &self,
+        context: &Self::Context,
+    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+        context.system_journal.clone()
     }
 
     fn name(&self) -> &str {
@@ -246,6 +274,7 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
         completion_writes: completion_writes.clone(),
     };
     let ctx = TestContext {
+        system_journal: Arc::new(terminal_commands::TestJournal::default()),
         failure_actions_executed: failure_actions_executed.clone(),
         publications: publications.clone(),
     };
@@ -278,6 +307,7 @@ async fn dispatch_state_error_drives_fsm_failure_path_handler_supervised() {
         stage_id: StageId::new_const(1),
     };
     let ctx = TestContext {
+        system_journal: Arc::new(terminal_commands::TestJournal::default()),
         failure_actions_executed: failure_actions_executed.clone(),
         publications: publications.clone(),
     };
@@ -366,6 +396,19 @@ impl Supervisor for ExternalEventTestSelfSupervisor {
         panic!("not required for wrapper dispatch_state tests");
     }
 
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
+    }
+
+    fn system_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+        Arc::new(terminal_commands::TestJournal::default())
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -409,7 +452,7 @@ impl SelfSupervised for ExternalEventTestSelfSupervisor {
     }
 
     fn writer_id(&self) -> WriterId {
-        WriterId::from(StageId::new_const(1))
+        WriterId::from(obzenflow_core::SystemId::new_const(1))
     }
 
     async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -438,6 +481,19 @@ impl Supervisor for ExternalEventTestHandlerSupervisor {
         _initial_state: Self::State,
     ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         panic!("not required for wrapper dispatch_state tests");
+    }
+
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    }
+
+    fn system_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+        Arc::new(terminal_commands::TestJournal::default())
     }
 
     fn name(&self) -> &str {

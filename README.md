@@ -186,7 +186,7 @@ with `--verbose`.
 - Payloads use JSON with braces at the left margin, one field per line, quoted
   strings and keys, and two-space indentation for nested objects and arrays.
   Numbers, booleans and null retain their types. The normal human view targets
-  100 columns; `COLUMNS` can narrow it to 40–100 columns, and wider terminals do
+  90 columns; `COLUMNS` can narrow it to 40–90 columns, and wider terminals do
   not stretch the output. Oversized string values end in `…` with a separate
   shortening note; field names and numbers are retained. `--detail` and `--json`
   preserve complete evidence. Quiet rows use a compact JSON preview and an
@@ -196,11 +196,28 @@ with `--verbose`.
   stopped. A compact `run_manifest.json` summary describes the run, followed by the
   referenced system journal and each stage's separate data and error journals.
   Journal counts include every observed entry, even hidden runtime entries; empty
-  journals remain visible with zero observed entries. Event-type counts cover only
-  displayed entries. Counts include replayed evidence, with grouped facts counted
-  individually. The manifest is recorded during flow construction; completion comes
-  from the system journal. Detaching does not turn missing outcome evidence into a
-  completed run. `--detail` prints the full manifest, including exact filenames.
+  journals remain visible with zero observed entries in the inventory. Each journal
+  with displayed entries then gets its own **Count / Event type / Author / Author type** table.
+  Stage data journals show **Stage**, **Subscribes to**, **Writes to** (the exact
+  journal filename), and **Subscribers**. Connections come from the manifest's
+  forward stage topology; an em dash means no recorded connection in that direction.
+  System and error journals retain their exact filename headings; error journals
+  also identify their stage. Data and error journals stay separate. A paragraph
+  below the tables explains the subscription and fold notation. Columns fit each
+  journal's contents, and author types use compact
+  labels such as `FiniteSource`, `Sink` and `MetricsAggregator`.
+  Counts are grouped by event type and recorded writer within each
+  journal. Author means the event's original author, so forwarded entries retain their
+  original source. Supervisor types and runtime names come from
+  `system.supervisor.registered` records; every supervisor registers through its
+  shared runner before its state machine executes. Stage names resolve through
+  the manifest. A partial observation without a registration says `Not recorded`.
+  Archive schema 7.0 rejects earlier journals; no older-archive inference is used.
+  Counts include replayed evidence,
+  with grouped facts counted individually. The manifest is recorded during flow
+  construction; completion comes from the system journal. Detaching does not turn
+  missing outcome evidence into a completed run. `--detail` prints the full manifest,
+  including exact filenames.
 
 This is an append-only teaching and demo interface. Journal search, storage and
 analysis can develop independently in RustFS/Quickwit; the CLI has no full-screen
