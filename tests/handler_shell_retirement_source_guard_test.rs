@@ -431,8 +431,12 @@ fn every_source_supervisor_closes_poll_timing_before_error_normalisation() {
         "crates/obzenflow_runtime/src/stages/source/infinite/async_supervisor.rs",
     ] {
         let source = fs::read_to_string(root.join(relative)).expect("read source supervisor");
+        assert!(
+            source.contains("use tokio::time;"),
+            "{relative} must import Tokio time for the paused-clock-testable poll timer"
+        );
         let poll_start = source
-            .rfind("let poll_started_at = tokio::time::Instant::now();")
+            .rfind("let poll_started_at = time::Instant::now();")
             .unwrap_or_else(|| panic!("{relative} must use the paused-clock-testable poll timer"));
         let live_poll = &source[poll_start..];
         let duration_capture = live_poll

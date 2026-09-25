@@ -72,33 +72,6 @@ const FIRST_RECOVERY_PAUSE: Duration = Duration::from_millis(5_250);
 /// Where the demo binary journals its runs.
 pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
 
-/// Optional per-source pacing jitter (FLOWIP-095d demo knob).
-///
-/// `PAYMENT_DEMO_SOURCE_JITTER_MS=<max>` delays each order by a deterministic
-/// pseudo-random duration derived from (channel, index). Two live runs with
-/// different jitter settings arrive in different wall-clock orders, and the
-/// canonical merge at `validate_order` still consumes them in the same merged
-/// order, asserted from the journals rather than from timing.
-fn demo_jitter(channel: &str, index: usize) {
-    // The FLOWIP-095d demo knob varies arrival timing only, never stream
-    // content, which is precisely what the canonical merge is insensitive to.
-    let max_ms: u64 = std::env::var("PAYMENT_DEMO_SOURCE_JITTER_MS") // allow-replay-ambient: timing-only demo pacing knob, stream content unaffected
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    if max_ms == 0 {
-        return;
-    }
-    // FNV-1a over (channel, index): reproducible for a given setting, varied
-    // across channels and indices.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in channel.bytes().chain(index.to_le_bytes()) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(hash % (max_ms + 1)));
-}
-
 /// Build the tutorial flow: the scripted three-phase order channels, the real
 /// gateway transform, and its breaker-retry-limiter policy.
 ///
@@ -152,20 +125,8 @@ pub fn assemble_flow(
             .build()
             .expect("gateway resilience configuration must be valid");
 
-        let mut web_orders = scripted_web_orders.into_iter().enumerate();
-        let web_orders_feed = sources::generate(move || {
-            web_orders.next().map(|(index, order)| {
-                demo_jitter("web", index);
-                order
-            })
-        });
-        let mut store_orders = scripted_store_orders.into_iter().enumerate();
-        let store_orders_feed = sources::generate(move || {
-            store_orders.next().map(|(index, order)| {
-                demo_jitter("store", index);
-                order
-            })
-        });
+        let web_orders_feed = sources::finite(scripted_web_orders);
+        let store_orders_feed = sources::finite(scripted_store_orders);
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ShippingHandoff;
         let record_cancelled =
@@ -194,9 +155,6 @@ pub fn assemble_flow(
                 //
                 // The flow reacts to these facts. On replay the runtime injects
                 // journaled source events instead of polling these sources again.
-                // Optional jitter (PAYMENT_DEMO_SOURCE_JITTER_MS) varies arrival
-                // timing without changing the merged delivery order, because the
-                // canonical merge at validate_order orders by stream content.
                 //
                 // The source rate limiter is the source-boundary example
                 // (FLOWIP-115a). These are local scripted fixtures, so a source
