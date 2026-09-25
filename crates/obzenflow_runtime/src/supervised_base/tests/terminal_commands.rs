@@ -3,13 +3,18 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::stages::common::stage_handle::STOP_REASON_USER_STOP;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::with_external_events::record_terminal_commands;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::{
     CommandDiscardDisposition, JournalRecord, JournalWriterId, SystemEvent, SystemPayload,
 };
-use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::journal::{journal_owner::JournalOwner, Journal, JournalError, JournalReader};
+use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::{AppendOptions, Journal, JournalError, JournalReader};
 use obzenflow_core::{EventId, JournalId};
+use obzenflow_fsm::FsmError;
+use std::error::Error;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
@@ -199,9 +204,7 @@ async fn terminal_mailbox_records_each_command_once_and_rejects_later_sends() {
             .await
             .unwrap();
         sender
-            .send(ExternalEventTestEvent::Error(
-                crate::stages::common::stage_handle::STOP_REASON_USER_STOP.into(),
-            ))
+            .send(ExternalEventTestEvent::Error(STOP_REASON_USER_STOP.into()))
             .await
             .unwrap();
 
@@ -331,16 +334,11 @@ struct CompletionAction;
 impl FsmAction for CompletionAction {
     type Context = CompletionContext;
 
-    async fn execute(
-        &self,
-        context: &mut CompletionContext,
-    ) -> Result<(), obzenflow_fsm::FsmError> {
+    async fn execute(&self, context: &mut CompletionContext) -> Result<(), FsmError> {
         context.entered.notify_one();
         context.release.notified().await;
         if context.fail_action {
-            return Err(obzenflow_fsm::FsmError::HandlerError(
-                "terminal action failed".into(),
-            ));
+            return Err(FsmError::HandlerError("terminal action failed".into()));
         }
         Ok(())
     }
@@ -386,10 +384,8 @@ impl Supervisor for CompletionSupervisor {
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Transform
     }
 
     fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
@@ -411,7 +407,7 @@ impl ExternalEventPolicy for CompletionSupervisor {
     }
 }
 
-impl crate::supervised_base::cleanup::HandlerSupervisedCleanup for CompletionSupervisor {}
+impl HandlerSupervisedCleanup for CompletionSupervisor {}
 
 #[async_trait::async_trait]
 impl HandlerSupervised for CompletionSupervisor {
@@ -421,7 +417,7 @@ impl HandlerSupervised for CompletionSupervisor {
         &mut self,
         state: &Self::State,
         _context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         assert!(matches!(
             state,
             ExternalEventTestState::Drained | ExternalEventTestState::Failed(_)

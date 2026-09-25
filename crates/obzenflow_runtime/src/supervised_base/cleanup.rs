@@ -5,6 +5,7 @@
 //! Internal resource settlement required by handler supervision.
 
 use super::base::Supervisor;
+use std::error::Error;
 
 /// Resource settlement after every orderly return from the consuming handler runner.
 ///
@@ -21,7 +22,7 @@ pub trait HandlerSupervisedCleanup: Supervisor + Sync {
     async fn cleanup_after_run(
         &mut self,
         _context: &Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(())
     }
 }

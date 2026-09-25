@@ -7,13 +7,15 @@
 //! This module provides supervision for state machines that delegate to handlers,
 //! such as source, transform, and sink supervisors.
 
-use super::base::{EventLoopDirective, Supervisor};
+use super::base::{self, EventLoopDirective, Supervisor};
 use super::cleanup::HandlerSupervisedCleanup;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_fsm::FsmAction;
-use obzenflow_fsm::StateVariant;
+use obzenflow_fsm::{FsmAction, StateVariant};
+use std::error::Error;
+use std::future::Future;
 use tokio::task::JoinHandle;
 
 /// Trait for handler-supervised components
@@ -28,7 +30,7 @@ pub trait HandlerSupervised: Supervisor + HandlerSupervisedCleanup + Sync {
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>>;
 
     /// Get the writer ID for this component
     fn writer_id(&self) -> WriterId;
@@ -39,7 +41,7 @@ pub trait HandlerSupervised: Supervisor + HandlerSupervisedCleanup + Sync {
     /// Optional termination hook for components that need a final marker after the
     /// FSM reaches a terminal state. Most stage supervisors rely on FSM-emitted
     /// lifecycle events and therefore use the default no-op implementation.
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(())
     }
 
@@ -76,7 +78,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         mut self,
         initial_state: Self::State,
         mut context: Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    ) -> Result<(), Box<dyn Error + Send + Sync>>
     where
         Self: Sized,
         Self::State: Send + Sync + 'static,
@@ -86,16 +88,16 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
     {
         // Keep fallible execution in a local scope so every orderly return reaches
         // cleanup without exposing a borrowed runner or an alternate task path.
-        let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
+        let result: Result<(), Box<dyn Error + Send + Sync>> = async {
             let supervisor_name = self.name().to_string();
             let supervisor_writer = self.writer_id();
             let supervisor_stage = self.stage_id();
 
-            super::base::register(
+            base::register(
                 &self,
                 &context,
                 supervisor_writer,
-                obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode::HandlerSupervised,
+                SupervisionMode::HandlerSupervised,
             )
             .await?;
 
@@ -296,7 +298,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
     /// Useful for handler-based supervisors that need to spawn processing tasks
     async fn spawn_task<F>(future: F) -> JoinHandle<()>
     where
-        F: std::future::Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         tokio::spawn(future)
     }

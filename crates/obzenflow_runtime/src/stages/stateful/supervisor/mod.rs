@@ -8,26 +8,32 @@
 //! - `running.rs`  contains the Accumulating and Emitting loops
 //! - `draining.rs` contains the Draining loop
 
-use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
-use obzenflow_core::event::ChainPayload;
-use obzenflow_core::journal::AppendOptions;
 mod draining;
 mod running;
 
+use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::{
-    EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
+    publication, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::{ChainEvent, JournalRecord, StageId};
-use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-
-use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::{ChainPayload, SystemEvent};
+use obzenflow_core::journal::{AppendOptions, Journal};
+use obzenflow_core::{ChainEvent, JournalRecord, StageId, WriterId};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
+use std::error::Error;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 fn contract_violation_directive<H>(
     error: &HandlerError,
@@ -46,7 +52,7 @@ fn contract_violation_directive<H>(
 
 /// Supervisor for stateful stages
 pub(crate) struct StatefulSupervisor<
-    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static,
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
@@ -58,10 +64,10 @@ pub(crate) struct StatefulSupervisor<
     pub(super) subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// Phantom marker to keep H in the type while no fields reference it directly
-    pub(crate) _marker: std::marker::PhantomData<H>,
+    pub(crate) _marker: PhantomData<H>,
 }
 
-impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervisor
     for StatefulSupervisor<H>
 {
     type State = StatefulState<H>;
@@ -72,7 +78,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         fsm! {
             state:   StatefulState<H>;
             event:   StatefulEvent<H>;
@@ -190,7 +196,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: StatefulState::Failed(failure_msg),
@@ -288,7 +294,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: StatefulState::Failed(failure_msg),
@@ -354,7 +360,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                    Err(FsmError::UnhandledEvent {
                         state: state_name,
                         event: event_name,
                     })
@@ -363,17 +369,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Stateful
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Stateful
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 
@@ -382,19 +382,19 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     }
 }
 
-impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    crate::supervised_base::cleanup::HandlerSupervisedCleanup for StatefulSupervisor<H>
+impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerSupervisedCleanup
+    for StatefulSupervisor<H>
 {
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerSupervised
     for StatefulSupervisor<H>
 {
     type Handler = H;
 
-    fn writer_id(&self) -> obzenflow_core::WriterId {
-        obzenflow_core::WriterId::from(self.stage_id)
+    fn writer_id(&self) -> WriterId {
+        WriterId::from(self.stage_id)
     }
 
     fn stage_id(&self) -> StageId {
@@ -409,7 +409,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         &mut self,
         state: &Self::State,
         ctx: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         match state {
             StatefulState::Created => {
                 // Wait for explicit initialization from pipeline.
@@ -431,8 +431,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     }
 }
 
-impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    ExternalEventPolicy for StatefulSupervisor<H>
+impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> ExternalEventPolicy
+    for StatefulSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, StatefulState::Created) {
@@ -455,15 +455,13 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     }
 }
 
-impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StatefulSupervisor<H>
-{
+impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> StatefulSupervisor<H> {
     /// Forward a control event downstream by appending it to the stateful stage's data journal.
     async fn forward_control_event(
         &self,
         ctx: &StatefulContext<H>,
         envelope: &JournalRecord<ChainPayload>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let _ = forward_control_event_helper(
             envelope,
             self.stage_id,
@@ -483,7 +481,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         &self,
         ctx: &mut StatefulContext<H>,
         force: bool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let interval = ctx.heartbeat_interval;
         if interval == 0 {
             return Ok(());
@@ -528,7 +526,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             ChainEventFactory::execution_event(writer_id, payload).with_flow_context(flow_context);
         let heartbeat = runtime_context.attach_to(heartbeat);
 
-        crate::supervised_base::publication::append(
+        publication::append(
             &ctx.data_journal,
             heartbeat,
             AppendOptions::new(None)

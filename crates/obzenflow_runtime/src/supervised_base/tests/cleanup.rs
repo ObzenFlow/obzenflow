@@ -3,10 +3,16 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::stages::common::stage_handle::discarded_control_details;
 use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::handle::StandardHandle;
 use crate::supervised_base::with_external_events::ExternalControlEvent;
 use futures::FutureExt;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent};
+use obzenflow_core::journal::Journal;
+use obzenflow_fsm::FsmError;
+use std::error::Error;
 use tokio::sync::Notify;
 use tokio::time::{timeout, Duration};
 
@@ -49,7 +55,7 @@ enum CleanupTestAction {
 impl FsmAction for CleanupTestAction {
     type Context = TestContext;
 
-    async fn execute(&self, context: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+    async fn execute(&self, context: &mut Self::Context) -> Result<(), FsmError> {
         context.assert_publication_owner();
         context
             .failure_actions_executed
@@ -58,7 +64,7 @@ impl FsmAction for CleanupTestAction {
             Self::Normal => "normal action failure",
             Self::Failure => "primary failure action failure",
         };
-        Err(obzenflow_fsm::FsmError::HandlerError(error.into()))
+        Err(FsmError::HandlerError(error.into()))
     }
 }
 
@@ -85,7 +91,7 @@ impl Supervisor for CleanupSupervisor {
                     Box::pin(async move {
                         let action = match failure_path {
                             Some(FailurePath::Transition | FailurePath::DispatchFailureTransition) => {
-                                return Err(obzenflow_fsm::FsmError::HandlerError("primary transition failure".into()));
+                                return Err(FsmError::HandlerError("primary transition failure".into()));
                             }
                             Some(FailurePath::DispatchFailureAction) => CleanupTestAction::Failure,
                             Some(FailurePath::ActionFailureTransition | FailurePath::ActionFailureAction) => CleanupTestAction::Normal,
@@ -104,7 +110,7 @@ impl Supervisor for CleanupSupervisor {
                     let state = state.clone();
                     Box::pin(async move {
                         if matches!(failure_path, Some(FailurePath::ActionFailureTransition)) {
-                            return Err(obzenflow_fsm::FsmError::HandlerError("primary transition failure".into()));
+                            return Err(FsmError::HandlerError("primary transition failure".into()));
                         }
                         Ok(Transition {
                             next_state: state,
@@ -120,16 +126,11 @@ impl Supervisor for CleanupSupervisor {
         "cleanup-supervisor"
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Transform
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 }
@@ -145,14 +146,9 @@ impl ExternalEventPolicy for CleanupSupervisor {
 }
 
 impl ExternalControlEvent for TestEvent {
-    fn discard_details(
-        &self,
-    ) -> (
-        obzenflow_core::event::CommandDiscardDisposition,
-        Option<String>,
-    ) {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
         let Self::Error(error) = self;
-        crate::stages::common::stage_handle::discarded_control_details(Some(error))
+        discarded_control_details(Some(error))
     }
 }
 
@@ -164,7 +160,7 @@ impl HandlerSupervised for CleanupSupervisor {
         &mut self,
         _state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         context.assert_publication_owner();
         self.probe.dispatches.fetch_add(1, Ordering::SeqCst);
         match self.failure_path {
@@ -190,7 +186,7 @@ impl HandlerSupervised for CleanupSupervisor {
         TestEvent::Error(msg)
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.probe.completion_hooks.fetch_add(1, Ordering::SeqCst);
         if self.runner_fails {
             return Err("primary runner failure".into());
@@ -204,7 +200,7 @@ impl HandlerSupervisedCleanup for CleanupSupervisor {
     async fn cleanup_after_run(
         &mut self,
         context: &Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let current = PublicationScope::current().expect("cleanup retains publication ownership");
         assert!(Arc::ptr_eq(&context.publications, &current));
         self.probe.started.fetch_add(1, Ordering::SeqCst);

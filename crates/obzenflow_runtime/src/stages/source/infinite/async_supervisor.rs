@@ -4,36 +4,48 @@
 
 //! Async infinite source supervisor implementation using HandlerSupervised pattern
 
-use crate::replay::{ReplayContextTemplate, ReplayDriver};
-use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
-use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
-use crate::stages::source::supervision::{
-    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, record_source_cleanup_failed,
-    record_source_stage_fatal, stage_boundary_control_events, stage_source_poll_outputs,
-    SourcePollObservation,
-};
-use crate::stages::source::{
-    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport, SourcePollResult,
-};
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::idle_backoff::IdleBackoff;
-use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
-use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, WriterId};
-use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use super::fsm::{
     InfiniteSourceAction, InfiniteSourceCompletionReason, InfiniteSourceContext,
     InfiniteSourceEvent, InfiniteSourceState,
 };
+use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
+use crate::replay::{ReplayContextTemplate, ReplayDriver};
+use crate::stages::common::handlers::source::SourceError;
+use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::observer::SourcePollObserverOutcome;
+use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
+use crate::stages::source::supervision::{
+    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
+    normalise_source_poll_error, observe_source_boundary_rejection, record_source_cleanup_failed,
+    record_source_stage_fatal, source_error_kind, source_open_failure,
+    stage_boundary_control_events, stage_source_poll_outputs, SourcePollObservation,
+};
+use crate::stages::source::{
+    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
+    SourcePollResult, SourceReaderInitContext,
+};
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
+use crate::supervised_base::idle_backoff::IdleBackoff;
+use crate::supervised_base::with_external_events::record_terminal_commands;
+use crate::supervised_base::{
+    publication, EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher,
+};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::types::Count;
+use obzenflow_core::event::{ChainEventFactory, ReplayLifecycleEvent, SystemEvent, SystemPayload};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{MiddlewareExecutionScope, StageId, StageKey, WriterId};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
+use std::error::Error;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time;
 
 /// Supervisor for async infinite source stages.
 pub(crate) struct AsyncInfiniteSourceSupervisor<
@@ -102,7 +114,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         // Construction starts in Created. Entry hooks mirror the engine-assigned
         // state before the supervisor executes any transition actions.
         fsm! {
@@ -245,7 +257,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
                                 ],
                             })
                         } else {
-                            Err(obzenflow_fsm::FsmError::HandlerError(
+                            Err(FsmError::HandlerError(
                                 "Invalid event".to_string(),
                             ))
                         }
@@ -340,7 +352,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
                                 actions: vec![],
                             })
                         } else {
-                            Err(obzenflow_fsm::FsmError::HandlerError(
+                            Err(FsmError::HandlerError(
                                 "Invalid event".to_string(),
                             ))
                         }
@@ -358,7 +370,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                    Err(FsmError::UnhandledEvent {
                         state: state_name,
                         event: event_name,
                     })
@@ -367,17 +379,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncInfiniteSource
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::AsyncInfiniteSource
     }
 
-    fn system_journal(
-        &self,
-        _context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         self.system_journal.clone()
     }
 
@@ -408,7 +414,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
         &mut self,
         state: &Self::State,
         ctx: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
             let _ = self.state_watcher.update(new_state.clone());
@@ -419,7 +425,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             state,
             InfiniteSourceState::Drained | InfiniteSourceState::Failed(_)
         ) {
-            crate::supervised_base::with_external_events::record_terminal_commands(
+            record_terminal_commands(
                 &mut self.external_events,
                 self.system_journal.clone(),
                 WriterId::from(self.stage_id),
@@ -507,7 +513,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
                 let replaying = matches!(
                     ctx.runtime_execution.source_phase_for(self.stage_id),
-                    crate::execution::SourceExecutionPhase::Replaying
+                    SourceExecutionPhase::Replaying
                 );
                 if replaying {
                     self.idle_backoff.reset();
@@ -524,14 +530,14 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 }),
                             ));
                         }
-                        _ = tokio::time::sleep(delay) => {}
+                        _ = time::sleep(delay) => {}
                     }
                     return Ok(EventLoopDirective::Continue);
                 }
 
                 ctx.instrumentation
                     .event_loops_total
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, Ordering::Relaxed);
 
                 if replaying {
                     let replay_archive = ctx
@@ -551,10 +557,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                             .source_data_journal_path(stage_key)
                             .map_err(|e| format!("Failed to locate archived journal: {e}"))?;
                         let reader = replay_archive
-                            .open_source_reader(
-                                stage_key,
-                                obzenflow_core::event::context::StageType::InfiniteSource,
-                            )
+                            .open_source_reader(stage_key, StageType::InfiniteSource)
                             .await
                             .map_err(|e| format!("Failed to open archived journal reader: {e}"))?;
                         let replay_context = ReplayContextTemplate {
@@ -579,7 +582,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     source_stages: replay_archive.source_stage_keys(),
                                 }),
                             );
-                            if let Err(e) = crate::supervised_base::publication::append(
+                            if let Err(e) = publication::append(
                                 &self.system_journal,
                                 started_event,
                                 Default::default(),
@@ -622,7 +625,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                         Ok(Some(event)) => {
                             ctx.instrumentation
                                 .event_loops_with_work_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
 
                             let per_data_event_duration = if event.consumes_data_credit() {
                                 tick_duration
@@ -644,7 +647,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                         }
                         Ok(None) => {
                             match ctx.runtime_execution.source_replay_exhausted(self.stage_id) {
-                                crate::execution::SourceReplayExhaustion::Terminate => {
+                                SourceReplayExhaustion::Terminate => {
                                     // FLOWIP-095k: reproduce the archive's recorded completion kind.
                                     let recorded_kind = self
                                         .replay_driver
@@ -660,7 +663,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                             &ctx.stage_name,
                                             &self.system_journal,
                                             self.replay_started_at,
-                                            crate::stages::source::replay_lifecycle::ReplayCompletionFacts {
+                                            ReplayCompletionFacts {
                                                 replayed_count,
                                                 skipped_count,
                                                 synthesized_eof_kind: Some(
@@ -682,7 +685,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 // behind the recorded outputs (F9), record the recorded
                                 // count and the boundary, then continue from the live
                                 // handler.
-                                crate::execution::SourceReplayExhaustion::ContinueLive => {
+                                SourceReplayExhaustion::ContinueLive => {
                                     let control = ctx.runtime_execution.resume_control().expect(
                                         "ContinueLive is only returned by the Resume strategy",
                                     );
@@ -693,14 +696,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     control
                                         .record_delivered_high_water(self.stage_id, replayed_count);
                                     let generation = control.resume_generation();
-                                    let marker =
-                                        obzenflow_core::event::ChainEventFactory::catch_up_complete_event(
-                                            WriterId::from(self.stage_id),
-                                            generation,
-                                            obzenflow_core::StageKey::from(
-                                                ctx.stage_name.clone(),
-                                            ),
-                                        );
+                                    let marker = ChainEventFactory::catch_up_complete_event(
+                                        WriterId::from(self.stage_id),
+                                        generation,
+                                        StageKey::from(ctx.stage_name.clone()),
+                                    );
                                     emit_batch_to_pending_outputs(
                                         vec![marker],
                                         &stage_flow_context,
@@ -715,7 +715,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                             &ctx.stage_name,
                                             &self.system_journal,
                                             self.replay_started_at,
-                                            crate::stages::source::replay_lifecycle::ReplayCompletionFacts {
+                                            ReplayCompletionFacts {
                                                 replayed_count,
                                                 skipped_count,
                                                 // FLOWIP-095k: the resume handoff
@@ -733,14 +733,12 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                                     .archive_for_io()
                                                     .map(|a| a.archive_flow_id().to_string())
                                                     .unwrap_or_default(),
-                                                replayed_count: obzenflow_core::event::types::Count(
-                                                    replayed_count,
-                                                ),
+                                                replayed_count: Count(replayed_count),
                                                 generation: generation.0,
                                             },
                                         ),
                                     );
-                                    if let Err(e) = crate::supervised_base::publication::append(
+                                    if let Err(e) = publication::append(
                                         &self.system_journal,
                                         resumed_live,
                                         Default::default(),
@@ -785,7 +783,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                     }
                 } else {
                     if !self.reader_acquired {
-                        let context = crate::stages::source::SourceReaderInitContext {
+                        let context = SourceReaderInitContext {
                             stage_id: self.stage_id,
                             stage_name: ctx.stage_name.clone(),
                             flow_name: ctx.flow_name.clone(),
@@ -801,7 +799,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                         };
                         if let Err(error) = opened {
                             return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                                crate::stages::source::supervision::source_open_failure(
+                                source_open_failure(
                                     &ctx.stage_name,
                                     ctx.runtime_execution.resume_control().is_some(),
                                     &error,
@@ -817,14 +815,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                     let boundary_future = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
-                            let poll_started_at = tokio::time::Instant::now();
+                            let poll_started_at = time::Instant::now();
                             match poll_timeout {
                                 Some(timeout) => {
-                                    match tokio::time::timeout(
-                                        timeout,
-                                        self.handler.next_invocation(),
-                                    )
-                                    .await
+                                    match time::timeout(timeout, self.handler.next_invocation())
+                                        .await
                                     {
                                         Ok(invocation) => SourcePollReport::from_erased(
                                             invocation,
@@ -832,13 +827,10 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                         ),
                                         Err(_) => {
                                             let poll_duration = poll_started_at.elapsed();
-                                            let timeout_error =
-                                                crate::stages::common::handlers::source::SourceError::Timeout(
-                                                    format!(
-                                                    "poll timeout exceeded ({}s)",
-                                                    timeout.as_secs()
-                                                ),
-                                                );
+                                            let timeout_error = SourceError::Timeout(format!(
+                                                "poll timeout exceeded ({}s)",
+                                                timeout.as_secs()
+                                            ));
                                             SourcePollReport::handler_error(
                                                 timeout_error,
                                                 poll_duration,
@@ -876,7 +868,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                         ctx.flow_id,
                         &stage_flow_context,
                         &ctx.observers,
-                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                        MiddlewareExecutionScope::LiveHandler,
                     );
 
                     match report.outcome {
@@ -917,7 +909,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                 self.pending_idle_delay = None;
                                 ctx.instrumentation
                                     .event_loops_with_work_total
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    .fetch_add(1, Ordering::Relaxed);
 
                                 let source_event_count = events.len();
                                 events.extend(poll.operational_events);
@@ -926,7 +918,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     .observe(
                                         events.as_mut_slice(),
                                         poll.poll_duration,
-                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                        SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
                                     )
@@ -952,7 +944,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     .observe(
                                         events.as_slice(),
                                         poll.poll_duration,
-                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                        SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
                                     )
@@ -978,7 +970,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     source_poll_observation
                                         .observe_empty(
                                             poll.poll_duration,
-                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
+                                            SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
                                     Ok(EventLoopDirective::Transition(
@@ -991,7 +983,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                         .observe(
                                             control_events.as_mut_slice(),
                                             poll.poll_duration,
-                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
+                                            SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
                                     stage_source_poll_outputs(
@@ -1012,8 +1004,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     error = error.safe_summary(),
                                     "Async infinite source handler.next() returned error"
                                 );
-                                let kind =
-                                    crate::stages::source::supervision::source_error_kind(&error);
+                                let kind = source_error_kind(&error);
                                 let mut events = vec![normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
                                     SourcePollKind::AsyncInfinite,
@@ -1025,9 +1016,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     .observe(
                                         events.as_mut_slice(),
                                         poll.poll_duration,
-                                        crate::stages::observer::SourcePollObserverOutcome::Error {
-                                            kind,
-                                        },
+                                        SourcePollObserverOutcome::Error { kind },
                                     )
                                     .await;
                                 stage_source_poll_outputs(
@@ -1082,13 +1071,13 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedAsyncInfiniteSourceHandler + 'static>
-    crate::supervised_base::cleanup::HandlerSupervisedCleanup for AsyncInfiniteSourceSupervisor<H>
+impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> HandlerSupervisedCleanup
+    for AsyncInfiniteSourceSupervisor<H>
 {
     async fn cleanup_after_run(
         &mut self,
         context: &Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.cleanup_reader(&context.stage_name).await
     }
 }
@@ -1097,7 +1086,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteSourceSupervis
     async fn cleanup_reader(
         &mut self,
         stage_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if self.reader_acquired && !self.cleanup_attempted {
             // Consume eligibility before the await, including when evidence fails.
             self.cleanup_attempted = true;

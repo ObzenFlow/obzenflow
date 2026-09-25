@@ -4,24 +4,23 @@
 
 //! Builder for async infinite source stages
 
-use std::sync::Arc;
-use std::time::Duration;
-
+use super::async_supervisor::AsyncInfiniteSourceSupervisor;
+use super::config::InfiniteSourceConfig;
+use super::fsm::{InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState};
+use super::handle::InfiniteSourceHandle;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::UnifiedAsyncInfiniteSourceHandler;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
+use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::WriterId;
-
-use super::async_supervisor::AsyncInfiniteSourceSupervisor;
-use super::config::InfiniteSourceConfig;
-use super::fsm::{InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourceState};
-use super::handle::InfiniteSourceHandle;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Builder for creating async infinite source stages.
 pub struct AsyncInfiniteSourceBuilder<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
@@ -114,7 +113,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
             handler,
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+            idle_backoff: IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),
             ),
