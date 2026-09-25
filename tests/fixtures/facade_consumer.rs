@@ -30,6 +30,43 @@ impl TypedPayload for Fact {
     const EVENT_TYPE: &'static str = "facade.fact";
 }
 
+#[derive(Clone, Debug)]
+struct FactIngress;
+
+impl sources::IngressDecoder for FactIngress {
+    type Output = Fact;
+}
+
+#[test]
+fn renamed_facade_ingress_builders_compile() {
+    use self::of::application::ingress::{ingress_source, IngestionConfig};
+
+    let mut app = of::application::FlowApplication::builder();
+    let http_source = app.http_ingress(FactIngress, IngestionConfig::default());
+    let inbox = ingress_source(
+        FactIngress,
+        IngestionConfig {
+            ingress_key: Some("direct".into()),
+            ..IngestionConfig::default()
+        },
+    );
+    let _sender = inbox.handle();
+    let direct_source = app.ingress(inbox);
+    let _flow = FlowDefinition::materialize(move |_| {
+        let output = sinks::debug::<Fact>();
+        Ok(flow! {
+            name: "facade_ingress",
+            journals: of::journal::memory_journals(),
+            stages: {
+                http = async_infinite_source!(Fact => http_source);
+                direct = async_infinite_source!(Fact => direct_source);
+                output = sink!(Fact => output);
+            },
+            topology: { http |> output; direct |> output; }
+        })
+    });
+}
+
 #[derive(Debug, Clone, StageOutputFacts)]
 #[stage_output(schema = of::schema)]
 enum Output {

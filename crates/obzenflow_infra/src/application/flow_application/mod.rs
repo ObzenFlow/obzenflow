@@ -20,7 +20,10 @@ use super::{
 #[cfg(feature = "warp-server")]
 use crate::application::config::CorsModeArg;
 use crate::application::config::ResolvedStartupConfig;
-use crate::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder, IngressHandle};
+use crate::web::endpoints::event_ingestion::{
+    http_ingress, HostedIngressSource, HttpIngressAttachment, IngestionConfig, Ingress,
+    IngressDecoder, IngressHandle,
+};
 #[cfg(feature = "warp-server")]
 use crate::web::host_config::{HostConfig, HostCorsConfig, HostCorsMode};
 #[cfg(feature = "warp-server")]
@@ -247,15 +250,50 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Register the optional framework-owned HTTP ingress adaptor.
-    pub fn with_http_ingress<D>(mut self, ingress: HttpIngress<D>) -> Self
+    /// Create and host HTTP ingress, returning its source for the flow topology.
+    ///
+    /// The builder retains the HTTP surface and wires readiness, refusal recording
+    /// and shutdown. The application only places the returned source in `flow!`.
+    pub fn http_ingress<D>(&mut self, decoder: D, config: IngestionConfig) -> HostedIngressSource<D>
     where
         D: IngressDecoder,
     {
+        let (source, http) = http_ingress(decoder, config).into_parts();
+        self.attach_http_ingress(http);
+        source
+    }
+
+    /// Register ingress for an application-owned protocol and return its source.
+    ///
+    /// Clone the bundle's submission handle before passing it here. The builder
+    /// wires its lifecycle; place the returned source in `flow!`.
+    pub fn ingress<D>(&mut self, ingress: Ingress<D>) -> HostedIngressSource<D>
+    where
+        D: IngressDecoder,
+    {
+        let (source, handle) = ingress.into_parts();
+        self.attach_ingress_handle(handle);
+        source
+    }
+
+    /// Register an HTTP attachment obtained by explicitly splitting an ingress bundle.
+    ///
+    /// Prefer [`Self::http_ingress`] for ordinary application wiring.
+    pub fn with_http_ingress<T>(mut self, ingress: HttpIngressAttachment<T>) -> Self
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
+        self.attach_http_ingress(ingress);
+        self
+    }
+
+    fn attach_http_ingress<T>(&mut self, ingress: HttpIngressAttachment<T>)
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
         let (surface, handle) = ingress.into_surface_and_handle();
         self.web_surfaces.push(surface);
-        self = self.with_ingress_handle(handle);
-        self
+        self.attach_ingress_handle(handle);
     }
 
     /// Wire a developer-owned ingress handle to the built flow.
@@ -263,10 +301,17 @@ impl FlowApplicationBuilder {
     where
         T: TypedPayload + Send + Sync + 'static,
     {
+        self.attach_ingress_handle(handle);
+        self
+    }
+
+    fn attach_ingress_handle<T>(&mut self, handle: IngressHandle<T>)
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
         self.flow_handle_hooks.push(Box::new(move |flow_handle| {
             handle.bind_flow_handle(flow_handle)
         }));
-        self
     }
 
     /// Add a single HTTP endpoint to be hosted by FlowApplication when running with `--server`.

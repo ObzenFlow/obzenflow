@@ -6,6 +6,11 @@
 //!
 //! Submission contracts are available without features. Enable `web-host` to
 //! serve HTTP ingress through [`super::FlowApplication`].
+//!
+//! Use [`super::FlowApplicationBuilder::http_ingress`] to register HTTP ingress
+//! and receive its source for the flow. The builder owns hosting and lifecycle
+//! wiring. For application-owned protocols, clone an [`Ingress::handle`] and
+//! pass the bundle to [`super::FlowApplicationBuilder::ingress`].
 
 pub use obzenflow_core::ingress::{
     BatchSubmission, EdgeShedReason, EventSubmission, IngressContext, IngressKey,
@@ -13,8 +18,8 @@ pub use obzenflow_core::ingress::{
     SubmissionResponse,
 };
 pub use obzenflow_infra::web::endpoints::event_ingestion::{
-    http_ingress, ingress_source, HttpIngress, IngestionConfig, Ingress, IngressHandle,
-    IngressSubmitError, IngressSubmitOutcome,
+    http_ingress, ingress_source, HttpIngress, HttpIngressAttachment, IngestionConfig, Ingress,
+    IngressHandle, IngressSubmitError, IngressSubmitOutcome,
 };
 pub use obzenflow_infra::web::endpoints::event_ingestion::{
     AuthConfig, AuthError, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
