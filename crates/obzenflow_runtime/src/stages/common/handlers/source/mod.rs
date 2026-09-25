@@ -5,6 +5,7 @@
 //! Source handler components
 
 mod erased;
+pub(crate) mod prepared;
 #[doc(hidden)]
 pub mod traits;
 pub(crate) mod typed;

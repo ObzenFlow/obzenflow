@@ -25,18 +25,14 @@ use super::handle::FiniteSourceHandle;
 use super::supervisor::FiniteSourceSupervisor;
 
 /// Builder for creating finite source stages
-pub struct FiniteSourceBuilder<
-    H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct FiniteSourceBuilder<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> {
     handler: H,
     config: FiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
-impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    FiniteSourceBuilder<H>
-{
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> FiniteSourceBuilder<H> {
     /// Create a new finite source builder
     pub fn new(handler: H, config: FiniteSourceConfig, resources: StageResources) -> Self {
         Self {
@@ -61,8 +57,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    SupervisorBuilder for FiniteSourceBuilder<H>
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
+    for FiniteSourceBuilder<H>
 {
     type Handle = FiniteSourceHandle<H>;
     type Error = BuilderError;

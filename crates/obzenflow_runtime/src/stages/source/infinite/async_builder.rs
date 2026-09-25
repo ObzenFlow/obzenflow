@@ -24,32 +24,22 @@ use super::fsm::{InfiniteSourceContext, InfiniteSourceContextInit, InfiniteSourc
 use super::handle::InfiniteSourceHandle;
 
 /// Builder for creating async infinite source stages.
-pub struct AsyncInfiniteSourceBuilder<
-    H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct AsyncInfiniteSourceBuilder<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
+{
     handler: H,
     config: InfiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
-    poll_timeout: Option<Duration>,
 }
 
-impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    AsyncInfiniteSourceBuilder<H>
-{
+impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> AsyncInfiniteSourceBuilder<H> {
     pub fn new(handler: H, config: InfiniteSourceConfig, resources: StageResources) -> Self {
         Self {
             handler,
             config,
             resources,
             instrumentation: None,
-            poll_timeout: None,
         }
-    }
-
-    pub fn with_poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
-        self.poll_timeout = poll_timeout;
-        self
     }
 
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
@@ -64,8 +54,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    SupervisorBuilder for AsyncInfiniteSourceBuilder<H>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
+    for AsyncInfiniteSourceBuilder<H>
 {
     type Handle = InfiniteSourceHandle<H>;
     type Error = BuilderError;
@@ -124,7 +114,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
             handler,
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            poll_timeout: self.poll_timeout,
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),
@@ -139,16 +128,24 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
             source_boundary: self.config.source_boundary,
             pending_boundary_begin_drain: false,
             pending_boundary_error: None,
-            live_entered: false,
+            reader_acquired: false,
             cleanup_attempted: false,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
-            supervisor,
-            InfiniteSourceState::<H>::Created,
-            context,
-        );
+        let task = SupervisorTaskBuilder::<AsyncInfiniteSourceSupervisor<H>>::new(&supervisor_name).spawn(move || async move {
+            let mut supervisor = supervisor;
+            let mut context = context;
+            let result = crate::supervised_base::handler_supervised::run_handler_supervised(
+                &mut supervisor, InfiniteSourceState::<H>::Created, &mut context,
+            ).await;
+            let cleanup = supervisor.cleanup_reader(&context.stage_name).await;
+            if let Err(error) = &cleanup {
+                tracing::warn!(stage_name = %context.stage_name, error = %error, "source cleanup evidence failed");
+            }
+            // Cleanup cannot replace the primary runner failure.
+            result.and(cleanup)
+        });
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

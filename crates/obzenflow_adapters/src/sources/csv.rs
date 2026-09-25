@@ -10,16 +10,17 @@
 //! - Malformed rows return `SourceError::Deserialization(..)`; middleware converts to error-marked events
 //! - Untyped mode preserves strings (no inference)
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use csv::{Reader, ReaderBuilder, StringRecord};
 use obzenflow_core::TypedPayload;
-use obzenflow_runtime::stages::{SourceError, TypedFiniteSourceHandler};
+use obzenflow_runtime::stages::source::{
+    FiniteSourceConnector, SourceError, SourceReaderInitContext, TypedFiniteSourceHandler,
+};
 use obzenflow_runtime::typing::SourceTyping;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 /// Untyped CSV row payload (`csv.row.v1`) with string-only values.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,8 +240,64 @@ where
             bail!("headers must be provided when has_headers=false");
         }
 
-        let file = File::open(&path)
-            .with_context(|| format!("Failed to open CSV file: {}", path.display()))?;
+        Ok(CsvSource {
+            path,
+            decoder: self.decoder,
+            has_headers: self.has_headers,
+            headers: self.headers,
+            delimiter: self.delimiter,
+            chunk_size: self.chunk_size,
+            skip_rows: self.skip_rows,
+            select_columns: self.select_columns,
+        })
+    }
+}
+
+/// Cold, reusable CSV configuration. File and header I/O happens in `open`.
+#[derive(Clone)]
+pub struct CsvSource<D> {
+    path: PathBuf,
+    decoder: D,
+    has_headers: bool,
+    headers: Option<Vec<String>>,
+    delimiter: u8,
+    chunk_size: usize,
+    skip_rows: usize,
+    select_columns: Option<Vec<String>>,
+}
+
+/// One independently owned CSV file cursor, returned by [`CsvSource::open`].
+pub struct CsvReader<D> {
+    state: CsvReaderState,
+    decoder: D,
+}
+
+impl<D: CsvDecoder> std::fmt::Debug for CsvReader<D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CsvReader")
+            .field("decoder", &std::any::type_name::<D>())
+            .field("output", &std::any::type_name::<D::Output>())
+            .field("row_index", &self.state.row_index)
+            .field("done", &self.state.done)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D: CsvDecoder> FiniteSourceConnector for CsvSource<D> {
+    type Output = D::Output;
+    type Reader = CsvReader<D>;
+
+    fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        self.open_reader()
+    }
+}
+
+impl<D: CsvDecoder> CsvSource<D> {
+    fn open_reader(&self) -> Result<CsvReader<D>, SourceError> {
+        let path = &self.path;
+        let file = File::open(path).map_err(|error| {
+            SourceError::Transport(format!("Failed to open CSV input: {error}"))
+        })?;
         let mut reader = ReaderBuilder::new()
             .has_headers(false)
             .delimiter(self.delimiter)
@@ -248,11 +305,13 @@ where
 
         let file_headers = if self.has_headers {
             let mut header_record = StringRecord::new();
-            let ok = reader
-                .read_record(&mut header_record)
-                .with_context(|| format!("Failed to read header row from {}", path.display()))?;
+            let ok = reader.read_record(&mut header_record).map_err(|error| {
+                SourceError::Deserialization(format!("Failed to read CSV header: {error}"))
+            })?;
             if !ok {
-                bail!("CSV file has no header row: {}", path.display());
+                return Err(SourceError::Validation(
+                    "CSV input has no header row".into(),
+                ));
             }
             header_record
         } else {
@@ -270,7 +329,9 @@ where
                 let mut selected_headers = StringRecord::new();
                 for col in columns {
                     let idx = file_headers.iter().position(|h| h == col).ok_or_else(|| {
-                        anyhow!("select_columns references unknown header '{col}'")
+                        SourceError::Validation(format!(
+                            "select_columns references unknown header '{col}'"
+                        ))
                     })?;
                     indices.push(idx);
                     selected_headers.push_field(col);
@@ -279,7 +340,7 @@ where
             }
         };
 
-        let state = Arc::new(Mutex::new(CsvReaderState {
+        let state = CsvReaderState {
             path: path.clone(),
             reader,
             file_headers,
@@ -291,30 +352,12 @@ where
             warned_schema_drift: false,
             pending_error: None,
             done: false,
-        }));
+        };
 
-        Ok(CsvSource {
+        Ok(CsvReader {
             state,
-            decoder: self.decoder,
-        })
-    }
-}
-
-/// CSV file source implementing `TypedFiniteSourceHandler`.
-pub struct CsvSource<D> {
-    state: Arc<Mutex<CsvReaderState>>,
-    decoder: D,
-}
-
-impl<D> Clone for CsvSource<D>
-where
-    D: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            state: Arc::clone(&self.state),
             decoder: self.decoder.clone(),
-        }
+        })
     }
 }
 
@@ -354,26 +397,11 @@ where
     }
 }
 
-impl<D> TypedFiniteSourceHandler for CsvSource<D>
-where
-    D: CsvDecoder,
-{
+impl<D: CsvDecoder> TypedFiniteSourceHandler for CsvReader<D> {
     type Output = D::Output;
 
     fn next(&mut self) -> Result<Option<Vec<Self::Output>>, SourceError> {
-        let items = {
-            let mut locked = self
-                .state
-                .lock()
-                .map_err(|_| SourceError::Other("CsvSource mutex poisoned".to_string()))?;
-            locked.next_items(&self.decoder)
-        }?;
-
-        let Some(items) = items else {
-            return Ok(None);
-        };
-
-        Ok(Some(items))
+        self.state.next_items(&self.decoder)
     }
 }
 
@@ -522,6 +550,13 @@ impl CsvReaderState {
 
 #[cfg(test)]
 mod tests {
+    fn context() -> SourceReaderInitContext {
+        SourceReaderInitContext {
+            stage_id: obzenflow_core::StageId::new(),
+            stage_name: "csv".into(),
+            flow_name: "test".into(),
+        }
+    }
     use super::*;
     use obzenflow_runtime::stages::TypedFiniteSourceHandler;
     use obzenflow_runtime::typing::SourceTyping;
@@ -567,7 +602,10 @@ mod tests {
         writeln!(tmp, "name,age").unwrap();
         writeln!(tmp, "alice,007").unwrap();
 
-        let mut src = CsvSource::from_file(CsvRowDecoder, tmp.path()).expect("source build");
+        let mut src = CsvSource::from_file(CsvRowDecoder, tmp.path())
+            .expect("source build")
+            .open(context())
+            .expect("source open");
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
@@ -585,7 +623,9 @@ mod tests {
             .has_headers(false)
             .headers(["name", "age"])
             .build()
-            .expect("source build");
+            .expect("source build")
+            .open(context())
+            .expect("source open");
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
@@ -599,7 +639,10 @@ mod tests {
         writeln!(tmp, "name\tage").unwrap();
         writeln!(tmp, "alice\t007").unwrap();
 
-        let mut src = CsvSource::tsv_from_file(CsvRowDecoder, tmp.path()).expect("source build");
+        let mut src = CsvSource::tsv_from_file(CsvRowDecoder, tmp.path())
+            .expect("source build")
+            .open(context())
+            .expect("source open");
         let batch = src.next().expect("next").expect("should have one batch");
         assert_eq!(batch.len(), 1);
 
@@ -613,13 +656,14 @@ mod tests {
         writeln!(tmp, "name,ignored").unwrap();
         writeln!(tmp, "alice,external-only").unwrap();
 
-        let mut source = CsvSource::builder(CustomerNameCsv {
+        let source = CsvSource::builder(CustomerNameCsv {
             prefix: "customer:".to_string(),
         })
         .path(tmp.path())
         .build()
         .expect("source build");
         assert_customer_name_output(&source);
+        let mut source = source.open(context()).expect("source open");
 
         let batch = source.next().expect("next").expect("one batch");
         assert_eq!(

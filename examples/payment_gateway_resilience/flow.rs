@@ -152,19 +152,19 @@ pub fn assemble_flow(
             .build()
             .expect("gateway resilience configuration must be valid");
 
-        let web_orders_feed = sources::finite_from_fn(move |index| {
-            let order = scripted_web_orders.get(index).cloned();
-            if order.is_some() {
+        let mut web_orders = scripted_web_orders.into_iter().enumerate();
+        let web_orders_feed = sources::generate(move || {
+            web_orders.next().map(|(index, order)| {
                 demo_jitter("web", index);
-            }
-            order
+                order
+            })
         });
-        let store_orders_feed = sources::finite_from_fn(move |index| {
-            let order = scripted_store_orders.get(index).cloned();
-            if order.is_some() {
+        let mut store_orders = scripted_store_orders.into_iter().enumerate();
+        let store_orders_feed = sources::generate(move || {
+            store_orders.next().map(|(index, order)| {
                 demo_jitter("store", index);
-            }
-            order
+                order
+            })
         });
         let validate_order = validation::ValidateOrder;
         let shipping_handoff = ShippingHandoff;

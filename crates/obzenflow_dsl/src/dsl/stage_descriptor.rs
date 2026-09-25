@@ -839,8 +839,8 @@ pub(crate) struct FiniteSourceDescriptor<H: UnifiedFiniteSourceHandler + 'static
 }
 
 #[async_trait]
-impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StageDescriptor for FiniteSourceDescriptor<H>
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
+    for FiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -970,23 +970,18 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 pub(crate) struct AsyncFiniteSourceDescriptor<H: UnifiedAsyncFiniteSourceHandler + 'static> {
     pub(crate) name: String,
     pub(crate) handler: H,
-    poll_timeout: Option<Duration>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) backpressure: Option<BackpressureClause>,
 }
 
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    AsyncFiniteSourceDescriptor<H>
-{
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceDescriptor<H> {
     /// Create a new async finite source descriptor carrying the handler's configured timeout.
     pub(crate) fn new(name: impl Into<String>, handler: H) -> Self {
-        let poll_timeout = handler.poll_timeout();
         Self {
             name: name.into(),
             handler,
-            poll_timeout,
             source_policies: Vec::new(),
             ingress_policy: None,
             observers: Vec::new(),
@@ -996,8 +991,8 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
 }
 
 #[async_trait]
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StageDescriptor for AsyncFiniteSourceDescriptor<H>
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> StageDescriptor
+    for AsyncFiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1061,7 +1056,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
-        let poll_timeout = self.poll_timeout;
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1105,7 +1099,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
 
         // Use the builder to create the handle
         let handle = AsyncFiniteSourceBuilder::new(handler, source_config, resources)
-            .with_poll_timeout(poll_timeout)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -1135,8 +1128,8 @@ pub(crate) struct InfiniteSourceDescriptor<H: UnifiedInfiniteSourceHandler + 'st
 }
 
 #[async_trait]
-impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StageDescriptor for InfiniteSourceDescriptor<H>
+impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
+    for InfiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1266,14 +1259,13 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
 pub(crate) struct AsyncInfiniteSourceDescriptor<H: UnifiedAsyncInfiniteSourceHandler + 'static> {
     pub(crate) name: String,
     pub(crate) handler: H,
-    poll_timeout: Option<Duration>,
     pub(crate) source_policies: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) ingress_policy: Option<Box<dyn MiddlewareFactory>>,
     pub(crate) observers: Vec<Box<dyn MiddlewareFactory>>,
     pub(crate) backpressure: Option<BackpressureClause>,
 }
 
-impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static>
     AsyncInfiniteSourceDescriptor<H>
 {
     /// Create a new async infinite source descriptor.
@@ -1281,11 +1273,9 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
     /// The handler contract defaults infinite sources to no poll timeout so push
     /// sources can block efficiently (e.g. `recv().await`).
     pub(crate) fn new(name: impl Into<String>, handler: H) -> Self {
-        let poll_timeout = handler.poll_timeout();
         Self {
             name: name.into(),
             handler,
-            poll_timeout,
             source_policies: Vec::new(),
             ingress_policy: None,
             observers: Vec::new(),
@@ -1295,8 +1285,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
 }
 
 #[async_trait]
-impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StageDescriptor for AsyncInfiniteSourceDescriptor<H>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> StageDescriptor
+    for AsyncInfiniteSourceDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1360,7 +1350,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
-        let poll_timeout = self.poll_timeout;
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
@@ -1407,7 +1396,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
         source_config.source_boundary = source_binding.source_boundary;
 
         let handle = AsyncInfiniteSourceBuilder::new(handler, source_config, resources)
-            .with_poll_timeout(poll_timeout)
             .with_instrumentation(instrumentation)
             .build()
             .await
@@ -3571,35 +3559,50 @@ mod tests {
     fn async_finite_source_descriptor_carries_configured_poll_timeout() {
         let descriptor =
             AsyncFiniteSourceDescriptor::new("configured", DummyAsyncFiniteSourceConfigured);
-        assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(123)));
+        assert_eq!(
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
+            Some(Duration::from_secs(123))
+        );
     }
 
     #[test]
     fn async_finite_source_descriptor_uses_handler_contract_default() {
         let descriptor =
             AsyncFiniteSourceDescriptor::new("defaulted", DummyAsyncFiniteSourceDefault);
-        assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]
     fn async_finite_source_descriptor_preserves_configured_disabled_timeout() {
         let descriptor =
             AsyncFiniteSourceDescriptor::new("disabled", DummyAsyncFiniteSourceDisabled);
-        assert_eq!(descriptor.poll_timeout, None);
+        assert_eq!(
+            UnifiedAsyncFiniteSourceHandler::poll_timeout(&descriptor.handler),
+            None
+        );
     }
 
     #[test]
     fn async_infinite_source_descriptor_carries_configured_poll_timeout() {
         let descriptor =
             AsyncInfiniteSourceDescriptor::new("configured", DummyAsyncInfiniteSourceConfigured);
-        assert_eq!(descriptor.poll_timeout, Some(Duration::from_secs(7)));
+        assert_eq!(
+            UnifiedAsyncInfiniteSourceHandler::poll_timeout(&descriptor.handler),
+            Some(Duration::from_secs(7))
+        );
     }
 
     #[test]
     fn async_infinite_source_descriptor_uses_handler_contract_default() {
         let descriptor =
             AsyncInfiniteSourceDescriptor::new("defaulted", DummyAsyncInfiniteSourceDefault);
-        assert_eq!(descriptor.poll_timeout, None);
+        assert_eq!(
+            UnifiedAsyncInfiniteSourceHandler::poll_timeout(&descriptor.handler),
+            None
+        );
     }
 
     #[test]

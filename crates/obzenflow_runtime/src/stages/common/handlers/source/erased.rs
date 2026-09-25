@@ -9,6 +9,7 @@ use super::traits::{
     InfiniteSourceHandler, SourceError,
 };
 use crate::stages::common::handler_error::StageFatal;
+use crate::stages::source::SourceReaderInitContext;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
@@ -81,6 +82,9 @@ mod sealed {
 /// Runtime-erased finite source interface.
 #[doc(hidden)]
 pub trait UnifiedFiniteSourceHandler: sealed::Finite + Send + Sync {
+    fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
+        Ok(())
+    }
     fn install_writer_id(&mut self, writer_id: WriterId);
     fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
     fn next_invocation(&mut self) -> ErasedSourceInvocation;
@@ -90,6 +94,9 @@ pub trait UnifiedFiniteSourceHandler: sealed::Finite + Send + Sync {
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
+    async fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
+        Ok(())
+    }
     fn install_writer_id(&mut self, writer_id: WriterId);
     fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
     fn poll_timeout(&self) -> Option<Duration>;
@@ -100,6 +107,9 @@ pub trait UnifiedAsyncFiniteSourceHandler: sealed::AsyncFinite + Send + Sync {
 /// Runtime-erased infinite source interface.
 #[doc(hidden)]
 pub trait UnifiedInfiniteSourceHandler: sealed::Infinite + Send + Sync {
+    fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
+        Ok(())
+    }
     fn install_writer_id(&mut self, writer_id: WriterId);
     fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
     fn next_invocation(&mut self) -> ErasedSourceInvocation;
@@ -109,6 +119,9 @@ pub trait UnifiedInfiniteSourceHandler: sealed::Infinite + Send + Sync {
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedAsyncInfiniteSourceHandler: sealed::AsyncInfinite + Send + Sync {
+    async fn acquire(&mut self, _context: SourceReaderInitContext) -> Result<(), SourceError> {
+        Ok(())
+    }
     fn install_writer_id(&mut self, writer_id: WriterId);
     fn install_observation_recorder(&mut self, _recorder: Arc<dyn ObservationRecorder>) {}
     fn poll_timeout(&self) -> Option<Duration>;

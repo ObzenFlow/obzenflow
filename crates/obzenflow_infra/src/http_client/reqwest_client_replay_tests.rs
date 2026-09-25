@@ -27,6 +27,7 @@ use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
     TypedAsyncFiniteSourceHandler,
 };
+use obzenflow_runtime::stages::source::{AsyncFiniteSourceConnector, SourceReaderInitContext};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -458,7 +459,16 @@ async fn source_retry_observes_one_cached_initialization_failure() {
         .build()
         .expect("HTTP pull config");
     let url = Url::parse("http://127.0.0.1:9/never-sent").expect("test URL");
-    let mut source = HttpPullSource::new(decoder(url), config);
+    let source = HttpPullSource::new(decoder(url), config);
+    let mut source = source
+        .open(SourceReaderInitContext {
+            stage_id: StageId::new(),
+            stage_name: "src".into(),
+            flow_name: "source_retry".into(),
+        })
+        .await
+        .expect("open HTTP reader");
+    assert_eq!(initializations.load(Ordering::SeqCst), 0);
 
     let mut terminal_error = None;
     for _ in 0..12 {

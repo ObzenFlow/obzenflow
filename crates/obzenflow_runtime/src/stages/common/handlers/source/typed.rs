@@ -270,7 +270,7 @@ pub trait TypedInfiniteSourceHandler: Send + Sync {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SourceRuntimeRegistration {
-    hosted_ingress_slot: HostedIngressBindingSlot,
+    pub(super) hosted_ingress_slot: HostedIngressBindingSlot,
 }
 
 impl fmt::Debug for SourceRuntimeRegistration {
@@ -394,24 +394,10 @@ pub trait IngressDecoder: Clone + Send + Sync + 'static {
 
 /// Runtime-owned typed hosted-ingress queue core.
 pub struct HostedIngressSource<D> {
-    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<EventSubmission>>>,
+    rx: tokio::sync::mpsc::Receiver<EventSubmission>,
     slot: HostedIngressBindingSlot,
     max_batch_size: usize,
     decoder: D,
-}
-
-impl<D> Clone for HostedIngressSource<D>
-where
-    D: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            rx: Arc::clone(&self.rx),
-            slot: self.slot.clone(),
-            max_batch_size: self.max_batch_size,
-            decoder: self.decoder.clone(),
-        }
-    }
 }
 
 impl<D> fmt::Debug for HostedIngressSource<D>
@@ -435,7 +421,7 @@ impl<D> HostedIngressSource<D> {
         slot: HostedIngressBindingSlot,
     ) -> Self {
         Self {
-            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            rx,
             slot,
             max_batch_size: 1000,
             decoder,
@@ -460,7 +446,7 @@ where
     D: IngressDecoder,
 {
     async fn receive_batch(&mut self) -> Result<Vec<(D::Output, IngressContext)>, SourceError> {
-        let mut rx = self.rx.lock().await;
+        let rx = &mut self.rx;
         let first = rx.recv().await.ok_or_else(|| {
             SourceError::Transport("hosted ingress source channel closed".to_string())
         })?;
@@ -541,7 +527,7 @@ where
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
-        self.rx.lock().await.close();
+        self.rx.close();
         Ok(())
     }
 
@@ -689,9 +675,8 @@ pub struct TypedAsyncFiniteSourceHandlerAdapter<H> {
 }
 
 impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
-    pub fn new(mut handler: H) -> Self {
+    pub fn new(handler: H) -> Self {
         let observation_sink = SourceObservationSink::new();
-        handler.install_source_observation_sink(observation_sink.clone());
         Self {
             handler,
             writer_id: None,
@@ -710,6 +695,8 @@ where
 {
     fn install_writer_id(&mut self, writer_id: WriterId) {
         self.writer_id = Some(writer_id);
+        self.handler
+            .install_source_observation_sink(self.observation_sink.clone());
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
@@ -775,20 +762,16 @@ pub struct TypedAsyncInfiniteSourceHandlerAdapter<H> {
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
-    registration: Option<SourceRuntimeRegistration>,
 }
 
 impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<H> {
-    pub fn new(mut handler: H) -> Self {
-        let registration = handler.runtime_registration();
+    pub fn new(handler: H) -> Self {
         let observation_sink = SourceObservationSink::new();
-        handler.install_source_observation_sink(observation_sink.clone());
         Self {
             handler,
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
-            registration,
         }
     }
 }
@@ -805,6 +788,8 @@ where
 {
     fn install_writer_id(&mut self, writer_id: WriterId) {
         self.writer_id = Some(writer_id);
+        self.handler
+            .install_source_observation_sink(self.observation_sink.clone());
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
@@ -816,9 +801,9 @@ where
     }
 
     fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
-        self.registration
-            .as_ref()
-            .map(|registration| registration.hosted_ingress_slot.clone())
+        self.handler
+            .runtime_registration()
+            .map(|registration| registration.hosted_ingress_slot)
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {

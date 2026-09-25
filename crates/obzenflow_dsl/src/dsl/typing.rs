@@ -19,8 +19,8 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
-    TypedAsyncFiniteSourceHandlerAdapter, TypedAsyncInfiniteSourceHandlerAdapter,
-    TypedFiniteSourceHandlerAdapter, TypedInfiniteSourceHandlerAdapter, TypedJoinHandlerAdapter,
+    AdmitAsyncFiniteSource, AdmitAsyncInfiniteSource, AdmitFiniteSource, AdmitInfiniteSource,
+    TypedJoinHandlerAdapter,
 };
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
@@ -37,9 +37,8 @@ use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, JoinReferenceView, SinkConnector, SinkDescription, SinkInputOrder,
     SinkTerminalOutcome, SinkWriteContext, SinkWriteReport, SinkWriteResult, StatefulEmission,
-    TransformHandler, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
-    TypedFiniteSourceHandler, TypedInfiniteSourceHandler, TypedJoinHandler, TypedStatefulHandler,
-    TypedStatefulHandlerAdapter, TypedTransformHandler, TypedTransformHandlerAdapter,
+    TransformHandler, TypedJoinHandler, TypedStatefulHandler, TypedStatefulHandlerAdapter,
+    TypedTransformHandler, TypedTransformHandlerAdapter,
 };
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
@@ -617,6 +616,7 @@ where
 #[doc(hidden)]
 pub fn typed_finite_source_descriptor<
     H,
+    Kind,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -631,7 +631,7 @@ pub fn typed_finite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedFiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H: AdmitFiniteSource<Kind>,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -642,7 +642,7 @@ where
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
     let descriptor: Box<dyn StageDescriptor> = Box::new(FiniteSourceDescriptor {
         name: name.into(),
-        handler: TypedFiniteSourceHandlerAdapter::new(handler),
+        handler: handler.prepare(),
         source_policies,
         ingress_policy,
         observers,
@@ -655,6 +655,7 @@ where
 #[doc(hidden)]
 pub fn typed_async_finite_source_descriptor<
     H,
+    Kind,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -669,7 +670,7 @@ pub fn typed_async_finite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedAsyncFiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H: AdmitAsyncFiniteSource<Kind>,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -678,8 +679,7 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor =
-        AsyncFiniteSourceDescriptor::new(name, TypedAsyncFiniteSourceHandlerAdapter::new(handler));
+    let mut descriptor = AsyncFiniteSourceDescriptor::new(name, handler.prepare());
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;
@@ -691,6 +691,7 @@ where
 #[doc(hidden)]
 pub fn typed_infinite_source_descriptor<
     H,
+    Kind,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -705,7 +706,7 @@ pub fn typed_infinite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedInfiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H: AdmitInfiniteSource<Kind>,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -716,7 +717,7 @@ where
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
     let descriptor: Box<dyn StageDescriptor> = Box::new(InfiniteSourceDescriptor {
         name: name.into(),
-        handler: TypedInfiniteSourceHandlerAdapter::new(handler),
+        handler: handler.prepare(),
         source_policies,
         ingress_policy,
         observers,
@@ -729,6 +730,7 @@ where
 #[doc(hidden)]
 pub fn typed_async_infinite_source_descriptor<
     H,
+    Kind,
     PrimaryOutput,
     ArrowOutputSet,
     PrimaryOutputIndex,
@@ -743,7 +745,7 @@ pub fn typed_async_infinite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: TypedAsyncInfiniteSourceHandler + Clone + fmt::Debug + Send + Sync + 'static,
+    H: AdmitAsyncInfiniteSource<Kind>,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -752,10 +754,7 @@ where
         HandlerOutputsAreDeclaredByArrow<ArrowOutputSet::Members, HandlerToArrowProof>,
 {
     let metadata = source_metadata_from_contract::<PrimaryOutput, ArrowOutputSet>(false, None);
-    let mut descriptor = AsyncInfiniteSourceDescriptor::new(
-        name,
-        TypedAsyncInfiniteSourceHandlerAdapter::new(handler),
-    );
+    let mut descriptor = AsyncInfiniteSourceDescriptor::new(name, handler.prepare());
     descriptor.source_policies = source_policies;
     descriptor.ingress_policy = ingress_policy;
     descriptor.observers = observers;

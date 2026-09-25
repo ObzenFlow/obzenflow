@@ -24,12 +24,10 @@ use serde::Serialize;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as TokioMutex;
+use std::sync::Mutex;
 
 type BoxedFallibleBatchFuture<T> =
     Pin<Box<dyn Future<Output = Result<Option<Vec<T>>, SourceError>> + Send>>;
-type BoxedFallibleVecFuture<T> = Pin<Box<dyn Future<Output = Result<Vec<T>, SourceError>> + Send>>;
 
 /// Typed finite source for synchronous producers (use with `source!`).
 ///
@@ -40,8 +38,8 @@ type BoxedFallibleVecFuture<T> = Pin<Box<dyn Future<Output = Result<Vec<T>, Sour
 #[derive(Clone)]
 pub struct FiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync,
 {
     producer: F,
     current_index: usize,
@@ -50,8 +48,8 @@ where
 
 impl<T, F> FiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync,
 {
     /// Create from a batch producer.
     pub fn from_producer(producer: F) -> Self {
@@ -65,11 +63,11 @@ where
 
 impl<T> FiniteSourceTyped<T, fn(usize) -> Option<Vec<T>>>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
 {
     /// Create from an iterator (primary constructor).
     ///
-    /// Collects the iterator into a `Vec` and clones items on emission.
+    /// Collects the iterator into owned storage and moves items on emission.
     /// Not suitable for very large datasets. Use a dedicated streaming source
     /// (e.g., FLOWIP-084 connectors) when inputs are unbounded.
     ///
@@ -81,28 +79,20 @@ where
     /// ```
     pub fn new<I>(
         iter: I,
-    ) -> FiniteSourceTyped<T, impl FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone>
+    ) -> FiniteSourceTyped<T, impl FnMut(usize) -> Option<Vec<T>> + Send + Sync>
     where
         I: IntoIterator<Item = T>,
     {
-        let items: Vec<T> = iter.into_iter().collect();
-        let total = items.len();
-
-        FiniteSourceTyped::from_producer(move |index| {
-            if index >= total {
-                None
-            } else {
-                Some(vec![items[index].clone()])
-            }
-        })
+        let mut items = iter.into_iter().collect::<Vec<T>>().into_iter();
+        FiniteSourceTyped::from_producer(move |_| items.next().map(|item| vec![item]))
     }
 
     /// Convenience: create from a single-item producer.
     pub fn from_item_fn<G>(
         mut producer: G,
-    ) -> FiniteSourceTyped<T, impl FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone>
+    ) -> FiniteSourceTyped<T, impl FnMut(usize) -> Option<Vec<T>> + Send + Sync>
     where
-        G: FnMut(usize) -> Option<T> + Send + Sync + Clone,
+        G: FnMut(usize) -> Option<T> + Send + Sync,
     {
         FiniteSourceTyped::from_producer(move |index| producer(index).map(|item| vec![item]))
     }
@@ -112,7 +102,7 @@ where
     /// Returns `FallibleFiniteSourceTyped` for error-returning producers.
     pub fn fallible<F>(producer: F) -> FallibleFiniteSourceTyped<T, F>
     where
-        F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+        F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
     {
         FallibleFiniteSourceTyped::new(producer)
     }
@@ -122,10 +112,10 @@ where
         producer: G,
     ) -> FallibleFiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+        impl FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
     >
     where
-        G: FnMut(usize) -> Result<Option<T>, SourceError> + Send + Sync + Clone,
+        G: FnMut(usize) -> Result<Option<T>, SourceError> + Send + Sync,
     {
         FallibleFiniteSourceTyped::from_fallible_item_fn(producer)
     }
@@ -133,8 +123,8 @@ where
 
 impl<T, F> std::fmt::Debug for FiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FiniteSourceTyped")
@@ -146,8 +136,8 @@ where
 
 impl<T, F> TypedFiniteSourceHandler for FiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync,
 {
     type Output = T;
 
@@ -181,8 +171,8 @@ where
 #[derive(Clone)]
 pub struct FallibleFiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
 {
     producer: F,
     current_index: usize,
@@ -191,8 +181,8 @@ where
 
 impl<T, F> FallibleFiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
 {
     /// Create from a fallible batch producer (primary constructor).
     ///
@@ -217,7 +207,7 @@ where
 
 impl<T> FallibleFiniteSourceTyped<T, fn(usize) -> Result<Option<Vec<T>>, SourceError>>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
 {
     /// Convenience: create from a fallible single-item producer.
     ///
@@ -226,10 +216,10 @@ where
         mut producer: G,
     ) -> FallibleFiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+        impl FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
     >
     where
-        G: FnMut(usize) -> Result<Option<T>, SourceError> + Send + Sync + Clone,
+        G: FnMut(usize) -> Result<Option<T>, SourceError> + Send + Sync,
     {
         FallibleFiniteSourceTyped::new(move |index| {
             producer(index).map(|opt| opt.map(|item| vec![item]))
@@ -239,8 +229,8 @@ where
 
 impl<T, F> std::fmt::Debug for FallibleFiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FallibleFiniteSourceTyped")
@@ -252,8 +242,8 @@ where
 
 impl<T, F> TypedFiniteSourceHandler for FallibleFiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
 {
     type Output = T;
 
@@ -283,8 +273,8 @@ where
 /// - `None` to signal completion (supervisor emits EOF)
 pub struct AsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
     producer: F,
@@ -294,7 +284,7 @@ where
 
 impl<T, F, Fut> Clone for AsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
@@ -309,8 +299,8 @@ where
 
 impl<T, F, Fut> AsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
     /// Create from an async batch producer (primary constructor).
@@ -333,8 +323,8 @@ where
 
 impl<T, F, Fut> std::fmt::Debug for AsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -348,8 +338,8 @@ where
 #[async_trait]
 impl<T, F, Fut> TypedAsyncFiniteSourceHandler for AsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
     type Output = T;
@@ -383,8 +373,8 @@ where
 /// - `Err(SourceError)` to signal a poll failure
 pub struct FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
     producer: F,
@@ -394,7 +384,7 @@ where
 
 impl<T, F, Fut> Clone for FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
@@ -409,8 +399,8 @@ where
 
 impl<T, F, Fut> FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
     /// Create from a fallible async batch producer (primary constructor).
@@ -441,7 +431,7 @@ impl<T>
         std::future::Ready<Result<Option<Vec<T>>, SourceError>>,
     >
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
 {
     /// Convenience: create from a fallible async single-item producer.
     ///
@@ -451,11 +441,11 @@ where
         mut producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<
         T,
-        impl FnMut(usize) -> BoxedFallibleBatchFuture<T> + Send + Sync + Clone,
+        impl FnMut(usize) -> BoxedFallibleBatchFuture<T> + Send + Sync,
         BoxedFallibleBatchFuture<T>,
     >
     where
-        G: FnMut(usize) -> FutItem + Send + Sync + Clone + 'static,
+        G: FnMut(usize) -> FutItem + Send + Sync + 'static,
         FutItem: Future<Output = Result<Option<T>, SourceError>> + Send + 'static,
     {
         FallibleAsyncFiniteSourceTyped::new(move |index| {
@@ -473,14 +463,14 @@ impl<T>
         std::future::Ready<Option<Vec<T>>>,
     >
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
 {
     /// Create a fallible async source from a batch producer.
     ///
     /// Returns `FallibleAsyncFiniteSourceTyped` for error-returning producers.
     pub fn fallible<G, Fut>(producer: G) -> FallibleAsyncFiniteSourceTyped<T, G, Fut>
     where
-        G: FnMut(usize) -> Fut + Send + Sync + Clone,
+        G: FnMut(usize) -> Fut + Send + Sync,
         Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
     {
         FallibleAsyncFiniteSourceTyped::new(producer)
@@ -491,11 +481,11 @@ where
         producer: G,
     ) -> FallibleAsyncFiniteSourceTyped<
         T,
-        impl FnMut(usize) -> BoxedFallibleBatchFuture<T> + Send + Sync + Clone,
+        impl FnMut(usize) -> BoxedFallibleBatchFuture<T> + Send + Sync,
         BoxedFallibleBatchFuture<T>,
     >
     where
-        G: FnMut(usize) -> FutItem + Send + Sync + Clone + 'static,
+        G: FnMut(usize) -> FutItem + Send + Sync + 'static,
         FutItem: Future<Output = Result<Option<T>, SourceError>> + Send + 'static,
     {
         FallibleAsyncFiniteSourceTyped::from_fallible_async_item_fn(producer)
@@ -504,8 +494,8 @@ where
 
 impl<T, F, Fut> std::fmt::Debug for FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -519,8 +509,8 @@ where
 #[async_trait]
 impl<T, F, Fut> TypedAsyncFiniteSourceHandler for FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
     type Output = T;
@@ -553,8 +543,8 @@ const DEFAULT_INFINITE_RECEIVER_BATCH_CAP: usize = 100;
 #[derive(Clone)]
 pub struct InfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync,
 {
     producer: F,
     current_index: usize,
@@ -563,8 +553,8 @@ where
 
 impl<T, F> InfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync,
 {
     /// Create from a batch producer (primary constructor).
     ///
@@ -586,14 +576,14 @@ where
 
 impl<T> InfiniteSourceTyped<T, fn(usize) -> Vec<T>>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
 {
     /// Create a fallible infinite source from a batch producer.
     ///
     /// Returns `FallibleInfiniteSourceTyped` for error-returning producers.
     pub fn fallible<G>(producer: G) -> FallibleInfiniteSourceTyped<T, G>
     where
-        G: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+        G: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
     {
         FallibleInfiniteSourceTyped::new(producer)
     }
@@ -609,16 +599,16 @@ where
         batch_cap: Option<usize>,
     ) -> FallibleInfiniteSourceTyped<
         T,
-        impl FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+        impl FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
     > {
         let cap = batch_cap
             .unwrap_or(DEFAULT_INFINITE_RECEIVER_BATCH_CAP)
             .max(1);
-        let shared = Arc::new(Mutex::new(receiver));
+        let receiver = Mutex::new(receiver);
 
         FallibleInfiniteSourceTyped::new(move |_index| {
             let mut batch = Vec::new();
-            let guard = shared
+            let guard = receiver
                 .lock()
                 .map_err(|e| SourceError::Other(format!("channel receiver lock poisoned: {e}")))?;
 
@@ -642,8 +632,8 @@ where
 
 impl<T, F> std::fmt::Debug for InfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InfiniteSourceTyped")
@@ -655,8 +645,8 @@ where
 
 impl<T, F> TypedInfiniteSourceHandler for InfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync,
 {
     type Output = T;
 
@@ -688,8 +678,8 @@ where
 #[derive(Clone)]
 pub struct FallibleInfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
 {
     producer: F,
     current_index: usize,
@@ -698,8 +688,8 @@ where
 
 impl<T, F> FallibleInfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
 {
     /// Create from a fallible batch producer (primary constructor).
     ///
@@ -721,8 +711,8 @@ where
 
 impl<T, F> std::fmt::Debug for FallibleInfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FallibleInfiniteSourceTyped")
@@ -734,8 +724,8 @@ where
 
 impl<T, F> TypedInfiniteSourceHandler for FallibleInfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
 {
     type Output = T;
 
@@ -760,8 +750,8 @@ where
 /// Note: Manual `Clone` impl to avoid requiring `Fut: Clone`.
 pub struct AsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Vec<T>> + Send,
 {
     producer: F,
@@ -771,7 +761,7 @@ where
 
 impl<T, F, Fut> Clone for AsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Vec<T>> + Send,
 {
@@ -786,8 +776,8 @@ where
 
 impl<T, F, Fut> AsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Vec<T>> + Send,
 {
     /// Create from an async batch producer (primary constructor).
@@ -811,75 +801,44 @@ where
 impl<T>
     AsyncInfiniteSourceTyped<T, fn(usize) -> std::future::Ready<Vec<T>>, std::future::Ready<Vec<T>>>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
 {
     /// Create a fallible async infinite source from a batch producer.
     ///
     /// Returns `FallibleAsyncInfiniteSourceTyped` for error-returning producers.
     pub fn fallible<G, FutG>(producer: G) -> FallibleAsyncInfiniteSourceTyped<T, G, FutG>
     where
-        G: FnMut(usize) -> FutG + Send + Sync + Clone,
+        G: FnMut(usize) -> FutG + Send + Sync,
         FutG: Future<Output = Result<Vec<T>, SourceError>> + Send,
     {
         FallibleAsyncInfiniteSourceTyped::new(producer)
     }
 
-    /// Create from an async `Stream` with shared progress.
-    ///
-    /// The stream is wrapped in `Arc<Mutex<...>>` so handler clones share progress.
-    /// Stream end is modeled as `Err(SourceError::Other("stream ended"))`.
+    /// Transfer an async stream into one source execution.
+    /// Stream end remains a source error; infinite completion is runtime-owned.
     pub fn from_stream<S>(
         stream: S,
-    ) -> FallibleAsyncInfiniteSourceTyped<
-        T,
-        impl FnMut(usize) -> BoxedFallibleVecFuture<T> + Send + Sync + Clone,
-        BoxedFallibleVecFuture<T>,
-    >
+    ) -> impl TypedAsyncInfiniteSourceHandler<Output = T> + SourceTyping<Output = T>
     where
         S: Stream<Item = T> + Send + Unpin + 'static,
     {
-        let shared = Arc::new(TokioMutex::new(stream));
-        FallibleAsyncInfiniteSourceTyped::new(move |_index| {
-            let stream = shared.clone();
-            Box::pin(async move {
-                let mut guard = stream.lock().await;
-                match guard.next().await {
-                    Some(item) => Ok(vec![item]),
-                    None => Err(SourceError::Other("stream ended".to_string())),
-                }
-            }) as BoxedFallibleVecFuture<T>
-        })
+        StreamSource {
+            stream: Mutex::new(stream),
+        }
     }
 
-    /// Create from an async channel receiver.
-    ///
-    /// The receiver is wrapped in `Arc<Mutex<...>>` so handler clones share progress.
-    /// Channel close is modeled as `Err(SourceError::Other("channel closed"))`.
+    /// Transfer a Tokio receiver into one source execution.
     pub fn from_receiver(
         receiver: tokio::sync::mpsc::Receiver<T>,
-    ) -> FallibleAsyncInfiniteSourceTyped<
-        T,
-        impl FnMut(usize) -> BoxedFallibleVecFuture<T> + Send + Sync + Clone,
-        BoxedFallibleVecFuture<T>,
-    > {
-        let shared = Arc::new(TokioMutex::new(receiver));
-        FallibleAsyncInfiniteSourceTyped::new(move |_index| {
-            let rx = shared.clone();
-            Box::pin(async move {
-                let mut guard = rx.lock().await;
-                match guard.recv().await {
-                    Some(item) => Ok(vec![item]),
-                    None => Err(SourceError::Other("channel closed".to_string())),
-                }
-            }) as BoxedFallibleVecFuture<T>
-        })
+    ) -> impl TypedAsyncInfiniteSourceHandler<Output = T> + SourceTyping<Output = T> {
+        ReceiverSource { receiver }
     }
 }
 
 impl<T, F, Fut> std::fmt::Debug for AsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Vec<T>> + Send,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -893,8 +852,8 @@ where
 #[async_trait]
 impl<T, F, Fut> TypedAsyncInfiniteSourceHandler for AsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Vec<T>> + Send,
 {
     type Output = T;
@@ -930,8 +889,8 @@ where
 /// - `Err(SourceError)` to signal a poll failure
 pub struct FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
     producer: F,
@@ -941,7 +900,7 @@ where
 
 impl<T, F, Fut> Clone for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
     F: FnMut(usize) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
@@ -956,8 +915,8 @@ where
 
 impl<T, F, Fut> FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
     /// Create from a fallible async batch producer (primary constructor).
@@ -980,8 +939,8 @@ where
 
 impl<T, F, Fut> std::fmt::Debug for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -995,8 +954,8 @@ where
 #[async_trait]
 impl<T, F, Fut> TypedAsyncInfiniteSourceHandler for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
     type Output = T;
@@ -1019,24 +978,24 @@ where
 
 impl<T, F> SourceTyping for FiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Option<Vec<T>> + Send + Sync,
 {
     type Output = T;
 }
 
 impl<T, F> SourceTyping for FallibleFiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Option<Vec<T>>, SourceError> + Send + Sync,
 {
     type Output = T;
 }
 
 impl<T, F, Fut> SourceTyping for AsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Option<Vec<T>>> + Send,
 {
     type Output = T;
@@ -1044,8 +1003,8 @@ where
 
 impl<T, F, Fut> SourceTyping for FallibleAsyncFiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Option<Vec<T>>, SourceError>> + Send,
 {
     type Output = T;
@@ -1053,24 +1012,24 @@ where
 
 impl<T, F> SourceTyping for InfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Vec<T> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Vec<T> + Send + Sync,
 {
     type Output = T;
 }
 
 impl<T, F> SourceTyping for FallibleInfiniteSourceTyped<T, F>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Result<Vec<T>, SourceError> + Send + Sync,
 {
     type Output = T;
 }
 
 impl<T, F, Fut> SourceTyping for AsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Vec<T>> + Send,
 {
     type Output = T;
@@ -1078,17 +1037,73 @@ where
 
 impl<T, F, Fut> SourceTyping for FallibleAsyncInfiniteSourceTyped<T, F, Fut>
 where
-    T: Serialize + TypedPayload + Clone + Send + Sync + 'static,
-    F: FnMut(usize) -> Fut + Send + Sync + Clone,
+    T: Serialize + TypedPayload + Send + Sync + 'static,
+    F: FnMut(usize) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Vec<T>, SourceError>> + Send,
 {
     type Output = T;
+}
+
+struct StreamSource<S> {
+    stream: Mutex<S>,
+}
+
+impl<S: Stream> SourceTyping for StreamSource<S>
+where
+    S::Item: TypedPayload,
+{
+    type Output = S::Item;
+}
+
+#[async_trait]
+impl<S, T> TypedAsyncInfiniteSourceHandler for StreamSource<S>
+where
+    S: Stream<Item = T> + Send + Unpin,
+    T: TypedPayload + Send + Sync + 'static,
+{
+    type Output = T;
+    async fn next(&mut self) -> Result<Vec<T>, SourceError> {
+        self.stream
+            .get_mut()
+            .map_err(|_| SourceError::Other("stream lock poisoned".into()))?
+            .next()
+            .await
+            .map(|item| vec![item])
+            .ok_or_else(|| SourceError::Other("stream ended".into()))
+    }
+}
+
+struct ReceiverSource<T> {
+    receiver: tokio::sync::mpsc::Receiver<T>,
+}
+
+impl<T: TypedPayload> SourceTyping for ReceiverSource<T> {
+    type Output = T;
+}
+
+#[async_trait]
+impl<T: TypedPayload + Send + Sync + 'static> TypedAsyncInfiniteSourceHandler
+    for ReceiverSource<T>
+{
+    type Output = T;
+    async fn next(&mut self) -> Result<Vec<T>, SourceError> {
+        self.receiver
+            .recv()
+            .await
+            .map(|item| vec![item])
+            .ok_or_else(|| SourceError::Other("channel closed".into()))
+    }
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        self.receiver.close();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     struct TestPayload {
@@ -1490,17 +1505,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_infinite_source_from_stream_clones_share_progress() {
+    async fn async_infinite_source_from_stream_preserves_owned_progress() {
         let stream = futures::stream::iter(vec![TestPayload { n: 1 }, TestPayload { n: 2 }]);
         let mut src1 = AsyncInfiniteSourceTyped::from_stream(stream);
-
-        let mut src2 = src1.clone();
 
         let first = src1.next().await.expect("next should succeed");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0], TestPayload { n: 1 });
 
-        let second = src2.next().await.expect("next should succeed");
+        let second = src1.next().await.expect("next should succeed");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0], TestPayload { n: 2 });
     }

@@ -154,6 +154,7 @@ macro_rules! __obzenflow_admit_typed_source {
         $($( __backpressure = Some($bp); )?)?
         $crate::dsl::typing::$factory::<
             _,
+            _,
             $out,
             $crate::__private::stage_fact_set![$($member),+],
             _,
@@ -178,7 +179,7 @@ macro_rules! __obzenflow_admit_typed_source {
         #[allow(unused_mut)]
         let mut __backpressure: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
         $($( __backpressure = Some($bp); )?)?
-        $crate::dsl::typing::$factory::<_, $out, $out, _, _, _>(
+        $crate::dsl::typing::$factory::<_, _, $out, $out, _, _, _>(
             $name,
             $handler,
             __source_policies,

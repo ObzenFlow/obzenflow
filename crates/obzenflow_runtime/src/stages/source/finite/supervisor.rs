@@ -37,9 +37,7 @@ use super::fsm::{
 };
 
 /// Supervisor for finite source stages
-pub(crate) struct FiniteSourceSupervisor<
-    H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub(crate) struct FiniteSourceSupervisor<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
@@ -83,7 +81,7 @@ pub(crate) struct FiniteSourceSupervisor<
     pub(crate) pending_boundary_rejected: bool,
 }
 
-impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
     for FiniteSourceSupervisor<H>
 {
     type State = FiniteSourceState<H>;
@@ -388,8 +386,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    HandlerSupervised for FiniteSourceSupervisor<H>
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
+    for FiniteSourceSupervisor<H>
 {
     type Handler = H;
 
@@ -651,6 +649,23 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         ))),
                     }
                 } else {
+                    if let Err(error) =
+                        self.handler
+                            .acquire(crate::stages::source::SourceReaderInitContext {
+                                stage_id: self.stage_id,
+                                stage_name: ctx.stage_name.clone(),
+                                flow_name: ctx.flow_name.clone(),
+                            })
+                    {
+                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                            crate::stages::source::supervision::source_open_failure(
+                                &ctx.stage_name,
+                                ctx.runtime_execution.resume_control().is_some(),
+                                &error,
+                            ),
+                        )));
+                    }
+
                     let source_boundary = self.source_boundary.clone();
                     let report = around_source_boundary(
                         source_boundary,
@@ -872,8 +887,8 @@ impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
     }
 }
 
-impl<H: UnifiedFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    ExternalEventPolicy for FiniteSourceSupervisor<H>
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> ExternalEventPolicy
+    for FiniteSourceSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(

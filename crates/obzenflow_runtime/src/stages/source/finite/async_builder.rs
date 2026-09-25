@@ -24,32 +24,21 @@ use super::fsm::{FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState
 use super::handle::FiniteSourceHandle;
 
 /// Builder for creating async finite source stages
-pub struct AsyncFiniteSourceBuilder<
-    H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct AsyncFiniteSourceBuilder<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> {
     handler: H,
     config: FiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
-    poll_timeout: Option<Duration>,
 }
 
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    AsyncFiniteSourceBuilder<H>
-{
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceBuilder<H> {
     pub fn new(handler: H, config: FiniteSourceConfig, resources: StageResources) -> Self {
         Self {
             handler,
             config,
             resources,
             instrumentation: None,
-            poll_timeout: Some(Duration::from_secs(30)),
         }
-    }
-
-    pub fn with_poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
-        self.poll_timeout = poll_timeout;
-        self
     }
 
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
@@ -64,8 +53,8 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    SupervisorBuilder for AsyncFiniteSourceBuilder<H>
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
+    for AsyncFiniteSourceBuilder<H>
 {
     type Handle = FiniteSourceHandle<H>;
     type Error = BuilderError;
@@ -124,7 +113,6 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             handler,
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            poll_timeout: self.poll_timeout,
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),
@@ -140,16 +128,24 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             pending_boundary_eof: false,
             pending_boundary_error: None,
             pending_boundary_rejected: false,
-            live_entered: false,
+            reader_acquired: false,
             cleanup_attempted: false,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
-            supervisor,
-            FiniteSourceState::<H>::Created,
-            context,
-        );
+        let task = SupervisorTaskBuilder::<AsyncFiniteSourceSupervisor<H>>::new(&supervisor_name).spawn(move || async move {
+            let mut supervisor = supervisor;
+            let mut context = context;
+            let result = crate::supervised_base::handler_supervised::run_handler_supervised(
+                &mut supervisor, FiniteSourceState::<H>::Created, &mut context,
+            ).await;
+            let cleanup = supervisor.cleanup_reader(&context.stage_name).await;
+            if let Err(error) = &cleanup {
+                tracing::warn!(stage_name = %context.stage_name, error = %error, "source cleanup evidence failed");
+            }
+            // Cleanup cannot replace the primary runner failure.
+            result.and(cleanup)
+        });
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

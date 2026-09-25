@@ -37,9 +37,8 @@ use super::fsm::{
 };
 
 /// Supervisor for infinite source stages
-pub(crate) struct InfiniteSourceSupervisor<
-    H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub(crate) struct InfiniteSourceSupervisor<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static>
+{
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
@@ -79,7 +78,7 @@ pub(crate) struct InfiniteSourceSupervisor<
     pub(crate) pending_boundary_error: Option<String>,
 }
 
-impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> Supervisor
     for InfiniteSourceSupervisor<H>
 {
     type State = InfiniteSourceState<H>;
@@ -375,8 +374,8 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    HandlerSupervised for InfiniteSourceSupervisor<H>
+impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
+    for InfiniteSourceSupervisor<H>
 {
     type Handler = H;
 
@@ -728,6 +727,23 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
                         ))),
                     }
                 } else {
+                    if let Err(error) =
+                        self.handler
+                            .acquire(crate::stages::source::SourceReaderInitContext {
+                                stage_id: self.stage_id,
+                                stage_name: ctx.stage_name.clone(),
+                                flow_name: ctx.flow_name.clone(),
+                            })
+                    {
+                        return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                            crate::stages::source::supervision::source_open_failure(
+                                &ctx.stage_name,
+                                ctx.runtime_execution.resume_control().is_some(),
+                                &error,
+                            ),
+                        )));
+                    }
+
                     let source_boundary = self.source_boundary.clone();
                     let report = around_source_boundary(
                         source_boundary,
@@ -955,8 +971,8 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
     }
 }
 
-impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    ExternalEventPolicy for InfiniteSourceSupervisor<H>
+impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> ExternalEventPolicy
+    for InfiniteSourceSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(

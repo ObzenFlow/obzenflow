@@ -59,9 +59,9 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct TestAsyncInfiniteSource {
-    rx: Arc<TokioMutex<mpsc::UnboundedReceiver<u64>>>,
+    rx: TokioMutex<mpsc::UnboundedReceiver<u64>>,
     drain_calls: Arc<AtomicU64>,
     poll_entered: Arc<Notify>,
     max_batch_size: usize,
@@ -74,7 +74,7 @@ impl TestAsyncInfiniteSource {
         max_batch_size: usize,
     ) -> Self {
         Self {
-            rx: Arc::new(TokioMutex::new(rx)),
+            rx: TokioMutex::new(rx),
             drain_calls,
             poll_entered: Arc::new(Notify::new()),
             max_batch_size,
@@ -263,19 +263,19 @@ async fn async_infinite_source_graceful_stop_interrupts_blocked_next_and_calls_d
 
 #[tokio::test]
 async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Result<()> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let drain_calls = Arc::new(AtomicU64::new(0));
+    let (tx, rx) = mpsc::channel(2);
+    tx.try_send(AsyncInfiniteEvent { n: 1 })?;
+    tx.try_send(AsyncInfiniteEvent { n: 2 })?;
     let events = Arc::new(Mutex::new(Vec::new()));
     let event_ready = Arc::new(Notify::new());
     let observer_calls = Arc::new(AtomicU64::new(0));
     let journal_root = unique_journal_dir("async_infinite_source_middleware");
-    let drain_calls_for_flow = Arc::clone(&drain_calls);
     let events_for_flow = Arc::clone(&events);
     let event_ready_for_flow = Arc::clone(&event_ready);
     let observer_calls_for_flow = Arc::clone(&observer_calls);
 
     let handle = FlowDefinition::materialize(move |_runtime_config| {
-        let source = TestAsyncInfiniteSource::new(rx, drain_calls_for_flow, 32);
+        let source = obzenflow::stages::sources::from_receiver(rx);
         let sink = CollectSink::new(events_for_flow, event_ready_for_flow);
 
         Ok(flow! {
@@ -301,13 +301,13 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
+    assert_eq!(tx.capacity(), 0, "materialisation must not consume input");
+    assert!(
+        !tx.is_closed(),
+        "materialisation must not close the receiver"
+    );
     handle.start().await?;
     wait_for_running(&handle).await?;
-
-    tx.send(1)
-        .map_err(|_| anyhow!("failed to send to source channel"))?;
-    tx.send(2)
-        .map_err(|_| anyhow!("failed to send to source channel"))?;
 
     wait_for_data_event_count(&events, &event_ready, 2).await?;
 
@@ -324,10 +324,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         .filter(|event| event.consumes_data_credit())
         .cloned()
         .collect();
-    assert!(
-        data_events.len() >= 2,
-        "expected at least two data events to reach the sink"
-    );
+    assert_eq!(data_events.len(), 2);
 
     assert_eq!(
         observer_calls.load(Ordering::Relaxed),
@@ -335,11 +332,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         "the source-poll observer sees every live data event"
     );
 
-    assert_eq!(
-        drain_calls.load(Ordering::Relaxed),
-        1,
-        "expected async infinite source drain() to be called once"
-    );
+    assert!(tx.is_closed(), "orderly cleanup releases the receiver");
 
     Ok(())
 }

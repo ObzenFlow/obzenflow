@@ -323,7 +323,7 @@ where
     }
 
     /// Spawn an already selected runner. Only typed construction calls this.
-    fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
+    pub(crate) fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>

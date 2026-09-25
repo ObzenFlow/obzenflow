@@ -25,18 +25,14 @@ use super::handle::InfiniteSourceHandle;
 use super::supervisor::InfiniteSourceSupervisor;
 
 /// Builder for creating infinite source stages
-pub struct InfiniteSourceBuilder<
-    H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct InfiniteSourceBuilder<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> {
     handler: H,
     config: InfiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
 }
 
-impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    InfiniteSourceBuilder<H>
-{
+impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> InfiniteSourceBuilder<H> {
     /// Create a new infinite source builder
     pub fn new(handler: H, config: InfiniteSourceConfig, resources: StageResources) -> Self {
         Self {
@@ -61,8 +57,8 @@ impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + '
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    SupervisorBuilder for InfiniteSourceBuilder<H>
+impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
+    for InfiniteSourceBuilder<H>
 {
     type Handle = InfiniteSourceHandle<H>;
     type Error = BuilderError;

@@ -484,6 +484,23 @@ where
     Ok(None)
 }
 
+/// Attribute acquisition failure without persisting connector error text, which
+/// can contain credentials, connection strings or untrusted response bodies.
+pub(crate) fn source_open_failure(stage_name: &str, resuming: bool, error: &SourceError) -> String {
+    let reason = match error {
+        SourceError::Timeout(_) => "opening the original input timed out",
+        SourceError::Transport(_) => "the original input is unavailable",
+        SourceError::Deserialization(_) => "the input could not be decoded during acquisition",
+        SourceError::Validation(_) => "the input failed acquisition validation",
+        SourceError::Other(_) => "the original input could not be acquired",
+    };
+    if resuming {
+        format!("Cannot resume source '{stage_name}': {reason}. Restore the original input and check its configuration and access before resuming.")
+    } else {
+        format!("Cannot start source '{stage_name}': {reason}. Check the input, configuration and access before starting again.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

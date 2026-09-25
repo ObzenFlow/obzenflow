@@ -15,8 +15,10 @@ use obzenflow::stages::joins::{JoinReferenceView, TypedJoinHandler};
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow::stages::sources::{CsvDecoder, CsvSource};
 use obzenflow::stages::transforms::TypedTransformHandler;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct DemoPaths {
     pub customers_csv: PathBuf,
     pub tickets_csv: PathBuf,
@@ -26,13 +28,20 @@ pub struct DemoPaths {
 
 impl DemoPaths {
     pub fn resolve() -> Result<Self> {
-        let out_root = PathBuf::from("target/csv-demo-support-sla");
+        Self::resolve_in(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/csv_demo_support_sla/fixtures"),
+            Path::new("target/csv-demo-support-sla"),
+        )
+    }
+
+    pub fn resolve_in(fixtures_dir: &Path, out_root: &Path) -> Result<Self> {
         let journals_dir = out_root.join("logs");
         let outputs_dir = out_root.join("outputs");
         std::fs::create_dir_all(&outputs_dir)
             .with_context(|| format!("create outputs dir {}", outputs_dir.display()))?;
 
-        let fixture_paths = fixtures::paths()?;
+        let fixture_paths = fixtures::paths(fixtures_dir);
 
         Ok(Self {
             customers_csv: fixture_paths.customers_csv,
@@ -174,7 +183,11 @@ fn build_flow(
     })
 }
 
-pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {
+pub fn run_example(
+    paths: DemoPaths,
+    presentation: Presentation,
+    cli_args: impl IntoIterator<Item = OsString>,
+) -> Result<()> {
     let customers = CsvSource::builder(CustomerCsv)
         .path(&paths.customers_csv)
         .build()?;
@@ -213,6 +226,7 @@ pub fn run_example(paths: DemoPaths, presentation: Presentation) -> Result<()> {
         .build()?;
 
     FlowApplication::builder()
+        .with_cli_args(cli_args)
         .with_presentation(presentation)
         .with_log_level(LogLevel::Info)
         .run_blocking(build_flow(

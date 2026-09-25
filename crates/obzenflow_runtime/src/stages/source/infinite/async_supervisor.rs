@@ -37,7 +37,7 @@ use super::fsm::{
 
 /// Supervisor for async infinite source stages.
 pub(crate) struct AsyncInfiniteSourceSupervisor<
-    H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static,
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
@@ -50,9 +50,6 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
-
-    /// Descriptor-selected bound for one raw async source poll.
-    pub(crate) poll_timeout: Option<Duration>,
 
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
@@ -90,12 +87,12 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     pub(crate) pending_boundary_error: Option<String>,
 
     /// Cleanup is live-only and attempted at most once.
-    pub(crate) live_entered: bool,
+    pub(crate) reader_acquired: bool,
     pub(crate) cleanup_attempted: bool,
 }
 
-impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    Supervisor for AsyncInfiniteSourceSupervisor<H>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
+    for AsyncInfiniteSourceSupervisor<H>
 {
     type State = InfiniteSourceState<H>;
     type Event = InfiniteSourceEvent<H>;
@@ -390,8 +387,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    HandlerSupervised for AsyncInfiniteSourceSupervisor<H>
+impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
+    for AsyncInfiniteSourceSupervisor<H>
 {
     type Handler = H;
 
@@ -490,23 +487,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                     }
                     self.idle_backoff.reset();
                     self.pending_idle_delay = None;
-                    if self.live_entered && !self.cleanup_attempted {
-                        self.cleanup_attempted = true;
-                        if let Err(e) = self.handler.drain().await {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                error = %e,
-                                "drain() failed; continuing shutdown"
-                            );
-                            record_source_cleanup_failed(
-                                self.stage_id,
-                                &ctx.stage_name,
-                                &e,
-                                &self.system_journal,
-                            )
-                            .await?;
-                        }
-                    }
+                    self.cleanup_reader(&ctx.stage_name).await?;
                     return Ok(EventLoopDirective::Transition(
                         InfiniteSourceEvent::Completed,
                     ));
@@ -803,9 +784,36 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                         ))),
                     }
                 } else {
-                    self.live_entered = true;
+                    if !self.reader_acquired {
+                        let context = crate::stages::source::SourceReaderInitContext {
+                            stage_id: self.stage_id,
+                            stage_name: ctx.stage_name.clone(),
+                            flow_name: ctx.flow_name.clone(),
+                        };
+                        let opened = tokio::select! {
+                            biased;
+                            event = self.external_events.recv() => {
+                                return Ok(EventLoopDirective::Transition(event.unwrap_or_else(||
+                                    InfiniteSourceEvent::Error("External control channel closed".into())
+                                )));
+                            }
+                            opened = self.handler.acquire(context) => opened,
+                        };
+                        if let Err(error) = opened {
+                            return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                                crate::stages::source::supervision::source_open_failure(
+                                    &ctx.stage_name,
+                                    ctx.runtime_execution.resume_control().is_some(),
+                                    &error,
+                                ),
+                            )));
+                        }
+                        self.reader_acquired = true;
+                        // Return to control dispatch before admitting the first poll.
+                        return Ok(EventLoopDirective::Continue);
+                    }
                     let source_boundary = self.source_boundary.clone();
-                    let poll_timeout = self.poll_timeout;
+                    let poll_timeout = self.handler.poll_timeout();
                     let boundary_future = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
@@ -1063,28 +1071,34 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Syn
                 self.pending_idle_delay = None;
                 // Best-effort: ensure async infinite sources can clean up resources even on
                 // force_shutdown (StopRequested), which routes through the Error → Failed path.
-                if self.live_entered && !self.cleanup_attempted {
-                    self.cleanup_attempted = true;
-                    if let Err(e) = self.handler.drain().await {
-                        tracing::warn!(
-                            stage_name = %ctx.stage_name,
-                            error = %e,
-                            "drain() failed during failure shutdown; continuing"
-                        );
-                        record_source_cleanup_failed(
-                            self.stage_id,
-                            &ctx.stage_name,
-                            &e,
-                            &self.system_journal,
-                        )
-                        .await?;
-                    }
-                }
+                self.cleanup_reader(&ctx.stage_name).await?;
                 Ok(EventLoopDirective::Terminate)
             }
             InfiniteSourceState::_Phantom(_) => {
                 unreachable!("PhantomData variant should never be instantiated")
             }
         }
+    }
+}
+
+impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteSourceSupervisor<H> {
+    pub(crate) async fn cleanup_reader(
+        &mut self,
+        stage_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.reader_acquired && !self.cleanup_attempted {
+            // Consume eligibility before the await, including when evidence fails.
+            self.cleanup_attempted = true;
+            if let Err(error) = self.handler.drain().await {
+                record_source_cleanup_failed(
+                    self.stage_id,
+                    stage_name,
+                    &error,
+                    &self.system_journal,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 }

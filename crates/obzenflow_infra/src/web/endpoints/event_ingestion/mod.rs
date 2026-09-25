@@ -137,7 +137,7 @@ pub struct Ingress<D>
 where
     D: IngressDecoder,
 {
-    source: HostedIngressSource<D>,
+    source: std::sync::Mutex<Option<HostedIngressSource<D>>>,
     handle: IngressHandle<D::Output>,
 }
 
@@ -145,8 +145,20 @@ impl<D> Ingress<D>
 where
     D: IngressDecoder,
 {
+    /// Transfer the receiver into one flow source. Use topology fan-out for
+    /// multiple consumers.
+    ///
+    /// # Panics
+    /// Panics if this bundle's source has already been transferred.
     pub fn source(&self) -> HostedIngressSource<D> {
-        self.source.clone()
+        let source = self
+            .source
+            .lock()
+            .expect("ingress source lock poisoned")
+            .take();
+        source.expect(
+            "ingress source already transferred; use topology fan-out for multiple consumers",
+        )
     }
 
     pub fn handle(&self) -> IngressHandle<D::Output> {
@@ -160,7 +172,7 @@ where
     D: IngressDecoder,
 {
     surface: WebSurfaceAttachment,
-    source: HostedIngressSource<D>,
+    source: std::sync::Mutex<Option<HostedIngressSource<D>>>,
     handle: IngressHandle<D::Output>,
 }
 
@@ -194,9 +206,20 @@ impl<D> HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    /// Clone the typed source that feeds accepted events into `flow!`.
+    /// Transfer the receiver into one flow source. Use topology fan-out for
+    /// multiple consumers.
+    ///
+    /// # Panics
+    /// Panics if this bundle's source has already been transferred.
     pub fn source(&self) -> HostedIngressSource<D> {
-        self.source.clone()
+        let source = self
+            .source
+            .lock()
+            .expect("ingress source lock poisoned")
+            .take();
+        source.expect(
+            "ingress source already transferred; use topology fan-out for multiple consumers",
+        )
     }
 
     /// Clone the underlying handle used by the hosted HTTP adaptor.
@@ -229,7 +252,10 @@ where
         state,
         _phantom: PhantomData,
     };
-    Ingress { source, handle }
+    Ingress {
+        source: std::sync::Mutex::new(Some(source)),
+        handle,
+    }
 }
 
 /// Create a zero-wiring HTTP ingress bundle.
@@ -253,7 +279,7 @@ where
 
     HttpIngress {
         surface,
-        source,
+        source: std::sync::Mutex::new(Some(source)),
         handle,
     }
 }
@@ -704,6 +730,10 @@ mod tests {
         );
         let handle = ingress.handle();
         let mut source = ingress.source();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ingress.source())).is_err(),
+            "one receiver cannot be transferred twice"
+        );
         let state = handle.state();
         state.ready.store(true, Ordering::Release);
         state
