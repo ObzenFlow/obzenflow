@@ -7,10 +7,17 @@
 use super::finite::fsm::tests::TestJournal;
 use super::*;
 use crate::id_conversions::StageIdExt;
-use crate::stages::common::handlers::source::prepared::*;
+use crate::stages::common::handlers::source::prepared::{
+    AdmitSource, ConnectorSource, DirectSource,
+};
+use crate::stages::common::handlers::source::typed::SourceObservationSink;
+use crate::stages::common::handlers::{
+    UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
+};
 use crate::stages::resources_builder::{StageResources, StageResourcesBuilder};
 use crate::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use async_trait::async_trait;
+use futures::FutureExt;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::archive::{
     ArchiveStatus, ReplayArchive, ReplayError, StatusDerivation,
@@ -34,6 +41,7 @@ impl TypedPayload for Row {
 #[derive(Default)]
 struct Counts {
     opens: AtomicUsize,
+    installations: AtomicUsize,
     polls: AtomicUsize,
     drains: AtomicUsize,
     drops: AtomicUsize,
@@ -147,6 +155,9 @@ impl AsyncInfiniteSourceConnector for Fixture {
 #[async_trait]
 impl TypedAsyncFiniteSourceHandler for Reader {
     type Output = Row;
+    fn install_source_observation_sink(&mut self, _sink: SourceObservationSink) {
+        self.resource.0.installations.fetch_add(1, Ordering::SeqCst);
+    }
     fn poll_timeout(&self) -> Option<Duration> {
         None
     }
@@ -160,6 +171,9 @@ impl TypedAsyncFiniteSourceHandler for Reader {
 #[async_trait]
 impl TypedAsyncInfiniteSourceHandler for Reader {
     type Output = Row;
+    fn install_source_observation_sink(&mut self, _sink: SourceObservationSink) {
+        self.resource.0.installations.fetch_add(1, Ordering::SeqCst);
+    }
     async fn next(&mut self) -> Result<Vec<Row>, SourceError> {
         Ok(self.read().await?.unwrap_or_default())
     }
@@ -219,15 +233,15 @@ async fn notified(notify: &Notify) {
 }
 
 macro_rules! lifecycle_family {
-    ($module:ident, $builder:path, $config:path, $event:path, $state:path, $prepared:ty, $admit:ident) => {
+    ($module:ident, $builder:path, $config:path, $event:path, $state:path, $family:path) => {
         mod $module {
             use super::*;
             use $builder as Builder;
             use $config as Config;
             use $event as Event;
             use $state as State;
-            type Handle =
-                crate::supervised_base::StandardHandle<Event<$prepared>, State<$prepared>>;
+            type Handler = <Fixture as AdmitSource<dyn $family, ConnectorSource>>::Handler;
+            type Handle = crate::supervised_base::StandardHandle<Event<Handler>, State<Handler>>;
 
             async fn build(
                 fixture: Fixture,
@@ -248,10 +262,14 @@ macro_rules! lifecycle_family {
                 let mut config = Config::new(stage, "input", "lifecycle");
                 config.source_boundary = boundary;
                 (
-                    Builder::new($admit::prepare(fixture), config, resources)
-                        .build()
-                        .await
-                        .unwrap(),
+                    Builder::new(
+                        <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
+                        config,
+                        resources,
+                    )
+                    .build()
+                    .await
+                    .unwrap(),
                     journal,
                 )
             }
@@ -266,6 +284,71 @@ macro_rules! lifecycle_family {
                 tokio::time::timeout(Duration::from_secs(3), handle.wait_for_completion())
                     .await
                     .expect("source terminates")
+            }
+
+            #[tokio::test]
+            async fn direct_and_connector_admission_share_the_adapter_and_defer_capabilities() {
+                let direct_counts = Arc::new(Counts::default());
+                let reader = Reader {
+                    resource: Resource(direct_counts.clone()),
+                    reading: Reading::Pending,
+                    drain_fails: false,
+                };
+                // Both routes must produce the very same existing adapter type.
+                let direct: Handler =
+                    <Reader as AdmitSource<dyn $family, DirectSource>>::prepare(reader);
+                let fixture = Fixture::new(Opening::Ready, Reading::Pending);
+                let connector_counts = fixture.counts.clone();
+                let connector =
+                    <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture);
+
+                for (mut handler, counts, expected_opens) in [
+                    (direct, direct_counts, 0),
+                    (connector, connector_counts, 1),
+                ] {
+                    let stage_id = StageId::new();
+                    handler.install_writer_id(obzenflow_core::WriterId::from(stage_id));
+                    assert_eq!(counts.opens.load(Ordering::SeqCst), 0);
+                    assert_eq!(counts.installations.load(Ordering::SeqCst), 0);
+
+                    let context = SourceReaderInitContext {
+                        stage_id,
+                        stage_name: "input".into(),
+                        flow_name: "lifecycle".into(),
+                    };
+                    handler.acquire(context.clone()).await.unwrap();
+                    handler.acquire(context).await.unwrap();
+                    assert_eq!(counts.opens.load(Ordering::SeqCst), expected_opens);
+                    assert_eq!(counts.installations.load(Ordering::SeqCst), 1);
+                    assert_eq!(counts.polls.load(Ordering::SeqCst), 0);
+                    handler.drain().await.unwrap();
+                    drop(handler);
+                    assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
+                    assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+                }
+            }
+
+            #[tokio::test]
+            async fn cancelled_acquisition_cannot_reopen() {
+                let fixture = Fixture::new(Opening::Pending, Reading::Pending);
+                let counts = fixture.counts.clone();
+                let mut handler =
+                    <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture);
+                let context = SourceReaderInitContext {
+                    stage_id: StageId::new(),
+                    stage_name: "input".into(),
+                    flow_name: "lifecycle".into(),
+                };
+                // Poll opening once, then drop its pending future and resources.
+                assert!(handler.acquire(context.clone()).now_or_never().is_none());
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+                assert!(matches!(
+                    handler.acquire(context).now_or_never(),
+                    Some(Err(_))
+                ));
+                assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.installations.load(Ordering::SeqCst), 0);
+                assert_eq!(counts.polls.load(Ordering::SeqCst), 0);
             }
 
             #[tokio::test]
@@ -412,8 +495,7 @@ lifecycle_family!(
     finite::FiniteSourceConfig,
     finite::FiniteSourceEvent,
     finite::FiniteSourceState,
-    PreparedAsyncFiniteSource,
-    AdmitAsyncFiniteSource
+    UnifiedAsyncFiniteSourceHandler
 );
 lifecycle_family!(
     infinite_lifecycle,
@@ -421,8 +503,7 @@ lifecycle_family!(
     infinite::InfiniteSourceConfig,
     infinite::InfiniteSourceEvent,
     infinite::InfiniteSourceState,
-    PreparedAsyncInfiniteSource,
-    AdmitAsyncInfiniteSource
+    UnifiedAsyncInfiniteSourceHandler
 );
 
 #[tokio::test]
@@ -433,7 +514,9 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     let (stage, resources, journal) = resources(&counts).await;
     let data = resources.data_journal.clone();
     let handle = finite::AsyncFiniteSourceBuilder::new(
-        AdmitAsyncFiniteSource::prepare(fixture),
+        <Fixture as AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource>>::prepare(
+            fixture,
+        ),
         finite::FiniteSourceConfig::new(stage, "input", "lifecycle"),
         resources,
     )

@@ -19,8 +19,8 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_core::{Member, OneFactStageOutput, StageFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::__private::{
-    AdmitAsyncFiniteSource, AdmitAsyncInfiniteSource, AdmitFiniteSource, AdmitInfiniteSource,
-    TypedJoinHandlerAdapter,
+    AdmitSource, TypedJoinHandlerAdapter, UnifiedAsyncFiniteSourceHandler,
+    UnifiedAsyncInfiniteSourceHandler, UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
@@ -631,7 +631,8 @@ pub fn typed_finite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitFiniteSource<Kind>,
+    H: AdmitSource<dyn UnifiedFiniteSourceHandler, Kind>,
+    H::Handler: UnifiedFiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -670,7 +671,8 @@ pub fn typed_async_finite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitAsyncFiniteSource<Kind>,
+    H: AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, Kind>,
+    H::Handler: UnifiedAsyncFiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -706,7 +708,8 @@ pub fn typed_infinite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitInfiniteSource<Kind>,
+    H: AdmitSource<dyn UnifiedInfiniteSourceHandler, Kind>,
+    H::Handler: UnifiedInfiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>
@@ -745,7 +748,8 @@ pub fn typed_async_infinite_source_descriptor<
     backpressure: Option<crate::dsl::backpressure_clause::BackpressureClause>,
 ) -> Box<dyn StageDescriptor>
 where
-    H: AdmitAsyncInfiniteSource<Kind>,
+    H: AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, Kind>,
+    H::Handler: UnifiedAsyncInfiniteSourceHandler,
     PrimaryOutput: TypedPayload + Send + Sync + 'static,
     ArrowOutputSet: StageFactSet,
     ArrowOutputSet::Members: Member<PrimaryOutput, PrimaryOutputIndex>

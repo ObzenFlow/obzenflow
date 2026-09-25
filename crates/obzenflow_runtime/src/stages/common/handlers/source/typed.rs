@@ -9,8 +9,16 @@ use super::erased::{
     SealInfinite, UnifiedAsyncFiniteSourceHandler, UnifiedAsyncInfiniteSourceHandler,
     UnifiedFiniteSourceHandler, UnifiedInfiniteSourceHandler,
 };
+use super::prepared::{
+    sealed as admission_sealed, AdmitSource, AsyncSourceReader, ConnectorSource, DirectSource,
+    SourceReader, SyncSourceReader,
+};
 use super::SourceError;
 use crate::stages::common::handler_error::StageFatal;
+use crate::stages::source::{
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
+    InfiniteSourceConnector, SourceReaderInitContext,
+};
 use crate::typing::SourceTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::{HttpPullMeasurements, HttpPullTelemetry};
@@ -544,100 +552,70 @@ where
     }
 }
 
-macro_rules! sync_adapter {
-    ($name:ident, $typed:ident, $seal:ident, $unified:ident, $finite:literal) => {
-        #[doc(hidden)]
-        #[derive(Clone, Debug)]
-        pub struct $name<H> {
-            handler: H,
-            writer_id: Option<WriterId>,
-        }
-
-        impl<H> $name<H> {
-            pub fn new(handler: H) -> Self {
-                Self {
-                    handler,
-                    writer_id: None,
-                }
-            }
-        }
-
-        impl<H: $typed> $seal for $name<H> {}
-
-        impl<H> $unified for $name<H>
-        where
-            H: $typed + Send + Sync,
-        {
-            fn install_writer_id(&mut self, writer_id: WriterId) {
-                self.writer_id = Some(writer_id);
-            }
-
-            fn next_invocation(&mut self) -> ErasedSourceInvocation {
-                let Some(writer_id) = self.writer_id else {
-                    return ErasedSourceInvocation::fatal(configuration_fatal(
-                        "typed source adapter invoked before runtime writer identity installation",
-                    ));
-                };
-                let result = self.handler.next();
-                if $finite {
-                    match result {
-                        Ok(Some(outputs)) => match lower_outputs(
-                            writer_id,
-                            outputs.into_iter().map(|output| (output, None)).collect(),
-                        ) {
-                            Ok(events) => ErasedSourceInvocation::completed(
-                                ErasedSourceCompletion::Batch(events),
-                                Vec::new(),
-                            ),
-                            Err(fatal) => ErasedSourceInvocation::fatal(fatal),
-                        },
-                        Ok(None) => ErasedSourceInvocation::completed(
-                            ErasedSourceCompletion::Eof,
-                            Vec::new(),
-                        ),
-                        Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
-                    }
-                } else {
-                    unreachable!("infinite adapter uses its explicit implementation")
-                }
-            }
-        }
-    };
-}
-
-// The finite macro keeps the repetitive adapter plumbing small. The infinite
-// form has a different return type and is written explicitly below.
-sync_adapter!(
-    TypedFiniteSourceHandlerAdapter,
-    TypedFiniteSourceHandler,
-    SealFinite,
-    UnifiedFiniteSourceHandler,
-    true
-);
-
-/// Runtime adapter for a synchronous typed infinite source.
+/// Runtime adapter for a synchronous typed finite source.
 #[doc(hidden)]
-#[derive(Clone, Debug)]
-pub struct TypedInfiniteSourceHandlerAdapter<H> {
-    handler: H,
+pub struct TypedFiniteSourceHandlerAdapter<H> {
+    reader: SyncSourceReader<H>,
     writer_id: Option<WriterId>,
 }
 
-impl<H> TypedInfiniteSourceHandlerAdapter<H> {
+impl<H> TypedFiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
+        Self::with_reader(SourceReader::acquired(handler))
+    }
+
+    fn with_reader(reader: SyncSourceReader<H>) -> Self {
         Self {
-            handler,
+            reader,
             writer_id: None,
         }
     }
 }
 
-impl<H: TypedInfiniteSourceHandler> SealInfinite for TypedInfiniteSourceHandlerAdapter<H> {}
-
-impl<H> UnifiedInfiniteSourceHandler for TypedInfiniteSourceHandlerAdapter<H>
-where
-    H: TypedInfiniteSourceHandler + Send + Sync,
+impl<H: TypedFiniteSourceHandler + 'static>
+    admission_sealed::Admitted<dyn UnifiedFiniteSourceHandler, DirectSource> for H
 {
+}
+
+impl<H: TypedFiniteSourceHandler + 'static>
+    AdmitSource<dyn UnifiedFiniteSourceHandler, DirectSource> for H
+{
+    type Output = H::Output;
+    type Handler = TypedFiniteSourceHandlerAdapter<H>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |_| {
+            Ok(self)
+        })))
+    }
+}
+
+impl<C: FiniteSourceConnector>
+    admission_sealed::Admitted<dyn UnifiedFiniteSourceHandler, ConnectorSource> for C
+{
+}
+
+impl<C: FiniteSourceConnector> AdmitSource<dyn UnifiedFiniteSourceHandler, ConnectorSource> for C {
+    type Output = C::Output;
+    type Handler = TypedFiniteSourceHandlerAdapter<C::Reader>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |context| {
+            self.open(context)
+        })))
+    }
+}
+
+impl<H: TypedFiniteSourceHandler> SealFinite for TypedFiniteSourceHandlerAdapter<H> {}
+
+impl<H: TypedFiniteSourceHandler> UnifiedFiniteSourceHandler
+    for TypedFiniteSourceHandlerAdapter<H>
+{
+    fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
+        self.reader.acquire(context)?;
+        Ok(())
+    }
+
     fn install_writer_id(&mut self, writer_id: WriterId) {
         self.writer_id = Some(writer_id);
     }
@@ -648,7 +626,109 @@ where
                 "typed source adapter invoked before runtime writer identity installation",
             ));
         };
-        match self.handler.next() {
+        let handler = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before polling");
+        match handler.next() {
+            Ok(Some(outputs)) => match lower_outputs(
+                writer_id,
+                outputs.into_iter().map(|output| (output, None)).collect(),
+            ) {
+                Ok(events) => ErasedSourceInvocation::completed(
+                    ErasedSourceCompletion::Batch(events),
+                    Vec::new(),
+                ),
+                Err(fatal) => ErasedSourceInvocation::fatal(fatal),
+            },
+            Ok(None) => ErasedSourceInvocation::completed(ErasedSourceCompletion::Eof, Vec::new()),
+            Err(error) => ErasedSourceInvocation::handler_error(error, Vec::new()),
+        }
+    }
+}
+
+/// Runtime adapter for a synchronous typed infinite source.
+#[doc(hidden)]
+pub struct TypedInfiniteSourceHandlerAdapter<H> {
+    reader: SyncSourceReader<H>,
+    writer_id: Option<WriterId>,
+}
+
+impl<H> TypedInfiniteSourceHandlerAdapter<H> {
+    pub fn new(handler: H) -> Self {
+        Self::with_reader(SourceReader::acquired(handler))
+    }
+
+    fn with_reader(reader: SyncSourceReader<H>) -> Self {
+        Self {
+            reader,
+            writer_id: None,
+        }
+    }
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static>
+    admission_sealed::Admitted<dyn UnifiedInfiniteSourceHandler, DirectSource> for H
+{
+}
+
+impl<H: TypedInfiniteSourceHandler + 'static>
+    AdmitSource<dyn UnifiedInfiniteSourceHandler, DirectSource> for H
+{
+    type Output = H::Output;
+    type Handler = TypedInfiniteSourceHandlerAdapter<H>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedInfiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |_| {
+            Ok(self)
+        })))
+    }
+}
+
+impl<C: InfiniteSourceConnector>
+    admission_sealed::Admitted<dyn UnifiedInfiniteSourceHandler, ConnectorSource> for C
+{
+}
+
+impl<C: InfiniteSourceConnector> AdmitSource<dyn UnifiedInfiniteSourceHandler, ConnectorSource>
+    for C
+{
+    type Output = C::Output;
+    type Handler = TypedInfiniteSourceHandlerAdapter<C::Reader>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedInfiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(
+            move |context| self.open(context),
+        )))
+    }
+}
+
+impl<H: TypedInfiniteSourceHandler> SealInfinite for TypedInfiniteSourceHandlerAdapter<H> {}
+
+impl<H> UnifiedInfiniteSourceHandler for TypedInfiniteSourceHandlerAdapter<H>
+where
+    H: TypedInfiniteSourceHandler + Send + Sync,
+{
+    fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
+        self.reader.acquire(context)?;
+        Ok(())
+    }
+
+    fn install_writer_id(&mut self, writer_id: WriterId) {
+        self.writer_id = Some(writer_id);
+    }
+
+    fn next_invocation(&mut self) -> ErasedSourceInvocation {
+        let Some(writer_id) = self.writer_id else {
+            return ErasedSourceInvocation::fatal(configuration_fatal(
+                "typed source adapter invoked before runtime writer identity installation",
+            ));
+        };
+        let handler = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before polling");
+        match handler.next() {
             Ok(outputs) => match lower_outputs(
                 writer_id,
                 outputs.into_iter().map(|output| (output, None)).collect(),
@@ -666,9 +746,8 @@ where
 
 /// Runtime adapter for an asynchronous typed finite source.
 #[doc(hidden)]
-#[derive(Clone, Debug)]
 pub struct TypedAsyncFiniteSourceHandlerAdapter<H> {
-    handler: H,
+    reader: AsyncSourceReader<H>,
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
@@ -676,13 +755,53 @@ pub struct TypedAsyncFiniteSourceHandlerAdapter<H> {
 
 impl<H: TypedAsyncFiniteSourceHandler> TypedAsyncFiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
+        Self::with_reader(SourceReader::acquired(handler))
+    }
+
+    fn with_reader(reader: AsyncSourceReader<H>) -> Self {
         let observation_sink = SourceObservationSink::new();
         Self {
-            handler,
+            reader,
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
         }
+    }
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    admission_sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler, DirectSource> for H
+{
+}
+
+impl<H: TypedAsyncFiniteSourceHandler + 'static>
+    AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, DirectSource> for H
+{
+    type Output = H::Output;
+    type Handler = TypedAsyncFiniteSourceHandlerAdapter<H>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedAsyncFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(move |_| {
+            Box::pin(async move { Ok(self) })
+        })))
+    }
+}
+
+impl<C: AsyncFiniteSourceConnector>
+    admission_sealed::Admitted<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource> for C
+{
+}
+
+impl<C: AsyncFiniteSourceConnector>
+    AdmitSource<dyn UnifiedAsyncFiniteSourceHandler, ConnectorSource> for C
+{
+    type Output = C::Output;
+    type Handler = TypedAsyncFiniteSourceHandlerAdapter<C::Reader>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedAsyncFiniteSourceHandlerAdapter::with_reader(SourceReader::cold(Box::new(
+            move |context| Box::pin(async move { self.open(context).await }),
+        )))
     }
 }
 
@@ -693,10 +812,20 @@ impl<H> UnifiedAsyncFiniteSourceHandler for TypedAsyncFiniteSourceHandlerAdapter
 where
     H: TypedAsyncFiniteSourceHandler + Send + Sync,
 {
+    async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
+        if let Some(handler) = self.reader.acquire(context).await? {
+            if self.writer_id.is_some() {
+                handler.install_source_observation_sink(self.observation_sink.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn install_writer_id(&mut self, writer_id: WriterId) {
         self.writer_id = Some(writer_id);
-        self.handler
-            .install_source_observation_sink(self.observation_sink.clone());
+        if let Some(handler) = self.reader.get_mut() {
+            handler.install_source_observation_sink(self.observation_sink.clone());
+        }
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
@@ -704,7 +833,11 @@ where
     }
 
     fn poll_timeout(&self) -> Option<Duration> {
-        self.handler.poll_timeout()
+        self.reader
+            .get()
+            .map_or(Some(Duration::from_secs(30)), |handler| {
+                handler.poll_timeout()
+            })
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
@@ -717,7 +850,12 @@ where
             Ok(scope) => scope,
             Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
         };
-        let result = self.handler.next().await;
+        let result = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before polling")
+            .next()
+            .await;
         let snapshot = match scope.finish() {
             Ok(snapshot) => snapshot,
             Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
@@ -750,29 +888,86 @@ where
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
-        self.handler.drain().await
+        match self.reader.get_mut() {
+            Some(handler) => handler.drain().await,
+            None => Ok(()),
+        }
     }
 }
 
 /// Runtime adapter for an asynchronous typed infinite source.
 #[doc(hidden)]
-#[derive(Clone, Debug)]
 pub struct TypedAsyncInfiniteSourceHandlerAdapter<H> {
-    handler: H,
+    reader: AsyncSourceReader<H>,
     writer_id: Option<WriterId>,
     observation_sink: SourceObservationSink,
     recorder: Arc<dyn ObservationRecorder>,
+    hosted_slot: Option<HostedIngressBindingSlot>,
 }
 
 impl<H: TypedAsyncInfiniteSourceHandler> TypedAsyncInfiniteSourceHandlerAdapter<H> {
     pub fn new(handler: H) -> Self {
+        let hosted_slot = handler
+            .runtime_registration()
+            .map(|registration| registration.hosted_ingress_slot);
+        Self::with_reader(SourceReader::acquired(handler), hosted_slot)
+    }
+
+    fn with_reader(
+        reader: AsyncSourceReader<H>,
+        hosted_slot: Option<HostedIngressBindingSlot>,
+    ) -> Self {
         let observation_sink = SourceObservationSink::new();
         Self {
-            handler,
+            reader,
             writer_id: None,
             observation_sink,
             recorder: Arc::new(NoObservations),
+            hosted_slot,
         }
+    }
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler, DirectSource> for H
+{
+}
+
+impl<H: TypedAsyncInfiniteSourceHandler + 'static>
+    AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, DirectSource> for H
+{
+    type Output = H::Output;
+    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<H>;
+
+    fn prepare(self) -> Self::Handler {
+        let hosted_slot = self
+            .runtime_registration()
+            .map(|registration| registration.hosted_ingress_slot);
+        TypedAsyncInfiniteSourceHandlerAdapter::with_reader(
+            SourceReader::cold(Box::new(move |_| Box::pin(async move { Ok(self) }))),
+            hosted_slot,
+        )
+    }
+}
+
+impl<C: AsyncInfiniteSourceConnector>
+    admission_sealed::Admitted<dyn UnifiedAsyncInfiniteSourceHandler, ConnectorSource> for C
+{
+}
+
+impl<C: AsyncInfiniteSourceConnector>
+    AdmitSource<dyn UnifiedAsyncInfiniteSourceHandler, ConnectorSource> for C
+{
+    type Output = C::Output;
+    type Handler = TypedAsyncInfiniteSourceHandlerAdapter<C::Reader>;
+
+    fn prepare(self) -> Self::Handler {
+        TypedAsyncInfiniteSourceHandlerAdapter::with_reader(
+            SourceReader::cold(Box::new(move |context| {
+                Box::pin(async move { self.open(context).await })
+            })),
+            None,
+        )
     }
 }
 
@@ -786,10 +981,20 @@ impl<H> UnifiedAsyncInfiniteSourceHandler for TypedAsyncInfiniteSourceHandlerAda
 where
     H: TypedAsyncInfiniteSourceHandler + Send + Sync,
 {
+    async fn acquire(&mut self, context: SourceReaderInitContext) -> Result<(), SourceError> {
+        if let Some(handler) = self.reader.acquire(context).await? {
+            if self.writer_id.is_some() {
+                handler.install_source_observation_sink(self.observation_sink.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn install_writer_id(&mut self, writer_id: WriterId) {
         self.writer_id = Some(writer_id);
-        self.handler
-            .install_source_observation_sink(self.observation_sink.clone());
+        if let Some(handler) = self.reader.get_mut() {
+            handler.install_source_observation_sink(self.observation_sink.clone());
+        }
     }
 
     fn install_observation_recorder(&mut self, recorder: Arc<dyn ObservationRecorder>) {
@@ -797,13 +1002,11 @@ where
     }
 
     fn poll_timeout(&self) -> Option<Duration> {
-        self.handler.poll_timeout()
+        self.reader.get().and_then(|handler| handler.poll_timeout())
     }
 
     fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
-        self.handler
-            .runtime_registration()
-            .map(|registration| registration.hosted_ingress_slot)
+        self.hosted_slot.clone()
     }
 
     async fn next_invocation(&mut self) -> ErasedSourceInvocation {
@@ -816,7 +1019,12 @@ where
             Ok(scope) => scope,
             Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
         };
-        let result = self.handler.next_invocation().await;
+        let result = self
+            .reader
+            .get_mut()
+            .expect("the source supervisor must acquire before polling")
+            .next_invocation()
+            .await;
         let snapshot = match scope.finish() {
             Ok(snapshot) => snapshot,
             Err(fatal) => return ErasedSourceInvocation::fatal(fatal),
@@ -843,7 +1051,10 @@ where
     }
 
     async fn drain(&mut self) -> Result<(), SourceError> {
-        self.handler.drain().await
+        match self.reader.get_mut() {
+            Some(handler) => handler.drain().await,
+            None => Ok(()),
+        }
     }
 }
 
