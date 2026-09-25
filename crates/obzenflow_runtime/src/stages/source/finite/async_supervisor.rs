@@ -985,8 +985,21 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervis
     }
 }
 
+#[async_trait::async_trait]
+impl<H: UnifiedAsyncFiniteSourceHandler + 'static>
+    crate::supervised_base::handler_supervised::HandlerSupervisedCleanup
+    for AsyncFiniteSourceSupervisor<H>
+{
+    async fn cleanup_after_run(
+        &mut self,
+        context: &Self::Context,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.cleanup_reader(&context.stage_name).await
+    }
+}
+
 impl<H: UnifiedAsyncFiniteSourceHandler + 'static> AsyncFiniteSourceSupervisor<H> {
-    pub(crate) async fn cleanup_reader(
+    async fn cleanup_reader(
         &mut self,
         stage_name: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

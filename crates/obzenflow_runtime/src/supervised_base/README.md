@@ -69,6 +69,14 @@ flowchart LR
 Production task construction selects a shared runner from a typed supervised
 component. Raw task construction is restricted to unit fixtures.
 
+Async source builders use the crate-private typed constructor with resource
+cleanup. It runs the shared handler runner and awaits cleanup after every orderly
+return, inside the same task and publication scope, before completing the handle.
+Cleanup preserves a primary runner error and cannot drive FSM transitions or emit
+business data or EOF. Source supervisors consume cleanup eligibility before
+awaiting, so earlier cleanup in dispatch cannot be repeated. Forced abort and panic
+do not guarantee awaited cleanup.
+
 The stage wrapper publishes changed states and applies a control-channel mode:
 
 | Mode | Behavior |

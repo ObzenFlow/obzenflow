@@ -16,6 +16,7 @@ use obzenflow_fsm::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+mod cleanup;
 mod terminal_commands;
 
 #[derive(Clone, Debug, PartialEq, StateVariant)]

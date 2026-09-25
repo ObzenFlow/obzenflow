@@ -24,6 +24,13 @@ pub(super) struct TestJournal {
 }
 
 impl TestJournal {
+    pub(super) fn failing_registration() -> Self {
+        Self {
+            fail: true,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn assert_registered(&self) {
         assert!(
             matches!(

@@ -133,19 +133,12 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::<AsyncInfiniteSourceSupervisor<H>>::new(&supervisor_name).spawn(move || async move {
-            let mut supervisor = supervisor;
-            let mut context = context;
-            let result = crate::supervised_base::handler_supervised::run_handler_supervised(
-                &mut supervisor, InfiniteSourceState::<H>::Created, &mut context,
-            ).await;
-            let cleanup = supervisor.cleanup_reader(&context.stage_name).await;
-            if let Err(error) = &cleanup {
-                tracing::warn!(stage_name = %context.stage_name, error = %error, "source cleanup evidence failed");
-            }
-            // Cleanup cannot replace the primary runner failure.
-            result.and(cleanup)
-        });
+        let task = SupervisorTaskBuilder::new(&supervisor_name)
+            .spawn_handler_supervised_with_cleanup(
+                supervisor,
+                InfiniteSourceState::<H>::Created,
+                context,
+            );
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

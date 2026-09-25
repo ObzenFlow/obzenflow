@@ -63,6 +63,19 @@ pub trait HandlerSupervised: Supervisor + Sync {
     }
 }
 
+/// Runtime-owned resource settlement after any orderly shared-runner return.
+///
+/// Implementations consume cleanup eligibility before awaiting. They must not
+/// dispatch, poll, author business data or EOF, or manufacture lifecycle success.
+/// Panic, forced task abortion and process death do not promise awaited cleanup.
+#[async_trait::async_trait]
+pub(crate) trait HandlerSupervisedCleanup: HandlerSupervised {
+    async fn cleanup_after_run(
+        &mut self,
+        context: &Self::Context,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+}
+
 /// Extension trait to add run functionality to any HandlerSupervised type
 #[async_trait::async_trait]
 pub trait HandlerSupervisedExt: HandlerSupervised {
@@ -100,9 +113,9 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
 // Blanket implementation - any type that implements HandlerSupervised gets run() for free
 impl<T: HandlerSupervised> HandlerSupervisedExt for T {}
 
-/// Borrowed runner lets source tasks retain the acquired reader across every
-/// orderly return, including errors in registration and failure actions.
-pub(crate) async fn run_handler_supervised<S>(
+/// Typed task construction retains the supervisor across every orderly return,
+/// including errors in registration and failure actions, so it can await cleanup.
+pub(super) async fn run_handler_supervised<S>(
     supervisor: &mut S,
     initial_state: S::State,
     context: &mut S::Context,
