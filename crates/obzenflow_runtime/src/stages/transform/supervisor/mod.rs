@@ -9,32 +9,39 @@
 //! - `draining.rs` — Draining state event loop
 //! - `tests.rs`    — All unit tests
 
-use obzenflow_core::event::ChainPayload;
 mod direct_fact_continuation;
 mod draining;
 mod running;
 #[cfg(test)]
 mod tests;
 
+use super::fsm::{TransformAction, TransformContext, TransformEvent, TransformState};
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::{
-    EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
+    publication, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, JournalRecord, StageId};
-use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
+use obzenflow_core::event::status::processing_status::ErrorKind;
+use obzenflow_core::event::{ChainPayload, SystemEvent};
+use obzenflow_core::journal::{AppendOptions, Journal};
+use obzenflow_core::{ChainEvent, JournalRecord, StageId, WriterId};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
+use std::error::Error;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
-use super::fsm::{TransformAction, TransformContext, TransformEvent, TransformState};
 
 /// Supervisor for transform stages
 pub(crate) struct TransformSupervisor<
-    H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static,
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
@@ -52,10 +59,10 @@ pub(crate) struct TransformSupervisor<
     pub(crate) cycle_guard: Option<CycleGuard>,
 
     /// Phantom marker to keep H in the type while no fields reference it directly
-    pub(crate) _marker: std::marker::PhantomData<H>,
+    pub(crate) _marker: PhantomData<H>,
 }
 
-impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervisor
     for TransformSupervisor<H>
 {
     type State = TransformState<H>;
@@ -66,7 +73,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         fsm! {
             state:   TransformState<H>;
             event:   TransformEvent<H>;
@@ -188,7 +195,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: TransformState::Failed(failure_msg),
@@ -236,7 +243,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: TransformState::Failed(failure_msg),
@@ -314,7 +321,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                    Err(FsmError::UnhandledEvent {
                         state: state_name,
                         event: event_name,
                     })
@@ -323,17 +330,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Transform
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 
@@ -342,14 +343,19 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     }
 }
 
+impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> HandlerSupervisedCleanup
+    for TransformSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
-impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> HandlerSupervised
     for TransformSupervisor<H>
 {
     type Handler = H;
 
-    fn writer_id(&self) -> obzenflow_core::WriterId {
-        obzenflow_core::WriterId::from(self.stage_id)
+    fn writer_id(&self) -> WriterId {
+        WriterId::from(self.stage_id)
     }
 
     fn stage_id(&self) -> StageId {
@@ -364,7 +370,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         &mut self,
         state: &Self::State,
         ctx: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         match state {
             TransformState::Created => {
                 // Wait for explicit initialization from pipeline
@@ -397,8 +403,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     }
 }
 
-impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    ExternalEventPolicy for TransformSupervisor<H>
+impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> ExternalEventPolicy
+    for TransformSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, TransformState::Created) {
@@ -425,16 +431,14 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 // Helper methods shared by running.rs and draining.rs
 // ---------------------------------------------------------------------------
 
-impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    TransformSupervisor<H>
-{
+impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> TransformSupervisor<H> {
     pub(super) async fn check_cycle_guard_data_event(
         &mut self,
         ctx: &mut TransformContext<H>,
         envelope: &mut JournalRecord<ChainPayload>,
         upstream: Option<StageId>,
         write_error_context: &'static str,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let Some(guard) = &mut self.cycle_guard else {
             return Ok(false);
         };
@@ -451,7 +455,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                     flow_id: ctx.flow_id.to_string(),
                     stage_name: ctx.stage_name.clone(),
                     stage_id: self.stage_id,
-                    stage_type: obzenflow_core::event::context::StageType::Transform,
+                    stage_type: StageType::Transform,
                 };
 
                 let error_event = ctx
@@ -462,19 +466,16 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                 let journal = ctx.error_journal.clone();
                 let parent = envelope.clone();
                 let instrumentation = ctx.instrumentation.clone();
-                crate::supervised_base::publication::commit(async move {
+                publication::commit(async move {
                     journal
                         .append(
                             error_event,
-                            obzenflow_core::journal::AppendOptions::new(Some(&parent))
-                                .with_capture(
-                                    instrumentation.journal_capture(None, vec![(0, false)]),
-                                ),
+                            AppendOptions::new(Some(&parent)).with_capture(
+                                instrumentation.journal_capture(None, vec![(0, false)]),
+                            ),
                         )
                         .await?;
-                    instrumentation.record_error(
-                        obzenflow_core::event::status::processing_status::ErrorKind::Unknown,
-                    );
+                    instrumentation.record_error(ErrorKind::Unknown);
                     Ok(())
                 })
                 .await
@@ -497,7 +498,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         &mut self,
         envelope: &JournalRecord<ChainPayload>,
         stage_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let should_forward = self
             .cycle_guard
             .as_mut()
@@ -514,10 +515,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     pub(super) async fn maybe_release_buffered_terminal(
         &mut self,
         ctx: &mut TransformContext<H>,
-    ) -> Result<
-        Option<EventLoopDirective<TransformEvent<H>>>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    ) -> Result<Option<EventLoopDirective<TransformEvent<H>>>, Box<dyn Error + Send + Sync>> {
         let Some(cfg) = ctx.cycle_guard_config.as_ref() else {
             return Ok(None);
         };
@@ -590,12 +588,12 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         &self,
         envelope: &JournalRecord<ChainPayload>,
         stage_name: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let _ = forward_control_event_helper(
             envelope,
             self.stage_id,
             stage_name,
-            obzenflow_core::event::context::StageType::Transform,
+            StageType::Transform,
             &self.data_journal,
         )
         .await?;

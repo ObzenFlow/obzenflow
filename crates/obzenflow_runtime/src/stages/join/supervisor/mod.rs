@@ -10,22 +10,28 @@ mod enriching;
 mod hydrating;
 mod live;
 
+use super::config::JoinReferenceMode;
+use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-
-use super::config::JoinReferenceMode;
-use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
+use std::error::Error;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 /// Supervisor for join stages.
-pub(crate) struct JoinSupervisor<
-    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub(crate) struct JoinSupervisor<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
@@ -39,10 +45,10 @@ pub(crate) struct JoinSupervisor<
     pub(super) stream_subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// Phantom marker to keep H in the type while no fields reference it directly
-    pub(crate) _marker: std::marker::PhantomData<H>,
+    pub(crate) _marker: PhantomData<H>,
 }
 
-impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
     for JoinSupervisor<H>
 {
     type State = JoinState<H>;
@@ -53,7 +59,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         fsm! {
             state:   JoinState<H>;
             event:   JoinEvent<H>;
@@ -79,7 +85,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -125,7 +131,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -189,7 +195,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -241,7 +247,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation.failures_total.fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -293,7 +299,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                     Box::pin(async move {
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
-                            ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            ctx.instrumentation.failures_total.fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -331,7 +337,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -355,7 +361,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation
                                 .failures_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
                             let failure_msg = msg.clone();
                             Ok(Transition {
                                 next_state: JoinState::Failed(failure_msg),
@@ -399,7 +405,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                    Err(FsmError::UnhandledEvent {
                         state: state_name,
                         event: event_name,
                     })
@@ -408,17 +414,11 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Join
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Join
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 
@@ -427,8 +427,13 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
     }
 }
 
+impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSupervisedCleanup
+    for JoinSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
-impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSupervised
     for JoinSupervisor<H>
 {
     type Handler = H;
@@ -449,7 +454,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Ha
         &mut self,
         state: &Self::State,
         ctx: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         tracing::debug!(
             stage_name = %ctx.stage_name,
             state = ?state,
@@ -469,7 +474,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Ha
     }
 }
 
-impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
+impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> ExternalEventPolicy
     for JoinSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {

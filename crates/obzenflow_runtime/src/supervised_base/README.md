@@ -69,6 +69,23 @@ flowchart LR
 Production task construction selects a shared runner from a typed supervised
 component. Raw task construction is restricted to unit fixtures.
 
+`HandlerSupervisedExt::run(self, ...)` owns the entire handler FSM loop and awaits
+resource cleanup after every orderly return, including registration, transition,
+failure-action and completion errors. Its local async scope contains fallible
+execution while retaining ownership of the supervisor and context until cleanup
+finishes. The single typed `spawn_handler_supervised` constructor calls this
+consuming trait method, just as self-supervised construction calls its own
+consuming trait method. There is no borrowed runner or alternate cleanup path.
+
+The internal [cleanup contract](cleanup.rs) is a required supertrait of
+`HandlerSupervised`. Supervisors without asynchronous resource settlement explicitly
+use its no-op default; the external-event wrapper forwards cleanup to its inner
+supervisor. Cleanup runs inside the same task and publication scope before handle
+completion. It preserves a primary runner error and cannot drive FSM transitions,
+emit business data or EOF, or turn failure into lifecycle success. Source supervisors
+consume cleanup eligibility before awaiting, so earlier cleanup in dispatch cannot
+be repeated. Forced abort and panic do not guarantee awaited cleanup.
+
 The stage wrapper publishes changed states and applies a control-channel mode:
 
 | Mode | Behavior |

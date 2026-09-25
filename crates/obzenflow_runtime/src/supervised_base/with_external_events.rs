@@ -6,14 +6,20 @@
 
 use super::base::Supervisor;
 use super::builder::{EventReceiver, StateWatcher};
+use super::cleanup::HandlerSupervisedCleanup;
 use super::handler_supervised::HandlerSupervised;
-#[cfg(test)]
-use super::self_supervised::SelfSupervised;
-use super::EventLoopDirective;
+use super::{publication, EventLoopDirective};
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::journal::Journal;
-use obzenflow_fsm::{EventVariant, StateVariant};
+use obzenflow_core::StageId;
+use obzenflow_fsm::{EventVariant, StateMachine, StateVariant};
+use std::error::Error;
 use std::sync::Arc;
+use tokio::sync::mpsc::error::TryRecvError;
+
+#[cfg(test)]
+use super::self_supervised::SelfSupervised;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalEventMode {
@@ -45,13 +51,13 @@ pub(crate) async fn record_terminal_commands<E: ExternalControlEvent>(
     writer_id: WriterId,
     supervisor: &str,
     terminal_state: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let Some(mut receiver) = external_events.close_and_take() else {
         return Ok(());
     };
     let supervisor = supervisor.to_owned();
     let terminal_state = terminal_state.to_owned();
-    super::publication::commit(async move {
+    publication::commit(async move {
         // recv() also accounts for a send that held a permit when we closed.
         while let Some(event) = receiver.recv().await {
             let (disposition, error) = event.discard_details();
@@ -120,13 +126,11 @@ where
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         self.inner.build_state_machine(initial_state)
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+    fn supervisor_kind(&self) -> SupervisorKind {
         self.inner.supervisor_kind()
     }
 
@@ -136,6 +140,19 @@ where
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> HandlerSupervisedCleanup for HandlerSupervisedWithExternalEvents<S>
+where
+    S: HandlerSupervised + ExternalEventPolicy + Send + Sync,
+{
+    async fn cleanup_after_run(
+        &mut self,
+        context: &Self::Context,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.inner.cleanup_after_run(context).await
     }
 }
 
@@ -152,7 +169,7 @@ where
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         // Update state for external observers only when it changes (FLOWIP-086i).
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
@@ -186,8 +203,8 @@ where
             },
             ExternalEventMode::Poll => match self.external_events.try_recv() {
                 Ok(event) => return Ok(EventLoopDirective::Transition(event)),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
                     if let Some(event) =
                         <S as ExternalEventPolicy>::on_external_event_channel_closed(state)
                     {
@@ -200,15 +217,15 @@ where
         self.inner.dispatch_state(state, context).await
     }
 
-    fn writer_id(&self) -> obzenflow_core::event::WriterId {
+    fn writer_id(&self) -> WriterId {
         self.inner.writer_id()
     }
 
-    fn stage_id(&self) -> obzenflow_core::StageId {
+    fn stage_id(&self) -> StageId {
         self.inner.stage_id()
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.inner.write_completion_event().await
     }
 
@@ -263,13 +280,11 @@ where
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         self.inner.build_state_machine(initial_state)
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+    fn supervisor_kind(&self) -> SupervisorKind {
         self.inner.supervisor_kind()
     }
 
@@ -294,7 +309,7 @@ where
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         // Update state for external observers only when it changes (FLOWIP-086i).
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
@@ -327,8 +342,8 @@ where
             },
             ExternalEventMode::Poll => match self.external_events.try_recv() {
                 Ok(event) => return Ok(EventLoopDirective::Transition(event)),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
                     if let Some(event) =
                         <S as ExternalEventPolicy>::on_external_event_channel_closed(state)
                     {
@@ -341,11 +356,11 @@ where
         self.inner.dispatch_state(state, context).await
     }
 
-    fn writer_id(&self) -> obzenflow_core::event::WriterId {
+    fn writer_id(&self) -> WriterId {
         self.inner.writer_id()
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.inner.write_completion_event().await
     }
 
@@ -357,7 +372,7 @@ where
         &mut self,
         state: &Self::State,
         context: &Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.inner.after_transition(state, context).await?;
 
         if self.last_state.as_ref() != Some(state) {

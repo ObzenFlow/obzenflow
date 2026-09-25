@@ -4,22 +4,28 @@
 
 //! Journal sink supervisor implementation using HandlerSupervised pattern
 
+use super::fsm::{JournalSinkAction, JournalSinkContext, JournalSinkEvent, JournalSinkState};
+use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::{ExternalEventMode, ExternalEventPolicy, HandlerSupervised};
-use crate::{messaging::UpstreamSubscription, supervised_base::EventLoopDirective};
-use obzenflow_core::ChainEvent;
-use obzenflow_core::{StageId, WriterId};
-use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-
-use super::fsm::{JournalSinkAction, JournalSinkContext, JournalSinkEvent, JournalSinkState};
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
+use crate::supervised_base::{
+    EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
+};
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
+use std::error::Error;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 mod running;
 
 /// Supervisor for journal sink stages
-pub(crate) struct JournalSinkSupervisor<
-    H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub(crate) struct JournalSinkSupervisor<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
@@ -34,10 +40,10 @@ pub(crate) struct JournalSinkSupervisor<
     pub(crate) subscription: Option<UpstreamSubscription<ChainEvent>>,
 
     /// Phantom marker to keep H in the type while no fields reference it directly
-    pub(crate) _marker: std::marker::PhantomData<H>,
+    pub(crate) _marker: PhantomData<H>,
 }
 
-impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> Supervisor
     for JournalSinkSupervisor<H>
 {
     type State = JournalSinkState<H>;
@@ -48,7 +54,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         // Construction starts in Created. Entry hooks mirror the engine-assigned
         // state before the supervisor executes any transition actions.
         fsm! {
@@ -354,7 +360,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                    Err(FsmError::UnhandledEvent {
                         state: state_name,
                         event: event_name,
                     })
@@ -363,17 +369,11 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Sink
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Sink
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 
@@ -382,8 +382,13 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
     }
 }
 
+impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervisedCleanup
+    for JournalSinkSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
-impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
     for JournalSinkSupervisor<H>
 {
     type Handler = H;
@@ -404,7 +409,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> HandlerSup
         &mut self,
         state: &Self::State,
         ctx: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         match state {
             JournalSinkState::Created => {
                 // Wait for explicit initialization from pipeline
@@ -471,7 +476,7 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> HandlerSup
     }
 }
 
-impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
+impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> ExternalEventPolicy
     for JournalSinkSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {

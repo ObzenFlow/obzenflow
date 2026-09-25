@@ -4,18 +4,26 @@
 
 use super::base::Supervisor;
 use super::publication::PublicationScope;
+use super::with_external_events::ExternalControlEvent;
 use super::{
     ChannelBuilder, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandleBuilder,
     HandlerSupervised, HandlerSupervisedWithExternalEvents, SelfSupervised,
     SelfSupervisedWithExternalEvents, SupervisorHandle, SupervisorTaskBuilder,
 };
-use obzenflow_core::{StageId, WriterId};
+use crate::stages::common::stage_handle::discarded_control_details;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{StageId, SystemId, WriterId};
 use obzenflow_fsm::{
-    fsm, EventVariant, FsmAction, FsmContext, StateMachine, StateVariant, Transition,
+    fsm, EventVariant, FsmAction, FsmContext, FsmError, StateMachine, StateVariant, Transition,
 };
+use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+mod cleanup;
 mod terminal_commands;
 
 #[derive(Clone, Debug, PartialEq, StateVariant)]
@@ -55,7 +63,7 @@ impl TestContext {
 impl FsmAction for TestAction {
     type Context = TestContext;
 
-    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), FsmError> {
         ctx.assert_publication_owner();
         match self {
             TestAction::MarkFailed => {
@@ -122,16 +130,11 @@ impl Supervisor for TestSelfSupervisor {
         build_test_machine(initial_state)
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Pipeline
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 
@@ -146,7 +149,7 @@ impl SelfSupervised for TestSelfSupervisor {
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         context.assert_publication_owner();
         match state {
             TestState::Running => Err("dispatch_state boom".into()),
@@ -155,10 +158,10 @@ impl SelfSupervised for TestSelfSupervisor {
     }
 
     fn writer_id(&self) -> WriterId {
-        WriterId::from(obzenflow_core::SystemId::new_const(1))
+        WriterId::from(SystemId::new_const(1))
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         assert!(PublicationScope::current().is_some());
         self.completion_writes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -188,16 +191,11 @@ impl Supervisor for TestHandlerSupervisor {
         build_test_machine(initial_state)
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Transform
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         context.system_journal.clone()
     }
 
@@ -205,6 +203,8 @@ impl Supervisor for TestHandlerSupervisor {
         &self.name
     }
 }
+
+impl HandlerSupervisedCleanup for TestHandlerSupervisor {}
 
 #[async_trait::async_trait]
 impl HandlerSupervised for TestHandlerSupervisor {
@@ -214,7 +214,7 @@ impl HandlerSupervised for TestHandlerSupervisor {
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         context.assert_publication_owner();
         match state {
             TestState::Running => Err("dispatch_state boom".into()),
@@ -230,7 +230,7 @@ impl HandlerSupervised for TestHandlerSupervisor {
         self.stage_id
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         assert!(PublicationScope::current().is_some());
         self.completion_writes.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -343,14 +343,9 @@ enum ExternalEventTestEvent {
     Error(String),
 }
 
-impl super::with_external_events::ExternalControlEvent for ExternalEventTestEvent {
-    fn discard_details(
-        &self,
-    ) -> (
-        obzenflow_core::event::CommandDiscardDisposition,
-        Option<String>,
-    ) {
-        crate::stages::common::stage_handle::discarded_control_details(match self {
+impl ExternalControlEvent for ExternalEventTestEvent {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
+        discarded_control_details(match self {
             Self::Error(error) => Some(error.as_str()),
             _ => None,
         })
@@ -366,7 +361,7 @@ enum ExternalEventTestAction {
 impl FsmAction for ExternalEventTestAction {
     type Context = ExternalEventTestContext;
 
-    async fn execute(&self, _ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+    async fn execute(&self, _ctx: &mut Self::Context) -> Result<(), FsmError> {
         match self {
             ExternalEventTestAction::Noop => Ok(()),
         }
@@ -396,16 +391,11 @@ impl Supervisor for ExternalEventTestSelfSupervisor {
         panic!("not required for wrapper dispatch_state tests");
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Pipeline
     }
 
-    fn system_journal(
-        &self,
-        _context: &Self::Context,
-    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         Arc::new(terminal_commands::TestJournal::default())
     }
 
@@ -446,16 +436,16 @@ impl SelfSupervised for ExternalEventTestSelfSupervisor {
         &mut self,
         _state: &Self::State,
         _context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         self.dispatch_calls.fetch_add(1, Ordering::Relaxed);
         Ok(EventLoopDirective::Continue)
     }
 
     fn writer_id(&self) -> WriterId {
-        WriterId::from(obzenflow_core::SystemId::new_const(1))
+        WriterId::from(SystemId::new_const(1))
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(())
     }
 
@@ -483,16 +473,11 @@ impl Supervisor for ExternalEventTestHandlerSupervisor {
         panic!("not required for wrapper dispatch_state tests");
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Transform
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Transform
     }
 
-    fn system_journal(
-        &self,
-        _context: &Self::Context,
-    ) -> Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>> {
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         Arc::new(terminal_commands::TestJournal::default())
     }
 
@@ -513,6 +498,8 @@ impl ExternalEventPolicy for ExternalEventTestHandlerSupervisor {
     }
 }
 
+impl HandlerSupervisedCleanup for ExternalEventTestHandlerSupervisor {}
+
 #[async_trait::async_trait]
 impl HandlerSupervised for ExternalEventTestHandlerSupervisor {
     type Handler = ();
@@ -521,7 +508,7 @@ impl HandlerSupervised for ExternalEventTestHandlerSupervisor {
         &mut self,
         _state: &Self::State,
         _context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         self.dispatch_calls.fetch_add(1, Ordering::Relaxed);
         Ok(EventLoopDirective::Continue)
     }
@@ -534,7 +521,7 @@ impl HandlerSupervised for ExternalEventTestHandlerSupervisor {
         self.stage_id
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(())
     }
 

@@ -81,11 +81,11 @@ pub(crate) fn normalise_source_poll_error(
         ExecutionPayload::SourcePollError(SourcePollErrorFact {
             source_type,
             error_type,
-            message: error.to_string(),
+            message: error.safe_summary().to_string(),
             timestamp_ms,
         }),
     )
-    .mark_as_error(error.to_string(), error_type.processing_error_kind())
+    .mark_as_error(error.safe_summary(), error_type.processing_error_kind())
 }
 
 /// Record a source adapter/runtime invariant through the common fatal lane.
@@ -124,7 +124,7 @@ pub(crate) async fn record_source_cleanup_failed(
         SystemPayload::SourceCleanupFailed {
             stage_id,
             stage_name: stage_name.to_string(),
-            error: error.to_string(),
+            error: error.safe_summary().to_string(),
         },
     );
     crate::supervised_base::publication::append(system_journal, event, Default::default()).await?;
@@ -484,6 +484,23 @@ where
     Ok(None)
 }
 
+/// Attribute acquisition failure without persisting connector error text, which
+/// can contain credentials, connection strings or untrusted response bodies.
+pub(crate) fn source_open_failure(stage_name: &str, resuming: bool, error: &SourceError) -> String {
+    let reason = match error {
+        SourceError::Timeout(_) => "opening the original input timed out",
+        SourceError::Transport(_) => "the original input is unavailable",
+        SourceError::Deserialization(_) => "the input could not be decoded during acquisition",
+        SourceError::Validation(_) => "the input failed acquisition validation",
+        SourceError::Other(_) => "the original input could not be acquired",
+    };
+    if resuming {
+        format!("Cannot resume source '{stage_name}': {reason}. Restore the original input and check its configuration and access before resuming.")
+    } else {
+        format!("Cannot start source '{stage_name}': {reason}. Check the input, configuration and access before starting again.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,40 +691,50 @@ mod tests {
     #[test]
     fn source_poll_errors_normalise_to_existing_error_marked_lifecycle_rows() {
         let writer_id = WriterId::from(StageId::new());
+        let secret = "credential=SECRET_SENTINEL";
         let cases = [
-            (SourceError::Timeout("late".to_string()), ErrorKind::Timeout),
             (
-                SourceError::Transport("offline".to_string()),
+                SourceError::Timeout(secret.into()),
+                ErrorKind::Timeout,
+                "source timeout",
+            ),
+            (
+                SourceError::Transport(secret.into()),
                 ErrorKind::Remote,
+                "source transport error",
             ),
             (
-                SourceError::Deserialization("bad json".to_string()),
+                SourceError::Deserialization(secret.into()),
                 ErrorKind::Deserialization,
+                "source deserialization error",
             ),
             (
-                SourceError::Validation("bad domain row".to_string()),
+                SourceError::Validation(secret.into()),
                 ErrorKind::Validation,
+                "source validation error",
             ),
             (
-                SourceError::Other("unknown".to_string()),
+                SourceError::Other(secret.into()),
                 ErrorKind::Unknown,
+                "source error",
             ),
         ];
 
-        for (error, expected_kind) in cases {
+        for (error, expected_kind, expected_message) in cases {
             let event = normalise_source_poll_error(writer_id, SourcePollKind::AsyncFinite, &error);
+            assert!(!serde_json::to_string(&event).unwrap().contains(secret));
             assert!(matches!(
                 event.processing.status,
                 ProcessingStatus::Error {
+                    ref message,
                     kind: Some(ref kind),
-                    ..
-                } if *kind == expected_kind
+                } if *kind == expected_kind && message == expected_message
             ));
             match event.payload {
                 ChainPayload::Execution(ExecutionPayload::SourcePollError(failure)) => {
                     assert_eq!(failure.source_type, SourcePollKind::AsyncFinite);
                     assert_eq!(failure.error_type.processing_error_kind(), expected_kind);
-                    assert_eq!(failure.message, error.to_string());
+                    assert_eq!(failure.message, expected_message);
                 }
                 other => panic!("expected source.poll_error lifecycle row, got {other:?}"),
             }

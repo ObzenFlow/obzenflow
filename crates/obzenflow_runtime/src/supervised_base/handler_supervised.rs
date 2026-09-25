@@ -7,18 +7,21 @@
 //! This module provides supervision for state machines that delegate to handlers,
 //! such as source, transform, and sink supervisors.
 
-use super::base::{EventLoopDirective, Supervisor};
+use super::base::{self, EventLoopDirective, Supervisor};
+use super::cleanup::HandlerSupervisedCleanup;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_fsm::FsmAction;
-use obzenflow_fsm::StateVariant;
+use obzenflow_fsm::{FsmAction, StateVariant};
+use std::error::Error;
+use std::future::Future;
 use tokio::task::JoinHandle;
 
 /// Trait for handler-supervised components
 /// This ensures they provide handler access while still going through FSM
 #[async_trait::async_trait]
-pub trait HandlerSupervised: Supervisor + Sync {
+pub trait HandlerSupervised: Supervisor + HandlerSupervisedCleanup + Sync {
     type Handler: Send + Sync;
 
     /// Dispatch state logic with access to handler
@@ -27,7 +30,7 @@ pub trait HandlerSupervised: Supervisor + Sync {
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>>;
 
     /// Get the writer ID for this component
     fn writer_id(&self) -> WriterId;
@@ -38,7 +41,7 @@ pub trait HandlerSupervised: Supervisor + Sync {
     /// Optional termination hook for components that need a final marker after the
     /// FSM reaches a terminal state. Most stage supervisors rely on FSM-emitted
     /// lifecycle events and therefore use the default no-op implementation.
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(())
     }
 
@@ -66,12 +69,16 @@ pub trait HandlerSupervised: Supervisor + Sync {
 /// Extension trait to add run functionality to any HandlerSupervised type
 #[async_trait::async_trait]
 pub trait HandlerSupervisedExt: HandlerSupervised {
-    /// Run the supervision loop
+    /// Consume the supervisor and run its FSM to an orderly return.
+    ///
+    /// Resource settlement is part of this runner, including when registration,
+    /// transitions, failure actions or completion return an error. The supervisor
+    /// and its context remain owned here until cleanup finishes.
     async fn run(
         mut self,
         initial_state: Self::State,
-        context: Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+        mut context: Self::Context,
+    ) -> Result<(), Box<dyn Error + Send + Sync>>
     where
         Self: Sized,
         Self::State: Send + Sync + 'static,
@@ -79,203 +86,219 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         Self::Context: 'static,
         Self::Action: 'static,
     {
-        let supervisor_name = self.name().to_string();
-        let supervisor_writer = self.writer_id();
-        let supervisor_stage = self.stage_id();
-        let mut context = context;
+        // Keep fallible execution in a local scope so every orderly return reaches
+        // cleanup without exposing a borrowed runner or an alternate task path.
+        let result: Result<(), Box<dyn Error + Send + Sync>> = async {
+            let supervisor_name = self.name().to_string();
+            let supervisor_writer = self.writer_id();
+            let supervisor_stage = self.stage_id();
 
-        super::base::register(
-            &self,
-            &context,
-            supervisor_writer,
-            obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode::HandlerSupervised,
-        )
-        .await?;
+            base::register(
+                &self,
+                &context,
+                supervisor_writer,
+                SupervisionMode::HandlerSupervised,
+            )
+            .await?;
 
-        // Build the state machine via the Supervisor API
-        let mut machine = self.build_state_machine(initial_state);
-        let mut loop_iteration: u64 = 0;
+            // Build the state machine via the Supervisor API
+            let mut machine = self.build_state_machine(initial_state);
+            let mut loop_iteration: u64 = 0;
 
-        loop {
-            loop_iteration += 1;
+            loop {
+                loop_iteration += 1;
 
-            // Get current state
-            let current_state = machine.state().clone();
+                // Get current state
+                let current_state = machine.state().clone();
 
-            tracing::debug!(
-                target: "obzenflow_runtime::supervised_base::handler_supervised",
-                iteration = loop_iteration,
-                state = %current_state.variant_name(),
-                "HandlerSupervised::run loop iteration start"
-            );
+                tracing::debug!(
+                    target: "obzenflow_runtime::supervised_base::handler_supervised",
+                    iteration = loop_iteration,
+                    state = %current_state.variant_name(),
+                    "HandlerSupervised::run loop iteration start"
+                );
 
-            // Get directive from the supervisor's dispatch logic (with mutable context)
-            let directive = match self.dispatch_state(&current_state, &mut context).await {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::error!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        stage_id = ?supervisor_stage,
-                        state = %current_state.variant_name(),
-                        error = %e,
-                        "dispatch_state returned error; driving FSM through failure path"
-                    );
+                // Get directive from the supervisor's dispatch logic (with mutable context)
+                let directive = match self.dispatch_state(&current_state, &mut context).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!(
+                            supervisor = %supervisor_name,
+                            writer_id = ?supervisor_writer,
+                            stage_id = ?supervisor_stage,
+                            state = %current_state.variant_name(),
+                            error = %e,
+                            "dispatch_state returned error; driving FSM through failure path"
+                        );
 
-                    let failure_event = self.event_for_action_error(format!(
-                        "dispatch_state error in {}: {e}",
-                        current_state.variant_name()
-                    ));
-                    let failure_actions = machine
-                        .handle(failure_event, &mut context)
-                        .await
-                        .map_err(|fe| {
-                            format!(
-                                "FSM error after dispatch_state failure (missing Error handler in state {}?): {fe}",
-                                current_state.variant_name()
-                            )
-                        })?;
+                        let failure_event = self.event_for_action_error(format!(
+                            "dispatch_state error in {}: {e}",
+                            current_state.variant_name()
+                        ));
+                        let failure_actions = machine
+                            .handle(failure_event, &mut context)
+                            .await
+                            .map_err(|fe| {
+                                format!(
+                                    "FSM error after dispatch_state failure (missing Error handler in state {}?): {fe}",
+                                    current_state.variant_name()
+                                )
+                            })?;
 
-                    tracing::info!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        stage_id = ?supervisor_stage,
-                        iteration = loop_iteration,
-                        action_count = failure_actions.len(),
-                        "HandlerSupervised: executing failure-handling actions"
-                    );
-                    for (i, failure_action) in failure_actions.into_iter().enumerate() {
                         tracing::info!(
                             supervisor = %supervisor_name,
                             writer_id = ?supervisor_writer,
                             stage_id = ?supervisor_stage,
                             iteration = loop_iteration,
-                            action_index = i,
-                            action = ?failure_action,
-                            "HandlerSupervised: executing failure-handling action"
+                            action_count = failure_actions.len(),
+                            "HandlerSupervised: executing failure-handling actions"
                         );
-                        failure_action.execute(&mut context).await.map_err(|e2| {
-                            format!("Action error during dispatch_state failure handling: {e2}")
-                        })?;
+                        for (i, failure_action) in failure_actions.into_iter().enumerate() {
+                            tracing::info!(
+                                supervisor = %supervisor_name,
+                                writer_id = ?supervisor_writer,
+                                stage_id = ?supervisor_stage,
+                                iteration = loop_iteration,
+                                action_index = i,
+                                action = ?failure_action,
+                                "HandlerSupervised: executing failure-handling action"
+                            );
+                            failure_action.execute(&mut context).await.map_err(|e2| {
+                                format!("Action error during dispatch_state failure handling: {e2}")
+                            })?;
+                        }
+
+                        continue;
+                    }
+                };
+
+                tracing::debug!(
+                    target: "obzenflow_runtime::supervised_base::handler_supervised",
+                    iteration = loop_iteration,
+                    state = %current_state.variant_name(),
+                    directive = ?directive,
+                    "HandlerSupervised::run dispatch_state returned directive"
+                );
+
+                match directive {
+                    EventLoopDirective::Continue => {
+                        // Yield to prevent busy loop when waiting for external events
+                        tokio::task::yield_now().await;
+                        continue;
                     }
 
-                    continue;
-                }
-            };
-
-            tracing::debug!(
-                target: "obzenflow_runtime::supervised_base::handler_supervised",
-                iteration = loop_iteration,
-                state = %current_state.variant_name(),
-                directive = ?directive,
-                "HandlerSupervised::run dispatch_state returned directive"
-            );
-
-            match directive {
-                EventLoopDirective::Continue => {
-                    // Yield to prevent busy loop when waiting for external events
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-
-                EventLoopDirective::Transition(event) => {
-                    tracing::trace!(
-                        target: "flowip-080o",
-                        iteration = loop_iteration,
-                        event = ?event,
-                        "HandlerSupervised: handling FSM transition event"
-                    );
-                    let actions = machine
-                        .handle(event, &mut context)
-                        .await
-                        .map_err(|e| format!("FSM error: {e}"))?;
-
-                    tracing::trace!(
-                        target: "flowip-080o",
-                        iteration = loop_iteration,
-                        action_count = actions.len(),
-                        "HandlerSupervised: FSM returned actions, executing sequentially"
-                    );
-                    for (i, action) in actions.into_iter().enumerate() {
+                    EventLoopDirective::Transition(event) => {
                         tracing::trace!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
-                            action_index = i,
-                            action = ?action,
-                            "HandlerSupervised: executing action"
+                            event = ?event,
+                            "HandlerSupervised: handling FSM transition event"
                         );
-                        if let Err(e) = action.execute(&mut context).await {
-                            tracing::error!(
+                        let actions = machine
+                            .handle(event, &mut context)
+                            .await
+                            .map_err(|e| format!("FSM error: {e}"))?;
+
+                        tracing::trace!(
+                            target: "flowip-080o",
+                            iteration = loop_iteration,
+                            action_count = actions.len(),
+                            "HandlerSupervised: FSM returned actions, executing sequentially"
+                        );
+                        for (i, action) in actions.into_iter().enumerate() {
+                            tracing::trace!(
                                 target: "flowip-080o",
                                 iteration = loop_iteration,
                                 action_index = i,
-                                error = %e,
-                                "HandlerSupervised action failed; emitting failure event"
+                                action = ?action,
+                                "HandlerSupervised: executing action"
                             );
+                            if let Err(e) = action.execute(&mut context).await {
+                                tracing::error!(
+                                    target: "flowip-080o",
+                                    iteration = loop_iteration,
+                                    action_index = i,
+                                    error = %e,
+                                    "HandlerSupervised action failed; emitting failure event"
+                                );
 
-                            // Drive the FSM with a stage-specific failure event so that
-                            // it can transition into a Failed state and emit the
-                            // appropriate lifecycle events.
-                            let failure_event = self.event_for_action_error(format!("{e}"));
-                            let failure_actions = machine
-                                .handle(failure_event, &mut context)
-                                .await
-                                .map_err(|fe| format!("FSM error after action failure: {fe}"))?;
+                                // Drive the FSM with a stage-specific failure event so that
+                                // it can transition into a Failed state and emit the
+                                // appropriate lifecycle events.
+                                let failure_event = self.event_for_action_error(format!("{e}"));
+                                let failure_actions = machine
+                                    .handle(failure_event, &mut context)
+                                    .await
+                                    .map_err(|fe| format!("FSM error after action failure: {fe}"))?;
 
-                            tracing::info!(
-                                target: "flowip-080o",
-                                iteration = loop_iteration,
-                                action_count = failure_actions.len(),
-                                "HandlerSupervised: executing failure-handling actions"
-                            );
-                            for (j, failure_action) in failure_actions.into_iter().enumerate() {
                                 tracing::info!(
                                     target: "flowip-080o",
                                     iteration = loop_iteration,
-                                    action_index = j,
-                                    action = ?failure_action,
-                                    "HandlerSupervised: executing failure-handling action"
+                                    action_count = failure_actions.len(),
+                                    "HandlerSupervised: executing failure-handling actions"
                                 );
-                                failure_action.execute(&mut context).await.map_err(|e2| {
-                                    format!("Action error during failure handling: {e2}")
-                                })?;
-                            }
+                                for (j, failure_action) in failure_actions.into_iter().enumerate() {
+                                    tracing::info!(
+                                        target: "flowip-080o",
+                                        iteration = loop_iteration,
+                                        action_index = j,
+                                        action = ?failure_action,
+                                        "HandlerSupervised: executing failure-handling action"
+                                    );
+                                    failure_action.execute(&mut context).await.map_err(|e2| {
+                                        format!("Action error during failure handling: {e2}")
+                                    })?;
+                                }
 
-                            // After executing failure-handling actions, break out of the
-                            // current action sequence. The next loop iteration will see
-                            // the new FSM state (typically Failed/Drained) and perform
-                            // the appropriate terminal behaviour.
-                            break;
+                                // After executing failure-handling actions, break out of the
+                                // current action sequence. The next loop iteration will see
+                                // the new FSM state (typically Failed/Drained) and perform
+                                // the appropriate terminal behaviour.
+                                break;
+                            }
+                            tracing::trace!(
+                                target: "flowip-080o",
+                                iteration = loop_iteration,
+                                action_index = i,
+                                "HandlerSupervised: action completed"
+                            );
                         }
                         tracing::trace!(
                             target: "flowip-080o",
                             iteration = loop_iteration,
-                            action_index = i,
-                            "HandlerSupervised: action completed"
+                            "HandlerSupervised: all actions completed"
                         );
                     }
-                    tracing::trace!(
-                        target: "flowip-080o",
-                        iteration = loop_iteration,
-                        "HandlerSupervised: all actions completed"
-                    );
-                }
 
-                EventLoopDirective::Terminate => {
-                    self.write_completion_event().await?;
-                    break;
+                    EventLoopDirective::Terminate => {
+                        self.write_completion_event().await?;
+                        break;
+                    }
                 }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+
+        let cleanup = self.cleanup_after_run(&context).await;
+        if let Err(error) = &cleanup {
+            tracing::warn!(
+                supervisor = %self.name(),
+                stage_id = %self.stage_id(),
+                error = %error,
+                "supervisor cleanup evidence failed"
+            );
+        }
+        // Await cleanup even after runner failure and preserve the primary error.
+        result.and(cleanup)
     }
 
     /// Helper to spawn a task and return the handle
     /// Useful for handler-based supervisors that need to spawn processing tasks
     async fn spawn_task<F>(future: F) -> JoinHandle<()>
     where
-        F: std::future::Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + Send + 'static,
     {
         tokio::spawn(future)
     }

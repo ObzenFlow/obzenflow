@@ -16,5 +16,5 @@ fn main() -> anyhow::Result<()> {
             .config("output_csv", paths.output_csv.display()),
     );
 
-    support::flow::run_example(paths, presentation)
+    support::flow::run_example(paths, presentation, std::env::args_os())
 }

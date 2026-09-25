@@ -11,11 +11,16 @@
 //!
 //! [`once`], [`finite`], [`finite_from_fn`], [`async_finite`], [`infinite`], and
 //! [`async_infinite`] construct source adapters from application-owned values or
-//! producer functions.
+//! producer functions. [`generate`] accepts `FnMut() -> Option<T>` and
+//! [`from_receiver`] transfers a Tokio receiver. Producers and receivers move into
+//! one execution without `Clone`; use topology fan-out for multiple consumers.
 //!
 //! ## CSV sources
 //!
-//! [`CsvSource`] (via [`CsvSourceBuilder`]) reads rows from CSV files on disk.
+//! [`CsvSource`] (via [`CsvSourceBuilder`]) is cold, reusable configuration.
+//! The supervisor opens an independent [`CsvReader`] only when live input is
+//! required. Building and cloning it do no file I/O, so strict replay works even
+//! when the original CSV is unavailable. Input/header errors occur at startup.
 //! A user-owned [`CsvDecoder`] value declares the emitted [`CsvDecoder::Output`].
 //! Its default method uses serde when the CSV and domain shapes match;
 //! [`CsvRowDecoder`] provides string-preserving [`CsvRow`] output.
@@ -30,22 +35,28 @@
 //!
 //! ## HTTP pull sources
 //!
-//! [`HttpPullSource`] performs a single HTTP request and decodes the response
-//! body using a [`PullDecoder`], whose associated [`PullDecoder::Output`]
-//! declares the emitted domain type. [`HttpPollSource`] wraps the same logic in
-//! a polling loop controlled by [`HttpPollConfig`].
+//! [`HttpPullSource`] configures a finite paginated HTTP source and
+//! [`HttpPollSource`] configures repeated polling with [`HttpPollConfig`]. Each
+//! opens an independent reader under supervision. [`PullDecoder::Output`]
+//! declares the domain type; the runtime owns subsequent poll requests.
+//!
+//! Integration authors implement one of [`FiniteSourceConnector`],
+//! [`AsyncFiniteSourceConnector`], [`InfiniteSourceConnector`] or
+//! [`AsyncInfiniteSourceConnector`]. Each returns its corresponding typed handler
+//! and receives only [`SourceReaderInitContext`], never runtime controls.
 //!
 //! The default HTTP client requires the `http-pull` feature.
 //! Applications supplying their own [`HttpClient`] do not require that feature.
 
 /// CSV file source, decoder contract, and string-preserving row support.
 pub use obzenflow_adapters::sources::{
-    CsvDecodeError, CsvDecoder, CsvRecord, CsvRow, CsvRowDecoder, CsvSource, CsvSourceBuilder,
+    CsvDecodeError, CsvDecoder, CsvReader, CsvRecord, CsvRow, CsvRowDecoder, CsvSource,
+    CsvSourceBuilder,
 };
 
 /// In-process source adapters constructed from values and producer functions.
 pub use obzenflow_adapters::sources::{
-    async_finite, async_infinite, finite, finite_from_fn, infinite, once,
+    async_finite, async_infinite, finite, finite_from_fn, from_receiver, generate, infinite, once,
 };
 
 pub use obzenflow_adapters::sources::http_pull::{HttpRetryConfig, ListDetailState};
@@ -55,8 +66,9 @@ pub use obzenflow_adapters::sources::{HostedIngressSource, IngressDecodeError, I
 /// HTTP pull and poll sources, decoders, and configuration types.
 pub use obzenflow_adapters::sources::{
     simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,
-    HttpPollConfigBuilder, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder, HttpPullSource,
-    HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder, PullDecoder,
+    HttpPollConfigBuilder, HttpPollReader, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder,
+    HttpPullReader, HttpPullSource, HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder,
+    PullDecoder,
 };
 
 /// HTTP primitives re-exported from `obzenflow_core` for building request specs.
@@ -74,7 +86,8 @@ pub use obzenflow_runtime::stages::common::handlers::{
     TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
 };
 pub use obzenflow_runtime::stages::source::{
-    AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped,
-    FallibleAsyncInfiniteSourceTyped, FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped,
-    FiniteSourceTyped, InfiniteSourceTyped,
+    AsyncFiniteSourceConnector, AsyncFiniteSourceTyped, AsyncInfiniteSourceConnector,
+    AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped, FallibleAsyncInfiniteSourceTyped,
+    FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped, FiniteSourceConnector,
+    FiniteSourceTyped, InfiniteSourceConnector, InfiniteSourceTyped, SourceReaderInitContext,
 };

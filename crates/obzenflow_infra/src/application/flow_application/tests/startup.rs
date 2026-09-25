@@ -3,6 +3,162 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::web::endpoints::event_ingestion::{IngestionConfig, IngressDecoder};
+
+#[derive(Clone, Debug)]
+struct IdleIngress;
+
+impl IngressDecoder for IdleIngress {
+    type Output = IdlePayload;
+}
+
+#[cfg(feature = "reqwest-client")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_ingress_builder_hosts_multiple_sources() {
+    use obzenflow_dsl::async_infinite_source;
+    use obzenflow_runtime::stages::sink::SinkTyped;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("obzenflow.toml");
+    let port = available_local_port();
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "auto"
+on_terminal = "exit"
+[metrics]
+enabled = false
+"#
+        ),
+    )
+    .unwrap();
+    let (flow_tx, flow_rx) = oneshot::channel();
+    let flow_tx = Mutex::new(Some(flow_tx));
+    let mut app = FlowApplication::builder()
+        .with_config_file(config_path)
+        .with_cli_args(["http-ingress-builder-test"])
+        .with_flow_handle_hook(move |flow| {
+            let _ = flow_tx.lock().unwrap().take().unwrap().send(flow.clone());
+            tokio::spawn(async {})
+        });
+    let config = |path: &str| IngestionConfig {
+        base_path: path.to_string(),
+        ..Default::default()
+    };
+    let first = app.http_ingress(IdleIngress, config("/first"));
+    let second = app.http_ingress(IdleIngress, config("/second"));
+    let (delivered_tx, mut delivered_rx) = tokio::sync::mpsc::unbounded_channel();
+    let definition = FlowDefinition::materialize(move |_| {
+        let output = SinkTyped::new(move |_: IdlePayload| {
+            let delivered_tx = delivered_tx.clone();
+            async move {
+                delivered_tx.send(()).unwrap();
+            }
+        });
+        Ok(flow! {
+            name: "http_ingress_builder",
+            journals: crate::journal::memory_journals(),
+            stages: {
+                first = async_infinite_source!(IdlePayload => first);
+                second = async_infinite_source!(IdlePayload => second);
+                output = sink!(IdlePayload => output);
+            },
+            topology: { first |> output; second |> output; }
+        })
+    });
+    let application = tokio::spawn(app.run_async(definition));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let flow = flow_rx.await.unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for path in ["/first", "/second"] {
+            let base = format!("http://127.0.0.1:{port}{path}");
+            loop {
+                if client
+                    .get(format!("{base}/health"))
+                    .send()
+                    .await
+                    .is_ok_and(|response| response.status().is_success())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let response = client
+                .post(format!("{base}/events"))
+                .header("content-type", "application/json")
+                .body(r#"{"event_type":"flow_application.idle","data":null}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            delivered_rx
+                .recv()
+                .await
+                .expect("HTTP event reaches its source and sink");
+        }
+        flow.stop_cancel().await.unwrap();
+        application.await.unwrap().unwrap();
+    })
+    .await
+    .expect("builder-created HTTP sources must deliver and shut down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_ingress_builder_without_source_fails_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("obzenflow.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 8080
+startup_mode = "auto"
+[metrics]
+enabled = false
+"#,
+    )
+    .unwrap();
+    let mut app = FlowApplication::builder()
+        .with_config_file(config_path)
+        .with_cli_args(["missing-ingress-test"]);
+    let _unplaced_source = app.http_ingress(
+        IdleIngress,
+        IngestionConfig {
+            ingress_key: Some("unplaced-ingress".into()),
+            ..Default::default()
+        },
+    );
+    let definition = FlowDefinition::materialize(move |_| {
+        let input = OneShotSource::new();
+        Ok(flow! {
+            name: "missing_ingress_source",
+            journals: crate::journal::memory_journals(),
+            stages: {
+                input = source!(IdlePayload => input);
+                output = sink!(IdlePayload => NoopSink);
+            },
+            topology: { input |> output; }
+        })
+    });
+
+    let error = tokio::time::timeout(Duration::from_secs(10), app.run_async(definition))
+        .await
+        .expect("missing ingress source must fail promptly")
+        .expect_err("an HTTP attachment cannot replace source placement");
+    assert!(
+        matches!(&error, ApplicationError::FlowBuildFailed(message)
+            if message.contains("unplaced-ingress")
+                && message.contains("source half was not placed in the flow topology")),
+        "unexpected startup error: {error}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn authentication_admission_failure_prevents_automatic_run() {

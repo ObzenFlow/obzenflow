@@ -10,6 +10,7 @@
 
 pub(crate) mod base;
 pub mod builder;
+pub(crate) mod cleanup;
 pub mod handle;
 pub mod handler_supervised;
 pub(crate) mod idle_backoff;

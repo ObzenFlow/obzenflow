@@ -4,40 +4,51 @@
 
 //! Async finite source supervisor implementation using HandlerSupervised pattern
 
-use crate::replay::{ReplayContextTemplate, ReplayDriver};
-use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
-use crate::stages::common::supervision::flow_context_factory::make_flow_context;
-use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
-use crate::stages::source::supervision::{
-    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
-    normalise_source_poll_error, observe_source_boundary_rejection, record_source_cleanup_failed,
-    record_source_stage_fatal, stage_boundary_control_events, stage_source_poll_outputs,
-    SourcePollObservation,
-};
-use crate::stages::source::{
-    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport, SourcePollResult,
-};
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::idle_backoff::IdleBackoff;
-use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
-use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
-use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, WriterId};
-use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use super::fsm::{
     FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState,
     SourceCompletionOrigin,
 };
+use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
+use crate::replay::{ReplayContextTemplate, ReplayDriver};
+use crate::stages::common::handlers::source::SourceError;
+use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::observer::SourcePollObserverOutcome;
+use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
+use crate::stages::source::supervision::{
+    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
+    normalise_source_poll_error, observe_source_boundary_rejection, record_source_cleanup_failed,
+    record_source_stage_fatal, source_error_kind, source_open_failure,
+    stage_boundary_control_events, stage_source_poll_outputs, SourcePollObservation,
+};
+use crate::stages::source::{
+    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
+    SourcePollResult, SourceReaderInitContext,
+};
+use crate::supervised_base::base::Supervisor;
+use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
+use crate::supervised_base::idle_backoff::IdleBackoff;
+use crate::supervised_base::with_external_events::record_terminal_commands;
+use crate::supervised_base::{
+    publication, EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher,
+};
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{MiddlewareExecutionScope, StageId, WriterId};
+use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
+use std::error::Error;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::time;
 
 /// Supervisor for async finite source stages
 pub(crate) struct AsyncFiniteSourceSupervisor<
-    H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static,
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
@@ -50,9 +61,6 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
 
     /// Stage ID
     pub(crate) stage_id: StageId,
-
-    /// Descriptor-selected bound for one raw async source poll.
-    pub(crate) poll_timeout: Option<Duration>,
 
     /// Adaptive backoff for async polls that deliver no data.
     pub(crate) idle_backoff: IdleBackoff,
@@ -94,12 +102,12 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
     pub(crate) pending_boundary_rejected: bool,
 
     /// Cleanup is live-only and attempted at most once.
-    pub(crate) live_entered: bool,
+    pub(crate) reader_acquired: bool,
     pub(crate) cleanup_attempted: bool,
 }
 
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    Supervisor for AsyncFiniteSourceSupervisor<H>
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> Supervisor
+    for AsyncFiniteSourceSupervisor<H>
 {
     type State = FiniteSourceState<H>;
     type Event = FiniteSourceEvent<H>;
@@ -109,7 +117,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
     fn build_state_machine(
         &self,
         initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         // Construction starts in Created. Entry hooks mirror the engine-assigned
         // state before the supervisor executes any transition actions.
         fsm! {
@@ -261,7 +269,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                 ],
                             })
                         } else {
-                            Err(obzenflow_fsm::FsmError::HandlerError(
+                            Err(FsmError::HandlerError(
                                 "Invalid event".to_string(),
                             ))
                         }
@@ -356,7 +364,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                 actions: vec![],
                             })
                         } else {
-                            Err(obzenflow_fsm::FsmError::HandlerError(
+                            Err(FsmError::HandlerError(
                                 "Invalid event".to_string(),
                             ))
                         }
@@ -374,7 +382,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                         event = %event_name,
                         "Unhandled event in FSM - this indicates a state machine configuration error"
                     );
-                    Err(obzenflow_fsm::FsmError::UnhandledEvent {
+                    Err(FsmError::UnhandledEvent {
                         state: state_name,
                         event: event_name,
                     })
@@ -383,17 +391,11 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         }
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::AsyncFiniteSource
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::AsyncFiniteSource
     }
 
-    fn system_journal(
-        &self,
-        _context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
+    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
         self.system_journal.clone()
     }
 
@@ -403,8 +405,8 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    HandlerSupervised for AsyncFiniteSourceSupervisor<H>
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
+    for AsyncFiniteSourceSupervisor<H>
 {
     type Handler = H;
 
@@ -424,7 +426,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
         &mut self,
         state: &Self::State,
         ctx: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         if self.last_state.as_ref() != Some(state) {
             let new_state = state.clone();
             let _ = self.state_watcher.update(new_state.clone());
@@ -435,7 +437,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             state,
             FiniteSourceState::Drained | FiniteSourceState::Failed(_)
         ) {
-            crate::supervised_base::with_external_events::record_terminal_commands(
+            record_terminal_commands(
                 &mut self.external_events,
                 self.system_journal.clone(),
                 WriterId::from(self.stage_id),
@@ -503,23 +505,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                     }
                     self.idle_backoff.reset();
                     self.pending_idle_delay = None;
-                    if self.live_entered && !self.cleanup_attempted {
-                        self.cleanup_attempted = true;
-                        if let Err(e) = self.handler.drain().await {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                error = %e,
-                                "drain() failed; continuing shutdown"
-                            );
-                            record_source_cleanup_failed(
-                                self.stage_id,
-                                &ctx.stage_name,
-                                &e,
-                                &self.system_journal,
-                            )
-                            .await?;
-                        }
-                    }
+                    self.cleanup_reader(&ctx.stage_name).await?;
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
                 }
 
@@ -539,7 +525,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
 
                 let replaying = matches!(
                     ctx.runtime_execution.source_phase_for(self.stage_id),
-                    crate::execution::SourceExecutionPhase::Replaying
+                    SourceExecutionPhase::Replaying
                 );
                 if replaying {
                     self.idle_backoff.reset();
@@ -556,14 +542,14 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                 }),
                             ));
                         }
-                        _ = tokio::time::sleep(delay) => {}
+                        _ = time::sleep(delay) => {}
                     }
                     return Ok(EventLoopDirective::Continue);
                 }
 
                 ctx.instrumentation
                     .event_loops_total
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, Ordering::Relaxed);
 
                 if replaying {
                     let replay_archive = ctx
@@ -577,10 +563,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                             .source_data_journal_path(stage_key)
                             .map_err(|e| format!("Failed to locate archived journal: {e}"))?;
                         let reader = replay_archive
-                            .open_source_reader(
-                                stage_key,
-                                obzenflow_core::event::context::StageType::FiniteSource,
-                            )
+                            .open_source_reader(stage_key, StageType::FiniteSource)
                             .await
                             .map_err(|e| format!("Failed to open archived journal reader: {e}"))?;
                         let replay_context = ReplayContextTemplate {
@@ -605,7 +588,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                     source_stages: replay_archive.source_stage_keys(),
                                 }),
                             );
-                            if let Err(e) = crate::supervised_base::publication::append(
+                            if let Err(e) = publication::append(
                                 &self.system_journal,
                                 started_event,
                                 Default::default(),
@@ -648,7 +631,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                         Ok(Some(event)) => {
                             ctx.instrumentation
                                 .event_loops_with_work_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                .fetch_add(1, Ordering::Relaxed);
 
                             let per_data_event_duration = if event.consumes_data_credit() {
                                 tick_duration
@@ -670,7 +653,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                         }
                         Ok(None) => {
                             match ctx.runtime_execution.source_replay_exhausted(self.stage_id) {
-                                crate::execution::SourceReplayExhaustion::Terminate => {
+                                SourceReplayExhaustion::Terminate => {
                                     // FLOWIP-095k: reproduce the archive's recorded completion kind.
                                     let recorded_kind = self
                                         .replay_driver
@@ -688,7 +671,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                             &ctx.stage_name,
                                             &self.system_journal,
                                             self.replay_started_at,
-                                            crate::stages::source::replay_lifecycle::ReplayCompletionFacts {
+                                            ReplayCompletionFacts {
                                                 replayed_count,
                                                 skipped_count,
                                                 synthesized_eof_kind: Some(
@@ -702,7 +685,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                 }
                                 // FLOWIP-120n: recorded prefix exhausted; drop the replay
                                 // driver and continue from the live handler.
-                                crate::execution::SourceReplayExhaustion::ContinueLive => {
+                                SourceReplayExhaustion::ContinueLive => {
                                     self.idle_backoff.reset();
                                     self.pending_idle_delay = None;
                                     self.replay_driver = None;
@@ -715,20 +698,44 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                         ))),
                     }
                 } else {
-                    self.live_entered = true;
+                    if !self.reader_acquired {
+                        let context = SourceReaderInitContext {
+                            stage_id: self.stage_id,
+                            stage_name: ctx.stage_name.clone(),
+                            flow_name: ctx.flow_name.clone(),
+                        };
+                        let opened = tokio::select! {
+                            biased;
+                            event = self.external_events.recv() => {
+                                return Ok(EventLoopDirective::Transition(event.unwrap_or_else(||
+                                    FiniteSourceEvent::Error("External control channel closed".into())
+                                )));
+                            }
+                            opened = self.handler.acquire(context) => opened,
+                        };
+                        if let Err(error) = opened {
+                            return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                                source_open_failure(
+                                    &ctx.stage_name,
+                                    ctx.runtime_execution.resume_control().is_some(),
+                                    &error,
+                                ),
+                            )));
+                        }
+                        self.reader_acquired = true;
+                        // Return to control dispatch before admitting the first poll.
+                        return Ok(EventLoopDirective::Continue);
+                    }
                     let source_boundary = self.source_boundary.clone();
-                    let poll_timeout = self.poll_timeout;
+                    let poll_timeout = self.handler.poll_timeout();
                     let boundary_future = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
-                            let poll_started_at = tokio::time::Instant::now();
+                            let poll_started_at = time::Instant::now();
                             match poll_timeout {
                                 Some(timeout) => {
-                                    match tokio::time::timeout(
-                                        timeout,
-                                        self.handler.next_invocation(),
-                                    )
-                                    .await
+                                    match time::timeout(timeout, self.handler.next_invocation())
+                                        .await
                                     {
                                         Ok(invocation) => SourcePollReport::from_erased(
                                             invocation,
@@ -736,13 +743,10 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                         ),
                                         Err(_) => {
                                             let poll_duration = poll_started_at.elapsed();
-                                            let timeout_error =
-                                                crate::stages::common::handlers::source::SourceError::Timeout(
-                                                    format!(
-                                                    "poll timeout exceeded ({}s)",
-                                                    timeout.as_secs()
-                                                ),
-                                                );
+                                            let timeout_error = SourceError::Timeout(format!(
+                                                "poll timeout exceeded ({}s)",
+                                                timeout.as_secs()
+                                            ));
                                             SourcePollReport::handler_error(
                                                 timeout_error,
                                                 poll_duration,
@@ -780,7 +784,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                         ctx.flow_id,
                         &stage_flow_context,
                         &ctx.observers,
-                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                        MiddlewareExecutionScope::LiveHandler,
                     );
 
                     match report.outcome {
@@ -818,7 +822,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                 self.pending_idle_delay = None;
                                 ctx.instrumentation
                                     .event_loops_with_work_total
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    .fetch_add(1, Ordering::Relaxed);
 
                                 let source_event_count = events.len();
                                 events.extend(poll.operational_events);
@@ -827,7 +831,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                     .observe(
                                         events.as_mut_slice(),
                                         poll.poll_duration,
-                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                        SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
                                     )
@@ -853,7 +857,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                     .observe(
                                         events.as_slice(),
                                         poll.poll_duration,
-                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                        SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
                                     )
@@ -878,7 +882,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                     source_poll_observation
                                         .observe_empty(
                                             poll.poll_duration,
-                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
+                                            SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
@@ -889,7 +893,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                         .observe(
                                             control_events.as_mut_slice(),
                                             poll.poll_duration,
-                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
+                                            SourcePollObserverOutcome::Eof,
                                         )
                                         .await;
                                     stage_source_poll_outputs(
@@ -907,11 +911,10 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                             SourcePollResult::HandlerError(error) => {
                                 tracing::warn!(
                                     stage_name = %ctx.stage_name,
-                                    error = %error,
+                                    error = error.safe_summary(),
                                     "Async finite source handler.next() returned error"
                                 );
-                                let kind =
-                                    crate::stages::source::supervision::source_error_kind(&error);
+                                let kind = source_error_kind(&error);
                                 let mut events = vec![normalise_source_poll_error(
                                     WriterId::from(self.stage_id),
                                     SourcePollKind::AsyncFinite,
@@ -923,9 +926,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
                                     .observe(
                                         events.as_mut_slice(),
                                         poll.poll_duration,
-                                        crate::stages::observer::SourcePollObserverOutcome::Error {
-                                            kind,
-                                        },
+                                        SourcePollObserverOutcome::Error { kind },
                                     )
                                     .await;
                                 stage_source_poll_outputs(
@@ -967,23 +968,46 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             FiniteSourceState::Failed(_) => {
                 self.idle_backoff.reset();
                 self.pending_idle_delay = None;
-                if self.live_entered && !self.cleanup_attempted {
-                    self.cleanup_attempted = true;
-                    if let Err(e) = self.handler.drain().await {
-                        record_source_cleanup_failed(
-                            self.stage_id,
-                            &ctx.stage_name,
-                            &e,
-                            &self.system_journal,
-                        )
-                        .await?;
-                    }
-                }
+                self.cleanup_reader(&ctx.stage_name).await?;
                 Ok(EventLoopDirective::Terminate)
             }
             FiniteSourceState::_Phantom(_) => {
                 unreachable!("PhantomData variant should never be instantiated")
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: UnifiedAsyncFiniteSourceHandler + 'static> HandlerSupervisedCleanup
+    for AsyncFiniteSourceSupervisor<H>
+{
+    async fn cleanup_after_run(
+        &mut self,
+        context: &Self::Context,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.cleanup_reader(&context.stage_name).await
+    }
+}
+
+impl<H: UnifiedAsyncFiniteSourceHandler + 'static> AsyncFiniteSourceSupervisor<H> {
+    async fn cleanup_reader(
+        &mut self,
+        stage_name: &str,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.reader_acquired && !self.cleanup_attempted {
+            // Consume eligibility before the await, including when evidence fails.
+            self.cleanup_attempted = true;
+            if let Err(error) = self.handler.drain().await {
+                record_source_cleanup_failed(
+                    self.stage_id,
+                    stage_name,
+                    &error,
+                    &self.system_journal,
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 }

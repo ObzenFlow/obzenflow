@@ -4,52 +4,40 @@
 
 //! Builder for async finite source stages
 
-use std::sync::Arc;
-use std::time::Duration;
-
+use super::async_supervisor::AsyncFiniteSourceSupervisor;
+use super::config::FiniteSourceConfig;
+use super::fsm::{FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState};
+use super::handle::FiniteSourceHandle;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::UnifiedAsyncFiniteSourceHandler;
 use crate::stages::observer::{ObserverTarget, StageObserverBundle};
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
+use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, SupervisorBuilder, SupervisorTaskBuilder,
 };
 use obzenflow_core::WriterId;
-
-use super::async_supervisor::AsyncFiniteSourceSupervisor;
-use super::config::FiniteSourceConfig;
-use super::fsm::{FiniteSourceContext, FiniteSourceContextInit, FiniteSourceState};
-use super::handle::FiniteSourceHandle;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Builder for creating async finite source stages
-pub struct AsyncFiniteSourceBuilder<
-    H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
-> {
+pub struct AsyncFiniteSourceBuilder<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> {
     handler: H,
     config: FiniteSourceConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
-    poll_timeout: Option<Duration>,
 }
 
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    AsyncFiniteSourceBuilder<H>
-{
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> AsyncFiniteSourceBuilder<H> {
     pub fn new(handler: H, config: FiniteSourceConfig, resources: StageResources) -> Self {
         Self {
             handler,
             config,
             resources,
             instrumentation: None,
-            poll_timeout: Some(Duration::from_secs(30)),
         }
-    }
-
-    pub fn with_poll_timeout(mut self, poll_timeout: Option<Duration>) -> Self {
-        self.poll_timeout = poll_timeout;
-        self
     }
 
     pub fn with_instrumentation(mut self, instrumentation: Arc<StageInstrumentation>) -> Self {
@@ -64,8 +52,8 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
 }
 
 #[async_trait::async_trait]
-impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    SupervisorBuilder for AsyncFiniteSourceBuilder<H>
+impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
+    for AsyncFiniteSourceBuilder<H>
 {
     type Handle = FiniteSourceHandle<H>;
     type Error = BuilderError;
@@ -124,8 +112,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             handler,
             system_journal: self.resources.system_journal.clone(),
             stage_id: self.config.stage_id,
-            poll_timeout: self.poll_timeout,
-            idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
+            idle_backoff: IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),
             ),
@@ -140,7 +127,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync 
             pending_boundary_eof: false,
             pending_boundary_error: None,
             pending_boundary_rejected: false,
-            live_entered: false,
+            reader_acquired: false,
             cleanup_attempted: false,
         };
 

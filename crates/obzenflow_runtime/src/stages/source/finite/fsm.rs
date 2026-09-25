@@ -838,14 +838,24 @@ pub(crate) mod tests {
     /// Minimal in-memory journal for tests
     pub(crate) struct TestJournal<T: JournalEvent> {
         id: JournalId,
+        fail_appends: Arc<std::sync::atomic::AtomicBool>,
         owner: Option<JournalOwner>,
         events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> TestJournal<T> {
+        pub(crate) fn with_append_failure(
+            mut self,
+            fail: Arc<std::sync::atomic::AtomicBool>,
+        ) -> Self {
+            self.fail_appends = fail;
+            self
+        }
+
         pub(crate) fn new(owner: JournalOwner) -> Self {
             Self {
                 id: JournalId::new(),
+                fail_appends: Arc::default(),
                 owner: Some(owner),
                 events: Arc::new(Mutex::new(Vec::new())),
             }
@@ -872,6 +882,9 @@ pub(crate) mod tests {
             event: T,
             mut options: obzenflow_core::journal::AppendOptions<'_, T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            if self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(JournalError::Full);
+            }
             let event = options.capture.prepare(0, event);
             let env = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
@@ -996,7 +1009,6 @@ pub(crate) mod tests {
                         handler: DummySource,
                         system_journal: system_journal.clone(),
                         stage_id,
-                        poll_timeout: None,
                         idle_backoff: IdleBackoff::exponential_with_cap(
                             Duration::from_millis(1), Duration::from_millis(10)),
                         pending_idle_delay: None,
@@ -1008,7 +1020,7 @@ pub(crate) mod tests {
                         replay_completion: Default::default(),
                         source_boundary: None,
                         pending_boundary_error: None,
-                        live_entered: false,
+                        reader_acquired: false,
                         cleanup_attempted: false,
                         $($extra: $value,)*
                     };

@@ -8,32 +8,31 @@ use obzenflow::stages::sources;
 use obzenflow::stages::sources::TypedFiniteSourceHandler;
 
 pub fn categories_source(
-) -> impl TypedFiniteSourceHandler<Output = Category> + Clone + std::fmt::Debug + 'static {
+) -> impl TypedFiniteSourceHandler<Output = Category> + std::fmt::Debug + 'static {
     sources::finite(fixtures::categories())
 }
 
 pub fn products_source(
-) -> impl TypedFiniteSourceHandler<Output = Product> + Clone + std::fmt::Debug + 'static {
+) -> impl TypedFiniteSourceHandler<Output = Product> + std::fmt::Debug + 'static {
     sources::finite(fixtures::products())
 }
 
-pub fn skus_source(
-) -> impl TypedFiniteSourceHandler<Output = Sku> + Clone + std::fmt::Debug + 'static {
+pub fn skus_source() -> impl TypedFiniteSourceHandler<Output = Sku> + std::fmt::Debug + 'static {
     sources::finite(fixtures::skus())
 }
 
 pub fn promotions_source(
-) -> impl TypedFiniteSourceHandler<Output = Promotion> + Clone + std::fmt::Debug + 'static {
+) -> impl TypedFiniteSourceHandler<Output = Promotion> + std::fmt::Debug + 'static {
     sources::finite(fixtures::promotions())
 }
 
 pub fn payment_methods_source(
-) -> impl TypedFiniteSourceHandler<Output = PaymentMethod> + Clone + std::fmt::Debug + 'static {
+) -> impl TypedFiniteSourceHandler<Output = PaymentMethod> + std::fmt::Debug + 'static {
     sources::finite(fixtures::payments())
 }
 
 pub fn orders_source(
-) -> impl TypedFiniteSourceHandler<Output = OrderEvent> + Clone + std::fmt::Debug + 'static {
+) -> impl TypedFiniteSourceHandler<Output = OrderEvent> + std::fmt::Debug + 'static {
     let inject_bad = std::env::var("INJECT_BAD_PAYMENT").is_ok();
     sources::finite(fixtures::orders(inject_bad))
 }

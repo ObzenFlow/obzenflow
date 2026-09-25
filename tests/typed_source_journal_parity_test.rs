@@ -17,11 +17,12 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
-use obzenflow_runtime::stages::common::handlers::{
-    TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler,
-    TypedInfiniteSourceHandler,
-};
 use obzenflow_runtime::stages::sink::{DeliveryContext, SinkTyped};
+use obzenflow_runtime::stages::source::{
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, FiniteSourceConnector,
+    InfiniteSourceConnector, SourceReaderInitContext, TypedAsyncFiniteSourceHandler,
+    TypedAsyncInfiniteSourceHandler, TypedFiniteSourceHandler, TypedInfiniteSourceHandler,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -50,7 +51,7 @@ impl TypedPayload for Beta {
     const EVENT_TYPE: &'static str = "flowip_134g.beta";
 }
 
-#[derive(Clone, Debug, StageOutputFacts)]
+#[derive(Clone, Debug, PartialEq, Eq, StageOutputFacts)]
 enum SourceFact {
     Alpha(Alpha),
     Beta(Beta),
@@ -58,6 +59,7 @@ enum SourceFact {
 
 #[derive(Debug, Default)]
 struct Counters {
+    opens: [AtomicUsize; 4],
     sync_finite_calls: AtomicUsize,
     async_finite_calls: AtomicUsize,
     sync_infinite_calls: AtomicUsize,
@@ -81,7 +83,6 @@ fn pair(source: &'static str, value: u64) -> Vec<SourceFact> {
     ]
 }
 
-#[derive(Clone, Debug)]
 struct SyncFinite {
     emitted: bool,
     counters: Arc<Counters>,
@@ -102,7 +103,6 @@ impl TypedFiniteSourceHandler for SyncFinite {
     }
 }
 
-#[derive(Clone, Debug)]
 struct AsyncFinite {
     emitted: bool,
     counters: Arc<Counters>,
@@ -131,7 +131,6 @@ impl TypedAsyncFiniteSourceHandler for AsyncFinite {
     }
 }
 
-#[derive(Clone, Debug)]
 struct SyncInfinite {
     emitted: bool,
     counters: Arc<Counters>,
@@ -152,7 +151,6 @@ impl TypedInfiniteSourceHandler for SyncInfinite {
     }
 }
 
-#[derive(Clone, Debug)]
 struct AsyncInfinite {
     emitted: bool,
     counters: Arc<Counters>,
@@ -195,7 +193,7 @@ where
     }
 }
 
-fn build_flow(journal_base: PathBuf, counters: Arc<Counters>) -> FlowDefinition {
+fn build_flow(journal_base: PathBuf, counters: Arc<Counters>, connectors: bool) -> FlowDefinition {
     FlowDefinition::materialize(move |_runtime_config| {
         let sync_finite = SyncFinite {
             emitted: false,
@@ -213,6 +211,10 @@ fn build_flow(journal_base: PathBuf, counters: Arc<Counters>) -> FlowDefinition 
             emitted: false,
             counters: counters.clone(),
         };
+        let sync_finite_connector = SyncFiniteConnector(counters.clone());
+        let async_finite_connector = AsyncFiniteConnector(counters.clone());
+        let sync_infinite_connector = SyncInfiniteConnector(counters.clone());
+        let async_infinite_connector = AsyncInfiniteConnector(counters.clone());
         let alpha_sink =
             SinkTyped::with_delivery(counting::<Alpha>(counters.clone(), |counters| {
                 &counters.alpha_delivered
@@ -228,10 +230,10 @@ fn build_flow(journal_base: PathBuf, counters: Arc<Counters>) -> FlowDefinition 
             journals: disk_journals(journal_base),
 
             stages: {
-                sync_fin = source!({ Alpha, Beta } => sync_finite);
-                async_fin = async_source!({ Alpha, Beta } => async_finite);
-                sync_inf = infinite_source!({ Alpha, Beta } => sync_infinite);
-                async_inf = async_infinite_source!({ Alpha, Beta } => async_infinite);
+                sync_fin = if connectors { source!({ Alpha, Beta } => sync_finite_connector) } else { source!({ Alpha, Beta } => sync_finite) };
+                async_fin = if connectors { async_source!({ Alpha, Beta } => async_finite_connector) } else { async_source!({ Alpha, Beta } => async_finite) };
+                sync_inf = if connectors { infinite_source!({ Alpha, Beta } => sync_infinite_connector) } else { infinite_source!({ Alpha, Beta } => sync_infinite) };
+                async_inf = if connectors { async_infinite_source!({ Alpha, Beta } => async_infinite_connector) } else { async_infinite_source!({ Alpha, Beta } => async_infinite) };
                 alphas = sink!(Alpha => alpha_sink);
                 betas = sink!(Beta => beta_sink);
             },
@@ -274,8 +276,8 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize, label: &str) {
     .unwrap_or_else(|_| panic!("timed out waiting for {label}"));
 }
 
-async fn run_live(journal_base: &Path, counters: Arc<Counters>) {
-    let handle = build_flow(journal_base.to_path_buf(), counters.clone())
+async fn run_live(journal_base: &Path, counters: Arc<Counters>, connectors: bool) {
+    let handle = build_flow(journal_base.to_path_buf(), counters.clone(), connectors)
         .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("typed source parity flow builds");
@@ -294,14 +296,19 @@ async fn run_live(journal_base: &Path, counters: Arc<Counters>) {
         .expect("flow completes cleanly");
 }
 
-async fn run_replay(journal_base: &Path, archive: &Path, counters: Arc<Counters>) {
+async fn run_replay(
+    journal_base: &Path,
+    archive: &Path,
+    counters: Arc<Counters>,
+    connectors: bool,
+) {
     FlowApplication::builder()
         .with_cli_args([
             OsString::from("obzenflow"),
             OsString::from("--replay-from"),
             archive.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow(journal_base.to_path_buf(), counters))
+        .run_async(build_flow(journal_base.to_path_buf(), counters, connectors))
         .await
         .expect("strict source replay completes");
 }
@@ -458,12 +465,89 @@ fn assert_source_journal(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn all_typed_source_variants_have_canonical_live_replay_parity() {
+async fn non_clone_direct_source_journal_parity() {
+    assert_source_parity(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cold_connector_source_journal_parity() {
+    assert_source_parity(true).await;
+}
+
+#[tokio::test]
+async fn lazy_iterator_replay_never_consumes_live_input() {
+    fn definition(base: PathBuf, polls: Arc<AtomicUsize>) -> FlowDefinition {
+        let counter = polls.clone();
+        let input = obzenflow::stages::sources::finite(std::iter::from_fn(move || {
+            let index = counter.fetch_add(1, Ordering::SeqCst);
+            (index < 2).then(|| Alpha {
+                source: "iterator".into(),
+                value: index as u64,
+            })
+        }));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            0,
+            "source construction is cold"
+        );
+        FlowDefinition::materialize(move |_| {
+            let output = SinkTyped::new(|_: Alpha| async {}).idempotent();
+            Ok(flow! {
+                name: "lazy_iterator_replay",
+                journals: disk_journals(base),
+                stages: {
+                    input = source!(Alpha => input);
+                    output = sink!(Alpha => output);
+                },
+                topology: { input |> output; }
+            })
+        })
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("journals");
+    let live_polls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(["lazy-iterator-live"])
+        .run_async(definition(base.clone(), live_polls.clone()))
+        .await
+        .unwrap();
+    assert_eq!(live_polls.load(Ordering::SeqCst), 3);
+    let live = latest_run_dir(&base);
+    let expected = data_signature(&read_stage_appended(&live, "input").await);
+    assert_eq!(expected.len(), 2);
+
+    let replay_polls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("lazy-iterator-replay"),
+            OsString::from("--replay-from"),
+            live.as_os_str().to_os_string(),
+        ])
+        .run_async(definition(base.clone(), replay_polls.clone()))
+        .await
+        .unwrap();
+    assert_eq!(replay_polls.load(Ordering::SeqCst), 0);
+    let replay = latest_run_dir(&base);
+    assert_ne!(live, replay);
+    assert_eq!(
+        data_signature(&read_stage_appended(&replay, "input").await),
+        expected
+    );
+    assert_eq!(
+        verify_run_dirs(&live, &replay, &VerifyOptions::default())
+            .unwrap()
+            .exit_code(),
+        0
+    );
+}
+
+async fn assert_source_parity(connectors: bool) {
     let temp = tempfile::tempdir().expect("parity tempdir");
     let journal_base = temp.path().join("journals");
 
     let live_counters = Arc::new(Counters::default());
-    run_live(&journal_base, live_counters.clone()).await;
+    run_live(&journal_base, live_counters.clone(), connectors).await;
     assert!(live_counters.sync_finite_calls.load(Ordering::SeqCst) >= 2);
     assert!(live_counters.async_finite_calls.load(Ordering::SeqCst) >= 2);
     assert!(live_counters.sync_infinite_calls.load(Ordering::SeqCst) >= 1);
@@ -474,6 +558,9 @@ async fn all_typed_source_variants_have_canonical_live_replay_parity() {
         1
     );
 
+    for count in &live_counters.opens {
+        assert_eq!(count.load(Ordering::SeqCst), usize::from(connectors));
+    }
     let live = latest_run_dir(&journal_base);
     let stage_names = ["sync_fin", "async_fin", "sync_inf", "async_inf"];
     let mut live_rows = Vec::new();
@@ -484,7 +571,7 @@ async fn all_typed_source_variants_have_canonical_live_replay_parity() {
     }
 
     let replay_counters = Arc::new(Counters::default());
-    run_replay(&journal_base, &live, replay_counters.clone()).await;
+    run_replay(&journal_base, &live, replay_counters.clone(), connectors).await;
     assert_eq!(replay_counters.sync_finite_calls.load(Ordering::SeqCst), 0);
     assert_eq!(replay_counters.async_finite_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -506,6 +593,9 @@ async fn all_typed_source_variants_have_canonical_live_replay_parity() {
         0
     );
 
+    for count in &replay_counters.opens {
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
     let replay = latest_run_dir(&journal_base);
     assert_ne!(live, replay);
     for (stage_name, live_writer, expected_data) in live_rows {
@@ -523,4 +613,121 @@ async fn all_typed_source_variants_have_canonical_live_replay_parity() {
         "whole-run source replay projection must match: {}",
         obzenflow_infra::verify::render_verdict(&verification)
     );
+}
+
+// An external test crate implements the production contract through the stable
+// runtime source module, with no erased adapter or lifecycle hook access.
+#[derive(Clone)]
+struct SyncFiniteConnector(Arc<Counters>);
+
+impl FiniteSourceConnector for SyncFiniteConnector {
+    type Output = SourceFact;
+    type Reader = SyncFinite;
+    fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        assert_eq!(context.flow_name, "typed_source_journal_parity");
+        assert!(!context.stage_name.is_empty());
+        self.0.opens[0].fetch_add(1, Ordering::SeqCst);
+        Ok(SyncFinite {
+            emitted: false,
+            counters: self.0.clone(),
+        })
+    }
+}
+
+// An external test crate implements the production contract through the stable
+// runtime source module, with no erased adapter or lifecycle hook access.
+#[derive(Clone)]
+struct AsyncFiniteConnector(Arc<Counters>);
+
+#[async_trait]
+impl AsyncFiniteSourceConnector for AsyncFiniteConnector {
+    type Output = SourceFact;
+    type Reader = AsyncFinite;
+    async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        assert_eq!(context.flow_name, "typed_source_journal_parity");
+        assert!(!context.stage_name.is_empty());
+        self.0.opens[1].fetch_add(1, Ordering::SeqCst);
+        Ok(AsyncFinite {
+            emitted: false,
+            counters: self.0.clone(),
+        })
+    }
+}
+
+// An external test crate implements the production contract through the stable
+// runtime source module, with no erased adapter or lifecycle hook access.
+#[derive(Clone)]
+struct SyncInfiniteConnector(Arc<Counters>);
+
+impl InfiniteSourceConnector for SyncInfiniteConnector {
+    type Output = SourceFact;
+    type Reader = SyncInfinite;
+    fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        assert_eq!(context.flow_name, "typed_source_journal_parity");
+        assert!(!context.stage_name.is_empty());
+        self.0.opens[2].fetch_add(1, Ordering::SeqCst);
+        Ok(SyncInfinite {
+            emitted: false,
+            counters: self.0.clone(),
+        })
+    }
+}
+
+// An external test crate implements the production contract through the stable
+// runtime source module, with no erased adapter or lifecycle hook access.
+#[derive(Clone)]
+struct AsyncInfiniteConnector(Arc<Counters>);
+
+#[async_trait]
+impl AsyncInfiniteSourceConnector for AsyncInfiniteConnector {
+    type Output = SourceFact;
+    type Reader = AsyncInfinite;
+    async fn open(&self, context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        assert_eq!(context.flow_name, "typed_source_journal_parity");
+        assert!(!context.stage_name.is_empty());
+        self.0.opens[3].fetch_add(1, Ordering::SeqCst);
+        Ok(AsyncInfinite {
+            emitted: false,
+            counters: self.0.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn four_connector_families_open_independent_readers() {
+    let counters = Arc::new(Counters::default());
+    let context = || SourceReaderInitContext {
+        stage_id: StageId::new(),
+        stage_name: "independent".into(),
+        flow_name: "typed_source_journal_parity".into(),
+    };
+    let connector = SyncFiniteConnector(counters.clone());
+    let mut a = connector.open(context()).unwrap();
+    let mut b = connector.clone().open(context()).unwrap();
+    let rows = a.next().unwrap();
+    assert!(a.next().unwrap().is_none());
+    assert_eq!(b.next().unwrap(), rows);
+    let connector = SyncInfiniteConnector(counters.clone());
+    let mut a = connector.open(context()).unwrap();
+    let mut b = connector.clone().open(context()).unwrap();
+    let rows = a.next().unwrap();
+    assert!(a.next().unwrap().is_empty());
+    assert_eq!(b.next().unwrap(), rows);
+    let connector = AsyncFiniteConnector(counters.clone());
+    let mut a = connector.open(context()).await.unwrap();
+    let mut b = connector.clone().open(context()).await.unwrap();
+    let rows = a.next().await.unwrap();
+    a.drain().await.unwrap();
+    assert_eq!(b.next().await.unwrap(), rows);
+    b.drain().await.unwrap();
+    let connector = AsyncInfiniteConnector(counters.clone());
+    let mut a = connector.open(context()).await.unwrap();
+    let mut b = connector.clone().open(context()).await.unwrap();
+    let rows = a.next().await.unwrap();
+    a.drain().await.unwrap();
+    assert_eq!(b.next().await.unwrap(), rows);
+    b.drain().await.unwrap();
+    for count in &counters.opens {
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
 }

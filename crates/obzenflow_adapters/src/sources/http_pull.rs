@@ -9,6 +9,9 @@ use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::{
     SourceObservationSink, TypedAsyncFiniteSourceHandler, TypedAsyncInfiniteSourceHandler,
 };
+use obzenflow_runtime::stages::source::{
+    AsyncFiniteSourceConnector, AsyncInfiniteSourceConnector, SourceReaderInitContext,
+};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
 use std::collections::VecDeque;
@@ -994,7 +997,14 @@ impl HttpPollConfig {
 /// the source configuration and `async_source!` accepts only the configured source handler.
 #[derive(Debug, Clone)]
 pub struct HttpPullSource<D: PullDecoder> {
-    inner: Arc<Mutex<HttpPullSourceInner<D>>>,
+    decoder: D,
+    config: HttpPullConfig,
+}
+
+/// Independent HTTP reader acquired by the source supervisor.
+#[derive(Debug)]
+pub struct HttpPullReader<D: PullDecoder> {
+    inner: Mutex<HttpPullSourceInner<D>>,
     decoder: D,
     observation_sink: Option<SourceObservationSink>,
     config: HttpPullConfig,
@@ -1006,7 +1016,14 @@ pub struct HttpPullSource<D: PullDecoder> {
 /// snapshots on state changes (e.g., entering/leaving waits) for Prometheus visibility.
 #[derive(Debug, Clone)]
 pub struct HttpPollSource<D: PullDecoder> {
-    inner: Arc<Mutex<HttpPollSourceInner<D>>>,
+    decoder: D,
+    config: HttpPollConfig,
+}
+
+/// Independent HTTP reader acquired by the source supervisor.
+#[derive(Debug)]
+pub struct HttpPollReader<D: PullDecoder> {
+    inner: Mutex<HttpPollSourceInner<D>>,
     decoder: D,
     observation_sink: Option<SourceObservationSink>,
     config: HttpPollConfig,
@@ -1125,8 +1142,27 @@ fn report_http_pull_snapshot(sink: &Option<SourceObservationSink>, telemetry: &H
 
 impl<D: PullDecoder> HttpPullSource<D> {
     pub fn new(decoder: D, config: HttpPullConfig) -> Self {
+        Self { decoder, config }
+    }
+}
+
+#[async_trait]
+impl<D: PullDecoder> AsyncFiniteSourceConnector for HttpPullSource<D> {
+    type Output = D::Output;
+    type Reader = HttpPullReader<D>;
+
+    async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        Ok(HttpPullReader::new(
+            self.decoder.clone(),
+            self.config.clone(),
+        ))
+    }
+}
+
+impl<D: PullDecoder> HttpPullReader<D> {
+    fn new(decoder: D, config: HttpPullConfig) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HttpPullSourceInner {
+            inner: Mutex::new(HttpPullSourceInner {
                 cursor: None,
                 buffer: VecDeque::new(),
                 exhausted: false,
@@ -1134,7 +1170,7 @@ impl<D: PullDecoder> HttpPullSource<D> {
                 scheduled_wait: None,
                 transient_attempts: 0,
                 poisoned: false,
-            })),
+            }),
             decoder,
             observation_sink: None,
             config,
@@ -1144,8 +1180,27 @@ impl<D: PullDecoder> HttpPullSource<D> {
 
 impl<D: PullDecoder> HttpPollSource<D> {
     pub fn new(decoder: D, config: HttpPollConfig) -> Self {
+        Self { decoder, config }
+    }
+}
+
+#[async_trait]
+impl<D: PullDecoder> AsyncInfiniteSourceConnector for HttpPollSource<D> {
+    type Output = D::Output;
+    type Reader = HttpPollReader<D>;
+
+    async fn open(&self, _context: SourceReaderInitContext) -> Result<Self::Reader, SourceError> {
+        Ok(HttpPollReader::new(
+            self.decoder.clone(),
+            self.config.clone(),
+        ))
+    }
+}
+
+impl<D: PullDecoder> HttpPollReader<D> {
+    fn new(decoder: D, config: HttpPollConfig) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HttpPollSourceInner {
+            inner: Mutex::new(HttpPollSourceInner {
                 cursor: None,
                 buffer: VecDeque::new(),
                 first_fetch: true,
@@ -1153,7 +1208,7 @@ impl<D: PullDecoder> HttpPollSource<D> {
                 telemetry: HttpPullTelemetry::default(),
                 scheduled_wait: None,
                 transient_attempts: 0,
-            })),
+            }),
             decoder,
             observation_sink: None,
             config,
@@ -1247,7 +1302,7 @@ async fn fetch_decode_once<D: PullDecoder>(
 }
 
 #[async_trait]
-impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullSource<D> {
+impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullReader<D> {
     type Output = D::Output;
 
     fn poll_timeout(&self) -> Option<Duration> {
@@ -1401,7 +1456,7 @@ impl<D: PullDecoder> TypedAsyncFiniteSourceHandler for HttpPullSource<D> {
 }
 
 #[async_trait]
-impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollSource<D> {
+impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollReader<D> {
     type Output = D::Output;
 
     fn poll_timeout(&self) -> Option<Duration> {
@@ -1562,7 +1617,7 @@ impl<D: PullDecoder> TypedAsyncInfiniteSourceHandler for HttpPollSource<D> {
     }
 }
 
-impl<D: PullDecoder> HttpPullSource<D> {
+impl<D: PullDecoder> HttpPullReader<D> {
     fn handle_transient_error(
         &self,
         inner: &mut HttpPullSourceInner<D>,
@@ -1587,7 +1642,7 @@ impl<D: PullDecoder> HttpPullSource<D> {
     }
 }
 
-impl<D: PullDecoder> HttpPollSource<D> {
+impl<D: PullDecoder> HttpPollReader<D> {
     fn handle_transient_error(
         &self,
         inner: &mut HttpPollSourceInner<D>,
@@ -1674,6 +1729,59 @@ mod tests {
         let client = Arc::new(MockHttpClient::new());
         let trait_object: Arc<dyn HttpClient> = client.clone();
         (client, trait_object)
+    }
+
+    #[tokio::test]
+    async fn cold_http_connectors_open_independent_cursors_and_buffers() {
+        let (mock, client) = mock_client();
+        let decoder = TestDecoder::new("http://example.invalid/items".parse().unwrap());
+        let pull = HttpPullSource::new(
+            decoder.clone(),
+            HttpPullConfig::builder()
+                .client(client.clone())
+                .max_batch_size(1)
+                .build()
+                .unwrap(),
+        );
+        let poll = HttpPollSource::new(
+            decoder,
+            HttpPollConfig::builder()
+                .client(client)
+                .poll_interval(Duration::from_secs(10))
+                .max_batch_size(1)
+                .build()
+                .unwrap(),
+        );
+        let context = || SourceReaderInitContext {
+            stage_id: obzenflow_core::StageId::new(),
+            stage_name: "http".into(),
+            flow_name: "isolation".into(),
+        };
+        let mut a = pull.open(context()).await.unwrap();
+        let mut b = pull.clone().open(context()).await.unwrap();
+        let mut c = poll.open(context()).await.unwrap();
+        let mut d = poll.clone().open(context()).await.unwrap();
+        // No responses were available during construction, cloning or opening.
+        // Each reader now fetches its own first page, then drains its own buffer.
+        for _ in 0..4 {
+            mock.enqueue(HttpResponse::new(
+                200,
+                HeaderMap::new(),
+                r#"{"items":[1,2]}"#,
+            ));
+        }
+        let first = vec![TestItem(serde_json::json!(1))];
+        let second = vec![TestItem(serde_json::json!(2))];
+        assert_eq!(a.next().await.unwrap(), Some(first.clone()));
+        assert_eq!(c.next().await.unwrap(), first);
+        assert_eq!(a.next().await.unwrap(), Some(second.clone()));
+        assert_eq!(b.next().await.unwrap(), Some(first.clone()));
+        assert_eq!(d.next().await.unwrap(), first);
+        assert_eq!(b.next().await.unwrap(), Some(second.clone()));
+        assert_eq!(d.next().await.unwrap(), second);
+        assert_eq!(c.next().await.unwrap(), second);
+        assert!(a.next().await.unwrap().is_none());
+        assert!(b.next().await.unwrap().is_none());
     }
 
     fn test_list_detail_decoder() -> ListDetailDecoder<u32, TestItem> {
@@ -1813,7 +1921,7 @@ mod tests {
             poll_timeout: Some(Duration::from_secs(120)),
         };
 
-        let mut source = HttpPullSource::new(decoder, config);
+        let mut source = HttpPullReader::new(decoder, config);
 
         let batch1 = source.next().await.unwrap().unwrap();
         let items1: Vec<_> = batch1.into_iter().map(|item| item.0).collect();
@@ -1875,7 +1983,7 @@ mod tests {
             retry: HttpRetryConfig::default(),
             poll_timeout: Some(Duration::from_secs(120)),
         };
-        let mut source = HttpPullSource::new(decoder, config);
+        let mut source = HttpPullReader::new(decoder, config);
 
         let error = source.next().await.expect_err("401 must be validation");
         assert!(matches!(error, SourceError::Validation(message) if message.contains("401")));
@@ -1908,7 +2016,7 @@ mod tests {
             poll_timeout: None,
             poll_interval: Duration::from_secs(10),
         };
-        let mut source = HttpPollSource::new(decoder, config);
+        let mut source = HttpPollReader::new(decoder, config);
 
         let first = source
             .next()
@@ -1926,19 +2034,22 @@ mod tests {
             ));
         }
 
-        let mut waiting_source = source.clone();
-        let waiting = tokio::spawn(async move { waiting_source.next().await });
-        tokio::task::yield_now().await;
-        assert!(
-            !waiting.is_finished(),
-            "validation retry must honor poll cadence"
-        );
-        tokio::time::advance(Duration::from_secs(10)).await;
-        assert!(waiting
-            .await
-            .expect("wait task joins")
-            .expect("wait transition is not an error")
-            .is_empty());
+        {
+            let waiting = source.next();
+            tokio::pin!(waiting);
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(
+                    std::future::Future::poll(waiting.as_mut(), cx).is_pending()
+                ))
+                .await,
+                "validation retry must honour poll cadence"
+            );
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert!(waiting
+                .await
+                .expect("wait transition is not an error")
+                .is_empty());
+        }
         assert_eq!(source.inner.lock().await.telemetry.requests_total, 1);
 
         let second = source
@@ -1964,7 +2075,7 @@ mod tests {
             poll_timeout: None,
             poll_interval: Duration::from_secs(1),
         };
-        let mut source = HttpPollSource::new(decoder, config);
+        let mut source = HttpPollReader::new(decoder, config);
 
         {
             let mut inner = source.inner.lock().await;
@@ -2004,8 +2115,7 @@ mod tests {
             poll_interval: Duration::from_secs(10),
         };
 
-        let mut source = HttpPollSource::new(decoder, config);
-        let mut source2 = source.clone();
+        let mut source = HttpPollReader::new(decoder, config);
 
         {
             let mut inner = source.inner.lock().await;
@@ -2026,16 +2136,19 @@ mod tests {
             ));
         }
 
-        let handle = tokio::spawn(async move { source2.next().await });
-        tokio::task::yield_now().await;
-        assert!(
-            !handle.is_finished(),
-            "next() should block on poll_interval"
-        );
-
-        tokio::time::advance(Duration::from_secs(10)).await;
-        let after_wait = handle.await.expect("join handle").expect("next ok");
-        assert!(after_wait.is_empty());
+        {
+            let waiting = source.next();
+            tokio::pin!(waiting);
+            assert!(
+                std::future::poll_fn(|cx| std::task::Poll::Ready(
+                    std::future::Future::poll(waiting.as_mut(), cx).is_pending()
+                ))
+                .await,
+                "next should wait for poll_interval"
+            );
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert!(waiting.await.expect("next ok").is_empty());
+        }
 
         {
             let inner = source.inner.lock().await;
@@ -2253,7 +2366,7 @@ mod tests {
             .build()
             .expect("build ok");
 
-        let mut source = HttpPullSource::new(decoder, config);
+        let mut source = HttpPullReader::new(decoder, config);
 
         let batch1 = source.next().await.unwrap().unwrap();
         let items1: Vec<_> = batch1.into_iter().map(|item| item.0).collect();

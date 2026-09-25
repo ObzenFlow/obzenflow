@@ -4,10 +4,12 @@
 
 //! Handle-first ingress plus optional HTTP event ingestion endpoints
 //!
-//! The primary push API is `ingress_source(decoder, ..)`, which returns a typed source
-//! plus a cloneable handle the application can mount behind its own HTTP/RPC
-//! surface. `http_ingress(decoder, ..)` is a convenience wrapper that provides the
-//! historical hosted HTTP routes:
+//! Applications use [`crate::application::FlowApplicationBuilder::http_ingress`]
+//! to register HTTP ingress and receive its source for the flow. The builder owns
+//! hosting and lifecycle wiring. For application-owned protocols, clone a handle
+//! from [`ingress_source`] and pass the bundle to
+//! [`crate::application::FlowApplicationBuilder::ingress`].
+//! HTTP ingress provides the hosted routes:
 //! - `POST {base_path}/events` (single event)
 //! - `POST {base_path}/batch`  (batch)
 //! - `GET  {base_path}/health` (ingestion readiness/backpressure)
@@ -145,8 +147,21 @@ impl<D> Ingress<D>
 where
     D: IngressDecoder,
 {
-    pub fn source(&self) -> HostedIngressSource<D> {
-        self.source.clone()
+    /// Consume the bundle into its source and cloneable submission handle.
+    ///
+    /// The receiver transfers once. Use topology fan-out for multiple consumers.
+    /// Splitting preserves the queue and ingress binding without starting execution.
+    ///
+    /// ```compile_fail,E0382
+    /// use obzenflow_infra::web::endpoints::event_ingestion::{Ingress, IngressDecoder};
+    ///
+    /// fn transfer_twice<D: IngressDecoder>(ingress: Ingress<D>) {
+    ///     let (source, handle) = ingress.into_parts();
+    ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
+    /// }
+    /// ```
+    pub fn into_parts(self) -> (HostedIngressSource<D>, IngressHandle<D::Output>) {
+        (self.source, self.handle)
     }
 
     pub fn handle(&self) -> IngressHandle<D::Output> {
@@ -159,9 +174,21 @@ pub struct HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    surface: WebSurfaceAttachment,
     source: HostedIngressSource<D>,
-    handle: IngressHandle<D::Output>,
+    attachment: HttpIngressAttachment<D::Output>,
+}
+
+/// HTTP hosting and submission half returned by [`HttpIngress::into_parts`].
+///
+/// Pass this attachment to [`crate::application::FlowApplicationBuilder::with_http_ingress`]
+/// and place the source half in the flow topology. Submission handles may be cloned;
+/// the attachment retains ownership of its HTTP surface.
+pub struct HttpIngressAttachment<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    surface: WebSurfaceAttachment,
+    handle: IngressHandle<T>,
 }
 
 struct IngressDecoderValidator<D>(D);
@@ -194,31 +221,53 @@ impl<D> HttpIngress<D>
 where
     D: IngressDecoder,
 {
-    /// Clone the typed source that feeds accepted events into `flow!`.
-    pub fn source(&self) -> HostedIngressSource<D> {
-        self.source.clone()
+    /// Consume the bundle into its source and HTTP hosting attachment.
+    ///
+    /// The receiver transfers once. Use topology fan-out for multiple consumers.
+    /// Splitting preserves the queue and ingress binding without starting execution.
+    ///
+    /// ```compile_fail,E0382
+    /// use obzenflow_infra::web::endpoints::event_ingestion::{HttpIngress, IngressDecoder};
+    ///
+    /// fn transfer_twice<D: IngressDecoder>(ingress: HttpIngress<D>) {
+    ///     let (source, http) = ingress.into_parts();
+    ///     let (another_source, _) = ingress.into_parts(); // ingress was consumed
+    /// }
+    /// ```
+    pub fn into_parts(self) -> (HostedIngressSource<D>, HttpIngressAttachment<D::Output>) {
+        (self.source, self.attachment)
     }
 
     /// Clone the underlying handle used by the hosted HTTP adaptor.
     pub fn handle(&self) -> IngressHandle<D::Output> {
+        self.attachment.handle()
+    }
+}
+
+impl<T> HttpIngressAttachment<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    /// Clone the underlying handle used by the hosted HTTP adaptor.
+    pub fn handle(&self) -> IngressHandle<T> {
         self.handle.clone()
     }
 
-    /// Consume the bundle and return the hosted surface attachment.
+    /// Consume the HTTP attachment and return its managed web surface.
     pub fn into_surface(self) -> WebSurfaceAttachment {
         self.surface
     }
 
-    pub(crate) fn into_surface_and_handle(
-        self,
-    ) -> (WebSurfaceAttachment, IngressHandle<D::Output>) {
+    pub(crate) fn into_surface_and_handle(self) -> (WebSurfaceAttachment, IngressHandle<T>) {
         (self.surface, self.handle)
     }
 }
 
 /// Create a typed source plus protocol-neutral ingress handle.
 ///
-/// The decoder value owns the source's output type.
+/// The decoder value owns the source's output type. Clone the bundle's handle for
+/// submission, then pass the bundle to [`crate::application::FlowApplicationBuilder::ingress`]
+/// to register its lifecycle and receive the source.
 pub fn ingress_source<D>(decoder: D, config: IngestionConfig) -> Ingress<D>
 where
     D: IngressDecoder,
@@ -234,6 +283,9 @@ where
 
 /// Create a zero-wiring HTTP ingress bundle.
 ///
+/// Prefer [`crate::application::FlowApplicationBuilder::http_ingress`] for application
+/// hosting. This bundle supports explicit source/attachment composition.
+///
 /// If `config.validation` is not set, the bundle defaults to a single-type validator
 /// for the decoder's output.
 pub fn http_ingress<D>(decoder: D, mut config: IngestionConfig) -> HttpIngress<D>
@@ -246,15 +298,12 @@ where
         });
     }
 
-    let ingress = ingress_source(decoder, config);
-    let source = ingress.source();
-    let handle = ingress.handle();
+    let (source, handle) = ingress_source(decoder, config).into_parts();
     let surface = create_ingestion_surface_from_state(handle.state());
 
     HttpIngress {
-        surface,
         source,
-        handle,
+        attachment: HttpIngressAttachment { surface, handle },
     }
 }
 
@@ -702,8 +751,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let handle = ingress.handle();
-        let mut source = ingress.source();
+        let cloned_handle = ingress.handle();
+        let (mut source, handle) = ingress.into_parts();
         let state = handle.state();
         state.ready.store(true, Ordering::Release);
         state
@@ -721,7 +770,7 @@ mod tests {
         )));
         state.install_refusal_writer(journal.clone());
 
-        let accepted = handle
+        let accepted = cloned_handle
             .submit(HandlePayload {
                 order_id: "1".to_string(),
             })
@@ -954,7 +1003,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let hosted_source = ingress.source();
+        let (hosted_source, _http) = ingress.into_parts();
         let built = FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
                 name: "flowip_115s_duplicate_positions",
@@ -1010,7 +1059,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let hosted_source = ingress.source();
+        let (hosted_source, _http) = ingress.into_parts();
         let built = FlowDefinition::materialize(move |_runtime_config| {
             Ok(flow! {
                 name: "flowip_115s_hosted_drain",
@@ -1677,7 +1726,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_ingress_bundle_wires_surface_and_source() {
+    async fn http_ingress_split_preserves_surface_handles_and_source() {
         use serde::{Deserialize, Serialize};
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1717,10 +1766,16 @@ mod tests {
                 ..IngestionConfig::default()
             },
         );
-        let mut source = ingress.source();
-        let (surface, handle) = ingress.into_surface_and_handle();
+        let cloned_handle = ingress.handle();
+        let (mut source, http) = ingress.into_parts();
+        let handle = http.handle();
+        let surface = http.into_surface();
         let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
 
+        assert!(
+            !handle.state().is_ready(),
+            "splitting must not start ingress"
+        );
         let wiring = wiring.expect("ingress surface wiring");
         let (_tx, pipeline_state) = tokio::sync::watch::channel(PipelineState::Running);
         let wired = wiring(WebSurfaceWiringContext {
@@ -1750,19 +1805,38 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].order_id, "1");
 
-        let outcome = handle
-            .submit(TestPayload {
-                order_id: "2".to_string(),
-            })
-            .await
-            .expect("typed output serializes");
-        assert!(matches!(
-            outcome,
-            IngressSubmitOutcome::Accepted { event_count: 1, .. }
-        ));
-        let out = source.next().await.unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].order_id, "2");
+        for (handle, order_id) in [(&cloned_handle, "2"), (&handle, "3")] {
+            let outcome = handle
+                .submit(TestPayload {
+                    order_id: order_id.to_string(),
+                })
+                .await
+                .expect("typed output serializes");
+            assert!(matches!(
+                outcome,
+                IngressSubmitOutcome::Accepted { event_count: 1, .. }
+            ));
+            let out = source.next().await.unwrap();
+            assert_eq!(out.len(), 1);
+            assert_eq!(out[0].order_id, order_id);
+        }
+
+        source.drain().await.expect("close the original receiver");
+        for handle in [cloned_handle, handle] {
+            let outcome = handle
+                .submit(TestPayload {
+                    order_id: "closed".to_string(),
+                })
+                .await
+                .expect("typed output serializes");
+            assert!(matches!(
+                outcome,
+                IngressSubmitOutcome::Shed {
+                    reason: obzenflow_core::ingress::EdgeShedReason::ChannelClosed,
+                    ..
+                }
+            ));
+        }
 
         for task in wired.tasks {
             task.abort();
@@ -1791,8 +1865,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let source = ingress.source();
-        let (surface, _handle) = ingress.into_surface_and_handle();
+        let (source, http) = ingress.into_parts();
+        let surface = http.into_surface();
         let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
         let wiring = wiring.expect("ingress surface wiring");
         let events_endpoint = endpoints
@@ -1906,8 +1980,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let source = ingress.source();
-        let (surface, _handle) = ingress.into_surface_and_handle();
+        let (source, http) = ingress.into_parts();
+        let surface = http.into_surface();
         let (_name, endpoints, wiring, _slot) = surface.into_parts();
         let wiring = wiring.expect("ingress surface wiring");
         let events_endpoint = endpoints
