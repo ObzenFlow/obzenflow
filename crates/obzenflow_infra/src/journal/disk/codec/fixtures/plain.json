@@ -63,14 +63,33 @@
       "journal": {
         "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
         "vector_clock": {
-          "clocks": {
-            "independent-writer": 18446744073709551615,
-            "zero-writer": 0
-          }
+          "entries": [
+            {
+              "journal_writer_id": "00000000000000000000000001",
+              "writer_id": {
+                "type": "System",
+                "id": "00000000000000000000000002"
+              },
+              "sequence": 18446744073709551615
+            },
+            {
+              "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
+              "writer_id": {
+                "type": "Stage",
+                "id": "01M2R1P9BTCYETFDCV5JYHW1VZ"
+              },
+              "sequence": 1
+            }
+          ]
         },
         "timestamp": "2037-01-02T03:04:05.123456789Z",
         "journal_group_id": null,
-        "journal_group_member": null
+        "journal_group_member": null,
+        "run_id": "00000000000000000000000003",
+        "causal": {
+          "previous": null,
+          "witnesses": []
+        }
       }
     }
   },

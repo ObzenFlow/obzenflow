@@ -184,6 +184,7 @@ pub(crate) fn emit_batch_to_pending_outputs(
         }
         pending_outputs.push_back(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: staged_event,
                 scope,
             },
@@ -340,7 +341,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             crate::supervised_base::publication::append(
                 error_journal,
                 event,
-                AppendOptions::new(None).with_capture(
+                AppendOptions::default().with_capture(
                     instrumentation.journal_capture(Some(pending.scope), vec![(0, false)]),
                 ),
             )
@@ -409,7 +410,7 @@ where
             crate::supervised_base::publication::append(
                 error_journal,
                 event,
-                AppendOptions::new(None).with_capture(
+                AppendOptions::default().with_capture(
                     instrumentation.journal_capture(Some(pending.scope), vec![(0, false)]),
                 ),
             )
@@ -568,7 +569,7 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
             Ok(JournalRecord::new(JournalWriterId::new(), event))
@@ -638,7 +639,7 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::new(), event);
@@ -824,6 +825,7 @@ mod tests {
         let mut pending_outputs = VecDeque::new();
         pending_outputs.push_back(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.event",
@@ -931,6 +933,7 @@ mod tests {
         let mut pending_outputs = VecDeque::new();
         pending_outputs.push_back(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.event",

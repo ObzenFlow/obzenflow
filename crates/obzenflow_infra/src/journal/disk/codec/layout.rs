@@ -40,7 +40,7 @@ impl DefinitionKind {
             Self::Origin => Kind::Struct(Layout::Origin),
             Self::Descriptor => Kind::Text,
             Self::CaptureScope => Kind::Struct(Layout::CaptureScope),
-            Self::ClockKeys => Kind::List(&Kind::ClockKey),
+            Self::ClockKeys => Kind::List(&Kind::Struct(Layout::Coordinate)),
             Self::JournalWriter => Kind::Id,
         }
     }
@@ -54,7 +54,6 @@ pub(super) enum Kind {
     Text,
     Id,
     FlowId,
-    ClockKey,
     Timestamp,
     PacketCapture,
     SnapshotCapture,
@@ -105,6 +104,9 @@ pub(super) enum Layout {
     Provenance,
     Event,
     Journal,
+    Coordinate,
+    Commitment,
+    Witnesses,
     Writer,
     Context,
     Processing,
@@ -184,11 +186,40 @@ impl Layout {
             S::Journal => {
                 const {
                     &[
+                        field("run_id", K::FlowId),
                         field("journal_writer_id", K::Definition(D::JournalWriter)),
+                        field("causal", K::Struct(S::Witnesses)),
                         field("vector_clock", K::Clock),
                         field("timestamp", K::Timestamp),
                         field("journal_group_id", K::Text),
                         field("journal_group_member", K::Struct(S::GroupMember)),
+                    ]
+                }
+            }
+            S::Coordinate => {
+                const {
+                    &[
+                        field("journal_writer_id", K::Id),
+                        field("writer_id", K::Struct(S::Writer)),
+                    ]
+                }
+            }
+            S::Commitment => {
+                const {
+                    &[
+                        field("run_id", K::FlowId),
+                        field("journal_writer_id", K::Definition(D::JournalWriter)),
+                        field("writer_id", K::Definition(D::Writer)),
+                        field("sequence", K::Unsigned),
+                        field("event_id", K::Id),
+                    ]
+                }
+            }
+            S::Witnesses => {
+                const {
+                    &[
+                        field("previous", K::Struct(S::Commitment)),
+                        field("witnesses", K::List(&K::Struct(S::Commitment))),
                     ]
                 }
             }

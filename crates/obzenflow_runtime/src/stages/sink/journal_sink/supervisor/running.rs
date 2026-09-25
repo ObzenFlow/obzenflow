@@ -808,7 +808,7 @@ async fn journal_policy_evidence<
         let written = crate::supervised_base::publication::append(
             &ctx.data_journal,
             event,
-            AppendOptions::new(Some(parent)).with_capture(
+            AppendOptions::from_record(Some(parent))?.with_capture(
                 ctx.instrumentation
                     .journal_capture(Some(scope), vec![(0, false)]),
             ),
@@ -1288,7 +1288,7 @@ async fn journal_delivery_receipt<
         let written = data_journal
             .append(
                 event,
-                AppendOptions::new(Some(&parent))
+                AppendOptions::from_record(Some(&parent))?
                     .with_capture(instrumentation.journal_capture(Some(scope), vec![(1, false)])),
             )
             .await?;

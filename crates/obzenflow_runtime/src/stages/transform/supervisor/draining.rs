@@ -383,13 +383,14 @@ async fn dispatch_draining_inner<
                     crate::supervised_base::publication::append(
                         &ctx.error_journal,
                         event,
-                        AppendOptions::new(Some(&envelope)),
+                        AppendOptions::from_record(Some(&envelope))?,
                     )
                     .await
                     .map_err(|e| format!("Failed to write error event during drain: {e}"))?;
                 } else {
                     stage_outputs.push_back(
                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                            causal: crate::supervised_base::publication::capture(),
                             event,
                             scope,
                         },

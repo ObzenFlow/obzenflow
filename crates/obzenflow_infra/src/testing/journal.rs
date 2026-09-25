@@ -468,8 +468,8 @@ fn audit_file<T: JournalEvent>(
                 && event["composite_activations"]
                     .as_array()
                     .is_some_and(Vec::is_empty)
-                && provenance["journal"]["vector_clock"]["clocks"]
-                    .as_object()
+                && provenance["journal"]["vector_clock"]["entries"]
+                    .as_array()
                     .is_some_and(|clocks| clocks.len() <= 8)
             {
                 if event["causality"]["parent_ids"].as_array().unwrap().len() == 1 {

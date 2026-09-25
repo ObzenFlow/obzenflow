@@ -158,7 +158,11 @@ pub(super) enum StageCommand {
 /// Dropping an unaccepted send cancels delivery, never the receiving task.
 #[derive(Default)]
 pub(super) struct StageDelivery {
-    commands: VecDeque<(Arc<dyn StageHandle>, StageCommand)>,
+    commands: VecDeque<(
+        Arc<dyn StageHandle>,
+        StageCommand,
+        obzenflow_core::event::CausalFrontier,
+    )>,
     pending: Mutex<Option<BoxFuture<'static, Result<(), StageError>>>>,
 }
 
@@ -177,7 +181,11 @@ impl StageDelivery {
         }
         for handle in handles {
             for command in commands {
-                self.commands.push_back((handle.clone(), *command));
+                self.commands.push_back((
+                    handle.clone(),
+                    *command,
+                    crate::supervised_base::publication::capture(),
+                ));
             }
         }
         Ok(())
@@ -200,11 +208,11 @@ impl StageDelivery {
     pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(), StageError>>> {
         let pending = self.pending.get_mut().unwrap_or_else(|e| e.into_inner());
         if pending.is_none() {
-            let Some((handle, command)) = self.commands.pop_front() else {
+            let Some((handle, command, frontier)) = self.commands.pop_front() else {
                 return Poll::Ready(None);
             };
             *pending = Some(
-                async move {
+                crate::supervised_base::publication::with_snapshot(frontier, async move {
                     match command {
                         StageCommand::Initialize => handle.initialize().await,
                         StageCommand::Ready => handle.ready().await,
@@ -219,7 +227,7 @@ impl StageDelivery {
                             }
                         }
                     }
-                }
+                })
                 .boxed(),
             );
         }

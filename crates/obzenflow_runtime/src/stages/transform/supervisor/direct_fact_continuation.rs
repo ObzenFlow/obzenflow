@@ -320,7 +320,7 @@ async fn finish_success<
             if let Err(error) = crate::supervised_base::publication::append(
                 &ctx.error_journal,
                 event,
-                AppendOptions::new(Some(&continuation.envelope)),
+                AppendOptions::from_record(Some(&continuation.envelope))?,
             )
             .await
             {
@@ -338,6 +338,7 @@ async fn finish_success<
             }
         } else {
             pending.push_back(PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event,
                 scope: continuation.scope,
             });
@@ -410,6 +411,7 @@ pub(super) async fn service<
         .direct_fact_continuation
         .take()
         .expect("service is called only for an occupied generated continuation");
+    crate::supervised_base::publication::with_snapshot(continuation.causal.clone(), Box::pin(async {
     if continuation.admission.event_type().as_str() != continuation.envelope.event_type() {
         let observed = continuation.envelope.event_type();
         let expected = continuation.admission.event_type().as_str().to_string();
@@ -518,4 +520,5 @@ pub(super) async fn service<
             }
         }
     }
+    })).await
 }

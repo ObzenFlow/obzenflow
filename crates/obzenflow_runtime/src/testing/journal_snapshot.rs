@@ -20,7 +20,7 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::JournalPayload;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{JournalEvent, JournalRecord, SystemPayload, WriterId};
+use obzenflow_core::event::{JournalEvent, JournalRecord, SystemPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::EventId;
 use std::sync::Arc;
@@ -94,7 +94,10 @@ pub enum ParentSelector {
     /// Direct parent event id (matches `event.causality.parent_ids.first()` for `ChainEvent`).
     ParentEventId(ParentEventId),
     /// Exact vector-clock component `(writer_id, seq)`.
-    VectorClockComponent { writer_id: WriterId, seq: u64 },
+    VectorClockComponent {
+        coordinate: obzenflow_core::event::CausalCoordinate,
+        seq: u64,
+    },
 }
 
 /// Fan-out grouping key.
@@ -563,12 +566,12 @@ fn assert_unordered_multiset<T: JournalEvent + DirectParentId + 'static>(
         .iter()
         .map(|r| &r.envelope)
         .filter(|env| match selector {
-            ParentSelector::VectorClockComponent { writer_id, seq } => {
+            ParentSelector::VectorClockComponent { coordinate, seq } => {
                 env.envelope
                     .provenance
                     .journal
                     .vector_clock
-                    .get(&writer_id.to_string())
+                    .get(&coordinate)
                     == seq
             }
             ParentSelector::ParentEventId(parent_id) => {
@@ -607,16 +610,14 @@ fn assert_unordered_multiset<T: JournalEvent + DirectParentId + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::chrono::Utc;
     use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent;
-    use obzenflow_core::event::provenance::JournalProvenance;
-    use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent, SystemPayload};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::reader::JournalReader;
+    use obzenflow_core::WriterId;
     use obzenflow_core::{JournalWriterId, StageId, SystemId};
     use std::sync::{Arc, Mutex};
 
@@ -683,11 +684,12 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
-            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("RecordingJournal: poisoned lock");
+            let envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
             guard.push(envelope.clone());
             Ok(envelope)
         }
@@ -770,54 +772,28 @@ mod tests {
 
     #[test]
     fn assert_happens_before_is_strict() {
-        let a_id = EventId::new();
-        let b_id = EventId::new();
-
-        let mut a_clock = VectorClock::new();
-        a_clock.clocks.insert("writer_a".to_string(), 1);
-
-        let mut b_clock = VectorClock::new();
-        b_clock.clocks.insert("writer_a".to_string(), 2);
-
-        let a = JournalRecord::<SystemPayload>::commit_event(
-            {
-                let mut event = SystemEvent::new(
-                    WriterId::from(SystemId::new()),
-                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
-                );
-                event.id = a_id;
-                event.timestamp = 0;
-                event
-            },
-            JournalProvenance {
-                journal_writer_id: JournalWriterId::from(JournalId::new()),
-                vector_clock: a_clock,
-                timestamp: Utc::now(),
-                journal_group_id: None,
-                journal_group_member: None,
-            },
+        let id = JournalId::new();
+        let writer = WriterId::from(SystemId::new());
+        let a = crate::testing::causal_fixture::commit(
+            id,
+            SystemEvent::new(
+                writer,
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
+            ),
+            &Default::default(),
+            &[],
         )
-        .expect("valid committed fixture");
-
-        let b = JournalRecord::<SystemPayload>::commit_event(
-            {
-                let mut event = SystemEvent::new(
-                    WriterId::from(SystemId::new()),
-                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
-                );
-                event.id = b_id;
-                event.timestamp = 0;
-                event
-            },
-            JournalProvenance {
-                journal_writer_id: JournalWriterId::from(JournalId::new()),
-                vector_clock: b_clock,
-                timestamp: Utc::now(),
-                journal_group_id: None,
-                journal_group_member: None,
-            },
+        .unwrap();
+        let b = crate::testing::causal_fixture::commit(
+            id,
+            SystemEvent::new(
+                writer,
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
+            ),
+            &Default::default(),
+            std::slice::from_ref(&a),
         )
-        .expect("valid committed fixture");
+        .unwrap();
 
         assert_happens_before(&a, &b).expect("a should happen before b");
         assert!(
@@ -832,17 +808,10 @@ mod tests {
         let writer = WriterId::from(stage);
 
         let mk = |ty: &str| {
-            JournalRecord::commit_event(
+            JournalRecord::new(
+                JournalWriterId::new(),
                 ChainEventFactory::data_event(writer, ty, serde_json::json!({})),
-                JournalProvenance {
-                    journal_writer_id: JournalWriterId::from(JournalId::new()),
-                    vector_clock: VectorClock::new(),
-                    timestamp: Utc::now(),
-                    journal_group_id: None,
-                    journal_group_member: None,
-                },
             )
-            .expect("valid committed fixture")
         };
 
         let snapshot = JournalSnapshot::<ChainEvent> {
@@ -912,14 +881,14 @@ mod tests {
         let child_a_env = journal
             .append(
                 child_a,
-                obzenflow_core::journal::AppendOptions::new(Some(&parent_env)),
+                obzenflow_core::journal::AppendOptions::from_record(Some(&parent_env)).unwrap(),
             )
             .await
             .expect("append child.a");
         let child_b_env = journal
             .append(
                 child_b,
-                obzenflow_core::journal::AppendOptions::new(Some(&parent_env)),
+                obzenflow_core::journal::AppendOptions::from_record(Some(&parent_env)).unwrap(),
             )
             .await
             .expect("append child.b");

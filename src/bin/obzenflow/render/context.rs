@@ -6,6 +6,8 @@
 //! clock components never stand in for input records or journal positions.
 
 use obzenflow::journal::read::*;
+use obzenflow_core::event::CausalCoordinate;
+use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
 use std::collections::{BTreeMap, VecDeque};
 
 const MAX_REFERENCES: usize = 4096;
@@ -22,13 +24,15 @@ pub(super) struct Stage {
     observed_effectful: bool,
 }
 
-pub(super) struct ClockComponent<'a> {
-    pub writer: &'a str,
-    pub name: Option<&'a str>,
+pub(super) struct ClockComponent {
+    pub coordinate: CausalCoordinate,
+    pub name: String,
     pub value: u64,
 }
 
 pub(super) struct Context {
+    causal: CausalProofCache,
+    causal_error: Option<String>,
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     references: BTreeMap<String, Reference>,
@@ -53,6 +57,8 @@ impl Context {
             (rank, stage.key.clone())
         });
         Self {
+            causal: CausalProofCache::new(MAX_REFERENCES, MAX_REFERENCES * 256),
+            causal_error: None,
             stages: stages
                 .into_iter()
                 .map(|stage| Stage {
@@ -68,6 +74,9 @@ impl Context {
     }
 
     pub fn remember(&mut self, record: &RunRecord) {
+        if let Err(error) = self.causal.admit_run_record(record) {
+            self.causal_error = Some(error.to_string());
+        }
         // Older manifests lack the declared capability. An effect cursor is
         // positive evidence for its own stage only; forwarded facts must not
         // turn a downstream pure stage into an effectful stage.
@@ -167,40 +176,37 @@ impl Context {
         Ok(())
     }
 
-    pub fn clock_components<'a>(
-        &'a self,
-        values: &'a BTreeMap<String, u64>,
-        vector: bool,
+    pub fn causal_proof(&self, record: &RunRecord) -> CausalProof {
+        match &self.causal_error {
+            Some(reason) => CausalProof::Invalid {
+                reason: reason.clone(),
+            },
+            None => self.causal.verify_run_record(record),
+        }
+    }
+
+    pub fn clock_components(
+        &self,
+        values: &BTreeMap<CausalCoordinate, u64>,
+        _vector: bool,
         run: &RunIdentity,
-    ) -> Vec<ClockComponent<'a>> {
-        if values.is_empty() {
-            return Vec::new();
-        }
-        let mut components = Vec::new();
-        if vector {
-            components.extend(self.stages.iter().map(|stage| ClockComponent {
-                writer: &stage.writer,
-                name: None,
-                value: values.get(&stage.writer).copied().unwrap_or(0),
-            }));
-        }
-        let pipeline_writer = run.pipeline_writer_id.to_string();
-        for (writer, value) in values {
-            if vector && self.stages.iter().any(|stage| stage.writer == *writer) {
-                continue;
-            }
-            let name = if *writer == pipeline_writer {
-                "pipeline"
-            } else {
-                self.writer_name(writer)
-            };
-            components.push(ClockComponent {
-                writer,
-                name: Some(name),
-                value: *value,
-            });
-        }
-        components
+    ) -> Vec<ClockComponent> {
+        values
+            .iter()
+            .map(|(coordinate, value)| {
+                let writer = coordinate.writer_id.to_string();
+                let name = if coordinate.writer_id == run.pipeline_writer_id {
+                    "pipeline"
+                } else {
+                    self.writer_name(&writer)
+                };
+                ClockComponent {
+                    coordinate: *coordinate,
+                    name: format!("{}@{}", name, coordinate.journal_writer_id.as_journal_id()),
+                    value: *value,
+                }
+            })
+            .collect()
     }
 }
 
@@ -256,7 +262,7 @@ pub(super) fn parent_ids(record: &RunRecord) -> Vec<String> {
     }
 }
 
-pub(super) fn clock(record: &RunRecord) -> &BTreeMap<String, u64> {
+pub(super) fn clock(record: &RunRecord) -> &BTreeMap<CausalCoordinate, u64> {
     match &record.record {
         RunRecordData::Chain(row) => &row.envelope.provenance.journal.vector_clock.clocks,
         RunRecordData::System(row) => &row.envelope.provenance.journal.vector_clock.clocks,

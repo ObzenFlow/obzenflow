@@ -10,7 +10,7 @@ use std::fmt;
 
 /// Identifies the journal that wrote an event envelope
 /// This wraps JournalId to make it clear this is about envelope authorship
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct JournalWriterId(JournalId);
 

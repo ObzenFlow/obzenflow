@@ -264,6 +264,7 @@ impl StudioProjection {
                             last_reader_seq: *last_reader_seq,
                             last_event_id: *last_event_id,
                             at: messages::Observation {
+                                commitment: None,
                                 timestamp_ms: selected.capture.observed_at_ms,
                                 vector_clock: None,
                                 capture: Some(selected.capture),

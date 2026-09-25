@@ -650,7 +650,7 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _options: obzenflow_core::journal::AppendOptions<'_, T>,
+            _options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "forced append failure".to_string(),

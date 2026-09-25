@@ -222,7 +222,7 @@ mod tests {
         async fn append(
             &self,
             _event: T,
-            _options: obzenflow_core::journal::AppendOptions<'_, T>,
+            _options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "append not supported in EmptyJournal".to_string(),
@@ -290,7 +290,7 @@ mod tests {
         async fn append(
             &self,
             event: SystemEvent,
-            mut options: obzenflow_core::journal::AppendOptions<'_, SystemEvent>,
+            mut options: obzenflow_core::journal::AppendOptions<SystemEvent>,
         ) -> Result<JournalRecord<SystemPayload>, JournalError> {
             let event = options.capture.prepare(0, event);
             self.events

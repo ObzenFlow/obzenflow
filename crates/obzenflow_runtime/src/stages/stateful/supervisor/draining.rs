@@ -28,7 +28,6 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::StageId;
@@ -183,25 +182,9 @@ pub(super) async fn dispatch_draining<
                 if envelope.consumes_data_credit() {
                     ctx.last_input_position = stage_input_position;
                 }
-                // Retain the last consumed upstream envelope (with a merged vector-clock) so that any
-                // final drain emissions can be parented and preserve happened-before via vector clocks.
-                match ctx.last_consumed_envelope.as_mut() {
-                    Some(merged) => {
-                        CausalOrderingService::update_with_parent(
-                            &mut merged.envelope.provenance.journal.vector_clock,
-                            &envelope.envelope.provenance.journal.vector_clock,
-                        );
-                        merged.envelope.provenance.journal.journal_writer_id =
-                            envelope.envelope.provenance.journal.journal_writer_id;
-                        merged.envelope.provenance.journal.timestamp =
-                            envelope.envelope.provenance.journal.timestamp;
-                        merged.envelope.provenance.event =
-                            envelope.envelope.provenance.event.clone();
-                        merged.envelope.observability = envelope.envelope.observability.clone();
-                        merged.payload = envelope.payload.clone();
-                    }
-                    None => ctx.last_consumed_envelope = Some(envelope.clone()),
-                }
+                // Keep the genuine delivered record for authored lineage. The owner
+                // retains accumulated causal evidence independently of this payload.
+                ctx.last_consumed_envelope = Some(envelope.clone());
                 ctx.instrumentation
                     .record_consumed(&envelope, delivered_upstream_stage);
 
@@ -396,7 +379,7 @@ pub(super) async fn dispatch_draining<
                             crate::supervised_base::publication::append(
                                 &ctx.error_journal,
                                 error_event,
-                                AppendOptions::new(Some(&envelope)),
+                                AppendOptions::from_record(Some(&envelope))?,
                             )
                             .await
                             .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;
@@ -408,7 +391,7 @@ pub(super) async fn dispatch_draining<
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,
-                                AppendOptions::new(Some(&envelope)).with_capture(
+                                AppendOptions::from_record(Some(&envelope))?.with_capture(
                                     ctx.instrumentation.journal_capture(None, vec![(0, false)]),
                                 ),
                             )
@@ -532,6 +515,7 @@ pub(super) async fn dispatch_draining<
                                             let scope = observer_scope;
                                             ctx.pending_outputs.push_back(
                                                 crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                                                     event: out,
                                                     scope,
                                                 },
@@ -622,6 +606,7 @@ pub(super) async fn dispatch_draining<
                                     let scope = observer_scope;
                                     ctx.pending_outputs.push_back(
                                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                                             event: error_event,
                                             scope,
                                         },
@@ -910,6 +895,7 @@ pub(super) async fn dispatch_draining<
                     let scope = observer_scope;
                     ctx.pending_outputs.push_back(
                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                            causal: crate::supervised_base::publication::capture(),
                             event,
                             scope,
                         },

@@ -508,7 +508,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 crate::supervised_base::publication::append(
                     &ctx.data_journal,
                     eof_event,
-                    AppendOptions::new(None)
+                    AppendOptions::default()
                         .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
                 )
                 .await
@@ -545,7 +545,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 crate::supervised_base::publication::append(
                     &ctx.data_journal,
                     final_event,
-                    AppendOptions::new(None)
+                    AppendOptions::default()
                         .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
                 )
                 .await

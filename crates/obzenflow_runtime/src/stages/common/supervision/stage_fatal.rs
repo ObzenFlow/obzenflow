@@ -61,7 +61,7 @@ pub(crate) async fn record_stage_fatal(
     crate::supervised_base::publication::append(
         commit.error_journal,
         event,
-        AppendOptions::new(commit.parent),
+        AppendOptions::from_record(commit.parent)?,
     )
     .await
     .map_err(|error| error.to_string().into())

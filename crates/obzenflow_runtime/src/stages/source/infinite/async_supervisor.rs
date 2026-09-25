@@ -623,6 +623,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
                     match next_result {
                         Ok(Some(event)) => {
+                            let event = event.admit()?;
                             ctx.instrumentation
                                 .event_loops_with_work_total
                                 .fetch_add(1, Ordering::Relaxed);

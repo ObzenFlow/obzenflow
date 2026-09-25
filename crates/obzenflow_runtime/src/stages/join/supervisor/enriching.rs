@@ -15,7 +15,6 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::ChainEvent;
@@ -295,11 +294,7 @@ pub(super) async fn dispatch_enriching<
                         return Ok(EventLoopDirective::Continue);
                     }
 
-                    let mut merged_parent = envelope.clone();
-                    CausalOrderingService::update_with_parent(
-                        &mut merged_parent.envelope.provenance.journal.vector_clock,
-                        &ctx.reference_high_water_clock,
-                    );
+                    let merged_parent = envelope.clone();
 
                     ctx.instrumentation
                         .in_flight_count
@@ -397,7 +392,7 @@ pub(super) async fn dispatch_enriching<
                                 crate::supervised_base::publication::append(
                                     &ctx.error_journal,
                                     error_event,
-                                    AppendOptions::new(Some(&merged_parent)),
+                                    AppendOptions::from_record(Some(&merged_parent))?,
                                 )
                                 .await
                                 .map_err(|e| format!("Failed to write join error event: {e}"))?;
@@ -532,6 +527,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         .into_iter()
         .map(
             |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event,
                 scope,
             },

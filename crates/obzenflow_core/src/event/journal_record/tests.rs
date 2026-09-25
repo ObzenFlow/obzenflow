@@ -26,6 +26,7 @@ use serde_json::json;
 
 fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainPayload> {
     let stage_id = StageId::new();
+    let journal_writer_id = JournalWriterId::new();
     let id = EventId::new();
     let mut runtime = RuntimeProvenance::default();
     runtime.accounting.events_processed_total = 7;
@@ -84,8 +85,19 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
         },
         payload,
         JournalProvenance {
-            journal_writer_id: JournalWriterId::new(),
-            vector_clock: VectorClock::new(),
+            run_id: crate::FlowId::new(),
+            causal: Default::default(),
+            journal_writer_id,
+            vector_clock: VectorClock {
+                clocks: [(
+                    crate::event::CausalCoordinate::new(
+                        journal_writer_id,
+                        WriterId::from(stage_id),
+                    ),
+                    1,
+                )]
+                .into(),
+            },
             timestamp: Utc.timestamp_millis_opt(12).unwrap(),
             journal_group_id: Some("fixture-group".into()),
             journal_group_member: Some(JournalGroupMember { index: 0, size: 1 }),
@@ -252,12 +264,14 @@ fn authored_records_and_old_roots_cannot_decode_as_committed_records() {
 
 #[test]
 fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time() {
+    let journal_writer_id = JournalWriterId::new();
+    let writer_id = WriterId::from(SystemId::new());
     let record = JournalRecord::commit(
         AuthoredEnvelope {
             provenance: AuthoredProvenance {
                 event: SystemEventProvenance {
                     id: EventId::new(),
-                    writer_id: WriterId::from(SystemId::new()),
+                    writer_id,
                     event_kind: EventKind::System,
                     event_type: "system.stage.running".into(),
                     timestamp: 10,
@@ -270,8 +284,16 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
             event: StageLifecycleEvent::Running,
         },
         JournalProvenance {
-            journal_writer_id: JournalWriterId::new(),
-            vector_clock: VectorClock::new(),
+            run_id: crate::FlowId::new(),
+            causal: Default::default(),
+            journal_writer_id,
+            vector_clock: VectorClock {
+                clocks: [(
+                    crate::event::CausalCoordinate::new(journal_writer_id, writer_id),
+                    1,
+                )]
+                .into(),
+            },
             timestamp: Utc.timestamp_millis_opt(12).unwrap(),
             journal_group_id: None,
             journal_group_member: None,

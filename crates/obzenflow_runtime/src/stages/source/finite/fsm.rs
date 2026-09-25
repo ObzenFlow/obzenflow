@@ -533,7 +533,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 crate::supervised_base::publication::append(
                     &ctx.data_journal,
                     eof_event,
-                    AppendOptions::new(None)
+                    AppendOptions::default()
                         .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
                 )
                 .await
@@ -544,7 +544,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 crate::supervised_base::publication::append(
                     &ctx.data_journal,
                     final_event,
-                    AppendOptions::new(None)
+                    AppendOptions::default()
                         .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
                 )
                 .await
@@ -792,7 +792,6 @@ pub(crate) mod tests {
     use crate::message_bus::FsmMessageBus;
     use crate::metrics::instrumentation::StageInstrumentation;
     use async_trait::async_trait;
-    use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::system_event::SystemEvent;
@@ -880,14 +879,14 @@ pub(crate) mod tests {
         async fn append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             if self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(JournalError::Full);
             }
             let event = options.capture.prepare(0, event);
-            let env = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
+            let env = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
             guard.push(env.clone());
             Ok(env)
         }

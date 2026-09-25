@@ -50,6 +50,52 @@ impl JournalReader<ChainEvent> for TestReader {
 }
 
 #[tokio::test]
+async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
+    use obzenflow_core::event::{CausalCommit, CausalFrontier};
+
+    let writer = WriterId::from(StageId::new());
+    let event = || ChainEventFactory::data_event(writer, "test.event", serde_json::json!({}));
+    let first = JournalRecord::new(JournalWriterId::new(), event());
+    let later_input = JournalRecord::new(JournalWriterId::new(), event());
+    let next_event = event();
+    let (next, witnesses) = CausalCommit::prepare(
+        first.envelope.provenance.journal.run_id,
+        first.causal_coordinate(),
+        next_event.id,
+        Some(&CausalCommit::from_record(&first).unwrap()),
+        &CausalFrontier::from_record(&later_input).unwrap(),
+    )
+    .unwrap();
+    let mut provenance = first.envelope.provenance.journal.clone();
+    provenance.vector_clock = next.clock;
+    provenance.causal = witnesses;
+    let second = JournalRecord::commit_event(next_event, provenance).unwrap();
+    let reader = Box::new(TestReader {
+        envelopes: vec![first.clone(), second.clone()],
+        pos: 0,
+        at_end_hint: true,
+        fail: false,
+    });
+    let mut driver = ReplayDriver::new(reader, PathBuf::from("archive.log"), template());
+    for original in [first, second] {
+        let replayed = driver
+            .next_replayed_event(writer, "source", flow_context())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replayed.event.id, *original.id());
+        assert_eq!(
+            replayed.origin,
+            CausalFrontier::from_record(&original).unwrap()
+        );
+        assert_eq!(
+            replayed.origin.references(),
+            vec![CausalCommit::from_record(&original).unwrap().reference]
+        );
+    }
+}
+
+#[tokio::test]
 async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     let archived_writer = WriterId::from(StageId::new());
     let eof = ChainEventFactory::eof_event(archived_writer, true);
@@ -100,6 +146,8 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
         .unwrap()
         .expect("should replay data after skipping eof");
 
+    assert!(!replayed.origin.clock().is_empty());
+    let replayed = replayed.event;
     assert_eq!(replayed.id, data.id);
     assert_eq!(replayed.writer_id, data.writer_id);
     assert_eq!(replayed.flow_context.flow_name, flow_context.flow_name);

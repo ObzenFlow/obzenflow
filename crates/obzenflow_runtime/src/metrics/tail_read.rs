@@ -164,7 +164,6 @@ pub async fn read_flow_metrics_from_tails(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
     use obzenflow_core::event::journal_record::JournalRecord;
     use obzenflow_core::event::provenance::{ExecutionAccounting, RuntimeProvenance};
     use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -196,8 +195,10 @@ mod tests {
         }
 
         fn append_raw(&self, event: ChainEvent) {
-            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
+            let envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &Default::default(), &guard)
+                    .unwrap();
             guard.push(envelope);
         }
     }
@@ -220,11 +221,12 @@ mod tests {
         async fn append(
             &self,
             event: ChainEvent,
-            mut options: obzenflow_core::journal::AppendOptions<'_, ChainEvent>,
+            mut options: obzenflow_core::journal::AppendOptions<ChainEvent>,
         ) -> Result<JournalRecord<ChainPayload>, JournalError> {
             let event = options.capture.prepare(0, event);
-            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().unwrap();
+            let envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
             guard.push(envelope.clone());
             Ok(envelope)
         }

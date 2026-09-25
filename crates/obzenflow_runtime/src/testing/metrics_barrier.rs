@@ -67,11 +67,10 @@ pub enum MetricsBarrierError {
 /// after the handle has been moved.
 pub struct MetricsBarrier {
     system_journal: Arc<dyn Journal<SystemEvent>>,
-    /// Writer key the watermark map uses for this stage, or `None` for the
+    /// Coordinate the watermark map uses for this stage, or `None` for the
     /// flow-wide drain barrier. Matches the production ExportMetrics action,
-    /// which inserts entries with
-    /// `WriterId::from(*stage_id).to_string()`.
-    stage_writer_key: Option<String>,
+    /// which keys entries by the data-journal incarnation and stage author.
+    stage_writer_key: Option<obzenflow_core::event::CausalCoordinate>,
     /// Catch-up baseline: total envelopes already present on the system
     /// journal at construction time. The wait loop scans from this offset
     /// before polling for newly appended events.
@@ -80,8 +79,8 @@ pub struct MetricsBarrier {
 
 impl MetricsBarrier {
     /// Build a stage-targeted barrier. Resolves the stage name through the
-    /// flow's topology to a `StageId`, then derives the watermark key as
-    /// `WriterId::from(stage_id).to_string()`.
+    /// flow's topology to a `StageId`, then combines the data-journal
+    /// incarnation with `WriterId::from(stage_id)` for the watermark key.
     pub async fn try_on_stage(
         handle: &FlowTestHarness,
         stage_name: &str,
@@ -91,7 +90,13 @@ impl MetricsBarrier {
             .ok_or(MetricsBarrierError::MissingSystemJournal)?;
 
         let stage_id = resolve_stage_id(handle, stage_name)?;
-        let stage_writer_key = Some(WriterId::from(stage_id).to_string());
+        let (_, journal) = handle
+            .stage_journal_for_test(stage_name)
+            .map_err(|error| MetricsBarrierError::JournalRead(error.to_string()))?;
+        let stage_writer_key = Some(obzenflow_core::event::CausalCoordinate::new(
+            (*journal.id()).into(),
+            WriterId::from(stage_id),
+        ));
 
         let baseline_offset = current_journal_offset(&system_journal).await?;
 
@@ -253,9 +258,7 @@ mod tests {
     use obzenflow_core::event::observability::NoObservations;
     use obzenflow_core::event::payloads::system_payload::MetricsCoordinationEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{
-        JournalEvent, JournalWriterId, SystemEvent, SystemPayload, WriterId,
-    };
+    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload, WriterId};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -327,11 +330,12 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
-            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
             guard.push(envelope.clone());
             Ok(envelope)
         }
@@ -387,6 +391,18 @@ mod tests {
             .build_standard()
             .expect("dummy handle should build");
 
+        let journals = topology
+            .as_ref()
+            .into_iter()
+            .flat_map(|topology| topology.stages())
+            .map(|stage| {
+                (
+                    StageId::from_topology_id(stage.id),
+                    Arc::new(MemoryJournal::<obzenflow_core::ChainEvent>::default())
+                        as Arc<dyn Journal<obzenflow_core::ChainEvent>>,
+                )
+            })
+            .collect();
         let extras = FlowHandleExtras {
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
@@ -408,7 +424,7 @@ mod tests {
         };
 
         let handle = FlowHandle::new(standard_handle, extras);
-        FlowTestHarness::from_parts(handle, Vec::new()).expect("empty stage journals")
+        FlowTestHarness::from_parts(handle, journals).expect("empty stage journals")
     }
 
     fn harness_without_system_journal(
@@ -583,15 +599,15 @@ mod tests {
         let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
 
         let stage_id = StageId::from_topology_id(stage_topo_id);
-        let writer_key = WriterId::from(stage_id).to_string();
 
         let harness = harness_with_system_journal(system_journal.clone(), Some(topology));
         let barrier = MetricsBarrier::try_on_stage(&harness, "stage")
             .await
             .expect("construct stage barrier");
+        let stage_key = barrier.stage_writer_key.unwrap();
 
         let mut watermark = VectorClock::new();
-        watermark.clocks.insert(writer_key, 5);
+        watermark.clocks.insert(stage_key, 5);
 
         system_journal
             .append(
@@ -623,14 +639,17 @@ mod tests {
         let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
 
         let stage_id = StageId::from_topology_id(stage_topo_id);
-        let stage_key = WriterId::from(stage_id).to_string();
         let other_id = StageId::from_topology_id(other_topo_id);
-        let other_key = WriterId::from(other_id).to_string();
+        let other_key = obzenflow_core::event::CausalCoordinate::new(
+            obzenflow_core::JournalWriterId::new(),
+            WriterId::from(other_id),
+        );
 
         let harness = harness_with_system_journal(system_journal.clone(), Some(topology));
         let barrier = MetricsBarrier::try_on_stage(&harness, "stage")
             .await
             .expect("construct stage barrier");
+        let stage_key = barrier.stage_writer_key.unwrap();
 
         let mut wait = tokio::spawn(async move { barrier.wait_for_stage_seq(5).await });
 
@@ -687,12 +706,12 @@ mod tests {
         let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
 
         let stage_id = StageId::from_topology_id(stage_topo_id);
-        let stage_key = WriterId::from(stage_id).to_string();
 
         let harness = harness_with_system_journal(system_journal.clone(), Some(topology));
         let barrier = MetricsBarrier::try_on_stage(&harness, "stage")
             .await
             .expect("construct stage barrier");
+        let stage_key = barrier.stage_writer_key.unwrap();
 
         let system_journal_for_writer = system_journal.clone();
         tokio::spawn(async move {

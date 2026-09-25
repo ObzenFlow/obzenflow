@@ -131,6 +131,13 @@ fn export_journal_file<R: JournalEvent>(
     let mut buf = Vec::new();
     let mut offset = 0u64;
     let mut decoder = Decoder::new(path);
+    let mut admission = super::identity::CommitmentAdmission::open(path).map_err(|error| {
+        JournalInspectError::Corrupt {
+            path: path.into(),
+            offset: 0,
+            problem: error.to_string(),
+        }
+    })?;
 
     while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|source| JournalInspectError::Io {
@@ -147,6 +154,13 @@ fn export_journal_file<R: JournalEvent>(
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
+                    admission
+                        .admit(&record)
+                        .map_err(|error| JournalInspectError::Corrupt {
+                            path: path.into(),
+                            offset: record_offset,
+                            problem: error.to_string(),
+                        })?;
                     serde_json::to_writer(&mut *out, &record).map_err(|e| {
                         JournalInspectError::Io {
                             path: path.to_path_buf(),
@@ -186,6 +200,13 @@ fn inspect_chain_journal(
     let mut buf = Vec::new();
     let mut offset = 0u64;
     let mut decoder = Decoder::new(path);
+    let mut admission = super::identity::CommitmentAdmission::open(path).map_err(|error| {
+        JournalInspectError::Corrupt {
+            path: path.into(),
+            offset: 0,
+            problem: error.to_string(),
+        }
+    })?;
 
     while let Some((consumed, termination)) =
         read_frame_sync(&mut reader, &mut buf).map_err(|source| JournalInspectError::Io {
@@ -202,6 +223,13 @@ fn inspect_chain_journal(
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
+                    admission
+                        .admit(&record)
+                        .map_err(|error| JournalInspectError::Corrupt {
+                            path: path.into(),
+                            offset: record_offset,
+                            problem: error.to_string(),
+                        })?;
                     let ty = record.event_type();
                     if event_type.is_some_and(|filter| filter != ty.as_str()) {
                         continue;
@@ -261,6 +289,12 @@ fn archive_policy(
     run_dir: &Path,
     manifest: &RunManifest,
 ) -> Result<ReadPolicy, JournalInspectError> {
+    super::identity::validate_archive_identities(run_dir, manifest).map_err(|error| {
+        JournalInspectError::Manifest {
+            path: run_dir.join(RUN_MANIFEST_FILENAME),
+            message: error.to_string(),
+        }
+    })?;
     Ok(ReadPolicy::SealedScan {
         tolerate_torn_tail: archive_status(run_dir, manifest)? != ArchiveStatus::Completed,
     })
@@ -301,6 +335,7 @@ pub(crate) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::journal::JournalReader;
 
     #[tokio::test]
     async fn observation_omission_preserves_full_records_through_reader_and_export() {
@@ -355,7 +390,10 @@ mod tests {
                 ..Default::default()
             });
             let mut clock = VectorClock::new();
-            clock.clocks.insert(writer.to_string(), index as u64 + 1);
+            clock.clocks.insert(
+                obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new(), writer),
+                index as u64 + 1,
+            );
             packet.runtime_snapshot = Some(RuntimeSnapshot {
                 capture: packet.capture,
                 progress: ExecutionProgress {
@@ -418,10 +456,18 @@ mod tests {
             }
             let path = dir.path().join(format!("{mode}.log"));
             std::fs::write(&path, framed).unwrap();
-            let restored =
-                DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
-                    .unwrap();
-            let mut reader = restored.reader().await.unwrap();
+            std::fs::copy(
+                dir.path().join("original.identity.json"),
+                path.with_extension("identity.json"),
+            )
+            .unwrap();
+            let mut reader = super::super::reader::DiskJournalReader::<ChainEvent>::new(
+                path.clone(),
+                *journal.id(),
+                std::sync::Arc::new(tokio::sync::RwLock::new(())),
+            )
+            .await
+            .unwrap();
             for expected_record in &expected {
                 let actual = reader.next().await.unwrap().unwrap();
                 assert_eq!(

@@ -7,9 +7,7 @@ use crate::stages::common::stage_handle::STOP_REASON_USER_STOP;
 use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::with_external_events::record_terminal_commands;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{
-    CommandDiscardDisposition, JournalRecord, JournalWriterId, SystemEvent, SystemPayload,
-};
+use obzenflow_core::event::{CommandDiscardDisposition, JournalRecord, SystemEvent, SystemPayload};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{AppendOptions, Journal, JournalError, JournalReader};
 use obzenflow_core::{EventId, JournalId};
@@ -124,7 +122,7 @@ impl Journal<SystemEvent> for TestJournal {
     async fn append(
         &self,
         event: SystemEvent,
-        mut options: AppendOptions<'_, SystemEvent>,
+        mut options: AppendOptions<SystemEvent>,
     ) -> Result<JournalRecord<SystemPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
@@ -140,8 +138,9 @@ impl Journal<SystemEvent> for TestJournal {
         {
             return Err(JournalError::Full);
         }
-        let record = JournalRecord::new(JournalWriterId::from(self.id), event);
-        self.records.lock().unwrap().push(record.clone());
+        let mut records = self.records.lock().unwrap();
+        let record = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(record.clone());
         Ok(record)
     }
 

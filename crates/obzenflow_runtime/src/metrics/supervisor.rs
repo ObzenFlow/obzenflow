@@ -285,7 +285,7 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            _options: obzenflow_core::journal::AppendOptions<'_, T>,
+            _options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             // Exercise a dispatch failure after successful registration.
             if event.event_type_name() == "system.supervisor.registered" {

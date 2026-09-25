@@ -731,8 +731,14 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
 
     // FLOWIP-071h: join outputs must carry ancestry from both the matched reference state
     // and the triggering stream input (no fan-in ancestry loss at merge boundaries).
-    let reference_key = WriterId::from(reference_stage).to_string();
-    let stream_key = WriterId::from(stream_stage).to_string();
+    let reference_key = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        WriterId::from(reference_stage),
+    );
+    let stream_key = obzenflow_core::event::CausalCoordinate::new(
+        (*stream_journal.id()).into(),
+        WriterId::from(stream_stage),
+    );
     assert_ne!(
         joined_env
             .envelope

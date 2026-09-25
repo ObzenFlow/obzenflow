@@ -71,7 +71,12 @@ pub(crate) async fn record_terminal_commands<E: ExternalControlEvent>(
                     error,
                 },
             );
-            system_journal.append(fact, Default::default()).await?;
+            crate::supervised_base::publication::append_inline(
+                &system_journal,
+                fact,
+                Default::default(),
+            )
+            .await?;
         }
         Ok(())
     })

@@ -415,7 +415,7 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
     crate::supervised_base::publication::append(
         &ctx.data_journal,
         heartbeat,
-        AppendOptions::new(None)
+        AppendOptions::default()
             .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
     )
     .await?;

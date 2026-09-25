@@ -73,7 +73,7 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
     async fn append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let fact = (self.fact)(&event);
         if let Some(fact) = fact {
@@ -104,7 +104,7 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(group_id, events, options).await
     }

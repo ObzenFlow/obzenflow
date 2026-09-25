@@ -228,7 +228,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     async fn append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let mut failures = self
@@ -246,11 +246,9 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             });
         }
         drop(failures);
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
-        self.events
-            .lock()
-            .expect("events lock poisoned")
-            .push(envelope.clone());
+        let mut records = self.events.lock().expect("events lock poisoned");
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(envelope.clone());
         Ok(envelope)
     }
 
@@ -258,7 +256,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         &self,
         group_id: &str,
         events: Vec<T>,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let events = events
             .into_iter()
@@ -284,24 +282,26 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             message: format!("test group '{group_id}' exceeds u32 member capacity"),
             source: "test group too large".into(),
         })?;
-        let envelopes = events
-            .into_iter()
-            .enumerate()
-            .map(|(index, event)| {
-                let mut envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
-                envelope.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
-                envelope.envelope.provenance.journal.journal_group_member =
-                    Some(JournalGroupMember {
-                        index: u32::try_from(index).expect("group size was checked"),
-                        size,
-                    });
-                envelope
-            })
-            .collect::<Vec<_>>();
-        self.events
-            .lock()
-            .expect("events lock poisoned")
-            .extend(envelopes.iter().cloned());
+        let mut records = self.events.lock().expect("events lock poisoned");
+        let mut prepared = records.clone();
+        let mut envelopes = Vec::new();
+        for (index, event) in events.into_iter().enumerate() {
+            let mut envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &prepared)?;
+            envelope.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
+            envelope.envelope.provenance.journal.journal_group_member = Some(JournalGroupMember {
+                index: index as u32,
+                size,
+            });
+            options
+                .frontier
+                .merge(&obzenflow_core::event::CausalFrontier::from_record(
+                    &envelope,
+                )?)?;
+            prepared.push(envelope.clone());
+            envelopes.push(envelope);
+        }
+        *records = prepared;
         Ok(envelopes)
     }
 
@@ -380,7 +380,7 @@ impl Journal<ChainEvent> for FailingStartJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         self.attempted_event_types
@@ -435,7 +435,7 @@ impl Journal<ChainEvent> for InspectingFailJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         assert!(event.consumes_data_credit());
@@ -2054,6 +2054,46 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     assert!(
         in_doubt_journal.events().is_empty(),
         "preflight preserves the archived Start without rematerialising or abandoning it"
+    );
+}
+
+#[tokio::test]
+async fn selected_effect_history_excludes_later_cursor_commitments() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let mut effects = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(stage.into()),
+        None,
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .unwrap();
+    let cursor = cursor_started_in(&journal);
+    let erased: Arc<dyn Journal<ChainEvent>> = journal.clone();
+    let selected = current_cursor_history(&erased, &cursor)
+        .await
+        .unwrap()
+        .causal;
+    assert!(selected.witness_count() > 0);
+    effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let selected_after = current_cursor_history(&erased, &cursor)
+        .await
+        .unwrap()
+        .causal;
+    assert_eq!(
+        selected_after, selected,
+        "preloading later cursors is not causal admission"
     );
 }
 

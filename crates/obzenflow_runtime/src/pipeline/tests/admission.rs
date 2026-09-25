@@ -71,7 +71,7 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
     let child = journal
         .append(
             SystemEvent::stage_running(writer),
-            AppendOptions::new(Some(&parent)),
+            AppendOptions::from_record(Some(&parent)).unwrap(),
         )
         .await
         .unwrap();
@@ -83,7 +83,7 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
                 SystemEvent::stage_running(writer),
                 SystemEvent::stage_running(writer),
             ],
-            AppendOptions::new(Some(&child)),
+            AppendOptions::from_record(Some(&child)).unwrap(),
         )
         .await
         .unwrap();
@@ -148,7 +148,7 @@ pub async fn controlled_journal_preserves_causality_groups_and_live_readers(
     let later = inner
         .append(
             SystemEvent::stage_running(writer),
-            AppendOptions::new(Some(&group[1])),
+            AppendOptions::from_record(Some(&group[1])).unwrap(),
         )
         .await
         .unwrap();

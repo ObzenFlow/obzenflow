@@ -253,8 +253,14 @@ async fn live_join_processes_stream_without_reference_eof() {
         .expect("joined output envelope present");
 
     // FLOWIP-071h: fan-in outputs must preserve ancestry from both contributors.
-    let reference_key = WriterId::from(reference_stage).to_string();
-    let stream_key = WriterId::from(stream_stage).to_string();
+    let reference_key = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        WriterId::from(reference_stage),
+    );
+    let stream_key = obzenflow_core::event::CausalCoordinate::new(
+        (*stream_journal.id()).into(),
+        WriterId::from(stream_stage),
+    );
     assert_ne!(
         joined_env
             .envelope
@@ -1084,8 +1090,12 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
     assert_eq!(observed, StreamObservedRefs { refs_seen: 2 });
 
     // FLOWIP-071h: outputs emitted at merge boundaries must preserve ancestry from all contributors.
-    let reference_key = reference_writer.to_string();
-    let stream_key = stream_writer.to_string();
+    let reference_key = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        reference_writer,
+    );
+    let stream_key =
+        obzenflow_core::event::CausalCoordinate::new((*stream_journal.id()).into(), stream_writer);
     assert_ne!(
         observed_env
             .envelope

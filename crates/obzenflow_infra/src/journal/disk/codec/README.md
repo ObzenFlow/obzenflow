@@ -1,8 +1,8 @@
 # Journal format
 
-The current schema is **7.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
+The current schema is **8.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
 version for records, frame encoding, archive interpretation, and the run
-manifest. `run_manifest.json` records `journal_schema_version: "7.0"`.
+manifest. `run_manifest.json` records `journal_schema_version: "8.0"`.
 Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
@@ -13,19 +13,32 @@ schemas before typed manifest decoding or record interpretation, including with
 The logical field layout retains absolute numbers and complete immutable
 definitions; JSONL export remains the expanded current logical record.
 
+Each physical journal has an immutable `.identity.json` descriptor containing
+its run and journal incarnation. It exists before the first append and is copied
+with read-only archives. A writable open holds the append file's local exclusive
+lock; clones share that file, committed clocks and poison state. Independent
+writers are rejected. A new run or writable fork uses new journal incarnations.
+
+Clock entries name both the journal incarnation and immutable event author.
+Protected provenance includes the previous local commitment and sorted immediate
+witness references. References contain run, journal, author, sequence and event
+ID; they contain no nested clocks or ancestors. The shared causal verifier resolves
+these references and checks exact componentwise maximum plus the local increment.
+Missing references and resolver budget exhaustion remain unresolved.
+
 ## Framing
 
 All fixed-width integers are little endian. A frame consists of:
 
 | Position | Bytes | Meaning |
 |---|---:|---|
-| 0 | 6 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF7.0`) |
+| 0 | 6 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF8.0`) |
 | 6 | 8 | Body length |
 | 14 | 4 | CRC32 of magic and body length |
 | 18 | body length | Compact body |
 | after body | 4 | CRC32 of header and body |
 | after checksum | 8 | Complete frame length, including header and trailer |
-| final | 6 | Reversed header magic (`0.7FJO`) |
+| final | 6 | Reversed header magic (`0.8FJO`) |
 
 The 18-byte trailer commits the entire ordinary record or atomic group. A reader
 validates both lengths, magic values and checksums before exposing members.
@@ -50,7 +63,7 @@ value. Slots and ordinals are zero-based unless stated otherwise.
    basenames. This table is local to the frame and has no external authority.
 2. Definition-slot count and entries. Each entry starts with its kind byte:
    writer `0`, flow/stage context `1`, complete origin `2`, descriptor `3`,
-   capture scope `4`, ordered clock-key names `5`, physical journal-writer ID
+   capture scope `4`, ordered journal/author coordinates `5`, physical journal-writer ID
    `6`. Storage tag `0` carries a
    length-delimited complete body. Tag `1` carries a journal ordinal, absolute
    carrier-frame offset and definition slot. Each use in a record is the
@@ -97,13 +110,12 @@ with the current record's complete packet capture. Capture state is cleared
 between group members. Equal owners or event IDs alone never select this tag.
 Clock components always carry their own complete unsigned values.
 
-A clock carries a reference to its complete ordered key-name list, followed by
-one complete absolute unsigned value for every key. The definition contains no
-clock values. Empty clocks and present zero-valued components remain distinct.
-Typed clock-key strings use tag `0` plus text, `1` plus a raw ULID, `2` plus a
-stage-writer ULID or `3` plus a system-writer ULID. Prefix encodings require
-exact reconstruction of the original string. A stage-identity field can reuse a
-complete `Stage` writer definition; a `System` writer is rejected in that slot.
+A clock carries a reference to its complete ordered coordinate list, followed
+by one complete absolute unsigned value for every coordinate. Each coordinate
+contains a journal incarnation and a typed author; the definition contains no
+clock values. Zero counters and duplicate coordinates are rejected. A
+stage-identity field can reuse a complete `Stage` writer definition; a `System`
+writer is rejected in that slot.
 
 Complete origins use the positional origin structure: complete `entry_time_ns`,
 `entry_event_id` and optional opaque `metadata`. The former generated-metadata

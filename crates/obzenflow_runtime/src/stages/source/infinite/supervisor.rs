@@ -582,6 +582,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
 
                     match next_result {
                         Ok(Some(event)) => {
+                            let event = event.admit()?;
                             self.idle_backoff.reset();
                             ctx.instrumentation
                                 .event_loops_with_work_total

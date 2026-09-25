@@ -6,7 +6,9 @@
 
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
-use obzenflow_core::event::{ChainPayload, JournalRecord};
+use obzenflow_core::event::{
+    CausalCommit, CausalCoordinate, CausalFrontier, ChainPayload, JournalRecord,
+};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
 use obzenflow_core::{
@@ -31,6 +33,8 @@ use obzenflow_runtime::stages::common::handlers::{
 
 struct AppendOnlyJournal {
     id: JournalId,
+    run_id: FlowId,
+    clocks: Mutex<std::collections::HashMap<obzenflow_core::WriterId, CausalCommit>>,
     owner: JournalOwner,
     fail_append: bool,
 }
@@ -39,9 +43,34 @@ impl AppendOnlyJournal {
     fn new(owner: JournalOwner, fail_append: bool) -> Self {
         Self {
             id: JournalId::new(),
+            run_id: FlowId::new(),
+            clocks: Mutex::new(Default::default()),
             owner,
             fail_append,
         }
+    }
+
+    fn prepare(
+        &self,
+        event: ChainEvent,
+        input: &CausalFrontier,
+        clocks: &mut std::collections::HashMap<obzenflow_core::WriterId, CausalCommit>,
+    ) -> Result<JournalRecord<ChainPayload>, JournalError> {
+        let writer = event.writer_id;
+        let (commitment, causal) = CausalCommit::prepare(
+            self.run_id,
+            CausalCoordinate::new(self.id.into(), writer),
+            event.id,
+            clocks.get(&writer),
+            input,
+        )?;
+        let mut record = JournalRecord::new(self.id.into(), event);
+        let journal = &mut record.envelope.provenance.journal;
+        journal.run_id = self.run_id;
+        journal.vector_clock = commitment.clock.clone();
+        journal.causal = causal;
+        clocks.insert(writer, commitment);
+        Ok(record)
     }
 }
 
@@ -75,7 +104,7 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         if self.fail_append {
@@ -84,14 +113,14 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
                 source: "test journal rejected append".into(),
             });
         }
-        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
+        self.prepare(event, &options.frontier, &mut self.clocks.lock().unwrap())
     }
 
     async fn append_group(
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         let events = events
             .into_iter()
@@ -104,10 +133,18 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
                 source: "test journal rejected atomic group".into(),
             });
         }
-        Ok(events
-            .into_iter()
-            .map(|event| JournalRecord::new(JournalWriterId::from(self.id), event))
-            .collect())
+        let mut clocks = self.clocks.lock().unwrap();
+        let mut prepared = clocks.clone();
+        let mut records = Vec::new();
+        for event in events {
+            let record = self.prepare(event, &options.frontier, &mut prepared)?;
+            options
+                .frontier
+                .merge(&CausalFrontier::from_record(&record)?)?;
+            records.push(record);
+        }
+        *clocks = prepared;
+        Ok(records)
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {

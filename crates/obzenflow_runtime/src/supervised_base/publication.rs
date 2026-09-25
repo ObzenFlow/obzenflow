@@ -14,7 +14,9 @@
 
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
-use obzenflow_core::event::{JournalEvent, JournalRecord};
+use obzenflow_core::event::payloads::JournalPayload;
+use obzenflow_core::event::{CausalFrontier, JournalEvent, JournalRecord};
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -111,7 +113,8 @@ struct State {
     admission: Admission,
     next_id: u64,
     operations: BTreeMap<u64, Operation>,
-    tail: Option<Shared<BoxFuture<'static, ()>>>,
+    tail: Option<Shared<BoxFuture<'static, CausalFrontier>>>,
+    inputs: CausalFrontier,
     failure: Option<SharedError>,
 }
 
@@ -127,6 +130,7 @@ pub(crate) struct PublicationScope {
 struct PublicationContext {
     scope: Arc<PublicationScope>,
     accepted: bool,
+    frontier: Option<Arc<Mutex<CausalFrontier>>>,
 }
 
 tokio::task_local! {
@@ -155,6 +159,7 @@ impl PublicationScope {
                 next_id: 0,
                 operations: BTreeMap::new(),
                 tail: None,
+                inputs: CausalFrontier::default(),
                 failure: None,
             }),
             slots: Arc::new(Semaphore::new(64)),
@@ -166,11 +171,39 @@ impl PublicationScope {
         CURRENT.try_with(|context| context.scope.clone()).ok()
     }
 
+    /// Incorporated inputs only. Prefetch and optional telemetry never call this.
+    pub(crate) fn incorporate(&self, input: &CausalFrontier) -> Result<(), JournalError> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inputs
+            .merge(input)?;
+        Ok(())
+    }
+
+    pub(crate) fn capture(&self) -> CausalFrontier {
+        if let Ok(Some(frontier)) = CURRENT.try_with(|context| {
+            if std::ptr::eq(context.scope.as_ref(), self) {
+                context.frontier.clone()
+            } else {
+                None
+            }
+        }) {
+            return frontier.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inputs
+            .clone()
+    }
+
     pub(crate) fn enter_sync<T>(self: &Arc<Self>, f: impl FnOnce() -> T) -> T {
         CURRENT.sync_scope(
             PublicationContext {
                 scope: self.clone(),
                 accepted: false,
+                frontier: None,
             },
             f,
         )
@@ -182,6 +215,7 @@ impl PublicationScope {
                 PublicationContext {
                     scope: self.clone(),
                     accepted: false,
+                    frontier: None,
                 },
                 future,
             )
@@ -256,6 +290,14 @@ impl PublicationScope {
         self: &Arc<Self>,
         operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
     ) -> BoxFuture<'static, Result<T, BoxError>> {
+        self.accept_with_frontier(self.capture(), operation)
+    }
+
+    fn accept_with_frontier<T: Send + 'static>(
+        self: &Arc<Self>,
+        snapshot: CausalFrontier,
+        operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
+    ) -> BoxFuture<'static, Result<T, BoxError>> {
         let scope = self.clone();
         let operation = operation.boxed();
         async move {
@@ -265,7 +307,7 @@ impl PublicationScope {
                 .acquire_owned()
                 .await
                 .map_err(|_| AdmissionClosed)?;
-            scope.register(slot, operation)?.await
+            scope.register(slot, operation, snapshot)?.await
         }
         .boxed()
     }
@@ -284,7 +326,7 @@ impl PublicationScope {
                 tokio::sync::TryAcquireError::Closed => Box::new(AdmissionClosed) as BoxError,
                 error => Box::new(error) as BoxError,
             })?;
-        self.register(slot, operation)
+        self.register(slot, operation, self.capture())
     }
 
     /// Reserved control admission shares the ordinary writer tail. Capacity
@@ -301,13 +343,14 @@ impl PublicationScope {
                 tokio::sync::TryAcquireError::Closed => Box::new(AdmissionClosed) as BoxError,
                 error => Box::new(error) as BoxError,
             })?;
-        self.register(slot, operation)
+        self.register(slot, operation, self.capture())
     }
 
     fn register<T: Send + 'static>(
         self: &Arc<Self>,
         slot: tokio::sync::OwnedSemaphorePermit,
         operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
+        snapshot: CausalFrontier,
     ) -> Result<BoxFuture<'static, Result<T, BoxError>>, BoxError> {
         let operation = operation.boxed();
         let (receipt_tx, receipt_rx) = oneshot::channel();
@@ -329,18 +372,25 @@ impl PublicationScope {
             };
             let (done_tx, done_rx) = oneshot::channel();
             state.tail = Some(
-                async move {
-                    let _ = done_rx.await;
-                }
-                .boxed()
-                .shared(),
+                async move { done_rx.await.unwrap_or_default() }
+                    .boxed()
+                    .shared(),
             );
             let scope = self.clone();
             let task = tokio::spawn(async move {
                 let _slot = slot;
+                let mut frontier = snapshot;
                 if let Some(previous) = previous {
-                    previous.await;
+                    if let Err(error) = frontier.merge(&previous.await) {
+                        let _ = scope.retain_error(Box::new(error));
+                        scope
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .admission = Admission::Poisoned;
+                    }
                 }
+                let frontier = Arc::new(Mutex::new(frontier));
                 let poisoned = scope
                     .state
                     .lock()
@@ -357,6 +407,7 @@ impl PublicationScope {
                             PublicationContext {
                                 scope: scope.clone(),
                                 accepted: true,
+                                frontier: Some(frontier.clone()),
                             },
                             std::panic::AssertUnwindSafe(operation).catch_unwind(),
                         )
@@ -385,7 +436,7 @@ impl PublicationScope {
                     state.failure.get_or_insert(error.clone());
                 }
                 let _ = receipt_tx.send(result);
-                let _ = done_tx.send(());
+                let _ = done_tx.send(frontier.lock().unwrap_or_else(|e| e.into_inner()).clone());
                 settlement
             });
             let abort = task.abort_handle();
@@ -449,38 +500,55 @@ pub(crate) fn commit<T: Send + 'static>(
     // states through effects, output commitment and admission otherwise
     // multiplies their stack frames before the retained task is spawned.
     let operation = operation.boxed();
-    async move {
-        let context = CURRENT.try_with(Clone::clone).ok();
-        match context {
-            Some(context) if !context.accepted => context.scope.accept(operation).await,
-            Some(context) => operation
+    let context = CURRENT.try_with(Clone::clone).ok();
+    match context {
+        Some(context) if !context.accepted => context.scope.accept(operation),
+        Some(context) => async move {
+            CURRENT
+                .scope(context.clone(), operation)
                 .await
-                .map_err(|error| context.scope.retain_error(error)),
-            _ => operation.await,
+                .map_err(|error| context.scope.retain_error(error))
         }
+        .boxed(),
+        _ => operation,
     }
-    .boxed()
 }
 
 /// The captured owner governs admission, writer order and failure retention.
 /// Only a matching task-local owner can supply an already-accepted context.
+#[cfg(test)]
 pub(crate) fn commit_in<T: Send + 'static>(
     scope: Option<Arc<PublicationScope>>,
     operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
 ) -> BoxFuture<'static, Result<T, BoxError>> {
     let operation = operation.boxed();
-    async move {
-        if let Some(scope) = scope {
-            let same_owner = CURRENT
-                .try_with(|context| Arc::ptr_eq(&context.scope, &scope))
-                .unwrap_or(false);
-            if !same_owner {
-                return scope.accept(operation).await;
-            }
+    if let Some(scope) = scope {
+        let same_owner = CURRENT
+            .try_with(|context| Arc::ptr_eq(&context.scope, &scope))
+            .unwrap_or(false);
+        if !same_owner {
+            return scope.accept(operation);
         }
-        commit(operation).await
     }
-    .boxed()
+    commit(operation)
+}
+
+/// Deferred effect handles retain their input snapshot across owner/task changes.
+/// The destination's completed publication tail is still incorporated at execution.
+pub(crate) fn commit_in_with_frontier<T: Send + 'static>(
+    scope: Option<Arc<PublicationScope>>,
+    frontier: CausalFrontier,
+    operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
+) -> BoxFuture<'static, Result<T, BoxError>> {
+    if let Some(scope) = scope {
+        let inline = CURRENT
+            .try_with(|context| context.accepted && Arc::ptr_eq(&context.scope, &scope))
+            .unwrap_or(false);
+        if !inline {
+            return scope.accept_with_frontier(frontier, operation);
+        }
+    }
+    commit(with_snapshot(frontier, operation))
 }
 
 /// Raw stage/control publications also cross the execution scope. More complex
@@ -488,26 +556,262 @@ pub(crate) fn commit_in<T: Send + 'static>(
 pub(crate) fn append<T: JournalEvent + 'static>(
     journal: &Arc<dyn Journal<T>>,
     event: T,
-    options: obzenflow_core::journal::AppendOptions<'_, T>,
+    options: obzenflow_core::journal::AppendOptions<T>,
 ) -> BoxFuture<'static, Result<JournalRecord<T::Payload>, BoxError>> {
-    let obzenflow_core::journal::AppendOptions { parent, capture } = options;
     let journal = journal.clone();
-    let parent = parent.cloned();
     commit(async move {
-        journal
-            .append(
-                event,
-                obzenflow_core::journal::AppendOptions::new(parent.as_ref()).with_capture(capture),
-            )
+        append_inline(&journal, event, options)
             .await
             .map_err(Into::into)
     })
+}
+
+/// Capture a queued output or cross-owner message before its next wait.
+pub(crate) fn capture() -> CausalFrontier {
+    CURRENT
+        .try_with(|context| match &context.frontier {
+            Some(frontier) => frontier.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            None => context.scope.capture(),
+        })
+        .unwrap_or_else(|_| {
+            DETACHED_INPUT
+                .try_with(|frontier| frontier.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                .unwrap_or_default()
+        })
+}
+
+/// An explicit frozen input context for deferred work, without new admission,
+/// a new writer, or a scheduling wait. Its publication still inherits the tail.
+pub(crate) async fn with_snapshot<T>(
+    frontier: CausalFrontier,
+    future: impl Future<Output = T>,
+) -> T {
+    if let Ok(mut context) = CURRENT.try_with(Clone::clone) {
+        if context.accepted {
+            // An inline nested publication keeps the retained operation's
+            // receipts. A frozen input cannot replace that completed work.
+            admit_command(&frontier);
+        } else {
+            context.frontier = Some(Arc::new(Mutex::new(frontier)));
+        }
+        CURRENT.scope(context, future).await
+    } else {
+        // Detached command delivery still carries evidence through EventSender.
+        DETACHED_INPUT
+            .scope(Arc::new(Mutex::new(frontier)), future)
+            .await
+    }
+}
+
+tokio::task_local! { static DETACHED_INPUT: Arc<Mutex<CausalFrontier>>; }
+
+pub(crate) fn admit_command(frontier: &CausalFrontier) -> bool {
+    match incorporate(frontier) {
+        Ok(()) => true,
+        Err(error) => {
+            if let Some(scope) = PublicationScope::current() {
+                let _ = scope.retain_error(Box::new(error));
+                scope
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .admission = Admission::Poisoned;
+                scope.close();
+            }
+            false
+        }
+    }
+}
+
+pub(crate) fn incorporate(frontier: &CausalFrontier) -> Result<(), JournalError> {
+    CURRENT
+        .try_with(|context| match &context.frontier {
+            Some(current) => {
+                current
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .merge(frontier)?;
+                context.scope.incorporate(frontier)
+            }
+            None => context.scope.incorporate(frontier),
+        })
+        .unwrap_or_else(|_| {
+            DETACHED_INPUT
+                .try_with(|current| {
+                    current
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .merge(frontier)
+                        .map_err(JournalError::from)
+                })
+                .unwrap_or(Ok(()))
+        })
+}
+
+pub(crate) fn observe_record<P: JournalPayload>(
+    record: &JournalRecord<P>,
+) -> Result<(), JournalError> {
+    incorporate(&CausalFrontier::from_record(record)?)
+}
+
+/// Receipt retention precedes accounting, mirrors and acknowledgement, including
+/// on paths where those later steps fail or the original waiter is cancelled.
+pub(crate) async fn append_inline<T: JournalEvent + 'static>(
+    journal: &Arc<dyn Journal<T>>,
+    event: T,
+    mut options: AppendOptions<T>,
+) -> Result<JournalRecord<T::Payload>, JournalError> {
+    if PublicationScope::current().is_some_and(|scope| {
+        scope
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admission
+            == Admission::Poisoned
+    }) {
+        return Err(JournalError::CommitIndeterminate {
+            source: "causal publication owner is poisoned".into(),
+        });
+    }
+    options.frontier.merge(&capture())?;
+    let written = journal.append(event, options).await?;
+    observe_record(&written)?;
+    Ok(written)
+}
+
+pub(crate) async fn append_group_inline<T: JournalEvent + 'static>(
+    journal: &Arc<dyn Journal<T>>,
+    group_id: &str,
+    events: Vec<T>,
+    mut options: AppendOptions<T>,
+) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    if PublicationScope::current().is_some_and(|scope| {
+        scope
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admission
+            == Admission::Poisoned
+    }) {
+        return Err(JournalError::CommitIndeterminate {
+            source: "causal publication owner is poisoned".into(),
+        });
+    }
+    options.frontier.merge(&capture())?;
+    let written = journal.append_group(group_id, events, options).await?;
+    for record in &written {
+        observe_record(record)?;
+    }
+    Ok(written)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn causal_input() -> JournalRecord<obzenflow_core::event::ChainPayload> {
+        JournalRecord::new(
+            obzenflow_core::JournalWriterId::new(),
+            obzenflow_core::event::ChainEventFactory::data_event(
+                obzenflow_core::StageId::new().into(),
+                "publication.input",
+                serde_json::json!({}),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn creation_snapshot_excludes_later_inputs_but_includes_completed_tail_after_cancellation(
+    ) {
+        let owner = PublicationScope::new();
+        let input = causal_input();
+        let committed = causal_input();
+        let later = causal_input();
+        owner
+            .incorporate(&CausalFrontier::from_record(&input).unwrap())
+            .unwrap();
+        let (release, gate) = oneshot::channel();
+        let committed_coordinate = committed.causal_coordinate();
+        // Drop acknowledgement immediately: the accepted publication still owns its receipt.
+        drop(
+            owner
+                .enqueue(async move {
+                    gate.await?;
+                    observe_record(&committed)?;
+                    Err::<(), BoxError>(std::io::Error::other("later step rejected").into())
+                })
+                .unwrap(),
+        );
+        let next = owner.accept(async { Ok(capture()) });
+        owner
+            .incorporate(&CausalFrontier::from_record(&later).unwrap())
+            .unwrap();
+        release.send(()).unwrap();
+        let frontier = next.await.unwrap();
+        assert_eq!(frontier.clock().get(&input.causal_coordinate()), 1);
+        assert_eq!(frontier.clock().get(&committed_coordinate), 1);
+        assert_eq!(frontier.clock().get(&later.causal_coordinate()), 0);
+        assert!(owner.join().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn accounting_failure_poison_retains_successful_receipt() {
+        let owner = PublicationScope::new();
+        let committed = causal_input();
+        let coordinate = committed.causal_coordinate();
+        let result = owner
+            .accept(async move {
+                observe_record(&committed)?;
+                Err::<(), _>(accounting_failed(
+                    std::io::Error::other("accounting failed").into(),
+                ))
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(owner.capture().clock().get(&coordinate), 1);
+        assert!(owner.accept(async { Ok(()) }).await.is_err());
+        assert!(owner.join().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stalled_publication_does_not_block_an_independent_owner() {
+        let stalled = PublicationScope::new();
+        let independent = PublicationScope::new();
+        let common = causal_input();
+        let input = CausalFrontier::from_record(&common).unwrap();
+        stalled.incorporate(&input).unwrap();
+        independent.incorporate(&input).unwrap();
+
+        let pending_record = causal_input();
+        let pending_coordinate = pending_record.causal_coordinate();
+        let (release, gate) = oneshot::channel();
+        let (started, running) = oneshot::channel();
+        let mut pending = stalled
+            .enqueue(async move {
+                started.send(()).unwrap();
+                gate.await?;
+                observe_record(&pending_record)?;
+                Ok(())
+            })
+            .unwrap();
+        running.await.unwrap();
+
+        // Completion before releasing the other owner proves there is no
+        // cross-owner admission or causal-resolution wait. The common input
+        // does not make the stalled publication available as evidence.
+        let frontier = independent.accept(async { Ok(capture()) }).await.unwrap();
+        assert_eq!(frontier, input);
+        assert_eq!(frontier.clock().get(&pending_coordinate), 0);
+        assert!(futures::poll!(&mut pending).is_pending());
+
+        release.send(()).unwrap();
+        pending.await.unwrap();
+        assert_eq!(stalled.capture().clock().get(&pending_coordinate), 1);
+        assert_eq!(independent.capture(), input);
+        stalled.join().await.unwrap();
+        independent.join().await.unwrap();
+    }
 
     #[tokio::test]
     async fn captured_owner_keeps_writer_order_and_failure_under_another_accepted_scope() {

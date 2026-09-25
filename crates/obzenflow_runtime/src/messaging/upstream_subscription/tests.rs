@@ -9,7 +9,6 @@ use super::{
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
-use obzenflow_core::chrono::Utc;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -19,7 +18,6 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::system_payload::{ContractResultStatusLabel, SystemPayload};
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
-use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -44,17 +42,12 @@ use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecord<ChainPayload> {
-    JournalRecord::commit_event(
-        event,
-        JournalProvenance {
-            journal_writer_id: JournalWriterId::new(),
-            vector_clock,
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-        },
-    )
-    .unwrap()
+    let mut record = JournalRecord::new(JournalWriterId::new(), event);
+    obzenflow_core::event::vector_clock::CausalOrderingService::update_with_parent(
+        &mut record.envelope.provenance.journal.vector_clock,
+        &vector_clock,
+    );
+    record
 }
 
 fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::provenance::FlowContext {
@@ -246,11 +239,11 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
         guard.push(envelope.clone());
         Ok(envelope)
     }
@@ -305,7 +298,7 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
     async fn append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let call_index = self.append_calls.fetch_add(1, Ordering::Relaxed);
@@ -316,8 +309,8 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
             });
         }
 
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
         guard.push(envelope.clone());
         Ok(envelope)
     }
@@ -414,7 +407,7 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
     async fn append(
         &self,
         _event: T,
-        _options: AppendOptions<'_, T>,
+        _options: AppendOptions<T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         Err(JournalError::Implementation {
             message: "append not supported".to_string(),
@@ -851,9 +844,13 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
     let read_event_id = EventId::new();
     let receipted_event_id = EventId::new();
     let mut read_clock = VectorClock::new();
-    read_clock.clocks.insert("upstream".to_string(), 3);
+    read_clock
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 3);
     let mut receipted_clock = VectorClock::new();
-    receipted_clock.clocks.insert("upstream".to_string(), 1);
+    receipted_clock
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 1);
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(3);
@@ -917,9 +914,13 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
     let second = ChainEventFactory::data_event(writer_id, "test.event", json!({"seq": 2}));
 
     let mut clock_1 = VectorClock::new();
-    clock_1.clocks.insert("upstream".to_string(), 1);
+    clock_1
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 1);
     let mut clock_2 = VectorClock::new();
-    clock_2.clocks.insert("upstream".to_string(), 2);
+    clock_2
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 2);
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(1);
@@ -993,7 +994,9 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
         json!({"value": 1}),
     );
     let mut clock = VectorClock::new();
-    clock.clocks.insert("source".to_string(), 1);
+    clock
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("source"), 1);
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].track_pending_delivery_input(committed_input(forwarded.clone(), clock));
 
@@ -2647,18 +2650,19 @@ impl SharedTestJournal {
     }
 
     fn append_with_clock(&self, event: ChainEvent, vector_clock: VectorClock) {
-        let envelope = JournalRecord::commit_event(
+        let mut records = self.events.lock().unwrap();
+        let mut record = crate::testing::causal_fixture::commit(
+            self.id,
             event,
-            JournalProvenance {
-                journal_writer_id: JournalWriterId::from(self.id),
-                vector_clock,
-                timestamp: chrono::Utc::now(),
-                journal_group_id: None,
-                journal_group_member: None,
-            },
+            &AppendOptions::default(),
+            &records,
         )
-        .expect("valid committed fixture");
-        self.events.lock().unwrap().push(envelope);
+        .unwrap();
+        obzenflow_core::event::vector_clock::CausalOrderingService::update_with_parent(
+            &mut record.envelope.provenance.journal.vector_clock,
+            &vector_clock,
+        );
+        records.push(record);
     }
 }
 
@@ -2704,11 +2708,12 @@ impl Journal<ChainEvent> for SharedTestJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> std::result::Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
-        self.events.lock().unwrap().push(envelope.clone());
+        let mut records = self.events.lock().unwrap();
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(envelope.clone());
         Ok(envelope)
     }
 
@@ -2771,13 +2776,14 @@ fn merge_consumption_progress(writer: StageId, seq: u64) -> ChainEvent {
     )
 }
 
-fn merge_clock(entries: &[(&str, u64)]) -> VectorClock {
+fn merge_clock(entries: &[(obzenflow_core::event::CausalCoordinate, u64)]) -> VectorClock {
     let mut clock = VectorClock::new();
     for (writer, seq) in entries {
         for _ in 0..*seq {
             obzenflow_core::event::vector_clock::CausalOrderingService::increment(
                 &mut clock, writer,
-            );
+            )
+            .unwrap();
         }
     }
     clock
@@ -2995,13 +3001,12 @@ async fn canonical_merge_excludes_happened_before_heads() {
     let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
         canonical_pair("z_upstream", "a_upstream").await;
 
-    journal_a.append_with_clock(merge_data(stage_a, "a1"), merge_clock(&[("wa", 1)]));
-    journal_a.append_with_clock(merge_data(stage_a, "a2"), merge_clock(&[("wa", 2)]));
+    let wa = obzenflow_core::event::CausalCoordinate::new(journal_a.id.into(), stage_a.into());
+    let wb = obzenflow_core::event::CausalCoordinate::new(journal_b.id.into(), stage_b.into());
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), merge_clock(&[(wa, 1)]));
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), merge_clock(&[(wa, 2)]));
     journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
-    journal_b.append_with_clock(
-        merge_data(stage_b, "b1"),
-        merge_clock(&[("wa", 2), ("wb", 1)]),
-    );
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), merge_clock(&[(wa, 2), (wb, 1)]));
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
 
     let mut order = Vec::new();

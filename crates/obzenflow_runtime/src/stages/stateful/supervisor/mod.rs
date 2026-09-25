@@ -529,7 +529,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Stateful
         publication::append(
             &ctx.data_journal,
             heartbeat,
-            AppendOptions::new(None)
+            AppendOptions::default()
                 .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
         )
         .await?;

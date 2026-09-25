@@ -78,7 +78,7 @@ where
     async fn append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         if event.event_type_name() == "system.metrics.ready" {
             if let Some(gate) = &self.metrics_ready_append {
@@ -105,7 +105,7 @@ where
         &self,
         group_id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(group_id, events, options).await
     }

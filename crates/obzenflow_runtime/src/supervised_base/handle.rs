@@ -277,11 +277,17 @@ where
         journal: Arc<dyn Journal<ChainEvent>>,
         event: ChainEvent,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let frontier = publication::capture();
         match self
             .supervisor_abort
             .publications
             .enqueue_control(async move {
-                journal.append(event, Default::default()).await?;
+                crate::supervised_base::publication::append_inline(
+                    &journal,
+                    event,
+                    obzenflow_core::journal::AppendOptions::new(frontier),
+                )
+                .await?;
                 Ok(())
             }) {
             Err(error) if error.is::<publication::AdmissionClosed>() => Ok(()),

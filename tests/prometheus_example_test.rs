@@ -1461,10 +1461,10 @@ enabled = {prometheus}
                     .find(|(_, metadata)| metadata.name == "error_processor")
                     .unwrap()
                     .0;
-                let key = obzenflow_core::WriterId::from(*transform).to_string();
+                let writer = obzenflow_core::WriterId::from(*transform);
                 assert!(systems[..terminal].iter().any(|row| matches!(&row.payload,
                     SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark })
-                        if watermark.clocks.get(&key).is_some_and(|sequence| *sequence > 0))), "live collection must advance before finalisation");
+                        if watermark.clocks.iter().any(|(coordinate, sequence)| coordinate.writer_id == writer && *sequence > 0))), "live collection must advance before finalisation");
             }
             println!("Prometheus proof: {count} inputs, mode={mode:?}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());
         } else {

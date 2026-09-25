@@ -309,7 +309,7 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
     async fn append(
         &self,
         event: ChainEvent,
-        options: AppendOptions<'_, ChainEvent>,
+        options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         self.inner.append(self.corrupt(event), options).await
     }
@@ -318,7 +318,7 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
         &self,
         group_id: &str,
         events: Vec<ChainEvent>,
-        options: AppendOptions<'_, ChainEvent>,
+        options: AppendOptions<ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner
             .append_group(

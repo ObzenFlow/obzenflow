@@ -220,6 +220,8 @@ pub(super) struct StageThroughput<'a> {
 
 #[derive(Serialize)]
 pub(super) struct Observation<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commitment: Option<obzenflow_core::event::CommittedCausalRef>,
     pub timestamp_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_clock: Option<&'a VectorClock>,

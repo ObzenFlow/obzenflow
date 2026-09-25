@@ -36,6 +36,9 @@ fn observe<'a>(
         unreachable!("journal handler input");
     };
     let row = envelope;
+    if let Err(error) = crate::supervised_base::publication::observe_record(row) {
+        return Err(fail(ctx, error.to_string()));
+    }
     ctx.last_system_event_id_seen = Some(*row.id());
     if matches!(ctx.resources.producer_tail, ProducerTail::Through(id) if id == *row.id()) {
         ctx.resources.producer_tail = ProducerTail::Reached;

@@ -41,7 +41,8 @@ pub(crate) enum PipelineAction {
 fn publish(ctx: &mut PipelineContext, event: SystemEvent, control: bool) -> Result<(), BoxError> {
     let journal = ctx.system_journal.clone();
     let append = async move {
-        journal.append(event, Default::default()).await?;
+        crate::supervised_base::publication::append_inline(&journal, event, Default::default())
+            .await?;
         Ok(())
     };
     let receipt = if control {
@@ -194,7 +195,12 @@ impl PipelineAction {
                 let acknowledged_at = ctx.resources.terminal_ack.clone();
                 let journal = ctx.system_journal.clone();
                 drop(ctx.resources.publications.enqueue(async move {
-                    journal.append(event, Default::default()).await?;
+                    crate::supervised_base::publication::append_inline(
+                        &journal,
+                        event,
+                        Default::default(),
+                    )
+                    .await?;
                     let at = std::time::Instant::now();
                     published
                         .set(crate::pipeline::termination::PublishedTermination {

@@ -949,7 +949,9 @@ mod tests {
         );
         let event_id = EventId::new();
         let mut vector_clock = VectorClock::new();
-        vector_clock.clocks.insert("sink".to_string(), 7);
+        vector_clock
+            .clocks
+            .insert(crate::testing::causal_fixture::coordinate("sink"), 7);
 
         instrumentation.record_receipted_position(7, event_id, vector_clock.clone());
 

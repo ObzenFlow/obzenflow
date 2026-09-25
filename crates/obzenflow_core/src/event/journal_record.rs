@@ -23,13 +23,20 @@ pub struct JournalRecord<P: JournalPayload> {
 impl<P: JournalPayload> JournalRecord<P> {
     pub fn new<E: JournalEvent<Payload = P>>(journal_writer_id: JournalWriterId, event: E) -> Self {
         let (authored, payload) = event.into_parts();
+        let mut vector_clock = super::vector_clock::VectorClock::new();
+        vector_clock.clocks.insert(
+            super::CausalCoordinate::new(journal_writer_id, *authored.provenance.event.writer_id()),
+            1,
+        );
         Self {
             envelope: EventEnvelope {
                 provenance: Provenance {
                     event: authored.provenance.event,
                     journal: JournalProvenance {
+                        run_id: crate::FlowId::new(),
+                        causal: Default::default(),
                         journal_writer_id,
-                        vector_clock: super::vector_clock::VectorClock::new(),
+                        vector_clock,
                         timestamp: chrono::Utc::now(),
                         journal_group_id: None,
                         journal_group_member: None,
@@ -48,6 +55,21 @@ impl<P: JournalPayload> JournalRecord<P> {
     ) -> Result<Self, serde_json::Error> {
         let (authored, payload) = event.into_parts();
         Self::commit(authored, payload, journal)
+    }
+
+    pub fn causal_coordinate(&self) -> super::CausalCoordinate {
+        super::CausalCoordinate::new(
+            self.envelope.provenance.journal.journal_writer_id,
+            *self.writer_id(),
+        )
+    }
+
+    pub fn local_sequence(&self) -> u64 {
+        self.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&self.causal_coordinate())
     }
 
     pub fn id(&self) -> &EventId {
@@ -83,7 +105,7 @@ impl<P: JournalPayload> JournalRecord<P> {
         journal: JournalProvenance,
     ) -> Result<Self, serde_json::Error> {
         payload.validate(&authored.provenance.event)?;
-        Ok(Self {
+        let record = Self {
             envelope: EventEnvelope {
                 provenance: Provenance {
                     event: authored.provenance.event,
@@ -92,7 +114,10 @@ impl<P: JournalPayload> JournalRecord<P> {
                 observability: authored.observability.and_then(|packet| packet.validated()),
             },
             payload,
-        })
+        };
+        super::CausalCommit::from_record(&record)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        Ok(record)
     }
 }
 
@@ -102,6 +127,7 @@ impl<P: JournalPayload> Serialize for JournalRecord<P> {
         self.payload
             .validate(&self.envelope.provenance.event)
             .map_err(S::Error::custom)?;
+        super::CausalCommit::from_record(self).map_err(S::Error::custom)?;
         let mut record = serializer.serialize_struct("JournalRecord", 2)?;
         record.serialize_field("envelope", &self.envelope)?;
         record.serialize_field("payload", &self.payload)?;
@@ -120,10 +146,12 @@ impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
         payload
             .validate(&record.envelope.provenance.event)
             .map_err(D::Error::custom)?;
-        Ok(Self {
+        let record = Self {
             envelope: record.envelope,
             payload,
-        })
+        };
+        super::CausalCommit::from_record(&record).map_err(D::Error::custom)?;
+        Ok(record)
     }
 }
 

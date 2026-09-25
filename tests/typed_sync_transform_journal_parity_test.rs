@@ -438,14 +438,13 @@ fn assert_derived_stage_authorship<T: TypedPayload>(
     output_events: &[JournalRecord<ChainPayload>],
 ) {
     let writer = stage_writer(run_dir, stage_name);
-    let writer_clock = writer.to_string();
     let parents = parent_events
         .iter()
         .filter(|envelope| envelope.consumes_data_credit())
         .map(|envelope| {
             (
                 envelope.envelope.provenance.event.id,
-                envelope.envelope.provenance.event.writer_id,
+                envelope.causal_coordinate(),
             )
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -471,7 +470,7 @@ fn assert_derived_stage_authorship<T: TypedPayload>(
                 .provenance
                 .journal
                 .vector_clock
-                .get(&writer_clock)
+                .get(&output.causal_coordinate())
                 > 0
         );
         assert!(
@@ -480,7 +479,7 @@ fn assert_derived_stage_authorship<T: TypedPayload>(
                 .provenance
                 .journal
                 .vector_clock
-                .get(&parent_writer.to_string())
+                .get(parent_writer)
                 > 0
         );
     }

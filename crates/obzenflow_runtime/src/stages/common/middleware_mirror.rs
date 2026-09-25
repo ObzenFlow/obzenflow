@@ -42,14 +42,7 @@ pub async fn mirror_middleware_event_to_system_journal(
     let origin = obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin {
         event_id: envelope.envelope.provenance.event.id,
         writer_key: writer_key.clone(),
-        seq: SeqNo(
-            envelope
-                .envelope
-                .provenance
-                .journal
-                .vector_clock
-                .get(&writer_key),
-        ),
+        seq: SeqNo(envelope.local_sequence()),
     };
 
     let event = SystemEvent::new(
@@ -88,9 +81,16 @@ pub async fn mirror_middleware_event_to_system_journal(
         },
     );
 
+    let evidence = obzenflow_core::event::CausalFrontier::from_record(envelope);
     let system_journal = system_journal.clone();
     let mirror = crate::supervised_base::publication::commit(async move {
-        if let Err(error) = system_journal.append(event, Default::default()).await {
+        if let Err(error) = crate::supervised_base::publication::append_inline(
+            &system_journal,
+            event,
+            obzenflow_core::journal::AppendOptions::new(evidence?),
+        )
+        .await
+        {
             if crate::supervised_base::publication::is_indeterminate(&error) {
                 return Err(Box::new(error) as crate::supervised_base::publication::BoxError);
             }

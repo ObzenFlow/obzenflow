@@ -4,5 +4,6 @@
 
 //! Application-level conformance kits.
 
+pub mod causal;
 pub mod journal;
 pub mod sink;

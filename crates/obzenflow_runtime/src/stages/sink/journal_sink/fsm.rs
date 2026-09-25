@@ -710,7 +710,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 evt,
-                                AppendOptions::new(None).with_capture(
+                                AppendOptions::default().with_capture(
                                     ctx.instrumentation.journal_capture(None, vec![(0, false)]),
                                 ),
                             )
@@ -907,7 +907,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 .with_flow_context(flow_ctx);
                         let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                        crate::supervised_base::publication::append(&ctx.data_journal, evt, AppendOptions::new(None).with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
+                        crate::supervised_base::publication::append(&ctx.data_journal, evt, AppendOptions::default().with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to write delivery receipt: {e}"
                             ))
@@ -1030,7 +1030,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         let written = data_journal
             .append(
                 event,
-                AppendOptions::new(Some(&parent))
+                AppendOptions::from_record(Some(&parent))?
                     .with_capture(instrumentation.journal_capture(None, vec![(1, false)])),
             )
             .await?;

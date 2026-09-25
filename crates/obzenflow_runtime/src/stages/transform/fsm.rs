@@ -102,6 +102,7 @@ impl futures::task::ArcWake for ContinuationWake {
 /// One supervisor-owned generated handler invocation suspended across event
 /// loop iterations. It is never serialised and never accepts another input.
 pub(crate) struct DirectFactContinuation {
+    pub causal: obzenflow_core::event::CausalFrontier,
     pub envelope: JournalRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
@@ -148,6 +149,7 @@ impl DirectFactContinuation {
             poll_state,
         } = start;
         Self {
+            causal: crate::supervised_base::publication::capture(),
             envelope,
             upstream_stage,
             input_position,
@@ -181,7 +183,9 @@ impl DirectFactContinuation {
         let complete = self.poll_complete.clone();
         let result = self.poll_result.clone();
         let wake = self.wake.clone();
-        *runner = Some(tokio::spawn(async move {
+        let owner = crate::supervised_base::publication::PublicationScope::current();
+        let causal = self.causal.clone();
+        let work = async move {
             loop {
                 request.notified().await;
                 wake.prepare_poll();
@@ -204,6 +208,14 @@ impl DirectFactContinuation {
                 if finished {
                     return;
                 }
+            }
+        };
+        *runner = Some(tokio::spawn(async move {
+            let work = crate::supervised_base::publication::with_snapshot(causal, work);
+            if let Some(owner) = owner {
+                owner.enter(work).await
+            } else {
+                work.await
             }
         }));
     }

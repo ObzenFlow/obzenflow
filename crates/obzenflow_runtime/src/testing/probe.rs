@@ -96,8 +96,8 @@ pub enum JournalProbeError {
 ///
 /// The producing stage writer's seq is the value the metrics aggregator's
 /// exported watermark must cover before `MetricsBarrier::wait_for_stage_seq`
-/// resolves. The envelope vector clock keyed by `WriterId::from(stage_id)`
-/// carries that seq; this struct exposes it through
+/// resolves. The envelope vector clock keyed by its journal incarnation and
+/// `WriterId::from(stage_id)` carries that seq; this struct exposes it through
 /// [`Self::stage_writer_seq`].
 pub struct JournalProbeEvent {
     stage_id: StageId,
@@ -106,12 +106,12 @@ pub struct JournalProbeEvent {
 
 impl JournalProbeEvent {
     /// The producing stage's seq, derived from the envelope vector clock
-    /// keyed by `WriterId::from(stage_id).to_string()`.
+    /// keyed by the record's journal incarnation and `WriterId::from(stage_id)`.
     ///
     /// For the non-cyclic single-writer-per-stage case this probe is
     /// specified for, the envelope's vector clock must contain the writer
-    /// component keyed by `WriterId::from(stage_id)`. Missing keys are helper
-    /// or event-construction bugs, not expected test control flow.
+    /// component for that journal and stage. Missing keys are helper or
+    /// event-construction bugs, not expected test control flow.
     pub fn stage_writer_seq(&self) -> Result<u64, JournalProbeError> {
         let key = WriterId::from(self.stage_id).to_string();
         self.envelope
@@ -120,7 +120,10 @@ impl JournalProbeEvent {
             .journal
             .vector_clock
             .clocks
-            .get(&key)
+            .get(&obzenflow_core::event::CausalCoordinate::new(
+                self.envelope.envelope.provenance.journal.journal_writer_id,
+                WriterId::from(self.stage_id),
+            ))
             .copied()
             .ok_or_else(|| JournalProbeError::MissingStageWriterSeq {
                 stage_id: self.stage_id,
@@ -223,7 +226,6 @@ impl JournalProbe {
             n >= 1,
             "expect_event_observing_clock_component(n): n must be >= 1"
         );
-        let writer_key = writer_id.to_string();
         loop {
             let envelopes = self.read_all_envelopes().await?;
             let mut count: u64 = 0;
@@ -236,8 +238,11 @@ impl JournalProbe {
                     .provenance
                     .journal
                     .vector_clock
-                    .get(&writer_key)
-                    == 0
+                    .clocks
+                    .iter()
+                    .all(|(coordinate, sequence)| {
+                        coordinate.writer_id != writer_id || *sequence == 0
+                    })
                 {
                     continue;
                 }
@@ -259,7 +264,6 @@ impl JournalProbe {
         &self,
         writer_id: WriterId,
     ) -> Result<u64, JournalProbeError> {
-        let writer_key = writer_id.to_string();
         let envelopes = self.read_all_envelopes().await?;
         Ok(envelopes
             .into_iter()
@@ -270,8 +274,11 @@ impl JournalProbe {
                         .provenance
                         .journal
                         .vector_clock
-                        .get(&writer_key)
-                        != 0
+                        .clocks
+                        .iter()
+                        .any(|(coordinate, sequence)| {
+                            coordinate.writer_id == writer_id && *sequence > 0
+                        })
             })
             .count() as u64)
     }
@@ -578,11 +585,12 @@ mod tests {
         async fn append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
-            let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
             guard.push(envelope.clone());
             Ok(envelope)
         }
@@ -736,17 +744,9 @@ mod tests {
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
 
         let event = ChainEventFactory::data_event(writer_id, "data", serde_json::json!({}));
-        let envelope = JournalRecord::commit_event(
-            event,
-            JournalProvenance {
-                journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
-                vector_clock: VectorClock::new(),
-                timestamp: Utc::now(),
-                journal_group_id: None,
-                journal_group_member: None,
-            },
-        )
-        .expect("valid committed fixture");
+        let mut envelope = JournalRecord::new(stage_journal_impl.id.into(), event);
+        // Deliberately corrupt an admitted test double to exercise probe diagnostics.
+        envelope.envelope.provenance.journal.vector_clock = VectorClock::new();
         stage_journal_impl.push_envelope(envelope);
 
         let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
@@ -876,10 +876,21 @@ mod tests {
             .expect("append eof");
 
         let mut clock_a = VectorClock::new();
-        clock_a.clocks.insert(upstream_a.to_string(), 1);
+        let coordinate_a =
+            obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new(), upstream_a);
+        clock_a.clocks.insert(coordinate_a, 1);
+        clock_a.clocks.insert(
+            obzenflow_core::event::CausalCoordinate::new(
+                stage_journal_impl.id.into(),
+                stage_writer_id,
+            ),
+            1,
+        );
         let env_a = JournalRecord::commit_event(
             ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
             JournalProvenance {
+                run_id: obzenflow_core::FlowId::new(),
+                causal: Default::default(),
                 journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: clock_a,
                 timestamp: Utc::now(),
@@ -891,10 +902,21 @@ mod tests {
         stage_journal_impl.push_envelope(env_a);
 
         let mut clock_b = VectorClock::new();
-        clock_b.clocks.insert(upstream_b.to_string(), 1);
+        let coordinate_b =
+            obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new(), upstream_b);
+        clock_b.clocks.insert(coordinate_b, 1);
+        clock_b.clocks.insert(
+            obzenflow_core::event::CausalCoordinate::new(
+                stage_journal_impl.id.into(),
+                stage_writer_id,
+            ),
+            1,
+        );
         let env_b = JournalRecord::commit_event(
             ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
             JournalProvenance {
+                run_id: obzenflow_core::FlowId::new(),
+                causal: Default::default(),
                 journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: clock_b,
                 timestamp: Utc::now(),
@@ -931,7 +953,7 @@ mod tests {
                 .provenance
                 .journal
                 .vector_clock
-                .get(&upstream_b.to_string()),
+                .get(&coordinate_b),
             0
         );
     }

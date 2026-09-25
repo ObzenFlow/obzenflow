@@ -69,7 +69,7 @@ impl<T: JournalEvent> Journal<T> for ObservedJournal<T> {
     async fn append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         self.inner.append(event, options).await
     }
@@ -77,7 +77,7 @@ impl<T: JournalEvent> Journal<T> for ObservedJournal<T> {
         &self,
         id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(id, events, options).await
     }

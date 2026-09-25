@@ -29,6 +29,7 @@ impl<T, S> Clone for EffectCommitHandle<T, S> {
 }
 
 struct EffectCommitHandleInner<T, S> {
+    causal: obzenflow_core::event::CausalFrontier,
     publications: Option<Arc<crate::supervised_base::publication::PublicationScope>>,
     writer_id: WriterId,
     data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -98,6 +99,7 @@ where
     pub(super) fn new(params: EffectCommitHandleParams) -> Self {
         Self {
             inner: Arc::new(EffectCommitHandleInner {
+                causal: crate::supervised_base::publication::capture(),
                 publications: crate::supervised_base::publication::PublicationScope::current(),
                 writer_id: params.writer_id,
                 data_journal: params.data_journal,
@@ -123,9 +125,11 @@ where
     pub async fn commit_success(&self, output: &T) -> Result<(), EffectError> {
         let handle = self.clone();
         let output = output.clone();
-        crate::supervised_base::publication::commit_in(
+        crate::supervised_base::publication::commit_in_with_frontier(
             self.inner.publications.clone(),
+            self.inner.causal.clone(),
             async move {
+                crate::supervised_base::publication::incorporate(&handle.inner.causal)?;
                 handle
                     .commit_success_inline(&output)
                     .await
@@ -252,9 +256,11 @@ where
     pub async fn commit_failure(&self, error: &EffectError) -> Result<(), EffectError> {
         let handle = self.clone();
         let error = error.clone();
-        crate::supervised_base::publication::commit_in(
+        crate::supervised_base::publication::commit_in_with_frontier(
             self.inner.publications.clone(),
+            self.inner.causal.clone(),
             async move {
+                crate::supervised_base::publication::incorporate(&handle.inner.causal)?;
                 handle.commit_failure_inline(&error).await.map_err(|error| {
                     Box::new(error) as crate::supervised_base::publication::BoxError
                 })

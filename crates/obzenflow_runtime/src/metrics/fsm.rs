@@ -184,6 +184,7 @@ pub struct MetricsStore {
     /// Highest selected own-writer carrier from the data journal. This is a
     /// freshness position, not evidence of complete physical coverage.
     pub stage_vector_clocks: HashMap<StageId, u64>,
+    pub causal_watermark: obzenflow_core::event::vector_clock::VectorClock,
 
     /// Per-system vector clock watermark (FLOWIP-059c).
     ///
@@ -1111,6 +1112,8 @@ impl FsmAction for MetricsAggregatorAction {
             }
 
             MetricsAggregatorAction::ProcessSystemEvent { envelope } => {
+                crate::supervised_base::publication::observe_record(envelope)
+                    .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
                 tracing::trace!(
                     event_id = %envelope.id(),
                     event_type = envelope.event_type_name(),
@@ -1126,13 +1129,11 @@ impl FsmAction for MetricsAggregatorAction {
                 // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
                 // system-originated metrics (pipeline + metrics writers) in addition to stage journals.
                 if let Some(system_id) = envelope.envelope.provenance.event.writer_id.as_system() {
-                    let writer_key = envelope.envelope.provenance.event.writer_id.to_string();
-                    let seq = envelope
-                        .envelope
-                        .provenance
-                        .journal
-                        .vector_clock
-                        .get(&writer_key);
+                    let seq = envelope.local_sequence();
+                    store
+                        .causal_watermark
+                        .clocks
+                        .insert(envelope.causal_coordinate(), seq);
                     let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
                     *entry = (*entry).max(seq);
                 }
@@ -1310,6 +1311,22 @@ impl FsmAction for MetricsAggregatorAction {
                         continue;
                     }
                     let stage_id = *journal_stage;
+                    // Only factual carriers selected for this stage advance its
+                    // causal input. Offering an optional packet above cannot.
+                    if event.runtime.is_some()
+                        || !selected
+                        || (*journal_kind == MetricsJournalKind::Data
+                            && envelope.local_sequence()
+                                > store
+                                    .stage_vector_clocks
+                                    .get(&stage_id)
+                                    .copied()
+                                    .unwrap_or(0))
+                    {
+                        crate::supervised_base::publication::observe_record(envelope).map_err(
+                            |error| obzenflow_fsm::FsmError::HandlerError(error.to_string()),
+                        )?;
+                    }
                     if let Some(runtime) = &event.runtime {
                         store.retain_accounting(stage_id, &runtime.accounting);
                     }
@@ -1318,12 +1335,13 @@ impl FsmAction for MetricsAggregatorAction {
                         selected = true;
                     }
                     if *journal_kind == MetricsJournalKind::Data {
-                        let seq = envelope
-                            .envelope
-                            .provenance
-                            .journal
-                            .vector_clock
-                            .get(&event.writer_id.to_string());
+                        let seq = envelope.local_sequence();
+                        store
+                            .causal_watermark
+                            .clocks
+                            .entry(envelope.causal_coordinate())
+                            .and_modify(|current| *current = (*current).max(seq))
+                            .or_insert(seq);
                         let current = store.stage_vector_clocks.entry(stage_id).or_default();
                         *current = (*current).max(seq);
                         if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
@@ -1400,21 +1418,12 @@ impl FsmAction for MetricsAggregatorAction {
 
                 // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
                 // for `/metrics` refresh and deterministic freshness gating.
-                let mut clocks: std::collections::BTreeMap<String, u64> =
-                    std::collections::BTreeMap::new();
-                for (stage_id, seq) in &ctx.metrics_store.stage_vector_clocks {
-                    clocks.insert(WriterId::from(*stage_id).to_string(), *seq);
-                }
-                for (system_id, seq) in &ctx.metrics_store.system_vector_clocks {
-                    clocks.insert(WriterId::from(*system_id).to_string(), *seq);
-                }
+                let watermark = ctx.metrics_store.causal_watermark.clone();
 
                 let export_event = obzenflow_core::event::SystemEvent::new(
                     WriterId::from(ctx.system_id),
                     SystemPayload::MetricsCoordination(
-                        obzenflow_core::event::MetricsCoordinationEvent::Exported {
-                            watermark: obzenflow_core::event::vector_clock::VectorClock { clocks },
-                        },
+                        obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark },
                     ),
                 );
 
@@ -1889,7 +1898,7 @@ mod tests {
             async fn append(
                 &self,
                 _event: T,
-                _options: obzenflow_core::journal::AppendOptions<'_, T>,
+                _options: obzenflow_core::journal::AppendOptions<T>,
             ) -> Result<JournalRecord<T::Payload>, JournalError> {
                 Err(JournalError::Implementation {
                     message: "noop journal".to_string(),

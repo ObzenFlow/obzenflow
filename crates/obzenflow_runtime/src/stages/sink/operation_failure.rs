@@ -87,7 +87,12 @@ pub async fn record_sink_lifecycle_operation_failure(
             snapshot_stage_accounting(&instrumentation),
             operation.envelope.provenance.event.id,
         );
-        let lifecycle = system_journal.append(lifecycle, Default::default()).await?;
+        let lifecycle = crate::supervised_base::publication::append_inline(
+            &system_journal,
+            lifecycle,
+            Default::default(),
+        )
+        .await?;
         Ok(SinkLifecycleFailureRecorded {
             operation,
             lifecycle_event_id: lifecycle.envelope.provenance.event.id,

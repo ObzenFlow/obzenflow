@@ -35,30 +35,6 @@ const MAX_STALL_POLLS: u32 = 5;
 // buffered, terminated frames are reused; a partial tail is always reread.
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 
-fn open_readable_std_file(path: &Path) -> Result<StdFile, JournalError> {
-    if path.exists() {
-        open_existing_std_file(path)
-    } else {
-        StdFile::options()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|e| {
-                tracing::error!(
-                    path = %path.display(),
-                    os_error = %e,
-                    "DiskJournalReader failed to create journal file"
-                );
-                JournalError::Implementation {
-                    message: format!("Failed to create journal file: {}", path.display()),
-                    source: Box::new(e),
-                }
-            })
-    }
-}
-
 fn open_existing_std_file(path: &Path) -> Result<StdFile, JournalError> {
     StdFile::open(path).map_err(|e| {
         tracing::error!(
@@ -82,6 +58,9 @@ fn observer_io(error: std::io::Error) -> JournalError {
 
 /// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
+    identity: super::identity::JournalIdentity,
+    commitments:
+        std::collections::HashMap<obzenflow_core::WriterId, obzenflow_core::event::CausalCommit>,
     decoder: Decoder,
     /// Current position (number of committed events read)
     position: u64,
@@ -117,7 +96,6 @@ pub struct DiskJournalReader<T: JournalEvent> {
     /// Shared lock to avoid reading partial writes
     read_write_lock: Arc<RwLock<()>>,
     /// Whether a live reader may create a missing empty file.
-    create_if_missing: bool,
     /// Observers never turn an unfinished append into corruption by timing out.
     observer: bool,
     /// Retain the admitted file identity, refusing replacement on a later poll.
@@ -134,39 +112,13 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     /// Create a new live-tail reader starting from the beginning
     pub async fn new(
         path: PathBuf,
-        _journal_id: JournalId,
+        journal_id: JournalId,
         read_write_lock: Arc<RwLock<()>>,
     ) -> Result<Self, JournalError> {
-        // If file doesn't exist, create an empty reader at EOF
-        if !path.exists() {
-            let _std_file = open_readable_std_file(&path)?;
-
-            return Ok(Self {
-                decoder: Decoder::new(&path),
-                position: 0,
-                read_offset: 0,
-                initial_end: None,
-                stall_polls: 0,
-                policy: ReadPolicy::LiveTail,
-                buf: Vec::new(),
-                buffered_reader: None,
-                #[cfg(test)]
-                frame_read_gate: None,
-                pending: VecDeque::new(),
-                pending_group_id: None,
-                pending_group_size: None,
-                pending_group_next_index: 0,
-                yielded_group_member: None,
-                path,
-                at_end: true,
-                read_write_lock: read_write_lock.clone(),
-                create_if_missing: true,
-                observer: false,
-                pinned_file: None,
-                _phantom: std::marker::PhantomData,
-            });
+        let identity = super::identity::read_identity(&path)?;
+        if identity.journal_id != journal_id {
+            return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
         }
-
         // Validate that the file is readable. Polls lease their buffered handle;
         // cancellation forces a fresh handle at the committed cursor.
         let _std_file = StdFile::open(&path).map_err(|e| {
@@ -182,6 +134,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
+            identity,
+            commitments: std::collections::HashMap::new(),
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
@@ -200,7 +154,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             path,
             at_end: false,
             read_write_lock,
-            create_if_missing: true,
             observer: false,
             pinned_file: None,
             _phantom: std::marker::PhantomData,
@@ -208,14 +161,18 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     }
 
     /// Open an existing journal for read-only sequential access under an explicit
-    /// read policy. Unlike `new()`, this never creates the file if missing.
+    /// read policy. Missing journals are never created by readers.
     /// Archive readers pass a sealed policy (FLOWIP-120q).
     pub(crate) async fn open_existing(
         path: PathBuf,
-        _journal_id: JournalId,
+        journal_id: JournalId,
         read_write_lock: Arc<RwLock<()>>,
         policy: ReadPolicy,
     ) -> Result<Self, JournalError> {
+        let identity = super::identity::read_identity(&path)?;
+        if identity.journal_id != journal_id {
+            return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
+        }
         let _std_file = StdFile::open(&path).map_err(|e| {
             tracing::error!(
                 path = %path.display(),
@@ -229,6 +186,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
+            identity,
+            commitments: std::collections::HashMap::new(),
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
@@ -247,7 +206,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             path,
             at_end: false,
             read_write_lock,
-            create_if_missing: false,
             observer: false,
             pinned_file: None,
             _phantom: std::marker::PhantomData,
@@ -441,9 +399,40 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 self.policy,
             ) {
                 Disposition::Yield(frame) => {
-                    self.read_offset += consumed as u64;
-                    self.pending_group_id = frame.group_id().map(str::to_string);
+                    let group_id = frame.group_id().map(str::to_string);
                     let records = frame.into_records();
+                    let mut commitments = self.commitments.clone();
+                    for record in &records {
+                        let commitment = obzenflow_core::event::CausalCommit::from_record(record)?;
+                        let previous = commitments
+                            .get(record.writer_id())
+                            .map(|previous| previous.reference);
+                        if commitment.reference.run_id != self.identity.run_id
+                            || commitment.reference.journal_writer_id.as_journal_id()
+                                != &self.identity.journal_id
+                            || previous.is_some_and(|previous| {
+                                commitment.reference.sequence <= previous.sequence
+                                    || record
+                                        .envelope
+                                        .provenance
+                                        .journal
+                                        .causal
+                                        .previous
+                                        .is_some_and(|claimed| {
+                                            claimed.sequence == previous.sequence
+                                                && claimed != previous
+                                        })
+                            })
+                        {
+                            return Err(
+                                obzenflow_core::event::CausalError::ConflictingCommitment.into()
+                            );
+                        }
+                        commitments.insert(*record.writer_id(), commitment);
+                    }
+                    self.commitments = commitments;
+                    self.read_offset += consumed as u64;
+                    self.pending_group_id = group_id;
                     self.pending_group_size = self
                         .pending_group_id
                         .as_ref()
@@ -501,11 +490,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     }
 
     async fn reader_at_offset(&self) -> Result<BufReader<File>, JournalError> {
-        let std_file = if self.create_if_missing {
-            open_readable_std_file(&self.path)?
-        } else {
-            open_existing_std_file(&self.path)?
-        };
+        let std_file = open_existing_std_file(&self.path)?;
         if let Some(pinned) = &self.pinned_file {
             let actual = std_file.metadata().map_err(observer_io)?;
             let expected = pinned.metadata().map_err(observer_io)?;
@@ -664,13 +649,10 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
 mod tests {
     use super::*;
     use crate::journal::disk::log_record::serialize_record;
-    use chrono::Utc;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::payloads::JournalPayload;
-    use obzenflow_core::event::provenance::JournalProvenance;
-    use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::JournalRecord;
-    use obzenflow_core::{ChainEvent, JournalId, JournalWriterId, StageId, WriterId};
+    use obzenflow_core::{ChainEvent, JournalId, StageId, WriterId};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -796,22 +778,16 @@ mod tests {
         use std::io::Seek;
         for observe_partial in [false, true] {
             let mut file = NamedTempFile::new().unwrap();
-            let journal_id = JournalId::new();
+            let (identity, lease) =
+                super::super::identity::open_identity(file.path(), None).unwrap();
+            drop(lease);
+            let journal_id = identity.journal_id;
+            let mut previous = std::collections::HashMap::new();
             let stage = StageId::new();
-            let make_record = || {
+            let mut make_record = || {
                 let event =
                     ChainEventFactory::data_event(stage.into(), "tail", serde_json::json!({}));
-                JournalRecord::commit_event(
-                    event,
-                    JournalProvenance {
-                        journal_writer_id: JournalWriterId::from(journal_id),
-                        vector_clock: VectorClock::new(),
-                        timestamp: Utc::now(),
-                        journal_group_id: None,
-                        journal_group_member: None,
-                    },
-                )
-                .expect("valid record")
+                super::super::identity::fixture_record(identity, event, &mut previous)
             };
             let first = make_record();
             write_framed_record(&mut file, &first);
@@ -900,24 +876,17 @@ mod tests {
 
         // Write some test records
         let writer_id = WriterId::from(StageId::new());
-        let journal_id = JournalId::new();
+        let (identity, lease) = super::super::identity::open_identity(&path, None).unwrap();
+        drop(lease);
+        let journal_id = identity.journal_id;
+        let mut previous = std::collections::HashMap::new();
         for i in 0..5 {
             let event = ChainEventFactory::data_event(
                 writer_id,
                 "test.event",
                 serde_json::json!({"index": i}),
             );
-            let record = JournalRecord::commit_event(
-                event,
-                JournalProvenance {
-                    journal_writer_id: JournalWriterId::from(journal_id),
-                    vector_clock: VectorClock::new(),
-                    timestamp: Utc::now(),
-                    journal_group_id: None,
-                    journal_group_member: None,
-                },
-            )
-            .expect("valid record");
+            let record = super::super::identity::fixture_record(identity, event, &mut previous);
             write_framed_record(&mut temp_file, &record);
         }
         temp_file.flush().unwrap();
@@ -948,24 +917,17 @@ mod tests {
 
         // Write some test records
         let writer_id = WriterId::from(StageId::new());
-        let journal_id = JournalId::new();
+        let (identity, lease) = super::super::identity::open_identity(&path, None).unwrap();
+        drop(lease);
+        let journal_id = identity.journal_id;
+        let mut previous = std::collections::HashMap::new();
         for i in 0..10 {
             let event = ChainEventFactory::data_event(
                 writer_id,
                 "test.event",
                 serde_json::json!({"index": i}),
             );
-            let record = JournalRecord::commit_event(
-                event,
-                JournalProvenance {
-                    journal_writer_id: JournalWriterId::from(journal_id),
-                    vector_clock: VectorClock::new(),
-                    timestamp: Utc::now(),
-                    journal_group_id: None,
-                    journal_group_member: None,
-                },
-            )
-            .expect("valid record");
+            let record = super::super::identity::fixture_record(identity, event, &mut previous);
             write_framed_record(&mut temp_file, &record);
         }
         temp_file.flush().unwrap();
@@ -998,16 +960,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_missing_file_creates_readable_empty_reader() {
+    async fn missing_journal_is_not_created_by_a_reader() {
         let temp_dir = tempfile::tempdir().unwrap();
         let path = temp_dir.path().join("missing.log");
-        let read_write_lock = Arc::new(RwLock::new(()));
-
-        let mut reader =
-            DiskJournalReader::<ChainEvent>::new(path, JournalId::new(), read_write_lock)
-                .await
-                .unwrap();
-
-        assert!(reader.next().await.unwrap().is_none());
+        assert!(DiskJournalReader::<ChainEvent>::new(
+            path.clone(),
+            JournalId::new(),
+            Arc::new(RwLock::new(()))
+        )
+        .await
+        .is_err());
+        assert!(!path.exists());
     }
 }

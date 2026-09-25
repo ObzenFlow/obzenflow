@@ -948,8 +948,7 @@ fn assert_generated_chunk_authorship(
         "the generated manifest carries the complete plan without a second planning row"
     );
 
-    let chunk_clock_key = chunk_writer.to_string();
-    let seed_clock_key = seed.envelope.provenance.event.writer_id.to_string();
+    let seed_clock_key = seed.causal_coordinate();
     for envelope in generated {
         assert_eq!(
             envelope.envelope.provenance.event.writer_id, chunk_writer,
@@ -972,7 +971,7 @@ fn assert_generated_chunk_authorship(
                 .provenance
                 .journal
                 .vector_clock
-                .get(&chunk_clock_key)
+                .get(&envelope.causal_coordinate())
                 > 0,
             "generated facts advance the chunk-stage clock component"
         );

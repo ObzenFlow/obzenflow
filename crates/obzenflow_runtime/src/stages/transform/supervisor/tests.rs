@@ -27,7 +27,6 @@ use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
-use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason, StageFatalRecorded,
     SystemEvent,
@@ -190,7 +189,6 @@ async fn build_cycle_entry_harness<
 struct TestJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
-    seq: AtomicU64,
     events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
 }
 
@@ -199,13 +197,8 @@ impl<T: JournalEvent> TestJournal<T> {
         Self {
             id: JournalId::new(),
             owner: Some(owner),
-            seq: AtomicU64::new(0),
             events: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed).saturating_add(1)
     }
 }
 
@@ -227,30 +220,11 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     async fn append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
-        let parent = options.parent;
-
-        let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
-
-        if let Some(parent) = parent {
-            CausalOrderingService::update_with_parent(
-                &mut env.envelope.provenance.journal.vector_clock,
-                &parent.envelope.provenance.journal.vector_clock,
-            );
-        }
-
-        let writer_key = env.writer_id().to_string();
-        let seq = self.next_seq();
-        env.envelope
-            .provenance
-            .journal
-            .vector_clock
-            .clocks
-            .insert(writer_key, seq);
-
         let mut guard = self.events.lock().unwrap();
+        let env = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
         guard.push(env.clone());
         Ok(env)
     }
@@ -1066,6 +1040,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
         .commit(1);
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
@@ -1102,6 +1077,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
     // loop returns to dispatch_state with the measured wait recorded.
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending2", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
@@ -1202,6 +1178,7 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         .commit(1);
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
@@ -1274,6 +1251,7 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
         .commit(1);
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },

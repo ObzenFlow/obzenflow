@@ -49,7 +49,10 @@ async fn test_journal_parity() {
 
         // Event 2: Child of event 1
         let envelope2 = journal
-            .append(event2.clone(), AppendOptions::new(Some(&envelope1)))
+            .append(
+                event2.clone(),
+                AppendOptions::from_record(Some(&envelope1)).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -61,7 +64,10 @@ async fn test_journal_parity() {
 
         // Event 4: Child of event 2
         journal
-            .append(event4.clone(), AppendOptions::new(Some(&envelope2)))
+            .append(
+                event4.clone(),
+                AppendOptions::from_record(Some(&envelope2)).unwrap(),
+            )
             .await
             .unwrap();
     }
@@ -229,7 +235,10 @@ async fn test_read_causally_after_matches_slice_with_concurrent_events() {
             .await
             .unwrap();
         let _env_c = journal
-            .append(event_c.clone(), AppendOptions::new(Some(&env_a)))
+            .append(
+                event_c.clone(),
+                AppendOptions::from_record(Some(&env_a)).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -292,21 +301,33 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
             .unwrap();
 
         let env_right = journal
-            .append(right.clone(), AppendOptions::new(Some(&env_root)))
+            .append(
+                right.clone(),
+                AppendOptions::from_record(Some(&env_root)).unwrap(),
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
         let env_left = journal
-            .append(left.clone(), AppendOptions::new(Some(&env_root)))
+            .append(
+                left.clone(),
+                AppendOptions::from_record(Some(&env_root)).unwrap(),
+            )
             .await
             .unwrap();
 
         let env_merge_left = journal
-            .append(merge_left.clone(), AppendOptions::new(Some(&env_left)))
+            .append(
+                merge_left.clone(),
+                AppendOptions::from_record(Some(&env_left)).unwrap(),
+            )
             .await
             .unwrap();
         let env_join = journal
-            .append(join.clone(), AppendOptions::new(Some(&env_right)))
+            .append(
+                join.clone(),
+                AppendOptions::from_record(Some(&env_right)).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -402,21 +423,33 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
         // If wall-clock timestamps were used as a concurrent tie-break, this would tend to order
         // right then left.
         journal
-            .append(right.clone(), AppendOptions::new(Some(&env_root)))
+            .append(
+                right.clone(),
+                AppendOptions::from_record(Some(&env_root)).unwrap(),
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
         let env_left = journal
-            .append(left.clone(), AppendOptions::new(Some(&env_root)))
+            .append(
+                left.clone(),
+                AppendOptions::from_record(Some(&env_root)).unwrap(),
+            )
             .await
             .unwrap();
 
         journal
-            .append(merge_left.clone(), AppendOptions::new(Some(&env_left)))
+            .append(
+                merge_left.clone(),
+                AppendOptions::from_record(Some(&env_left)).unwrap(),
+            )
             .await
             .unwrap();
         journal
-            .append(join.clone(), AppendOptions::new(Some(&env_left)))
+            .append(
+                join.clone(),
+                AppendOptions::from_record(Some(&env_left)).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -459,7 +492,10 @@ async fn test_reader_surface_parity() {
         let mut parent = None;
         for event in &events {
             let env = journal
-                .append(event.clone(), AppendOptions::new(parent.as_ref()))
+                .append(
+                    event.clone(),
+                    AppendOptions::from_record(parent.as_ref()).unwrap(),
+                )
                 .await
                 .unwrap();
             parent = Some(env);
@@ -554,7 +590,10 @@ async fn test_system_event_parity() {
         let mut parent = None;
         for event in &events {
             let env = journal
-                .append(event.clone(), AppendOptions::new(parent.as_ref()))
+                .append(
+                    event.clone(),
+                    AppendOptions::from_record(parent.as_ref()).unwrap(),
+                )
                 .await
                 .unwrap();
             parent = Some(env);

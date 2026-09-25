@@ -288,7 +288,9 @@ async fn cli_verify_exit_codes_follow_the_contract() {
                 .count(),
             3
         );
-        assert!(rows.iter().all(|r| r.version == 1));
+        assert!(rows
+            .iter()
+            .all(|r| r.version == obzenflow::journal::read::RUN_RECORD_VERSION));
         let mut positions = std::collections::BTreeMap::new();
         for row in &rows {
             if include_runtime {
@@ -1618,7 +1620,13 @@ mod hosted {
                 "reader_error" => {
                     let system = path.join("system.log");
                     let hidden = path.join("system.temporarily-unavailable");
-                    std::fs::rename(&system, &hidden).unwrap();
+                    let replacement = path.join("system.observer-copy");
+                    // Replace the observer's admitted inode atomically while
+                    // keeping the application's writer and live reads available.
+                    // Removing its required journal also fails the application.
+                    std::fs::copy(&system, &replacement).unwrap();
+                    std::fs::hard_link(&system, &hidden).unwrap();
+                    std::fs::rename(&replacement, &system).unwrap();
                     assert_eq!(wait(&mut viewer).await.code(), Some(4));
                     assert!(std::fs::read_to_string(&diagnostics)
                         .unwrap()

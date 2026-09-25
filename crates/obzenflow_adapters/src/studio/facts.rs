@@ -167,6 +167,11 @@ pub(super) fn frame(
 
 fn observation(envelope: &SystemJournalRecord) -> Observation<'_> {
     Observation {
+        commitment: Some(
+            obzenflow_core::event::CausalCommit::from_record(envelope)
+                .expect("admitted system commitment")
+                .reference,
+        ),
         timestamp_ms: envelope.envelope.provenance.event.timestamp,
         vector_clock: Some(&envelope.envelope.provenance.journal.vector_clock),
         capture: None,

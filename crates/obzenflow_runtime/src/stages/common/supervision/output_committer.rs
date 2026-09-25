@@ -133,9 +133,12 @@ pub(crate) fn commit_control_output(
         snapshot.project_emission(&event);
         event = snapshot.attach_to(event);
         let capture = instrumentation.journal_capture(None, vec![(1, true)]);
-        let written = journal
-            .append(event, AppendOptions::new(None).with_capture(capture))
-            .await?;
+        let written = crate::supervised_base::publication::append_inline(
+            &journal,
+            event,
+            AppendOptions::default().with_capture(capture),
+        )
+        .await?;
         instrumentation.record_emitted(&written.authored());
         Ok(written)
     })
@@ -163,12 +166,12 @@ pub(crate) fn commit_error_output(
         let emitted = u64::from(event.consumes_data_credit());
         event = snapshot.attach_to(event);
         let capture = instrumentation.journal_capture(None, vec![(emitted, true)]);
-        let written = journal
-            .append(
-                event,
-                AppendOptions::new(parent.as_ref()).with_capture(capture),
-            )
-            .await?;
+        let written = crate::supervised_base::publication::append_inline(
+            &journal,
+            event,
+            AppendOptions::from_record(parent.as_ref())?.with_capture(capture),
+        )
+        .await?;
         if written.consumes_data_credit() {
             instrumentation.record_error_journal_output_event(&written.authored());
         }
@@ -463,10 +466,12 @@ impl OutputCommitter<'_> {
             u64::from(options.count_output && event.consumes_data_credit()),
             intent.receives_runtime_data_enrichment(),
         )]);
-        let written = match self
-            .data_journal
-            .append(event, AppendOptions::new(parent).with_capture(capture))
-            .await
+        let written = match crate::supervised_base::publication::append_inline(
+            self.data_journal,
+            event,
+            AppendOptions::from_record(parent)?.with_capture(capture),
+        )
+        .await
         {
             Ok(written) => written,
             Err(error) => {
@@ -510,13 +515,12 @@ impl OutputCommitter<'_> {
                 u64::from(options.count_output && event.consumes_data_credit()),
                 true,
             )]);
-            let written = match committer
-                .data_journal
-                .append(
-                    event,
-                    AppendOptions::new(parent.as_ref()).with_capture(capture),
-                )
-                .await
+            let written = match crate::supervised_base::publication::append_inline(
+                committer.data_journal,
+                event,
+                AppendOptions::from_record(parent.as_ref())?.with_capture(capture),
+            )
+            .await
             {
                 Ok(written) => written,
                 Err(error) => {
@@ -700,14 +704,13 @@ impl OutputCommitter<'_> {
             reserve_direct_data_rows(self.backpressure_writer, data_count)?;
 
         let member_count = metadata.len();
-        let written = match self
-            .data_journal
-            .append_group(
-                group_id,
-                prepared,
-                AppendOptions::new(parent).with_capture(self.observation_capture(projections)),
-            )
-            .await
+        let written = match crate::supervised_base::publication::append_group_inline(
+            self.data_journal,
+            group_id,
+            prepared,
+            AppendOptions::from_record(parent)?.with_capture(self.observation_capture(projections)),
+        )
+        .await
         {
             Ok(written) => written,
             Err(error) => {

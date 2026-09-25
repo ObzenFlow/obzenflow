@@ -6,14 +6,12 @@ use chrono::Utc;
 use crc32fast::Hasher;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::types::DurationMs;
-use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
     ChainEvent, ChainEventFactory, JournalRecord, PipelineLifecycleEvent, SystemEvent,
     SystemPayload,
 };
-use obzenflow_core::id::{JournalId, SystemId};
+use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, RunManifestStage, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
     RUN_MANIFEST_FILENAME,
@@ -48,11 +46,11 @@ fn write_manifest(dir: &Path) {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
             is_effectful: Some(false),
-            stage_id: "stage_01H000000000000000000000000".to_string(),
+            stage_id: "stage_01H00000000000000000000000".to_string(),
             stage_logic_version: "1".to_string(),
-            data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
+            data_journal_file: "FiniteSource_returns_stage_01H00000000000000000000000.log"
                 .to_string(),
-            error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
+            error_journal_file: "FiniteSource_returns_error_stage_01H00000000000000000000000.log"
                 .to_string(),
             inbound: Vec::new(),
             ordered_delivery: true,
@@ -63,7 +61,7 @@ fn write_manifest(dir: &Path) {
         journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
 
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
-        flow_id: "flow_01H000000000000000000000000".to_string(),
+        flow_id: "flow_01H00000000000000000000000".to_string(),
         pipeline_writer_id: SystemId::new().into(),
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
@@ -94,25 +92,16 @@ async fn write_system_log_completed(dir: &Path) {
         }),
     );
 
-    let record = JournalRecord::commit_event(
-        event,
-        JournalProvenance {
-            journal_writer_id: JournalWriterId::from(JournalId::new()),
-            vector_clock: VectorClock::new(),
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-        },
-    )
-    .expect("valid record");
+    let record = JournalRecord::new(JournalWriterId::new(), event);
 
     write_framed_log_record(dir, &record).await;
 }
 
 async fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
-    let journal = DiskJournal::<SystemEvent>::with_owner(
+    let journal = DiskJournal::<SystemEvent>::with_owner_in_run(
         dir.join("system.log"),
         obzenflow_core::JournalOwner::system(SystemId::new()),
+        "flow_01H00000000000000000000000".parse().unwrap(),
     )
     .unwrap();
     journal
@@ -216,17 +205,7 @@ async fn archive_fixture_helpers_accept_current_schema() {
 fn write_released_legacy_retry_row(dir: &Path) {
     let writer_id = WriterId::from(obzenflow_core::StageId::new());
     let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));
-    let record = JournalRecord::commit_event(
-        event,
-        JournalProvenance {
-            journal_writer_id: JournalWriterId::from(JournalId::new()),
-            vector_clock: VectorClock::new(),
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-        },
-    )
-    .expect("valid record");
+    let record = JournalRecord::new(JournalWriterId::new(), event);
     let mut frame = serde_json::json!({
         "frame_kind": "record_v2",
         "record": record,
@@ -256,7 +235,7 @@ fn write_released_legacy_retry_row(dir: &Path) {
     bytes.extend_from_slice(&json_body);
     bytes.push(b'\n');
     std::fs::write(
-        dir.join("FiniteSource_returns_stage_01H000000000000000000000000.log"),
+        dir.join("FiniteSource_returns_stage_01H00000000000000000000000.log"),
         bytes,
     )
     .unwrap();
@@ -352,17 +331,7 @@ async fn open_requires_completed_status_by_default() {
         }),
     );
 
-    let record = JournalRecord::commit_event(
-        failed_event,
-        JournalProvenance {
-            journal_writer_id: JournalWriterId::from(JournalId::new()),
-            vector_clock: VectorClock::new(),
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-        },
-    )
-    .expect("valid record");
+    let record = JournalRecord::new(JournalWriterId::new(), failed_event);
 
     write_framed_log_record(dir.path(), &record).await;
 
@@ -400,17 +369,17 @@ async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
     let old_manifest = serde_json::json!({
         "journal_schema_version": "2.0",
         "obzenflow_version": OBZENFLOW_VERSION,
-        "flow_id": "flow_01H000000000000000000000000",
+        "flow_id": "flow_01H00000000000000000000000",
         "flow_name": "test_flow",
         "created_at": Utc::now(),
         "stages": {
             "returns": {
                 "dsl_var": "source",
                 "stage_type": "finite_source",
-                "stage_id": "stage_01H000000000000000000000000",
+                "stage_id": "stage_01H00000000000000000000000",
                 "stage_logic_version": "1",
-                "data_journal_file": "FiniteSource_returns_stage_01H000000000000000000000000.log",
-                "error_journal_file": "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
+                "data_journal_file": "FiniteSource_returns_stage_01H00000000000000000000000.log",
+                "error_journal_file": "FiniteSource_returns_error_stage_01H00000000000000000000000.log"
             }
         },
         "system_journal_file": "system.log"
@@ -534,7 +503,7 @@ async fn open_source_reader_errors_when_journal_missing() {
     assert!(matches!(err, ReplayError::MissingJournal { .. }));
 }
 
-/// Schema 5 manifests cannot relabel schema 4 frames, even as torn tails.
+/// Current manifests cannot relabel schema 4 frames, even as torn tails.
 #[tokio::test]
 async fn manifest_frame_mismatches_refuse_replay_inspect_export_and_verify() {
     use obzenflow_infra::journal::disk::inspect::{export_jsonl, inspect};
@@ -548,8 +517,23 @@ async fn manifest_frame_mismatches_refuse_replay_inspect_export_and_verify() {
                 dir.path().join("system.log")
             } else {
                 dir.path()
-                    .join("FiniteSource_returns_stage_01H000000000000000000000000.log")
+                    .join("FiniteSource_returns_stage_01H00000000000000000000000.log")
             };
+            if !system {
+                // Isolate the frame-epoch refusal behind a valid empty identity.
+                drop(
+                    DiskJournal::<ChainEvent>::with_owner_in_run(
+                        path.clone(),
+                        obzenflow_core::JournalOwner::stage(obzenflow_core::StageId::new()),
+                        obzenflow_infra::journal::disk::identity::read_identity(
+                            &dir.path().join("system.log"),
+                        )
+                        .unwrap()
+                        .run_id,
+                    )
+                    .unwrap(),
+                );
+            }
             // An old partial frame after valid current frames is still a schema mismatch.
             use std::io::Write;
             std::fs::OpenOptions::new()

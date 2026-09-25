@@ -259,7 +259,7 @@ pub(crate) mod tests {
         journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None)
+                obzenflow_core::journal::AppendOptions::default()
                     .with_capture(capture(captures.clone())),
             )
             .await
@@ -277,7 +277,7 @@ pub(crate) mod tests {
         journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None)
+                obzenflow_core::journal::AppendOptions::default()
                     .with_capture(capture(captures.clone())),
             )
             .await
@@ -290,7 +290,7 @@ pub(crate) mod tests {
                 .append_group(
                     "atomic",
                     vec![original.clone(); 3],
-                    obzenflow_core::journal::AppendOptions::new(None)
+                    obzenflow_core::journal::AppendOptions::default()
                         .with_capture(capture(captures.clone())),
                 )
                 .await
@@ -334,7 +334,7 @@ pub(crate) mod tests {
         let historical = journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None)
+                obzenflow_core::journal::AppendOptions::default()
                     .with_capture(JournalCapture::Historical),
             )
             .await
@@ -439,7 +439,7 @@ pub(crate) mod tests {
         let record = journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None).with_capture(
+                obzenflow_core::journal::AppendOptions::default().with_capture(
                     JournalCapture::Live(Some(Box::new(|_, _| panic!("diagnostic failure")))),
                 ),
             )

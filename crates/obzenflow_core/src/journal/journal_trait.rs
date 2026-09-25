@@ -72,7 +72,7 @@ where
     async fn append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError>;
 
     /// Atomically append a logical group of events.
@@ -90,7 +90,7 @@ where
         &self,
         group_id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         match events.len() {
             0 => Ok(Vec::new()),

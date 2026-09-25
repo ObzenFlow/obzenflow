@@ -751,7 +751,7 @@ impl Journal<SystemEvent> for ScriptedJournal {
     async fn append(
         &self,
         event: SystemEvent,
-        options: AppendOptions<'_, SystemEvent>,
+        options: AppendOptions<SystemEvent>,
     ) -> Result<SystemJournalRecord, JournalError> {
         self.inner.append(event, options).await
     }

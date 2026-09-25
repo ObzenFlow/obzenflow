@@ -150,6 +150,37 @@ fn run_release_witness(
         .expect("configuration-faithful payment release witness should complete");
     let run = only_run(journal_root);
     assert_release_manifest(&run, policy);
+    let mut admitted = vec![run.as_path()];
+    admitted.extend(replay_from);
+    let proof = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(obzenflow_infra::testing::causal::prove_archives(
+            &admitted, 100_000, 2_000_000,
+        ))
+        .expect("payment journals admit an exact causal proof");
+    assert!(proof.valid > 0);
+    assert!(
+        proof.chain_to_system > 0,
+        "chain inputs justify system publications"
+    );
+    assert!(
+        proof.system_to_chain > 0,
+        "system commands justify chain publications"
+    );
+    assert!(
+        proof.witnessed_contract_results > 0,
+        "contract results retain consumed chain evidence"
+    );
+    assert!(
+        proof.invalid.is_empty(),
+        "contradictory causal evidence: {:?}",
+        proof.invalid
+    );
+    assert!(
+        proof.unresolved.is_empty(),
+        "missing causal evidence: {:?}",
+        proof.unresolved
+    );
     run
 }
 

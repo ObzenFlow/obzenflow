@@ -467,14 +467,14 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
                 let parent = envelope.clone();
                 let instrumentation = ctx.instrumentation.clone();
                 publication::commit(async move {
-                    journal
-                        .append(
-                            error_event,
-                            AppendOptions::new(Some(&parent)).with_capture(
-                                instrumentation.journal_capture(None, vec![(0, false)]),
-                            ),
-                        )
-                        .await?;
+                    crate::supervised_base::publication::append_inline(
+                        &journal,
+                        error_event,
+                        AppendOptions::from_record(Some(&parent))
+                            .unwrap()
+                            .with_capture(instrumentation.journal_capture(None, vec![(0, false)])),
+                    )
+                    .await?;
                     instrumentation.record_error(ErrorKind::Unknown);
                     Ok(())
                 })

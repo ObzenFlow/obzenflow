@@ -438,7 +438,7 @@ async fn handle_reference_envelope<
                         crate::supervised_base::publication::append(
                             &ctx.error_journal,
                             error_event,
-                            AppendOptions::new(Some(&envelope)),
+                            AppendOptions::from_record(Some(&envelope))?,
                         )
                         .await
                         .map_err(|e| format!("Failed to write join error event: {e}"))?;
@@ -741,11 +741,7 @@ async fn handle_stream_envelope<
                 return Ok(Some(EventLoopDirective::Continue));
             }
 
-            let mut merged_parent = envelope.clone();
-            CausalOrderingService::update_with_parent(
-                &mut merged_parent.envelope.provenance.journal.vector_clock,
-                &ctx.reference_high_water_clock,
-            );
+            let merged_parent = envelope.clone();
 
             ctx.instrumentation
                 .in_flight_count
@@ -842,7 +838,7 @@ async fn handle_stream_envelope<
                         crate::supervised_base::publication::append(
                             &ctx.error_journal,
                             error_event,
-                            AppendOptions::new(Some(&merged_parent)),
+                            AppendOptions::from_record(Some(&merged_parent))?,
                         )
                         .await
                         .map_err(|e| format!("Failed to write join error event: {e}"))?;
@@ -1218,6 +1214,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         .into_iter()
         .map(
             |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event,
                 scope,
             },
@@ -1279,7 +1276,11 @@ mod tests {
         let mut clock = VectorClock::new();
         for (writer, seq) in entries {
             for _ in 0..*seq {
-                CausalOrderingService::increment(&mut clock, writer);
+                CausalOrderingService::increment(
+                    &mut clock,
+                    &crate::testing::causal_fixture::coordinate(writer),
+                )
+                .unwrap();
             }
         }
         clock

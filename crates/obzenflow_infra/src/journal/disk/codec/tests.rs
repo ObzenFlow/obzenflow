@@ -3,8 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::provenance::{JournalProvenance, RuntimeProvenance};
-use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::provenance::RuntimeProvenance;
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
 use obzenflow_core::{EventId, JournalWriterId, StageId, WriterId};
 use serde_json::{json, Value};
@@ -21,17 +20,10 @@ fn record() -> JournalRecord<ChainPayload> {
         }),
     );
     event.runtime = Some(RuntimeProvenance::default());
-    JournalRecord::commit_event(
-        event,
-        JournalProvenance {
-            journal_writer_id: JournalWriterId::new(),
-            vector_clock: VectorClock::new(),
-            timestamp: "2037-01-02T03:04:05.123456789Z".parse().unwrap(),
-            journal_group_id: None,
-            journal_group_member: None,
-        },
-    )
-    .unwrap()
+    let mut record = JournalRecord::new(JournalWriterId::new(), event);
+    record.envelope.provenance.journal.timestamp =
+        "2037-01-02T03:04:05.123456789Z".parse().unwrap();
+    record
 }
 
 fn persist(
@@ -317,6 +309,90 @@ fn representative_records_preserve_all_fields_and_attribute_complete_origin_cost
 }
 
 #[test]
+fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
+    use obzenflow_core::event::{CausalCommit, CausalCoordinate, CausalFrontier};
+    use obzenflow_core::FlowId;
+
+    for participants in [1usize, 8, 32] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("causal-growth.log");
+        let store = DefinitionStore::default();
+        let run = FlowId::new();
+        let mut inputs = (0..participants)
+            .map(|_| {
+                CausalCommit::prepare(
+                    run,
+                    CausalCoordinate::new(JournalWriterId::new(), StageId::new().into()),
+                    EventId::new(),
+                    None,
+                    &CausalFrontier::default(),
+                )
+                .unwrap()
+                .0
+            })
+            .collect::<Vec<_>>();
+        let mut original = record();
+        let destination = original.causal_coordinate();
+        let mut frontier = CausalFrontier::default();
+        let mut previous = None;
+        let mut total = 0;
+        let mut early_max = 0;
+        for index in 0..512 {
+            // Repeated fan-in advances every independent input; the fold must
+            // replace its evidence rather than keep a history of contributors.
+            for input in &mut inputs {
+                *input = CausalCommit::prepare(
+                    run,
+                    input.reference.coordinate(),
+                    EventId::new(),
+                    Some(input),
+                    &CausalFrontier::default(),
+                )
+                .unwrap()
+                .0;
+                frontier.merge(&input.frontier()).unwrap();
+            }
+            original.envelope.provenance.event.id = EventId::new();
+            let (commitment, witnesses) = CausalCommit::prepare(
+                run,
+                destination,
+                *original.id(),
+                previous.as_ref(),
+                &frontier,
+            )
+            .unwrap();
+            let journal = &mut original.envelope.provenance.journal;
+            journal.run_id = run;
+            journal.vector_clock = commitment.clock.clone();
+            journal.causal = witnesses;
+            let (offset, bytes) = persist(&path, &original, store.clone());
+            let restored = decode(&path, offset, &bytes).unwrap();
+            assert_eq!(
+                serde_json::to_value(&restored).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+            total += bytes.len();
+            if index < 32 {
+                early_max = early_max.max(bytes.len());
+            }
+            assert!(bytes.len() <= early_max + 16 * (participants + 1));
+            assert!(bytes.len() < 2048 + 256 * (participants + 1));
+            frontier.merge(&commitment.frontier()).unwrap();
+            // These are the only variable-sized fields retained by a frontier:
+            // fixed-width counter/coordinate and witness/coordinate map entries.
+            assert_eq!(frontier.clock().clocks.len(), participants + 1);
+            assert_eq!(frontier.witness_count(), participants + 1);
+            assert!(
+                original.envelope.provenance.journal.causal.witnesses.len() <= participants + 1
+            );
+            previous = Some(commitment);
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), total as u64);
+        assert!(total < 512 * (2048 + 256 * (participants + 1)));
+    }
+}
+
+#[test]
 fn provenance_growth_follows_retained_relationships_without_expanding_ancestors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("growth.log");
@@ -430,10 +506,13 @@ fn complete_observation_record() -> JournalRecord<ChainPayload> {
     let mut snapshot_capture = capture.clone();
     snapshot_capture["capture_seq"] = json!(u64::MAX - 1);
     snapshot_capture["observer"] = author.clone();
-    let clock = json!({"clocks":{"independent-writer": u64::MAX, "zero-writer":0}});
+    let mut clock = value["envelope"]["provenance"]["journal"]["vector_clock"].clone();
+    clock["entries"].as_array_mut().unwrap().push(json!({
+        "journal_writer_id": JournalWriterId::new(), "writer_id": observer, "sequence": u64::MAX
+    }));
     value["envelope"]["provenance"]["journal"]["vector_clock"] = clock.clone();
     let mut different_clock = clock.clone();
-    different_clock["clocks"]["independent-writer"] = json!(u64::MAX - 1);
+    different_clock["entries"][1]["sequence"] = json!(u64::MAX - 1);
     let packet = json!({
         "capture": capture,
         "processing_time": u64::MAX,

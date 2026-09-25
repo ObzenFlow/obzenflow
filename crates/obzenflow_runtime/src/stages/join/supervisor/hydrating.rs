@@ -264,6 +264,7 @@ pub(super) async fn dispatch_hydrating<
                         .await?;
                         ctx.pending_outputs.extend(outputs.into_iter().map(|event| {
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                causal: crate::supervised_base::publication::capture(),
                                 event,
                                 scope,
                             }

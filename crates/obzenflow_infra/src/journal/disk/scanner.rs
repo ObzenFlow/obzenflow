@@ -168,12 +168,9 @@ pub(crate) async fn read_frame_async<B: tokio::io::AsyncBufRead + Unpin>(
 mod tests {
     use super::*;
     use crate::journal::disk::log_record::{serialize_record, LogRecord};
-    use chrono::Utc;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-    use obzenflow_core::event::provenance::JournalProvenance;
-    use obzenflow_core::event::vector_clock::VectorClock;
     use obzenflow_core::event::JournalRecord;
-    use obzenflow_core::{JournalId, JournalWriterId, StageId, WriterId};
+    use obzenflow_core::{JournalWriterId, StageId, WriterId};
     use serde_json::json;
     use std::io::Cursor;
     use std::path::Path;
@@ -184,17 +181,7 @@ mod tests {
             "test.event",
             json!({ "k": "v\n\u{0}🙂" }),
         );
-        JournalRecord::commit_event(
-            event,
-            JournalProvenance {
-                journal_writer_id: JournalWriterId::from(JournalId::new()),
-                vector_clock: VectorClock::new(),
-                timestamp: Utc::now(),
-                journal_group_id: None,
-                journal_group_member: None,
-            },
-        )
-        .unwrap()
+        JournalRecord::new(JournalWriterId::new(), event)
     }
     fn classify(bytes: &[u8]) -> ParseOutcome<ChainEvent> {
         classify_frame(bytes, &mut Decoder::new(Path::new("fixture.log")), 0)

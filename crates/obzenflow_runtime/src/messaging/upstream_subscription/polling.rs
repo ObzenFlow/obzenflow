@@ -424,6 +424,9 @@ where
             catch_up,
             orders_by_own_seq,
         } = head;
+        if let Err(error) = crate::supervised_base::publication::observe_record(&envelope) {
+            return PollResult::Error(Box::new(error));
+        }
         // FLOWIP-120n F18: a delivered positional row advances the inherited
         // key for this reader's later re-authored control heads.
         if orders_by_own_seq {

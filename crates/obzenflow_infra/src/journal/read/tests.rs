@@ -26,23 +26,30 @@ impl Run {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let pipeline = SystemId::new();
+        let run_id = FlowId::new();
         let stage = StageId::new();
-        let system = DiskJournal::with_owner(
+        let system = DiskJournal::with_owner_in_run(
             dir.path().join("system.log"),
             JournalOwner::system(pipeline),
+            run_id,
         )
         .unwrap();
-        let data = DiskJournal::with_owner(dir.path().join("data.log"), JournalOwner::stage(stage))
-            .unwrap();
-        let _error = DiskJournal::<ChainEvent>::with_owner(
+        let data = DiskJournal::with_owner_in_run(
+            dir.path().join("data.log"),
+            JournalOwner::stage(stage),
+            run_id,
+        )
+        .unwrap();
+        let _error = DiskJournal::<ChainEvent>::with_owner_in_run(
             dir.path().join("error.log"),
             JournalOwner::stage(stage),
+            run_id,
         )
         .unwrap();
         let manifest = RunManifest {
             journal_schema_version: JOURNAL_SCHEMA_VERSION.into(),
             obzenflow_version: env!("CARGO_PKG_VERSION").into(),
-            flow_id: FlowId::new().to_string(),
+            flow_id: run_id.to_string(),
             pipeline_writer_id: pipeline.into(),
             flow_name: "reader_test".into(),
             created_at: chrono::Utc::now(),
@@ -179,7 +186,10 @@ async fn snapshot_cuts_are_fixed_and_transfer_unread_atomic_members_without_dupl
     );
     assert!(tail.progress().outcome.is_none());
     let json = serde_json::to_value(&first).unwrap();
-    assert_eq!(json["version"], 1);
+    assert_eq!(
+        json["version"],
+        obzenflow_core::journal::read::RUN_RECORD_VERSION
+    );
     assert!(json["record"]["envelope"].is_object());
     assert!(json["record"]["payload"].is_object());
     let decoded: RunRecord = serde_json::from_value(json).unwrap();
@@ -418,7 +428,7 @@ async fn terminal_and_drain_cannot_settle_over_an_incomplete_stage_group() {
 #[tokio::test]
 async fn admission_requires_all_files_current_schema_and_pipeline_writer() {
     let mut run = Run::new();
-    for version in ["5.0", "6.0", "8.0"] {
+    for version in ["6.0", "7.0", "9.0"] {
         run.manifest.journal_schema_version = version.into();
         run.save_manifest();
         assert!(open_disk_run(run.dir.path()).await.is_err());

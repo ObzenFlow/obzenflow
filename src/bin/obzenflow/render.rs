@@ -172,14 +172,7 @@ impl Renderer {
                 run.flow_id,
                 if follow { "follow" } else { "snapshot" }
             )?;
-            let stages = self
-                .context
-                .stages
-                .iter()
-                .map(|stage| safe_text(&stage.key))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(output, "{}", self.dim(&format!("Clocks ⟨{stages}⟩")))?;
+            writeln!(output, "{}", self.dim("Clocks ⟨author@journal:sequence⟩"))?;
             writeln!(
                 output,
                 "{}",
@@ -271,6 +264,14 @@ impl Renderer {
                 let (indices, closed) = self.group_indices(index);
                 let parents = parent_ids(record);
                 if (force || closed)
+                    && (force
+                        || !(self.explain || self.full)
+                        || indices.iter().all(|index| {
+                            !matches!(
+                                self.context.causal_proof(&self.pending[*index]),
+                                obzenflow_core::journal::causal::CausalProof::Unresolved { .. }
+                            )
+                        }))
                     && self.context.parents_available(record)
                     && parents.iter().all(|parent| !pending_ids.contains(parent))
                 {
@@ -360,6 +361,18 @@ impl Renderer {
                 writeln!(output, "{}", self.record_text(record, &line, false))?;
             }
             writeln!(output, "{}", self.record_clock(record))?;
+            if self.explain || self.full {
+                writeln!(
+                    output,
+                    "causal proof: {}",
+                    serde_json::to_string(&self.context.causal_proof(record))?
+                )?;
+                writeln!(
+                    output,
+                    "committed witnesses: {}",
+                    serde_json::to_string(record.causal_witnesses())?
+                )?;
+            }
             if let Some(message) = fact_error(record) {
                 for line in wrap_fields(
                     &[format!("processing error: {}", safe_text(message))],
@@ -457,18 +470,18 @@ impl Renderer {
             .into_iter()
             .map(|component| {
                 let digits = component.value.to_string();
-                let digits = if component.writer == writer
-                    && values.contains_key(component.writer)
+                let digits = if component.coordinate.writer_id.to_string() == writer
+                    && component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id
                     && !runtime
                 {
                     self.record_text(record, &digits, true)
                 } else {
                     self.dim(&digits)
                 };
-                match component.name {
-                    Some(name) => format!("{}{digits}", self.dim(&format!("{}:", safe_text(name)))),
-                    None => digits,
-                }
+                format!(
+                    "{}{digits}",
+                    self.dim(&format!("{}:", safe_text(&component.name)))
+                )
             })
             .collect::<Vec<_>>();
         format!(

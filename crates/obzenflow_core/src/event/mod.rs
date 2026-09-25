@@ -7,6 +7,7 @@
 //! This module contains all event-related domain types.
 
 // Core modules
+pub mod causal;
 pub mod chain_event;
 pub mod constants;
 pub mod envelope;
@@ -28,6 +29,10 @@ pub mod status;
 pub mod utils;
 
 // Re-export main types at root level for convenience
+pub use causal::{
+    CausalCommit, CausalCoordinate, CausalError, CausalFrontier, CausalWitnesses,
+    CommittedCausalRef,
+};
 pub use chain_event::{
     ChainEvent, ChainEventFactory, ChainPayload, CircuitBreakerAttemptSettledEventParams,
     CircuitBreakerOpenedEventParams, CircuitBreakerRecoveryCompletedEventParams,

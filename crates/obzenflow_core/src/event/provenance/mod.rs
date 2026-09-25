@@ -67,8 +67,10 @@ pub struct SystemEventProvenance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JournalProvenance {
+    pub run_id: crate::FlowId,
     pub journal_writer_id: JournalWriterId,
     pub vector_clock: VectorClock,
+    pub causal: crate::event::CausalWitnesses,
     pub timestamp: DateTime<Utc>,
     pub journal_group_id: Option<String>,
     pub journal_group_member: Option<JournalGroupMember>,

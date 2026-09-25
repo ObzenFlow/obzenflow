@@ -388,8 +388,12 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
 
     // FLOWIP-071h: drain-time outputs must still preserve ancestry from both contributors,
     // including the zero-output edge case (no prior output to "carry" reference ancestry).
-    let reference_key = reference_writer.to_string();
-    let stream_key = stream_writer.to_string();
+    let reference_key = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        reference_writer,
+    );
+    let stream_key =
+        obzenflow_core::event::CausalCoordinate::new((*stream_journal.id()).into(), stream_writer);
     assert_ne!(
         drain_env
             .envelope
@@ -598,9 +602,16 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
 
     // Over-claim is intentional under the conservative interim: output depends on k1 only,
     // but merges the reference high-water clock, which includes writer_b.
-    let key_a = reference_writer_a.to_string();
-    let key_b = reference_writer_b.to_string();
-    let key_stream = stream_writer.to_string();
+    let key_a = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        reference_writer_a,
+    );
+    let key_b = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        reference_writer_b,
+    );
+    let key_stream =
+        obzenflow_core::event::CausalCoordinate::new((*stream_journal.id()).into(), stream_writer);
     assert_ne!(
         matched_env
             .envelope
@@ -803,8 +814,12 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
         .collect();
     assert_eq!(out_envs.len(), 3, "expected 3 fan-out outputs");
 
-    let reference_key = reference_writer.to_string();
-    let stream_key = stream_writer.to_string();
+    let reference_key = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        reference_writer,
+    );
+    let stream_key =
+        obzenflow_core::event::CausalCoordinate::new((*stream_journal.id()).into(), stream_writer);
     for env in out_envs {
         assert_ne!(
             env.envelope
@@ -1029,8 +1044,12 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
         .expect("expected an error-journal entry");
 
     // FLOWIP-071h: error journal writes derived from an input must use the same merged parent.
-    let reference_key = reference_writer.to_string();
-    let stream_key = stream_writer.to_string();
+    let reference_key = obzenflow_core::event::CausalCoordinate::new(
+        (*reference_journal.id()).into(),
+        reference_writer,
+    );
+    let stream_key =
+        obzenflow_core::event::CausalCoordinate::new((*stream_journal.id()).into(), stream_writer);
     assert_ne!(
         error_env
             .envelope

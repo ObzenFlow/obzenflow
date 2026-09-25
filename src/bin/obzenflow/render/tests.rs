@@ -9,6 +9,22 @@ fn id(value: u64) -> String {
     format!("{value:026X}")
 }
 
+fn coordinate(stage: u64) -> obzenflow_core::event::CausalCoordinate {
+    serde_json::from_value(
+        json!({"journal_writer_id":id(stage),"writer_id":{"type":"Stage","id":id(stage)}}),
+    )
+    .unwrap()
+}
+
+fn displayed_clock(stage: u64, sequence: u64) -> String {
+    let name = if stage == 1 {
+        "thermometer"
+    } else {
+        "classify"
+    };
+    format!("⟨{name}@journal_{}:{sequence}⟩", id(stage))
+}
+
 fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
     let (key, stage_type, kind, event_type) = if stage == 1 {
         (
@@ -26,7 +42,7 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
         )
     };
     serde_json::from_value(json!({
-        "version": 1,
+        "version": 2,
         "run": {"flow_id": id(10), "pipeline_writer_id": {"type":"System", "id":id(11)}},
         "journal": {"id":id(stage), "kind":"data", "stage":{"key":key, "id":id(stage), "stage_type":stage_type}},
         "position":event,
@@ -42,7 +58,9 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
                 },
                 "journal": {
                     "journal_writer_id":id(stage),
-                    "vector_clock":{"clocks":{format!("writer_stage_{}",id(stage)):event}},
+                    "run_id":id(10),
+                    "causal":{"previous":{"run_id":id(10),"journal_writer_id":id(stage),"writer_id":{"type":"Stage","id":id(stage)},"sequence":event-1,"event_id":id(event-1)},"witnesses":[]},
+                    "vector_clock":{"entries":[{"journal_writer_id":id(stage),"writer_id":{"type":"Stage","id":id(stage)},"sequence":event}]},
                     "timestamp":"2026-09-23T00:00:00Z", "journal_group_id":null, "journal_group_member":null
                 }
             }},
@@ -202,7 +220,7 @@ fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() 
     assert!(!text.contains(&format!("\n{progress_type} ← ")));
     assert!(text.contains(&format!("sensor.classified.v1 ← classify({progress_type})")));
     assert!(
-        !text.contains("⟨0,102⟩"),
+        !text.contains(&displayed_clock(2, 102)),
         "the hidden input clock is not repeated"
     );
     assert!(!text.contains("unresolved"));
@@ -398,17 +416,24 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
-        text.contains("SOURCE\nsensor.reading.v1 ← thermometer()\n⟨100,0⟩"),
+        text.contains(&format!(
+            "SOURCE\nsensor.reading.v1 ← thermometer()\n{}",
+            displayed_clock(1, 100)
+        )),
         "{text}"
     );
     assert!(
-        text.contains("TRANSFORM\nsensor.classified.v1 ← classify(sensor.reading.v1)\n⟨0,101⟩"),
+        text.contains(&format!(
+            "TRANSFORM\nsensor.classified.v1 ← classify(sensor.reading.v1)\n{}",
+            displayed_clock(2, 101)
+        )),
         "{text}"
     );
     assert!(
-        text.contains(
-            "TRANSFORM\nsensor.cooling_requested.v1 ← classify(sensor.reading.v1)\n⟨0,102⟩"
-        ),
+        text.contains(&format!(
+            "TRANSFORM\nsensor.cooling_requested.v1 ← classify(sensor.reading.v1)\n{}",
+            displayed_clock(2, 102)
+        )),
         "{text}"
     );
     let clocks: Vec<_> = text
@@ -416,8 +441,15 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         .map(str::trim_start)
         .filter(|line| line.starts_with('⟨'))
         .collect();
-    assert_eq!(clocks, ["⟨100,0⟩", "⟨0,101⟩", "⟨0,102⟩"]);
-    let last_clock = text.find("⟨0,102⟩").unwrap();
+    assert_eq!(
+        clocks,
+        [
+            displayed_clock(1, 100),
+            displayed_clock(2, 101),
+            displayed_clock(2, 102)
+        ]
+    );
+    let last_clock = text.find(&displayed_clock(2, 102)).unwrap();
     let last_fact = text
         .find("sensor.cooling_requested.v1 ← classify(sensor.reading.v1)")
         .unwrap();
@@ -503,6 +535,49 @@ fn continuous_stream_with_missing_parents_has_bounded_pending_rows() {
 }
 
 #[test]
+fn explanation_resolves_full_commitments_when_a_cross_journal_witness_arrives_later() {
+    use obzenflow_core::event::{CausalCommit, CausalFrontier};
+
+    let mut source = fact(1, 100, &[], json!({}));
+    let RunRecordData::Chain(row) = &mut source.record else {
+        unreachable!()
+    };
+    row.envelope.provenance.journal.causal = Default::default();
+    row.envelope
+        .provenance
+        .journal
+        .vector_clock
+        .clocks
+        .insert(coordinate(1), 1);
+    let input = CausalFrontier::from_record(row).unwrap();
+    let mut child = fact(2, 101, &[], json!({}));
+    let RunRecordData::Chain(row) = &mut child.record else {
+        unreachable!()
+    };
+    let (commitment, witnesses) =
+        CausalCommit::prepare(child.run.flow_id, coordinate(2), *row.id(), None, &input).unwrap();
+    row.envelope.provenance.journal.vector_clock = commitment.clock;
+    row.envelope.provenance.journal.causal = witnesses;
+
+    let mut renderer = renderer();
+    renderer.explain = true;
+    renderer.full = true;
+    let mut output = Vec::new();
+    renderer.record(&mut output, child).unwrap();
+    assert!(
+        output.is_empty(),
+        "bounded buffering can still resolve this witness"
+    );
+    renderer.record(&mut output, source).unwrap();
+    renderer.flush_pending(&mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches("\"status\":\"valid\"").count(), 2, "{text}");
+    assert!(text.contains("\"resolved\":[{\"reference\":"), "{text}");
+    assert!(text.contains("\"merged\":{\"entries\":[{"), "{text}");
+    assert!(!text.contains("\"status\":\"unresolved\""), "{text}");
+}
+
+#[test]
 fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
     let mut renderer = renderer();
     let mut source = fact(1, 100, &[], json!({}));
@@ -512,7 +587,7 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
             .journal
             .vector_clock
             .clocks
-            .insert("another_writer".into(), 12);
+            .insert(coordinate(3), 12);
     }
     let mut output = Vec::new();
     renderer.record(&mut output, source).unwrap();
@@ -521,7 +596,15 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
         .unwrap();
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
-    assert!(text.contains("⟨100,0,another_writer:12⟩"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "⟨thermometer@journal_{}:100,{}@journal_{}:12⟩",
+            id(1),
+            coordinate(3).writer_id,
+            id(3)
+        )),
+        "{text}"
+    );
     assert!(text.contains("input not recorded"), "{text}");
 }
 
@@ -555,13 +638,7 @@ fn compact_clock_rows_follow_output_equations_without_truncating_counts() {
         .collect();
     assert_eq!(
         clocks,
-        [
-            "⟨9,0⟩",
-            "⟨10,0⟩",
-            "⟨99,0⟩",
-            "⟨100,0⟩",
-            "⟨18446744073709551615,0⟩"
-        ]
+        [9, 10, 99, 100, u64::MAX].map(|sequence| displayed_clock(1, sequence))
     );
     assert_eq!(
         text.matches('⟨').count(),
@@ -581,7 +658,7 @@ fn writer_highlight_uses_recorded_identity_and_row_color_instead_of_counter_size
             .journal
             .vector_clock
             .clocks
-            .insert(format!("writer_stage_{}", id(2)), 999);
+            .insert(coordinate(2), 999);
     }
     let mut transform = fact(2, 10, &[9], json!({"status":"too_hot"}));
     if let RunRecordData::Chain(row) = &mut transform.record {
@@ -590,7 +667,7 @@ fn writer_highlight_uses_recorded_identity_and_row_color_instead_of_counter_size
             .journal
             .vector_clock
             .clocks
-            .insert(format!("writer_stage_{}", id(1)), 100);
+            .insert(coordinate(1), 100);
     }
     let mut output = Vec::new();
     renderer.record(&mut output, source).unwrap();

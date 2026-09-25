@@ -283,6 +283,11 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
         expected["stage_id"] = json!(stage.to_string());
         expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
         expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
+        expected["commitment"] = json!(
+            obzenflow_core::event::CausalCommit::from_record(&envelope)
+                .unwrap()
+                .reference
+        );
         assert_eq!(payload(&live), expected);
         assert_eq!(live.event.as_deref(), Some("stage_lifecycle"));
         assert_eq!(
@@ -385,8 +390,10 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
             expected.clone(),
         );
         let stage = StageId::new();
-        let mut stage_envelope = envelope;
-        stage_envelope.envelope.provenance.event.writer_id = WriterId::from(stage);
+        let journal = envelope.envelope.provenance.journal.journal_writer_id;
+        let mut stage_event = envelope.into_authored();
+        stage_event.writer_id = WriterId::from(stage);
+        let stage_envelope = JournalRecord::new(journal, stage_event);
         let mut expected = expected;
         expected["stage_id"] = json!(stage.to_string());
         assert_fact_payload(
@@ -435,6 +442,11 @@ fn assert_fact_payload(
     }
     expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
     expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
+    expected["commitment"] = json!(
+        obzenflow_core::event::CausalCommit::from_record(&envelope)
+            .unwrap()
+            .reference
+    );
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let frames = projection.project(&envelope, 123);
     assert_eq!(frames.len(), 1);

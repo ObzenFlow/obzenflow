@@ -527,6 +527,7 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
 
 #[derive(Debug)]
 struct CreditCheckingJournal {
+    records: Mutex<Vec<JournalRecord<ChainPayload>>>,
     id: JournalId,
     owner: JournalOwner,
     writer: BackpressureWriter,
@@ -560,6 +561,7 @@ impl CreditCheckingJournal {
             owner,
             writer,
             expected_credit_at_append,
+            records: Mutex::new(Vec::new()),
             appended: Mutex::new(Vec::new()),
             gate: None,
         }
@@ -587,7 +589,7 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         let events = events
             .into_iter()
@@ -599,16 +601,26 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
             self.expected_credit_at_append
         );
         self.appended.lock().unwrap().extend(events.clone());
-        Ok(events
-            .into_iter()
-            .map(|event| JournalRecord::new(JournalWriterId::from(self.id), event))
-            .collect())
+        let mut records = self.records.lock().unwrap();
+        let mut written = Vec::new();
+        for event in events {
+            let record =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+            options
+                .frontier
+                .merge(&obzenflow_core::event::CausalFrontier::from_record(
+                    &record,
+                )?)?;
+            records.push(record.clone());
+            written.push(record);
+        }
+        Ok(written)
     }
 
     async fn append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let credit = self.writer.min_downstream_credit();
@@ -633,7 +645,10 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
             .expect("CreditCheckingJournal: poisoned lock")
             .push(event.clone());
 
-        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
+        let mut records = self.records.lock().unwrap();
+        let record = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(record.clone());
+        Ok(record)
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -687,6 +702,7 @@ impl<T: JournalEvent> JournalReader<T> for NoopReader<T> {
 
 #[derive(Debug)]
 struct NoopJournal<T: JournalEvent> {
+    records: Mutex<Vec<JournalRecord<T::Payload>>>,
     id: JournalId,
     owner: JournalOwner,
     _marker: std::marker::PhantomData<T>,
@@ -699,6 +715,7 @@ impl<T: JournalEvent> NoopJournal<T> {
             id: JournalId::new(),
             owner,
             _marker: std::marker::PhantomData,
+            records: Mutex::new(Vec::new()),
             append_gate: None,
         }
     }
@@ -717,14 +734,17 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
     async fn append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         if let Some(gate) = &self.append_gate {
             gate.entered.notify_one();
             gate.release.notified().await;
         }
-        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
+        let mut records = self.records.lock().unwrap();
+        let record = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(record.clone());
+        Ok(record)
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -900,6 +920,7 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     let output_contract = output_contract_for_event_type("x");
     pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "x", json!({"n": 1})),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1157,6 +1178,7 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                     );
                     drain_one_pending(
                         super::backpressure_drain::PendingOutput {
+                            causal: crate::supervised_base::publication::capture(),
                             event: ChainEventFactory::data_event(
                                 WriterId::from(stage_id),
                                 "x",
@@ -1269,6 +1291,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1328,6 +1351,7 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1384,6 +1408,7 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let err = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1445,6 +1470,7 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1513,6 +1539,7 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
     let mut pending_outputs = VecDeque::new();
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1603,6 +1630,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     let mut pending_outputs = VecDeque::new();
     let error = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1649,6 +1677,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
 
     let error = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1709,6 +1738,7 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1789,6 +1819,7 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 1})),
             scope,
         },
@@ -1854,6 +1885,7 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     // output at still-zero live credit also commits without blocking.
     let outcome2 = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 2})),
             scope,
         },
@@ -1935,6 +1967,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     for n in 0..3 {
         let outcome = drain_one_pending(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": n })),
                 scope: MiddlewareExecutionScope::ResumeHandler,
             },
@@ -1970,6 +2003,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     // against a window of 2), returns BackedOff, and anchors the stall clock.
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": 99 })),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
