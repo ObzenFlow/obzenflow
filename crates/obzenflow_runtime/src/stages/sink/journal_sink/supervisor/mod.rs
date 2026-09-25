@@ -382,6 +382,11 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
     }
 }
 
+impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::cleanup::HandlerSupervisedCleanup for JournalSinkSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
 impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for JournalSinkSupervisor<H>

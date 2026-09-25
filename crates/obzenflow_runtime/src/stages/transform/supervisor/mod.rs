@@ -342,6 +342,11 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
     }
 }
 
+impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::cleanup::HandlerSupervisedCleanup for TransformSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
 impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for TransformSupervisor<H>

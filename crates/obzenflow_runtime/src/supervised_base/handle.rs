@@ -426,38 +426,6 @@ where
     ) -> SupervisorTask {
         self.spawn(move || super::HandlerSupervisedExt::run(supervisor, initial_state, context))
     }
-
-    /// Run the shared supervisor and settle its owned resources before task completion.
-    /// Cleanup is runtime-only and cannot replace the selected runner.
-    pub(crate) fn spawn_handler_supervised_with_cleanup(
-        self,
-        mut supervisor: S,
-        initial_state: S::State,
-        mut context: S::Context,
-    ) -> SupervisorTask
-    where
-        S: super::handler_supervised::HandlerSupervisedCleanup,
-    {
-        self.spawn(move || async move {
-            let result = super::handler_supervised::run_handler_supervised(
-                &mut supervisor,
-                initial_state,
-                &mut context,
-            )
-            .await;
-            let cleanup = supervisor.cleanup_after_run(&context).await;
-            if let Err(error) = &cleanup {
-                tracing::warn!(
-                    supervisor = %supervisor.name(),
-                    stage_id = %supervisor.stage_id(),
-                    error = %error,
-                    "supervisor cleanup evidence failed"
-                );
-            }
-            // Await cleanup even after runner failure and preserve the primary error.
-            result.and(cleanup)
-        })
-    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

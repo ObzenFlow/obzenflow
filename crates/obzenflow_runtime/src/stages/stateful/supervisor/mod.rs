@@ -382,6 +382,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
     }
 }
 
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::cleanup::HandlerSupervisedCleanup for StatefulSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
 impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for StatefulSupervisor<H>

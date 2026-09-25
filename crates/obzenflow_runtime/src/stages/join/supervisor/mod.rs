@@ -427,6 +427,11 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
     }
 }
 
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    crate::supervised_base::cleanup::HandlerSupervisedCleanup for JoinSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
 impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for JoinSupervisor<H>

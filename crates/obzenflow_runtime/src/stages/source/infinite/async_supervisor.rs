@@ -1083,8 +1083,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
 #[async_trait::async_trait]
 impl<H: UnifiedAsyncInfiniteSourceHandler + 'static>
-    crate::supervised_base::handler_supervised::HandlerSupervisedCleanup
-    for AsyncInfiniteSourceSupervisor<H>
+    crate::supervised_base::cleanup::HandlerSupervisedCleanup for AsyncInfiniteSourceSupervisor<H>
 {
     async fn cleanup_after_run(
         &mut self,

@@ -385,6 +385,11 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
     }
 }
 
+impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static>
+    crate::supervised_base::cleanup::HandlerSupervisedCleanup for FiniteSourceSupervisor<H>
+{
+}
+
 #[async_trait::async_trait]
 impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
     for FiniteSourceSupervisor<H>

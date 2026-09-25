@@ -133,12 +133,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::new(&supervisor_name)
-            .spawn_handler_supervised_with_cleanup(
-                supervisor,
-                InfiniteSourceState::<H>::Created,
-                context,
-            );
+        let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
+            supervisor,
+            InfiniteSourceState::<H>::Created,
+            context,
+        );
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

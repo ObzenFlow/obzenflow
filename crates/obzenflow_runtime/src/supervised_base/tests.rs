@@ -207,6 +207,8 @@ impl Supervisor for TestHandlerSupervisor {
     }
 }
 
+impl crate::supervised_base::cleanup::HandlerSupervisedCleanup for TestHandlerSupervisor {}
+
 #[async_trait::async_trait]
 impl HandlerSupervised for TestHandlerSupervisor {
     type Handler = ();
@@ -512,6 +514,11 @@ impl ExternalEventPolicy for ExternalEventTestHandlerSupervisor {
             state,
         )
     }
+}
+
+impl crate::supervised_base::cleanup::HandlerSupervisedCleanup
+    for ExternalEventTestHandlerSupervisor
+{
 }
 
 #[async_trait::async_trait]

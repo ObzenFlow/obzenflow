@@ -133,12 +133,11 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);
-        let task = SupervisorTaskBuilder::new(&supervisor_name)
-            .spawn_handler_supervised_with_cleanup(
-                supervisor,
-                FiniteSourceState::<H>::Created,
-                context,
-            );
+        let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
+            supervisor,
+            FiniteSourceState::<H>::Created,
+            context,
+        );
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

@@ -411,6 +411,8 @@ impl ExternalEventPolicy for CompletionSupervisor {
     }
 }
 
+impl crate::supervised_base::cleanup::HandlerSupervisedCleanup for CompletionSupervisor {}
+
 #[async_trait::async_trait]
 impl HandlerSupervised for CompletionSupervisor {
     type Handler = ();

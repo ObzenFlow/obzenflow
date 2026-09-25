@@ -6,6 +6,7 @@
 
 use super::base::Supervisor;
 use super::builder::{EventReceiver, StateWatcher};
+use super::cleanup::HandlerSupervisedCleanup;
 use super::handler_supervised::HandlerSupervised;
 #[cfg(test)]
 use super::self_supervised::SelfSupervised;
@@ -136,6 +137,19 @@ where
 
     fn name(&self) -> &str {
         self.inner.name()
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> HandlerSupervisedCleanup for HandlerSupervisedWithExternalEvents<S>
+where
+    S: HandlerSupervised + ExternalEventPolicy + Send + Sync,
+{
+    async fn cleanup_after_run(
+        &mut self,
+        context: &Self::Context,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.cleanup_after_run(context).await
     }
 }
 
