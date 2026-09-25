@@ -105,7 +105,15 @@ impl CsvDecodeError {
 
 impl From<csv::Error> for CsvDecodeError {
     fn from(error: csv::Error) -> Self {
-        Self::new(error.to_string())
+        // Serde messages can echo rejected field values (for example, an unknown
+        // enum variant). Retain only the structural field position.
+        match error.kind() {
+            csv::ErrorKind::Deserialize { err, .. } => match err.field() {
+                Some(field) => Self::new(format!("CSV deserialization failed at field {field}")),
+                None => Self::new("CSV deserialization failed"),
+            },
+            _ => Self::new("CSV record could not be deserialized"),
+        }
     }
 }
 
@@ -687,5 +695,42 @@ mod tests {
         let fields = StringRecord::from(vec!["private-name"]);
         let record_debug = format!("{:?}", CsvRecord::new(&headers, &fields));
         assert!(!record_debug.contains("private-name"));
+    }
+
+    #[test]
+    fn default_decoder_error_does_not_echo_an_unknown_enum_value() {
+        #[derive(Debug, Serialize, Deserialize)]
+        enum Status {
+            Ready,
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct StatusRow {
+            status: Status,
+        }
+
+        impl TypedPayload for StatusRow {
+            const EVENT_TYPE: &'static str = "csv.status";
+        }
+
+        #[derive(Clone)]
+        struct StatusCsv;
+
+        impl CsvDecoder for StatusCsv {
+            type Output = StatusRow;
+        }
+
+        let mut input = NamedTempFile::new().unwrap();
+        writeln!(input, "status\nSECRET_SENTINEL").unwrap();
+        let mut reader = CsvSource::from_file(StatusCsv, input.path())
+            .unwrap()
+            .open(context())
+            .unwrap();
+        let error = reader.next().unwrap_err();
+        assert!(matches!(error, SourceError::Deserialization(_)));
+        assert!(error.to_string().contains("row 1"));
+        assert!(error.to_string().contains("CSV deserialization failed"));
+        assert!(!format!("{error} {error:?}").contains("SECRET_SENTINEL"));
+        assert!(reader.next().unwrap().is_none());
     }
 }

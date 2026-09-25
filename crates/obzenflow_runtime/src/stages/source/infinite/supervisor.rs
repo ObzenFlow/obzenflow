@@ -898,7 +898,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                             SourcePollResult::HandlerError(error) => {
                                 tracing::warn!(
                                     stage_name = %ctx.stage_name,
-                                    error = %error,
+                                    error = error.safe_summary(),
                                     "Infinite source handler.next() returned error"
                                 );
                                 let kind =

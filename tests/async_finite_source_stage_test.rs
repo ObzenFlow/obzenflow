@@ -261,7 +261,9 @@ impl TypedAsyncFiniteSourceHandler for CleanupFailureSource {
 
     async fn drain(&mut self) -> std::result::Result<(), SourceError> {
         self.drain_calls.fetch_add(1, Ordering::Relaxed);
-        Err(SourceError::Other("cleanup exploded".to_string()))
+        Err(SourceError::Other(
+            "cleanup exploded credential=SECRET_SENTINEL".to_string(),
+        ))
     }
 }
 
@@ -316,7 +318,8 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
         .collect::<Vec<_>>();
     assert_eq!(cleanup_failures.len(), 1);
     assert_eq!(cleanup_failures[0].0, "source");
-    assert!(cleanup_failures[0].1.contains("cleanup exploded"));
+    assert_eq!(cleanup_failures[0].1, "source error");
+    assert!(!serde_json::to_string(&cleanup_failures)?.contains("SECRET_SENTINEL"));
     Ok(())
 }
 

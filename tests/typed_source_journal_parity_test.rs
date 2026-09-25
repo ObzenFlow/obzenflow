@@ -474,6 +474,74 @@ async fn cold_connector_source_journal_parity() {
     assert_source_parity(true).await;
 }
 
+#[tokio::test]
+async fn lazy_iterator_replay_never_consumes_live_input() {
+    fn definition(base: PathBuf, polls: Arc<AtomicUsize>) -> FlowDefinition {
+        let counter = polls.clone();
+        let input = obzenflow::stages::sources::finite(std::iter::from_fn(move || {
+            let index = counter.fetch_add(1, Ordering::SeqCst);
+            (index < 2).then(|| Alpha {
+                source: "iterator".into(),
+                value: index as u64,
+            })
+        }));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            0,
+            "source construction is cold"
+        );
+        FlowDefinition::materialize(move |_| {
+            let output = SinkTyped::new(|_: Alpha| async {}).idempotent();
+            Ok(flow! {
+                name: "lazy_iterator_replay",
+                journals: disk_journals(base),
+                stages: {
+                    input = source!(Alpha => input);
+                    output = sink!(Alpha => output);
+                },
+                topology: { input |> output; }
+            })
+        })
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("journals");
+    let live_polls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args(["lazy-iterator-live"])
+        .run_async(definition(base.clone(), live_polls.clone()))
+        .await
+        .unwrap();
+    assert_eq!(live_polls.load(Ordering::SeqCst), 3);
+    let live = latest_run_dir(&base);
+    let expected = data_signature(&read_stage_appended(&live, "input").await);
+    assert_eq!(expected.len(), 2);
+
+    let replay_polls = Arc::new(AtomicUsize::new(0));
+    FlowApplication::builder()
+        .with_cli_args([
+            OsString::from("lazy-iterator-replay"),
+            OsString::from("--replay-from"),
+            live.as_os_str().to_os_string(),
+        ])
+        .run_async(definition(base.clone(), replay_polls.clone()))
+        .await
+        .unwrap();
+    assert_eq!(replay_polls.load(Ordering::SeqCst), 0);
+    let replay = latest_run_dir(&base);
+    assert_ne!(live, replay);
+    assert_eq!(
+        data_signature(&read_stage_appended(&replay, "input").await),
+        expected
+    );
+    assert_eq!(
+        verify_run_dirs(&live, &replay, &VerifyOptions::default())
+            .unwrap()
+            .exit_code(),
+        0
+    );
+}
+
 async fn assert_source_parity(connectors: bool) {
     let temp = tempfile::tempdir().expect("parity tempdir");
     let journal_base = temp.path().join("journals");

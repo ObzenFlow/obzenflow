@@ -25,15 +25,18 @@ where
 }
 
 /// Create a finite typed source from an iterator.
+///
+/// Iterator creation and consumption are deferred until live polling. The input
+/// transfers into one execution, without collecting or cloning its values.
 pub fn finite<T, I>(
     iter: I,
 ) -> impl TypedFiniteSourceHandler<Output = T> + SourceTyping<Output = T> + Debug + 'static
 where
     T: Serialize + TypedPayload + Send + Sync + 'static,
-    I: IntoIterator<Item = T>,
+    I: IntoIterator<Item = T> + Send + Sync + 'static,
+    I::IntoIter: Send + Sync,
 {
-    let mut items = iter.into_iter().collect::<Vec<T>>().into_iter();
-    FiniteSourceTyped::from_producer(move |_| items.next().map(|item| vec![item]))
+    FiniteSourceTyped::new(iter)
 }
 
 /// Create a finite typed source from a per-item producer.
@@ -116,6 +119,8 @@ where
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     struct Item(u64);
@@ -129,5 +134,54 @@ mod tests {
         let mut source = once(Item(7));
         assert_eq!(source.next().unwrap(), Some(vec![Item(7)]));
         assert_eq!(source.next().unwrap(), None);
+    }
+
+    #[test]
+    fn finite_defers_iterator_creation_and_consumes_one_item_per_poll() {
+        struct Input {
+            starts: Arc<AtomicUsize>,
+            polls: Arc<AtomicUsize>,
+        }
+
+        struct Items(Arc<AtomicUsize>);
+
+        impl Iterator for Items {
+            type Item = Item;
+
+            fn next(&mut self) -> Option<Item> {
+                let index = self.0.fetch_add(1, Ordering::SeqCst);
+                (index < 2).then_some(Item(index as u64))
+            }
+        }
+
+        impl IntoIterator for Input {
+            type Item = Item;
+            type IntoIter = Items;
+
+            fn into_iter(self) -> Items {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                Items(self.polls)
+            }
+        }
+
+        let starts = Arc::new(AtomicUsize::new(0));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut source = finite(Input {
+            starts: starts.clone(),
+            polls: polls.clone(),
+        });
+        assert!(format!("{source:?}").contains("FiniteSourceTyped"));
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+
+        assert_eq!(source.next().unwrap(), Some(vec![Item(0)]));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert_eq!(source.next().unwrap(), Some(vec![Item(1)]));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(source.next().unwrap(), None);
+        assert_eq!(source.next().unwrap(), None);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
     }
 }

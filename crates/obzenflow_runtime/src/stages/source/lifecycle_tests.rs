@@ -129,7 +129,9 @@ impl Reader {
     async fn cleanup(&mut self) -> Result<(), SourceError> {
         self.resource.0.drains.fetch_add(1, Ordering::SeqCst);
         if self.drain_fails {
-            Err(SourceError::Other("secondary cleanup failure".into()))
+            Err(SourceError::Other(
+                "secondary cleanup failure credential=DO_NOT_PERSIST".into(),
+            ))
         } else {
             Ok(())
         }
@@ -448,8 +450,10 @@ macro_rules! lifecycle_family {
                             State::Failed(reason) if reason == "primary failure before first poll"
                         ));
                     }
+                    let evidence = journal.read_all_unordered().await.unwrap();
+                    assert!(!serde_json::to_string(&evidence).unwrap().contains("DO_NOT_PERSIST"));
                     assert_eq!(
-                        journal.read_all_unordered().await.unwrap().iter().filter(|row| matches!(
+                        evidence.iter().filter(|row| matches!(
                             row.payload,
                             obzenflow_core::event::SystemPayload::SourceCleanupFailed { .. }
                         )).count(),
@@ -541,6 +545,9 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     assert_eq!(counts.polls.load(Ordering::SeqCst), 1);
     assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
     let evidence = journal.read_all_unordered().await.unwrap();
+    assert!(!serde_json::to_string(&evidence)
+        .unwrap()
+        .contains("DO_NOT_PERSIST"));
     assert_eq!(
         evidence
             .iter()

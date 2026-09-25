@@ -67,9 +67,9 @@ where
 {
     /// Create from an iterator (primary constructor).
     ///
-    /// Collects the iterator into owned storage and moves items on emission.
-    /// Not suitable for very large datasets. Use a dedicated streaming source
-    /// (e.g., FLOWIP-084 connectors) when inputs are unbounded.
+    /// Owns the input without calling `into_iter` or `next` during construction.
+    /// Live polling creates the iterator once and moves one item per poll, without
+    /// collecting the input. Strict replay leaves the input unconsumed.
     ///
     /// # Example
     ///
@@ -81,9 +81,12 @@ where
         iter: I,
     ) -> FiniteSourceTyped<T, impl FnMut(usize) -> Option<Vec<T>> + Send + Sync>
     where
-        I: IntoIterator<Item = T>,
+        I: IntoIterator<Item = T> + Send + Sync,
+        I::IntoIter: Send + Sync,
     {
-        let mut items = iter.into_iter().collect::<Vec<T>>().into_iter();
+        let mut items = std::iter::once_with(move || iter.into_iter())
+            .flatten()
+            .fuse();
         FiniteSourceTyped::from_producer(move |_| items.next().map(|item| vec![item]))
     }
 

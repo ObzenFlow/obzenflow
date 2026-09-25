@@ -29,10 +29,10 @@
 //! task abort and process death cannot guarantee awaited cleanup; implement `Drop`
 //! for resources that require synchronous release.
 //!
-//! Poll and drain errors use the existing durable failure paths. Their messages
-//! must be safe to persist and contain no credentials or sensitive response data.
-//! Opening errors are attributed by the runtime using the error category and
-//! stage identity, without persisting the connector's raw error text.
+//! Open, poll and drain errors use the existing durable failure paths. Runtime
+//! diagnostics retain the error category and stage identity without logging or
+//! persisting the connector's raw error text. Connector-authored diagnostics
+//! must also exclude credentials and sensitive response data.
 
 pub mod boundary;
 mod connector;

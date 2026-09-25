@@ -34,6 +34,20 @@ pub enum SourceError {
     Other(String),
 }
 
+impl SourceError {
+    /// Runtime diagnostics retain the category, never untrusted connector text.
+    /// Error strings can contain credentials, URLs or rejected input values.
+    pub(crate) fn safe_summary(&self) -> &'static str {
+        match self {
+            Self::Timeout(_) => "source timeout",
+            Self::Transport(_) => "source transport error",
+            Self::Deserialization(_) => "source deserialization error",
+            Self::Validation(_) => "source validation error",
+            Self::Other(_) => "source error",
+        }
+    }
+}
+
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
