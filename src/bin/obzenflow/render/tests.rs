@@ -2,8 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::context::writer_id;
+use super::payload::{abbreviated, compact};
 use super::*;
-use serde_json::json;
+use obzenflow::journal::ProcessingStatus;
+use serde_json::{json, Value};
+
+#[path = "tests/presentation.rs"]
+mod presentation;
 
 fn id(value: u64) -> String {
     format!("{value:026X}")
@@ -15,6 +21,11 @@ fn coordinate(stage: u64) -> obzenflow_core::event::CausalCoordinate {
 
 fn displayed_clock(stage: u64, sequence: u64) -> String {
     format!("⟨{stage}:{sequence}⟩")
+}
+
+fn record_clock(renderer: &Renderer, record: &RunRecord) -> String {
+    let view = EventView::from_record(record, &renderer.context);
+    renderer.terminal().clock(&view.clock(), &view.header())
 }
 
 fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
@@ -489,7 +500,7 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
     }
     renderer.record(&mut output, forwarded.clone()).unwrap();
     renderer.flush_pending(&mut output).unwrap();
-    assert_eq!(renderer.record_clock(&forwarded), "⟨3:100,5:1⟩");
+    assert_eq!(record_clock(&renderer, &forwarded), "⟨3:100,5:1⟩");
     let matrix = matrix_text(&renderer, &RunReadProgress::default());
     assert!(matrix.lines().any(|line| {
         let mut cells = line.split_whitespace();
@@ -499,8 +510,7 @@ fn journal_numbers_stay_fixed_across_hidden_records_late_journals_and_matrix_fil
         assert_eq!(renderer.context.journal_number(&id), number);
     }
     renderer.color = true;
-    assert!(renderer
-        .record_clock(&forwarded)
+    assert!(record_clock(&renderer, &forwarded)
         .contains("\x1b[1;38;5;215m5:\x1b[0m\x1b[1;4;38;5;215m1\x1b[0m"));
 }
 
@@ -536,7 +546,7 @@ fn hundred_journal_clocks_wrap_whole_cells_without_losing_counters_or_highlighti
     for width in [40, 60, 90] {
         renderer.width = width;
         renderer.color = false;
-        let plain = renderer.record_clock(&record);
+        let plain = record_clock(&renderer, &record);
         assert!(plain.starts_with('⟨') && plain.ends_with('⟩'));
         assert!(
             plain.lines().all(|line| line.chars().count() <= width),
@@ -558,7 +568,7 @@ fn hundred_journal_clocks_wrap_whole_cells_without_losing_counters_or_highlighti
             "never split or omit a journal:counter cell"
         );
         renderer.color = true;
-        let colored = renderer.record_clock(&record);
+        let colored = record_clock(&renderer, &record);
         assert_eq!(colored.matches("\x1b[1;4;38;5;").count(), 1);
         assert!(colored.contains(&format!(
             "\x1b[1;38;5;215m57:\x1b[0m\x1b[1;4;38;5;215m{}\x1b[0m",
@@ -1337,36 +1347,27 @@ fn arbitrary_payload_shapes_keep_types_units_and_escape_terminal_controls() {
         "amount_cents":1234, "nested":{"label":"a\u{1b}[2J\nb\u{202e}"},
         "items":[1,2,3,4,5], "numeric_string":"1234", "enabled":true
     });
-    let (text, shortened) = pretty(&value, 80);
-    assert!(!shortened);
+    let text = pretty(&value).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
     assert!(text.starts_with("{\n  \"amount_cents\": 1234,"));
     assert!(!text.contains('·') && !text.contains('\x1b') && !text.contains('\u{202e}'));
     assert!(text.lines().all(|line| line.chars().count() <= 80));
-    assert_eq!(pretty(&json!(42), 80), ("42".into(), false));
-    assert_eq!(pretty(&Value::Null, 80), ("null".into(), false));
-    assert_eq!(pretty(&json!({}), 80), ("{}".into(), false));
-    assert_eq!(pretty(&json!([]), 80), ("[]".into(), false));
+    assert_eq!(pretty(&json!(42)).unwrap(), "42");
+    assert_eq!(pretty(&Value::Null).unwrap(), "null");
+    assert_eq!(pretty(&json!({})).unwrap(), "{}");
+    assert_eq!(pretty(&json!([])).unwrap(), "[]");
 }
 
 #[test]
-fn long_json_strings_fit_the_width_without_splitting_escapes_or_mutating_the_record() {
+fn long_json_strings_preserve_values_and_only_compact_output_abbreviates() {
     let value = json!({"reason":{"nested":["é\"\\\n\u{202e}".repeat(30)]}});
-    let original = value.clone();
+    let text = pretty(&value).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+    assert!(text.lines().any(|line| line.chars().count() > 90));
     for width in [40, 60, 80, 90] {
-        let (text, shortened) = pretty(&value, width);
-        assert!(shortened);
-        assert!(
-            text.lines().all(|line| line.chars().count() <= width),
-            "{text}"
-        );
-        let preview: Value = serde_json::from_str(&text).unwrap();
-        let preview = preview["reason"]["nested"][0].as_str().unwrap();
-        assert!(original["reason"]["nested"][0]
-            .as_str()
-            .unwrap()
-            .starts_with(preview.strip_suffix('…').unwrap()));
-        assert_eq!(value, original);
+        let preview = abbreviated(&compact(&value).unwrap(), width);
+        assert!(preview.ends_with("… [--full]"));
+        assert!(preview.chars().count() <= width);
     }
 }
 

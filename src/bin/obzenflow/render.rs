@@ -7,8 +7,6 @@
 
 use super::{Error, ViewArgs};
 use obzenflow::journal::read::*;
-use obzenflow::journal::ProcessingStatus;
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
 
@@ -20,74 +18,16 @@ mod event_counts;
 mod payload;
 #[path = "render/summary.rs"]
 mod summary;
-use context::{clock, event_id, event_type, parent_ids, writer_id, Context};
-use payload::{abbreviated, compact, pretty, safe_text, wrap_fields};
+#[path = "render/terminal.rs"]
+mod terminal;
+#[path = "render/view.rs"]
+mod view;
+use context::{event_id, event_type, parent_ids, writer_id, Context};
+use payload::{pretty, safe_text, wrap_fields};
+use terminal::{OutputMode, RenderOptions, TerminalRenderer};
+use view::{fact_error, replay_note, stage_heading, Category, EventView};
 
 const MAX_PENDING: usize = 128;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Category {
-    Fact,
-    Effect,
-    Delivery,
-    Runtime,
-}
-
-#[derive(Clone, Copy)]
-enum TextEmphasis {
-    Normal,
-    Reporter,
-    Output,
-    JournalCounter,
-}
-
-impl Category {
-    fn of(record: &RunRecord) -> Self {
-        match &record.record {
-            RunRecordData::Chain(row) => match &row.payload {
-                ChainPayload::Fact(_) => Self::Fact,
-                ChainPayload::Delivery(_) => Self::Delivery,
-                ChainPayload::Execution(
-                    ExecutionPayload::EffectRecord(_)
-                    | ExecutionPayload::EffectAttemptStarted(_)
-                    | ExecutionPayload::EffectRecoveryAbandoned(_),
-                ) => Self::Effect,
-                _ => Self::Runtime,
-            },
-            RunRecordData::System(_) => Self::Runtime,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Fact => "FACT",
-            Self::Effect => "EFFECT",
-            Self::Delivery => "DELIVERY",
-            Self::Runtime => "RUNTIME",
-        }
-    }
-
-    fn heading(self, record: &RunRecord, context: &Context) -> &'static str {
-        if self != Self::Fact {
-            return self.label();
-        }
-        record.journal.stage.as_ref().map_or("FACT", |stage| {
-            stage_heading(stage.stage_type, context.is_effectful(record))
-        })
-    }
-}
-
-fn stage_heading(stage_type: StageType, is_effectful: bool) -> &'static str {
-    match stage_type {
-        StageType::FiniteSource | StageType::InfiniteSource => "SOURCE",
-        StageType::Transform if is_effectful => "EFFECTFUL TRANSFORM",
-        StageType::Transform => "TRANSFORM",
-        StageType::Stateful if is_effectful => "EFFECTFUL STATEFUL",
-        StageType::Stateful => "STATEFUL",
-        StageType::Join => "JOIN",
-        StageType::Sink => "SINK",
-    }
-}
 
 #[cfg(test)]
 #[path = "render/tests.rs"]
@@ -190,7 +130,7 @@ impl Renderer {
                 "Facts orange · stateful/join outputs green · effects/deliveries pink · runtime gray",
                 "Output ← stage(recorded inputs). The reporting journal's counter is underlined.",
                 "Counters track journal history, including hidden runtime records (--include-runtime).",
-                "Headings name stage kinds, or EFFECT/DELIVERY evidence. … marks shortened values; --full shows complete records.",
+                "Headings name stage kinds, or EFFECT/DELIVERY evidence. --explain adds context; --full shows complete records.",
             ] {
                 for line in wrap_fields(&[text.into()], self.width) {
                     writeln!(output, "{}", self.dim(&line))?;
@@ -256,8 +196,8 @@ impl Renderer {
         }
         if self.jsonl {
             if self.visible(&record) {
-                serde_json::to_writer(&mut *output, &record)?;
-                writeln!(output)?;
+                self.terminal()
+                    .render(output, &EventView::from_record(&record, &self.context))?;
             }
         } else {
             // Hidden rows still supply causal context and journal boundaries.
@@ -355,262 +295,32 @@ impl Renderer {
     }
 
     fn render_group(&self, output: &mut impl Write, records: &[RunRecord]) -> Result<(), Error> {
-        let first = &records[0];
-        if !self.visible(first) {
-            return Ok(());
-        }
-        let category = Category::of(first);
-        let stage = safe_text(&self.speaker(first));
-        let input = self.input_name(first);
-        for record in records {
-            let heading = category.heading(record, &self.context);
-            let value = display_payload(record, self.full)?;
-            // The recorded output leads once; the arrow explains its origin.
-            // Sources have no upstream event argument. This is observation,
-            // not evaluation or a claim that the stage is a pure function.
-            let output_type = safe_text(event_type(record));
-            let mut relation = if record.kind == RunRecordKind::SourceFact {
-                format!("{output_type} ← {stage}()")
-            } else if uses_inputs(record) {
-                format!("{output_type} ← {stage}({input})")
-            } else {
-                format!("{output_type} ← {stage}")
-            };
-            relation.push_str(replay_label(record));
-            if fact_error(record).is_some() {
-                relation.push_str(" [processing error]");
-            }
-            if self.compact {
-                let mut line = format!("{heading}  {relation}");
-                if let Some(value) = &value {
-                    line.push_str(&format!("  {}", compact(value)));
-                }
-                let line = abbreviated(&line, self.width);
-                writeln!(
-                    output,
-                    "{}",
-                    self.record_text(record, &line, TextEmphasis::Normal)
-                )?;
-                continue;
-            }
-            let prefix = format!("{heading} (stage: ");
-            let stage_range = prefix.len()..prefix.len() + stage.len();
-            let journal = self.context.journal_number(&record.journal.id);
-            let heading = format!("{prefix}{stage}, journal: {journal})");
-            self.record_emphasized_lines(
-                output,
-                record,
-                &heading,
-                stage_range,
-                TextEmphasis::Reporter,
-            )?;
-            self.record_emphasized_lines(
-                output,
-                record,
-                &relation,
-                0..output_type.len(),
-                TextEmphasis::Output,
-            )?;
-            writeln!(output, "{}", self.record_clock(record))?;
-            if self.explain || self.full {
-                writeln!(
-                    output,
-                    "causal proof: {}",
-                    serde_json::to_string(&self.context.causal_proof(record))?
-                )?;
-                writeln!(
-                    output,
-                    "committed witnesses: {}",
-                    serde_json::to_string(record.causal_witnesses())?
-                )?;
-            }
-            if let Some(message) = fact_error(record) {
-                for line in wrap_fields(
-                    &[format!("processing error: {}", safe_text(message))],
-                    self.width,
-                ) {
-                    writeln!(output, "{line}")?;
-                }
-            }
-            if let Some(value) = &value {
-                self.payload_lines(output, value, category)?;
-            }
-            if self.explain {
-                for line in wrap_fields(&[gloss(record, &self.context).into()], self.width) {
-                    writeln!(output, "{}", self.dim(&line))?;
-                }
-            }
-            if self.full {
-                // Serialized JSON escapes untrusted text; it is never styled.
-                serde_json::to_writer_pretty(&mut *output, record)?;
-                writeln!(output)?;
-            }
-            writeln!(output)?;
+        let terminal = self.terminal();
+        for record in records.iter().filter(|record| self.visible(record)) {
+            // Resolve the presentation only after pending parents have had a
+            // chance to arrive. The view borrows the unmodified source record.
+            terminal.render(output, &EventView::from_record(record, &self.context))?;
         }
         Ok(())
     }
 
-    fn record_emphasized_lines(
-        &self,
-        output: &mut impl Write,
-        record: &RunRecord,
-        text: &str,
-        highlighted: std::ops::Range<usize>,
-        emphasis: TextEmphasis,
-    ) -> Result<(), Error> {
-        // Wrap escaped plain text before inserting ANSI codes. Track the
-        // original byte range through discarded spaces and continuation
-        // indentation, including names that cross a line or contain Unicode.
-        let mut remaining = text;
-        for (index, line) in wrap_fields(&[text.to_owned()], self.width)
-            .iter()
-            .enumerate()
-        {
-            let (indent, line) = if index == 0 {
-                ("", line.as_str())
-            } else {
-                remaining = remaining.trim_start();
-                ("  ", &line[2..])
-            };
-            let offset = text.len() - remaining.len();
-            let start = highlighted.start.saturating_sub(offset).min(line.len());
-            let end = highlighted.end.saturating_sub(offset).min(line.len());
-            writeln!(
-                output,
-                "{indent}{}{}{}",
-                self.record_text(record, &line[..start], TextEmphasis::Normal),
-                self.record_text(record, &line[start..end], emphasis),
-                self.record_text(record, &line[end..], TextEmphasis::Normal),
-            )?;
-            remaining = &remaining[line.len()..];
-        }
-        Ok(())
-    }
-
-    fn input_name(&self, record: &RunRecord) -> String {
-        let inputs = self.context.inputs(record);
-        if inputs.is_empty() {
-            return "input not recorded".into();
-        }
-        let mut labels: Vec<_> = inputs
-            .iter()
-            .take(3)
-            .map(|reference| match reference {
-                Some(reference) => safe_text(&reference.event_type),
-                None => "recorded input (unresolved)".into(),
-            })
-            .collect();
-        if inputs.len() > 3 {
-            labels.push(format!("{} more recorded parents", inputs.len() - 3));
-        }
-        labels.join(", ")
-    }
-
-    fn payload_lines(
-        &self,
-        output: &mut impl Write,
-        value: &Value,
-        category: Category,
-    ) -> Result<(), Error> {
-        let (json, shortened) = pretty(value, self.width);
-        for line in json.lines() {
-            let line = if category == Category::Runtime {
-                self.dim(line)
-            } else {
-                line.into()
-            };
-            writeln!(output, "{line}")?;
-        }
-        if shortened {
-            writeln!(
-                output,
-                "{}",
-                self.dim("Payload shortened; --full shows complete values.")
-            )?;
-        }
-        Ok(())
-    }
-
-    fn speaker(&self, record: &RunRecord) -> String {
-        if let Some(stage) = &record.journal.stage {
-            return stage.key.clone();
-        }
-        match &record.record {
-            RunRecordData::System(row) if *row.writer_id() == record.run.pipeline_writer_id => {
-                "pipeline".into()
-            }
-            RunRecordData::System(row) => self
-                .context
-                .writer_name(&row.writer_id().to_string())
-                .into(),
-            _ => "system".into(),
-        }
-    }
-
-    fn record_clock(&self, record: &RunRecord) -> String {
-        let mut result = self.dim("⟨");
-        let mut columns = 1;
-        for (index, component) in self
-            .context
-            .clock_components(clock(record))
-            .iter()
-            .enumerate()
-        {
-            let label = format!("{}:", component.number);
-            let digits = component.value.to_string();
-            let cell_width = label.len() + digits.len();
-            if index > 0 {
-                result.push_str(&self.dim(","));
-                columns += 1;
-                // Reserve a column for the closing bracket or trailing comma.
-                // Count plain ASCII cells, never the ANSI styling bytes.
-                if columns + cell_width + 1 > self.width {
-                    result.push_str("\n  ");
-                    columns = 2;
-                }
-            }
-            let reporting =
-                component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id;
-            if reporting {
-                result.push_str(&self.record_text(record, &label, TextEmphasis::Output));
-                result.push_str(&self.record_text(record, &digits, TextEmphasis::JournalCounter));
-            } else {
-                result.push_str(&self.dim(&format!("{label}{digits}")));
-            }
-            columns += cell_width;
-        }
-        result.push_str(&self.dim("⟩"));
-        result
-    }
-
-    fn record_text(&self, record: &RunRecord, text: &str, emphasis: TextEmphasis) -> String {
-        let text = safe_text(text);
-        if !self.color || text.is_empty() {
-            return text;
-        }
-        let category = Category::of(record);
-        let (normal_color, output_color, reporter_color) = match category {
-            Category::Fact => match record.journal.stage.as_ref().map(|stage| stage.stage_type) {
-                // Read-model styling is a stage-role cue. These remain facts
-                // in the journal; no mutable state snapshot is inferred.
-                Some(StageType::Stateful | StageType::Join) => (114, 157, 194), // green
-                _ => (208, 215, 223),                                           // orange
+    fn terminal(&self) -> TerminalRenderer {
+        TerminalRenderer {
+            options: RenderOptions {
+                mode: if self.jsonl {
+                    OutputMode::Jsonl
+                } else if self.compact {
+                    OutputMode::Compact
+                } else {
+                    OutputMode::Expanded {
+                        full: self.full,
+                        explain: self.explain,
+                    }
+                },
+                width: self.width,
+                color: self.color,
             },
-            Category::Effect | Category::Delivery => (217, 224, 231), // light pink
-            Category::Runtime => (245, 250, 255),                     // gray
-        };
-        let color = match emphasis {
-            TextEmphasis::Reporter => reporter_color,
-            TextEmphasis::Output | TextEmphasis::JournalCounter => output_color,
-            TextEmphasis::Normal => normal_color,
-        };
-        let emphasis = match emphasis {
-            TextEmphasis::JournalCounter => "1;4;",
-            TextEmphasis::Reporter | TextEmphasis::Output => "1;",
-            TextEmphasis::Normal if category == Category::Fact => "1;",
-            TextEmphasis::Normal => "",
-        };
-        format!("\x1b[{emphasis}38;5;{color}m{text}\x1b[0m")
+        }
     }
 
     fn visible(&self, record: &RunRecord) -> bool {
@@ -636,53 +346,13 @@ fn journal_label(kind: RunJournalKind) -> &'static str {
     }
 }
 
-fn effect_fact(record: &RunRecord) -> bool {
-    matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Fact(_)) && row.envelope.provenance.event.effect_provenance.is_some())
-}
-
-fn replayed(record: &RunRecord) -> bool {
-    matches!(&record.record, RunRecordData::Chain(row) if row.envelope.provenance.event.replay_context.is_some())
-}
-
-fn replay_label(record: &RunRecord) -> &'static str {
-    if !replayed(record) {
-        ""
-    } else if record.kind == RunRecordKind::Effect || effect_fact(record) {
-        " [read from journal]"
-    } else {
-        " [replay]"
-    }
-}
-
-fn uses_inputs(record: &RunRecord) -> bool {
-    matches!(
-        record.kind,
-        RunRecordKind::StageOutput
-            | RunRecordKind::CompositeData
-            | RunRecordKind::Effect
-            | RunRecordKind::Delivery
-    )
-}
-
 fn branchable(record: &RunRecord) -> bool {
     fact_error(record).is_none()
         && matches!(&record.record, RunRecordData::Chain(row) if matches!(row.payload, ChainPayload::Fact(_)) && !row.envelope.provenance.event.causality.parent_ids.is_empty())
 }
 
-fn fact_error(record: &RunRecord) -> Option<&str> {
-    if let RunRecordData::Chain(row) = &record.record {
-        if let (ChainPayload::Fact(_), ProcessingStatus::Error { message, .. }) = (
-            &row.payload,
-            &row.envelope.provenance.event.processing.status,
-        ) {
-            return Some(message);
-        }
-    }
-    None
-}
-
 fn same_branch(a: &RunRecord, b: &RunRecord) -> bool {
-    if !branchable(b) || parent_ids(a) != parent_ids(b) || replay_label(a) != replay_label(b) {
+    if !branchable(b) || parent_ids(a) != parent_ids(b) || replay_note(a) != replay_note(b) {
         return false;
     }
     match (&a.record, &b.record) {
@@ -699,92 +369,5 @@ fn same_branch(a: &RunRecord, b: &RunRecord) -> bool {
             }
         }
         _ => false,
-    }
-}
-
-fn display_payload(record: &RunRecord, full: bool) -> Result<Option<Value>, Error> {
-    // Export notices retain their event and causal clock in the normal view.
-    // The freshness watermark is available in --full and untouched --jsonl.
-    if !full
-        && matches!(&record.record, RunRecordData::System(row) if matches!(
-            row.payload,
-            SystemPayload::MetricsCoordination(obzenflow_core::event::MetricsCoordinationEvent::Exported { .. })
-        ))
-    {
-        return Ok(None);
-    }
-    Ok(Some(match &record.record {
-        RunRecordData::Chain(row) => match &row.payload {
-            // The outcome is the teaching surface. Cursor hashes and descriptor
-            // plumbing remain available in --full and --jsonl records.
-            ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => {
-                let mut payload = serde_json::to_value(&effect.outcome)?;
-                if let Value::Object(fields) = &mut payload {
-                    fields.insert(
-                        "effect_type".into(),
-                        serde_json::to_value(&effect.descriptor.effect_type)?,
-                    );
-                }
-                payload
-            }
-            ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(effect)) => {
-                serde_json::json!({"effect_type": effect.effect_type, "attempt": effect.attempt})
-            }
-            ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(effect)) => {
-                serde_json::json!({"effect_type": effect.effect_type, "cause": effect.cause, "message": effect.message, "highest_started_attempt": effect.highest_started_attempt})
-            }
-            _ => serde_json::to_value(&row.payload)?,
-        },
-        RunRecordData::System(row) => serde_json::to_value(&row.payload)?,
-    }))
-}
-
-fn gloss(record: &RunRecord, context: &Context) -> &'static str {
-    if replayed(record) && (record.kind == RunRecordKind::Effect || effect_fact(record)) {
-        return "Read from journal with replay provenance; this row does not establish that the effect fired again.";
-    }
-    if effect_fact(record) {
-        return "Effects are data: the effect's outcome was recorded as a domain fact.";
-    }
-    match &record.record {
-        RunRecordData::Chain(row) => match &row.payload {
-            ChainPayload::Fact(_) if replayed(record) => "This fact carries replay provenance; the original flow and event are available in --full.",
-            ChainPayload::Fact(_) => match record.journal.stage.as_ref().map(|s| s.stage_type) {
-                Some(StageType::FiniteSource | StageType::InfiniteSource) => "Source stage admitted a domain fact into this run.",
-                Some(StageType::Stateful) if context.is_effectful(record) => "Effectful stateful stage committed a domain fact; apply folds committed facts into state.",
-                Some(StageType::Stateful) => "Stateful stage emitted a fact from its accumulated state.",
-                Some(StageType::Join) => "Join stage emitted a fact using its recorded inputs.",
-                Some(StageType::Transform) if context.is_effectful(record) => "Effectful transform emitted a domain fact; this fact alone does not imply an external call.",
-                Some(StageType::Transform) => "Transform stage derived a fact from upstream input.",
-                _ => "This stage recorded a domain fact; its recorded parents appear on the input side when available.",
-            },
-            ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(_)) => "The runtime recorded the start of an effect attempt; this does not prove external completion.",
-            ChainPayload::Execution(ExecutionPayload::EffectRecord(_)) => "Effects are data: a committed outcome can be read during replay without executing the effect again.",
-            ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(_)) => "Recorded effect recovery was abandoned; this row is not a new effect invocation.",
-            ChainPayload::Execution(ExecutionPayload::AccumulatorProgress { .. }) => "Stateful stage folded inputs into its accumulated state.",
-            ChainPayload::Execution(ExecutionPayload::JoinReferenceProgress { .. }) => "Join stage accumulated reference inputs for matching later stream records.",
-            ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Drained { .. })) => "This stage finished draining; whole-run coverage is tracked separately.",
-            ChainPayload::Execution(ExecutionPayload::StageLifecycle(_)) => "The stage recorded a lifecycle transition.",
-            ChainPayload::Execution(_) => "The runtime recorded execution evidence, such as admission, retry or backpressure.",
-            ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => "This journal recorded an end-of-input signal; it does not by itself settle the whole run.",
-            ChainPayload::FlowControl(_) => "A flow signal coordinates delivery or progress between stages.",
-            ChainPayload::Delivery(delivery) => match &delivery.result {
-                DeliveryResult::Buffered { .. } => "The sink buffered this input; durable delivery is not yet confirmed.",
-                DeliveryResult::Success { .. } => "The sink recorded a successful delivery outcome.",
-                DeliveryResult::Failed { .. } => "The sink recorded a failed delivery outcome.",
-                DeliveryResult::Partial { .. } => "The sink recorded a mixture of successful and failed deliveries.",
-            },
-            ChainPayload::CompositeData(_) => "A composite stage recorded protocol data; the original envelope and payload remain available in --full.",
-        },
-        RunRecordData::System(row) if matches!(row.payload, SystemPayload::PipelineLifecycle(_)) && *row.writer_id() != record.run.pipeline_writer_id => "This lifecycle row is from another writer; it does not establish this run's pipeline outcome.",
-        RunRecordData::System(row) => match &row.payload {
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained) => "Pipeline drain was recorded; follow still verifies that every stage journal has been consumed.",
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Completed { .. }) => "Pipeline completion was recorded; drain and reader coverage are separate evidence.",
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed { .. }) => "Pipeline failure was recorded; successful inspection does not mean execution succeeded.",
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Cancelled { .. }) => "Pipeline cancellation was recorded; the viewer can still inspect committed evidence.",
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::NotStarted) => "The application closed this run before execution started.",
-            SystemPayload::PipelineLifecycle(_) => "The pipeline recorded a lifecycle transition.",
-            _ => "A system component recorded coordination or lifecycle evidence.",
-        },
     }
 }

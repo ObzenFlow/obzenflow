@@ -100,7 +100,7 @@ impl Renderer {
         if self.full {
             // No shortening: --full exposes the recorded fields, including
             // exact filenames. JSON escapes keep terminal controls inert.
-            let (json, _) = pretty(&serde_json::to_value(manifest)?, usize::MAX);
+            let json = pretty(manifest)?;
             for line in json.lines() {
                 self.summary_write(output, BODY, line)?;
             }

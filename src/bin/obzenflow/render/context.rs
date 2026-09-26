@@ -145,6 +145,11 @@ impl Context {
         for coordinate in clock(record).keys() {
             self.number_journal(*coordinate.journal_writer_id.as_journal_id());
         }
+        for payload_clock in super::view::payload_clocks(record) {
+            for coordinate in payload_clock.clocks.keys() {
+                self.number_journal(*coordinate.journal_writer_id.as_journal_id());
+            }
+        }
         // Physical journal position chooses the last clock, independently of
         // display filtering, cross-journal visitation and forwarded event IDs.
         let journal = self
@@ -181,14 +186,6 @@ impl Context {
             },
         );
         self.insertion_order.push_back(id);
-    }
-
-    pub fn is_effectful(&self, record: &RunRecord) -> bool {
-        record
-            .journal
-            .stage
-            .as_ref()
-            .is_some_and(|stage| stage.is_effectful)
     }
 
     pub fn parents_available(&self, record: &RunRecord) -> bool {

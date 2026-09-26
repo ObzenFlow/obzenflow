@@ -92,7 +92,7 @@ struct ViewArgs {
     /// Show complete envelopes, payloads, manifest and large clock matrices.
     #[arg(long, conflicts_with = "jsonl")]
     full: bool,
-    /// Add teaching notes beneath the operation and payload.
+    /// Add teaching notes, causal evidence and payload watermarks.
     #[arg(long, conflicts_with_all = ["compact", "jsonl"])]
     explain: bool,
     /// One line per selected record, without clocks, teaching notes or count tables.
