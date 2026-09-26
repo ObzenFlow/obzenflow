@@ -5,6 +5,8 @@
 //! FLOWIP-122e: the shipped application's ordinary entry point can replay after
 //! losing both original inputs. All fixtures and archives belong to this test.
 
+mod replay_testkit;
+
 #[allow(dead_code)]
 #[path = "../examples/csv_demo_support_sla/support.rs"]
 mod example;
@@ -14,10 +16,7 @@ use obzenflow::stages::sources::{
     CsvRowDecoder, CsvSource, FiniteSourceConnector, SourceReaderInitContext,
     TypedFiniteSourceHandler,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_infra::journal::DiskJournal;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -76,9 +75,7 @@ async fn facts(run: &Path, stage: &str) -> anyhow::Result<Vec<serde_json::Value>
     let file = manifest["stages"][stage]["data_journal_file"]
         .as_str()
         .unwrap();
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))?;
-    let rows = journal.read_all_unordered().await?;
+    let rows = replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&run.join(file)).await;
     if stage != "enrich" {
         assert_eq!(
             rows.iter().filter(|row| row.is_eof()).count(),

@@ -4,6 +4,8 @@
 
 //! FLOWIP-122a durable sink-operation failure-chain proofs.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
@@ -18,12 +20,10 @@ use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
-use obzenflow_core::{
-    AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, StageId, TypedPayload,
-};
+use obzenflow_core::{AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
-use obzenflow_infra::journal::{disk_journals, DiskJournal, DiskJournalFactory};
+use obzenflow_infra::journal::{disk_journals, DiskJournalFactory};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
     PendingSinkInput, SinkCommitReceipt, SinkConnector, SinkDescription, SinkOperationError,
@@ -699,13 +699,7 @@ async fn read_stage_journal(
     let file = manifest["stages"][stage][field]
         .as_str()
         .expect("manifest stage journal");
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))
-            .expect("stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal reads")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run.join(file)).await
 }
 
 async fn read_sink_reports(run: &Path) -> Vec<SupervisorRecord> {

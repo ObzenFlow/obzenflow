@@ -21,6 +21,8 @@
 //!     without re-executing effects; source and sink policies remain suppressed,
 //!     while effect-history settlement rows retain their archived identities.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{CircuitBreaker, EffectResilience, MiddlewareFactory, Retry};
 use obzenflow_core::{
@@ -30,8 +32,6 @@ use obzenflow_core::{
         CircuitBreakerFact, CircuitBreakerHealthClassification, ExecutionPayload,
     },
     event::ChainPayload,
-    id::StageId,
-    journal::{journal_owner::JournalOwner, Journal},
     StageOutputs, TypedPayload,
 };
 use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
@@ -335,17 +335,8 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
-    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(stage_journal),
-            JournalOwner::stage(StageId::new()),
-        )
-        .expect("stage journal should open");
-
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(stage_journal))
         .await
-        .expect("stage journal should read")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()

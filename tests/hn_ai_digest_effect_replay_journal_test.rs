@@ -9,6 +9,8 @@
 //! polled. The fixture compares the framework evidence and domain effect fact
 //! identities emitted by both runs.
 
+mod replay_testkit;
+
 use obzenflow_core::event::observability::ObservationRecord;
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
@@ -56,11 +58,10 @@ use obzenflow_core::event::{
     ChainPayload, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload,
     EffectRecoveryAbandoned, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
-use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload, WriterId};
+use obzenflow_core::{id::StageId, EventId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai_map_reduce, flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolutionError, EffectPortResolver, EffectRegistrationBuilder,
@@ -1109,15 +1110,7 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<C
     let relative = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .expect("stage data journal path");
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal is readable")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative)).await
 }
 
 #[derive(Debug, PartialEq)]
@@ -1182,15 +1175,8 @@ async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
     let relative = manifest["system_journal_file"]
         .as_str()
         .expect("system journal path");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("system journal opens");
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<SystemEvent>(&run_dir.join(relative))
         .await
-        .expect("system journal is readable")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()

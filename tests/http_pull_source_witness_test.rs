@@ -4,6 +4,8 @@
 
 //! FLOWIP-134g HTTP-pull validation and observation journal witness.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_adapters::sources::{
     CursorlessPullDecoder, DecodeError, HttpPullConfig, HttpPullSource, HttpResponse,
@@ -12,12 +14,10 @@ use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, HttpP
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError, RequestSpec};
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, TypedPayload, WriterId};
+use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use serde::{Deserialize, Serialize};
@@ -106,15 +106,7 @@ async fn read_error_journal(run_dir: &Path) -> Vec<JournalRecord<ChainPayload>> 
     let journal_file = manifest["stages"]["pull"]["error_journal_file"]
         .as_str()
         .expect("pull error journal in manifest");
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(journal_file),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("pull error journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("pull error journal reads")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(journal_file)).await
 }
 
 fn latest_run_dir(base: &Path) -> PathBuf {
@@ -139,17 +131,7 @@ async fn read_data_journal(run_dir: &Path) -> Vec<JournalRecord<ChainPayload>> {
     let journal_file = manifest["stages"]["pull"]["data_journal_file"]
         .as_str()
         .expect("pull data journal in manifest");
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(journal_file),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("pull data journal opens");
-    let mut reader = journal.reader().await.expect("pull data journal reader");
-    let mut events = Vec::new();
-    while let Some(event) = reader.next().await.expect("pull data journal read") {
-        events.push(event);
-    }
-    events
+    replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(journal_file)).await
 }
 
 fn typed_snapshots(events: &[JournalRecord<ChainPayload>]) -> Vec<(WriterId, HttpPullStateFact)> {

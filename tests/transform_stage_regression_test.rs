@@ -4,6 +4,8 @@
 
 //! Transform stage integration regression tests.
 
+mod replay_testkit;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::handler_observer;
@@ -12,8 +14,6 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::ChainPayload;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalRecord, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -282,15 +282,7 @@ async fn transform_routes_error_kinds_to_correct_journal() -> Result<()> {
     async fn read_chain_journal(
         path: std::path::PathBuf,
     ) -> Result<Vec<JournalRecord<ChainPayload>>> {
-        let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-            obzenflow_infra::journal::DiskJournal::with_owner(
-                path,
-                JournalOwner::stage(StageId::new()),
-            )?;
-        journal
-            .read_causally_ordered()
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:?}"))
+        Ok(replay_testkit::read_journal_envelopes::<ChainEvent>(&path).await)
     }
 
     let error_events: Vec<ChainEvent> = read_chain_journal(error_journals[0].clone())
@@ -431,14 +423,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
     }
 
     async fn read_journal(path: std::path::PathBuf) -> Result<Vec<JournalRecord<ChainPayload>>> {
-        let journal = obzenflow_infra::journal::DiskJournal::<ChainEvent>::with_owner(
-            path,
-            JournalOwner::stage(StageId::new()),
-        )?;
-        journal
-            .read_causally_ordered()
-            .await
-            .map_err(|error| anyhow::anyhow!("{error:?}"))
+        Ok(replay_testkit::read_journal_envelopes::<ChainEvent>(&path).await)
     }
 
     let error_events = read_journal(error_journal.expect("try-map error journal exists"))

@@ -34,12 +34,10 @@ use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
     StageActivity, StageLifecycleEvent, SupervisorRecord, SystemPayload,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{JournalRecord, StageId, TypedPayload};
+use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::run_context::FlowBuildContext;
@@ -921,13 +919,7 @@ async fn read_stage_journal(
     let file = manifest["stages"][stage][field]
         .as_str()
         .expect("manifest contains the PostgreSQL stage journal");
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))
-            .expect("PostgreSQL stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("PostgreSQL stage journal reads")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run.join(file)).await
 }
 
 async fn assert_operation_failure_lifecycle(

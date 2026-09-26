@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, BufReader};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// Live-tail polls allowed at the same unterminated record before a stuck or
 /// crashed writer is treated as a hard error rather than an endless retry
@@ -307,10 +307,13 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         // Lock through a cloned Arc so the guard borrows a local, not `self`,
         // leaving `self` free for the `&mut self` advance below.
         let lock = self.read_write_lock.clone();
-        let _read_guard = lock.read().await;
-        let mut reader = self.reader_at_offset().await?;
+        let mut reader = {
+            let _read_guard = lock.read().await;
+            self.reader_at_offset().await?
+        };
         while self.position < target {
-            let (disposition, frame_start) = self.advance_one(&mut reader).await?;
+            let read_guard = lock.read().await;
+            let (disposition, frame_start) = self.advance_one(&mut reader, read_guard).await?;
             match disposition {
                 Disposition::Yield(_) => {}
                 Disposition::EndOfCommittedRecords => {
@@ -349,6 +352,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     async fn advance_one<B: tokio::io::AsyncBufRead + Unpin>(
         &mut self,
         reader: &mut B,
+        read_guard: RwLockReadGuard<'_, ()>,
     ) -> Result<(Disposition<T>, u64), JournalError> {
         self.yielded_group_member = None;
         if let Some(record) = self.pending.pop_front() {
@@ -389,6 +393,11 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             else {
                 return Ok((Disposition::EndOfCommittedRecords, frame_start));
             };
+
+            // These bytes are now owned by this reader. Writers cannot change
+            // a committed prefix, and incomplete frames do not advance us, so
+            // decoding need not hold up the next append while its task runs.
+            drop(read_guard);
 
             #[cfg(test)]
             if let Some(gate) = self.frame_read_gate.take() {
@@ -530,7 +539,7 @@ impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJ
         // Lock through a cloned Arc so the guard borrows a local, not `self`,
         // leaving `self` free for the `&mut self` advance below.
         let lock = self.read_write_lock.clone();
-        let _read_guard = lock.read().await;
+        let read_guard = lock.read().await;
         let mut reader = match self.buffered_reader.take() {
             Some(reader)
                 if !self.pending.is_empty()
@@ -542,7 +551,7 @@ impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJ
             _ => self.reader_at_offset().await?,
         };
 
-        let (disposition, frame_start) = self.advance_one(&mut reader).await?;
+        let (disposition, frame_start) = self.advance_one(&mut reader, read_guard).await?;
         // There is no await between committed cursor advancement and returning
         // the record. An interrupted I/O await leaves buffered_reader empty;
         // read_offset still identifies the next unconsumed physical frame.
@@ -702,6 +711,41 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn decoding_a_copied_frame_releases_the_append_lock() {
+        use crate::journal::DiskJournal;
+        use obzenflow_core::{Journal, JournalOwner};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("decode-lock.log");
+        let stage = StageId::new();
+        let journal =
+            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                .unwrap();
+        let expected = journal
+            .append(
+                ChainEventFactory::data_event(stage.into(), "copied", serde_json::json!({})),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let lock = Arc::new(RwLock::new(()));
+        let mut reader = DiskJournalReader::<ChainEvent>::new(path, *journal.id(), lock.clone())
+            .await
+            .unwrap();
+        let gate = Arc::new(FrameReadGate::default());
+        reader.frame_read_gate = Some(gate.clone());
+        let next = reader.next();
+        tokio::pin!(next);
+        tokio::select! {
+            result = &mut next => panic!("decode must pause at the gate: {result:?}"),
+            _ = gate.entered.notified() => {}
+        }
+        let _writer = lock.try_write().expect("decoding must not block appends");
+        gate.release.notify_one();
+        assert_eq!(next.await.unwrap().unwrap().id(), expected.id());
     }
 
     #[tokio::test]

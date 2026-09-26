@@ -4,17 +4,17 @@
 
 //! FLOWIP-134g journal oracle for all four typed source variants.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, StageOutputFacts, TypedPayload, WriterId};
 use obzenflow_dsl::{
     async_infinite_source, async_source, flow, infinite_source, sink, source, FlowDefinition,
 };
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::sink::{DeliveryContext, SinkTyped};
@@ -335,17 +335,7 @@ async fn read_stage_appended(run_dir: &Path, stage_name: &str) -> Vec<JournalRec
     let journal_file = manifest["stages"][stage_name]["data_journal_file"]
         .as_str()
         .unwrap_or_else(|| panic!("manifest data journal for {stage_name}"));
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(journal_file),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("stage journal opens");
-    let mut reader = journal.reader().await.expect("stage journal reader");
-    let mut events = Vec::new();
-    while let Some(event) = reader.next().await.expect("stage journal read") {
-        events.push(event);
-    }
-    events
+    replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(journal_file)).await
 }
 
 fn data_signature(events: &[JournalRecord<ChainPayload>]) -> Vec<(String, serde_json::Value)> {

@@ -4,6 +4,8 @@
 
 //! FLOWIP-122a retained-outcome and admission-only boundary proofs.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
     MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
@@ -17,12 +19,10 @@ use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, StageFatalCode, StageFatalRecorded,
     StageLifecycleEvent, SupervisorRecord, SystemEvent, SystemPayload,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventId, JournalRecord, StageId, SystemId, TypedPayload};
+use obzenflow_core::{EventId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
     PendingSinkInput, SinkCommitReceipt, SinkConnector, SinkDescription, SinkOperationError,
@@ -325,13 +325,7 @@ async fn read_stage(run: &Path, stage: &str, field: &str) -> Vec<JournalRecord<C
     let file = manifest["stages"][stage][field]
         .as_str()
         .expect("stage journal file");
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))
-            .expect("stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal reads")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run.join(file)).await
 }
 
 async fn read_system(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
@@ -339,15 +333,7 @@ async fn read_system(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
     let file = manifest["system_journal_file"]
         .as_str()
         .expect("system journal file");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run.join(file),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("system journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("system journal reads")
+    replay_testkit::read_journal_envelopes::<SystemEvent>(&run.join(file)).await
 }
 
 fn parent(event: &ChainEvent) -> Option<EventId> {

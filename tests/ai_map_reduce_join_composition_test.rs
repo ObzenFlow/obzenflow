@@ -5,6 +5,8 @@
 //! Runtime and journal proofs for joins adjacent to the generated AI composite.
 //! All inputs and chat responses are local fixtures; replay cannot resolve a client.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
@@ -20,12 +22,12 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
-use obzenflow_core::journal::{Journal, RunManifest};
-use obzenflow_core::{EventId, JournalOwner, StageId, TypedPayload, WriterId};
+use obzenflow_core::journal::RunManifest;
+use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::dsl::backpressure_clause::enforced;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
@@ -495,17 +497,10 @@ fn run_dir(root: &Path) -> PathBuf {
 
 async fn stage_records(run: &Path, stage: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = manifest(run);
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run.join(&manifest.stages[stage].data_journal_file),
-        JournalOwner::stage(StageId::new()),
+    replay_testkit::read_journal_envelopes_appended::<ChainEvent>(
+        &run.join(&manifest.stages[stage].data_journal_file),
     )
-    .unwrap();
-    let mut reader = journal.reader().await.unwrap();
-    let mut rows = Vec::new();
-    while let Some(row) = reader.next().await.unwrap() {
-        rows.push(row);
-    }
-    rows
+    .await
 }
 
 fn typed<T: TypedPayload>(

@@ -8,6 +8,8 @@
 //! - record processing time during `accumulate()` (051j-1)
 //! - count input events per-accumulate even when heartbeats are disabled (051j-2)
 
+mod replay_testkit;
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::ChainEvent;
@@ -422,16 +424,11 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
         })
         .ok_or_else(|| anyhow!("missing stateful counter journal in {}", flow_dir.display()))?;
 
-    use obzenflow_core::Journal;
-    let journal = obzenflow_infra::journal::DiskJournal::<ChainEvent>::with_owner(
-        stage_log.clone(),
-        obzenflow_core::JournalOwner::stage(obzenflow_core::StageId::new()),
-    )?;
-    let aggregate_record = journal
-        .read_all_unordered()
-        .await?
-        .into_iter()
-        .find(|record| AggregateMetricEvent::from_event(&record.authored()).is_some());
+    let aggregate_record =
+        replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&stage_log)
+            .await
+            .into_iter()
+            .find(|record| AggregateMetricEvent::from_event(&record.authored()).is_some());
 
     let aggregate_record = aggregate_record
         .ok_or_else(|| anyhow!("missing aggregate event in {}", stage_log.display()))?;

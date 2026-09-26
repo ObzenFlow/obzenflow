@@ -11,6 +11,7 @@ use obzenflow::journal::ProcessingStatus;
 use obzenflow_core::event::{CausalCoordinate, CausalWitnesses};
 use obzenflow_core::journal::causal::CausalProof;
 use obzenflow_core::JournalId;
+use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -19,7 +20,8 @@ use std::fmt;
 mod body;
 pub(super) use body::{payload_clocks, BodyView};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
 pub(super) struct JournalNumber(usize);
 
 impl From<usize> for JournalNumber {
@@ -174,7 +176,7 @@ impl<'a> EventView<'a> {
     }
 
     pub fn body(&self) -> BodyView<'a> {
-        BodyView::from_record(self.record)
+        BodyView::from_record(self.record, self.context)
     }
 
     pub fn evidence(&self) -> EvidenceView<'a> {

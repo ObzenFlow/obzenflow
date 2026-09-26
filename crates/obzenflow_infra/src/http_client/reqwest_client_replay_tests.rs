@@ -16,9 +16,7 @@ use obzenflow_core::event::{
     ChainEvent, ChainPayload, ReplayLifecycleEvent, SupervisorRecord, SystemPayload,
 };
 use obzenflow_core::http_client::Url;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::read::RunRecordData;
-use obzenflow_core::journal::Journal;
+use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
 use obzenflow_runtime::bootstrap::{
@@ -437,25 +435,24 @@ async fn wait_for_completion(handle: FlowHandle) {
 }
 
 async fn source_events(run_dir: &Path) -> Vec<ChainEvent> {
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(run_dir.join("run_manifest.json")).expect("read run manifest"),
-    )
-    .expect("parse run manifest");
-    let relative = manifest["stages"]["src"]["data_journal_file"]
-        .as_str()
-        .expect("source journal path");
-    let journal = crate::journal::DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("open source journal");
-    journal
-        .read_causally_ordered()
+    let mut snapshot = crate::journal::read::open_disk_run(run_dir)
         .await
-        .expect("read source journal")
-        .into_iter()
-        .map(|envelope| envelope.authored())
-        .collect()
+        .expect("open source archive");
+    let mut events = Vec::new();
+    while let Some(record) = snapshot.next().await.expect("read source archive") {
+        if record.journal.kind == RunJournalKind::Data
+            && record
+                .journal
+                .stage
+                .as_ref()
+                .is_some_and(|stage| stage.key == "src")
+        {
+            if let RunRecordData::Chain(row) = record.record {
+                events.push(row.into_authored());
+            }
+        }
+    }
+    events
 }
 
 #[tokio::test]
