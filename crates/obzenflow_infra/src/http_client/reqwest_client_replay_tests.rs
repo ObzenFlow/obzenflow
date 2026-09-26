@@ -236,11 +236,11 @@ fn counted_client_after_resume_marker(
                 .await
                 .expect("admit resumed run before client initialization");
             while let Some(record) = snapshot.next().await.expect("read resumed run") {
-                if !record
+                if record
                     .journal
                     .stage
                     .as_ref()
-                    .is_some_and(|stage| stage.key == "src")
+                    .is_none_or(|stage| stage.key != "src")
                 {
                     continue;
                 }
