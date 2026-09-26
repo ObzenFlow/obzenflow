@@ -44,7 +44,7 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
     serde_json::from_value(json!({
         "version": 2,
         "run": {"flow_id": id(10), "pipeline_writer_id": {"type":"System", "id":id(11)}},
-        "journal": {"id":id(stage), "kind":"data", "stage":{"key":key, "id":id(stage), "stage_type":stage_type}},
+        "journal": {"id":id(stage), "kind":"data", "stage":{"key":key, "id":id(stage), "stage_type":stage_type,"is_effectful":false}},
         "position":event,
         "kind":kind,
         "record": {
@@ -256,12 +256,14 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
         renderer.color = true;
         renderer.include_runtime = verbose;
         let mut output = Vec::new();
-        for record in [
+        for mut record in [
             fact(1, 100, &[], json!({"celsius":38})),
             failed.clone(),
             progress.clone(),
             fact(2, 103, &[100], json!({"reason":"unavailable"})),
         ] {
+            let stage = record.journal.stage.as_mut().unwrap();
+            stage.is_effectful = stage.key == "classify";
             renderer.record(&mut output, record).unwrap();
         }
         renderer.flush_pending(&mut output).unwrap();
@@ -299,7 +301,7 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
         let mut result = fact(2, 101, &[100], json!({"reason":"no_effect_needed"}));
         let stage = result.journal.stage.as_mut().unwrap();
         stage.stage_type = stage_type;
-        stage.is_effectful = Some(true);
+        stage.is_effectful = true;
         let mut output = Vec::new();
         renderer
             .record(&mut output, fact(1, 100, &[], json!({"celsius":38})))
@@ -318,11 +320,26 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
 }
 
 #[test]
-fn older_archives_learn_effectful_capability_only_from_the_owning_stage() {
+fn current_projection_requires_declared_stage_capability() {
+    for missing in [true, false] {
+        let mut record = serde_json::to_value(fact(2, 101, &[], json!({}))).unwrap();
+        let stage = record["journal"]["stage"].as_object_mut().unwrap();
+        if missing {
+            stage.remove("is_effectful");
+        } else {
+            stage.insert("is_effectful".into(), Value::Null);
+        }
+        assert!(serde_json::from_value::<RunRecord>(record).is_err());
+    }
+}
+
+#[test]
+fn stage_capability_comes_from_the_manifest_regardless_of_effect_provenance() {
     for (declared, effect_stage, expected) in [
-        (None, "classify", "EFFECTFUL TRANSFORM"),
-        (None, "upstream", "TRANSFORM"),
-        (Some(false), "classify", "TRANSFORM"),
+        (true, "classify", "EFFECTFUL TRANSFORM"),
+        (true, "upstream", "EFFECTFUL TRANSFORM"),
+        (false, "classify", "TRANSFORM"),
+        (false, "upstream", "TRANSFORM"),
     ] {
         let mut renderer = renderer();
         let mut result = fact(2, 101, &[100], json!({"result":"calibrated"}));
@@ -368,7 +385,7 @@ fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_
         let mut result = fact(2, 101, &[100], json!({"reason":"unavailable"}));
         let stage = result.journal.stage.as_mut().unwrap();
         stage.key = "authorize_payment".into();
-        stage.is_effectful = Some(true);
+        stage.is_effectful = true;
         if let RunRecordData::Chain(row) = &mut result.record {
             row.envelope.provenance.event.event_type =
                 "payment.authorization_unavailable.v1".into();

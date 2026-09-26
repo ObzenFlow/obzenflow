@@ -7,9 +7,11 @@ Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
 
-Earlier development archives must be re-recorded. Readers reject unsupported
-schemas before typed manifest decoding or record interpretation, including with
+Only the current journal schema is supported. Readers reject unsupported schemas
+before typed manifest decoding or record interpretation, including with
 `--allow-incomplete-archive`. There are no legacy readers or conversion paths.
+Stage manifests and run projections require the recorded `is_effectful` boolean;
+readers do not infer omitted declarations from effect records.
 The logical field layout retains absolute numbers and complete immutable
 definitions; JSONL export remains the expanded current logical record.
 

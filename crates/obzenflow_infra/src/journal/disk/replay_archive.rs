@@ -404,7 +404,7 @@ impl ReplayArchive for DiskReplayArchive {
     }
 
     /// Max recorded admission sequence across the source journals (FLOWIP-120n
-    /// F18), 0 for archives predating the field. From the same open-time scan.
+    /// F18), 0 when there are no recorded source admissions. From the same open-time scan.
     fn max_recorded_admission_seq(&self) -> obzenflow_core::AdmissionSeq {
         self.max_recorded_admission_seq
     }

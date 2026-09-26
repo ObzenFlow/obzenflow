@@ -21,7 +21,6 @@ pub(super) struct Reference {
 pub(super) struct Stage {
     pub writer: String,
     pub key: String,
-    observed_effectful: bool,
 }
 
 pub(super) struct ClockComponent {
@@ -64,7 +63,6 @@ impl Context {
                 .map(|stage| Stage {
                     writer: format!("writer_{}", stage.id),
                     key: stage.key,
-                    observed_effectful: false,
                 })
                 .collect(),
             references: BTreeMap::new(),
@@ -76,19 +74,6 @@ impl Context {
     pub fn remember(&mut self, record: &RunRecord) {
         if let Err(error) = self.causal.admit_run_record(record) {
             self.causal_error = Some(error.to_string());
-        }
-        // Older manifests lack the declared capability. An effect cursor is
-        // positive evidence for its own stage only; forwarded facts must not
-        // turn a downstream pure stage into an effectful stage.
-        if let Some(key) = effect_stage_key(record) {
-            let writer = writer_id(record);
-            if let Some(stage) = self
-                .stages
-                .iter_mut()
-                .find(|stage| stage.key == key && stage.writer == writer)
-            {
-                stage.observed_effectful = true;
-            }
         }
         let id = event_id(record);
         if self.references.contains_key(&id) {
@@ -110,13 +95,11 @@ impl Context {
     }
 
     pub fn is_effectful(&self, record: &RunRecord) -> bool {
-        record.journal.stage.as_ref().is_some_and(|stage| {
-            stage.is_effectful.unwrap_or_else(|| {
-                self.stages
-                    .iter()
-                    .any(|known| known.key == stage.key && known.observed_effectful)
-            })
-        })
+        record
+            .journal
+            .stage
+            .as_ref()
+            .is_some_and(|stage| stage.is_effectful)
     }
 
     pub fn parents_available(&self, record: &RunRecord) -> bool {
@@ -208,29 +191,6 @@ impl Context {
             })
             .collect()
     }
-}
-
-fn effect_stage_key(record: &RunRecord) -> Option<&str> {
-    let RunRecordData::Chain(row) = &record.record else {
-        return None;
-    };
-    let cursor = match &row.payload {
-        ChainPayload::Fact(_) => {
-            &row.envelope
-                .provenance
-                .event
-                .effect_provenance
-                .as_ref()?
-                .cursor
-        }
-        ChainPayload::Execution(ExecutionPayload::EffectRecord(effect)) => &effect.cursor,
-        ChainPayload::Execution(ExecutionPayload::EffectAttemptStarted(effect)) => &effect.cursor,
-        ChainPayload::Execution(ExecutionPayload::EffectRecoveryAbandoned(effect)) => {
-            &effect.cursor
-        }
-        _ => return None,
-    };
-    Some(cursor.stage_key.as_str())
 }
 
 pub(super) fn event_type(record: &RunRecord) -> &str {

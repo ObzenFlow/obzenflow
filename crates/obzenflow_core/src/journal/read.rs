@@ -39,10 +39,9 @@ pub struct RunStage {
     pub key: String,
     pub id: StageId,
     pub stage_type: StageType,
-    /// Declared ability to use replay-suppressed effects. `None` means the
-    /// provider has no recorded classification; it does not establish purity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_effectful: Option<bool>,
+    /// Recorded ability to use replay-suppressed effects, required by the
+    /// current journal schema.
+    pub is_effectful: bool,
 }
 
 /// Stable identity derived by the provider from the admitted run and journal.

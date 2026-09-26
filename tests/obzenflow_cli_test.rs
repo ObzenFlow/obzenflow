@@ -732,7 +732,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .collect();
     for row in &rows {
         if let Some(stage) = &row.journal.stage {
-            assert_eq!(stage.is_effectful, Some(stage.key == "authorize_payment"));
+            assert_eq!(stage.is_effectful, stage.key == "authorize_payment");
         }
     }
     assert_record_outputs(&human, &rows);

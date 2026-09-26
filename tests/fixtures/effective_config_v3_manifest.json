@@ -10,6 +10,7 @@
     "orders": {
       "dsl_var": "orders",
       "stage_type": "FiniteSource",
+      "is_effectful": false,
       "stage_id": "stage_01J00000000000000000000001",
       "stage_logic_version": "1",
       "data_journal_file": "FiniteSource_orders.log",
@@ -20,6 +21,7 @@
     "authorize_payment": {
       "dsl_var": "authorize_payment",
       "stage_type": "Transform",
+      "is_effectful": true,
       "stage_id": "stage_01J00000000000000000000002",
       "stage_logic_version": "1",
       "data_journal_file": "Transform_authorize_payment.log",
@@ -32,6 +34,7 @@
     "output": {
       "dsl_var": "output",
       "stage_type": "Sink",
+      "is_effectful": false,
       "stage_id": "stage_01J00000000000000000000003",
       "stage_logic_version": "1",
       "data_journal_file": "Sink_output.log",

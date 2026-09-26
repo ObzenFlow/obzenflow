@@ -45,7 +45,7 @@ fn write_manifest(dir: &Path) {
         RunManifestStage {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
-            is_effectful: Some(false),
+            is_effectful: false,
             stage_id: "stage_01H00000000000000000000000".to_string(),
             stage_logic_version: "1".to_string(),
             data_journal_file: "FiniteSource_returns_stage_01H00000000000000000000000.log"
@@ -407,6 +407,47 @@ async fn open_rejects_previous_journal_schema_version_before_typed_parse() {
         err.to_string().contains("re-record"),
         "refusal must carry the re-record guidance, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn current_manifest_requires_stage_capability_before_journal_access() {
+    for (value, expected) in [
+        (None, "missing field `is_effectful`"),
+        (Some(serde_json::Value::Null), "expected a boolean"),
+    ] {
+        let dir = tempdir().unwrap();
+        write_manifest(dir.path());
+        let manifest_path = dir.path().join(RUN_MANIFEST_FILENAME);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let stage = manifest["stages"]["returns"].as_object_mut().unwrap();
+        stage.remove("is_effectful");
+        if let Some(value) = value {
+            stage.insert("is_effectful".into(), value);
+        }
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        // No journal files exist: both readers must reject the manifest before
+        // trying to recover metadata from journal records, even in incomplete mode.
+        let snapshot_error = obzenflow_infra::journal::read::open_disk_run(dir.path())
+            .await
+            .err()
+            .expect("missing capability must fail snapshot admission");
+        assert!(
+            snapshot_error.to_string().contains(expected),
+            "{snapshot_error}"
+        );
+        for allow_incomplete in [false, true] {
+            let replay_error = DiskReplayArchive::open(dir.path().to_path_buf(), allow_incomplete)
+                .await
+                .err()
+                .expect("missing capability must fail replay admission");
+            assert!(
+                replay_error.to_string().contains(expected),
+                "{replay_error}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

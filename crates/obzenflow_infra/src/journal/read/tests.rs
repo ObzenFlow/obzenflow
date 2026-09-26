@@ -62,7 +62,7 @@ impl Run {
                 RunManifestStage {
                     dsl_var: "source".into(),
                     stage_type: StageType::FiniteSource,
-                    is_effectful: Some(false),
+                    is_effectful: false,
                     stage_id: stage.to_string(),
                     stage_logic_version: "1".into(),
                     data_journal_file: "data.log".into(),
@@ -131,7 +131,7 @@ async fn available(tail: &mut RunTail) -> Vec<RunRecord> {
 #[tokio::test]
 async fn stage_effectful_capability_survives_manifest_projection_without_records() {
     for stage_type in [StageType::Transform, StageType::Stateful] {
-        for capability in [None, Some(false), Some(true)] {
+        for capability in [false, true] {
             let mut run = Run::new();
             let stage = run.manifest.stages.get_mut("source").unwrap();
             stage.stage_type = stage_type;
