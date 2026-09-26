@@ -1549,29 +1549,39 @@ fn mark_archive_incomplete(run_dir: &Path) {
     .expect("incomplete fixture must retain readable stage journals");
 }
 
-fn remove_effect_results_for_stage(run_dir: &Path, stage_key: &str) {
+fn truncate_stage_before_effect_results(run_dir: &Path, stage_key: &str) {
     let manifest = archive_manifest(run_dir);
     let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .expect("manifest should contain stage data journal file");
     // FLOWIP-120b: successful effect outcomes are domain `Data` facts carrying
     // non-framework effect provenance. Failure/capture compatibility rows remain
-    // framework-owned reserved event types. Drop both forms so resume sees the
-    // effect outcomes as missing and re-executes; ordinary domain outputs on the
-    // same journal are retained.
+    // framework-owned reserved event types. An interrupted journal is a physical
+    // prefix: stop before the first outcome frame, including every later output.
+    // Removing outcomes alone would leave holes in the committed causal chain.
     let effect_outcome_type = ReplayEffectValue::versioned_event_type();
+    let reached_outcome = std::cell::Cell::new(false);
     obzenflow_infra::testing::journal::retain_archive_frames(run_dir, |path, records| {
-        path.file_name().and_then(|name| name.to_str()) != Some(stage_journal)
-            || !records.iter().any(|record| {
-                record
-                    .pointer("/envelope/provenance/event/event_type")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|event_type| {
-                        event_type == EFFECT_RECORD_EVENT_TYPE || event_type == effect_outcome_type
-                    })
-            })
+        if path.file_name().and_then(|name| name.to_str()) != Some(stage_journal) {
+            return true;
+        }
+        if records.iter().any(|record| {
+            record
+                .pointer("/envelope/provenance/event/event_type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|event_type| {
+                    event_type == EFFECT_RECORD_EVENT_TYPE || event_type == effect_outcome_type
+                })
+        }) {
+            reached_outcome.set(true);
+        }
+        !reached_outcome.get()
     })
     .expect("missing-outcome fixture must retain readable complete frames");
+    assert!(
+        reached_outcome.get(),
+        "fixture must contain effect outcomes"
+    );
 }
 
 async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
@@ -3456,7 +3466,7 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
     let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
 
     let archive_dir = latest_run_dir(&journal_base);
-    remove_effect_results_for_stage(&archive_dir, "effectful");
+    truncate_stage_before_effect_results(&archive_dir, "effectful");
     mark_archive_incomplete(&archive_dir);
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
@@ -3541,7 +3551,7 @@ async fn resume_incomplete_runs_effect_boundary_limiter_for_missing_effect_recor
 
     // Drop every committed effect record so each effect must re-execute live.
     let archive_dir = latest_run_dir(&journal_base);
-    remove_effect_results_for_stage(&archive_dir, "effectful");
+    truncate_stage_before_effect_results(&archive_dir, "effectful");
     mark_archive_incomplete(&archive_dir);
 
     let resume_calls = Arc::new(AtomicUsize::new(0));

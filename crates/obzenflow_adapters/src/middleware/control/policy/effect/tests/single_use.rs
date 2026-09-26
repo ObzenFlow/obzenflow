@@ -329,7 +329,7 @@ async fn effect_context(
 
         instrumentation: None,
         heartbeat_state: None,
-        parent,
+        parent: parent.into(),
         effect_history: None,
         runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
         effect_ports,

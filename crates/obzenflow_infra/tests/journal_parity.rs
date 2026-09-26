@@ -7,6 +7,7 @@
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::system_event::SystemEventFactory;
 use obzenflow_core::event::types::EventId;
+use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, SystemPayload};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::AppendOptions;
@@ -142,7 +143,7 @@ async fn test_journal_parity() {
 }
 
 #[tokio::test]
-async fn test_journal_concurrent_tiebreak_is_event_id() {
+async fn test_journal_physical_order_precedes_event_id_across_authors() {
     let temp_dir = TempDir::new().unwrap();
     let owner = JournalOwner::stage(StageId::new());
     let log_path = temp_dir.path().join("tiebreak_test.log");
@@ -164,9 +165,8 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
     let (low, high) = if a.id < b.id { (a, b) } else { (b, a) };
 
     for journal in [&disk_journal, &memory_journal] {
-        // Append in the opposite order of the desired causal-tie-break order.
-        // If timestamps were used as the concurrent tie-break, this would tend to sort as:
-        //   high (earlier append) then low (later append).
+        // Different event authors still share this physical journal sequence.
+        // Causality must win over the opposite EventId order.
         journal
             .append(high.clone(), Default::default())
             .await
@@ -178,14 +178,18 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
             .unwrap();
 
         let ordered = journal.read_causally_ordered().await.unwrap();
+        assert!(CausalOrderingService::happened_before(
+            &ordered[0].envelope.provenance.journal.vector_clock,
+            &ordered[1].envelope.provenance.journal.vector_clock,
+        ));
         let ordered_ids: Vec<_> = ordered
             .iter()
             .map(|e| e.envelope.provenance.event.id)
             .collect();
         assert_eq!(
             ordered_ids,
-            vec![low.id, high.id],
-            "concurrent tie-break should use EventId ordering"
+            vec![high.id, low.id],
+            "one physical journal preserves commit order across authors"
         );
     }
 
@@ -208,7 +212,7 @@ async fn test_journal_concurrent_tiebreak_is_event_id() {
 }
 
 #[tokio::test]
-async fn test_read_causally_after_matches_slice_with_concurrent_events() {
+async fn test_read_causally_after_matches_slice_across_event_authors() {
     let temp_dir = TempDir::new().unwrap();
     let owner = JournalOwner::stage(StageId::new());
     let log_path = temp_dir.path().join("after_slice_test.log");
@@ -262,17 +266,29 @@ async fn test_read_causally_after_matches_slice_with_concurrent_events() {
     }
 }
 
+// Concurrency is between physical journals, not event authors in one journal.
+fn independent_journal_sets<const N: usize>(
+    directory: &std::path::Path,
+) -> [[Arc<dyn Journal<ChainEvent>>; N]; 2] {
+    let owners: [_; N] = std::array::from_fn(|_| JournalOwner::stage(StageId::new()));
+    let disk = std::array::from_fn(|index| {
+        Arc::new(
+            DiskJournal::with_owner(
+                directory.join(format!("branch_{index}.log")),
+                owners[index].clone(),
+            )
+            .unwrap(),
+        ) as Arc<dyn Journal<ChainEvent>>
+    });
+    let memory = std::array::from_fn(|index| {
+        Arc::new(MemoryJournal::with_owner(owners[index].clone())) as Arc<dyn Journal<ChainEvent>>
+    });
+    [disk, memory]
+}
+
 #[tokio::test]
 async fn test_diamond_like_dag_respects_causality_and_event_id() {
     let temp_dir = TempDir::new().unwrap();
-    let owner = JournalOwner::stage(StageId::new());
-    let log_path = temp_dir.path().join("diamond_like.log");
-
-    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
-    let memory_journal =
-        Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
-
     let writer_root = WriterId::from(StageId::new());
     let writer_left = WriterId::from(StageId::new());
     let writer_right = WriterId::from(StageId::new());
@@ -294,13 +310,15 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
     let mut join = ChainEventFactory::data_event(writer_join, "test.join", json!({ "n": 4 }));
     join.id = EventId::from_string("33333333333333333333333333").unwrap();
 
-    for journal in [&disk_journal, &memory_journal] {
-        let env_root = journal
+    for [root_journal, left_journal, right_journal, join_journal] in
+        independent_journal_sets::<4>(temp_dir.path())
+    {
+        let env_root = root_journal
             .append(root.clone(), Default::default())
             .await
             .unwrap();
 
-        let env_right = journal
+        let env_right = right_journal
             .append(
                 right.clone(),
                 AppendOptions::from_record(Some(&env_root)).unwrap(),
@@ -308,7 +326,7 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let env_left = journal
+        let env_left = left_journal
             .append(
                 left.clone(),
                 AppendOptions::from_record(Some(&env_root)).unwrap(),
@@ -316,14 +334,14 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
             .await
             .unwrap();
 
-        let env_merge_left = journal
+        let env_merge_left = join_journal
             .append(
                 merge_left.clone(),
                 AppendOptions::from_record(Some(&env_left)).unwrap(),
             )
             .await
             .unwrap();
-        let env_join = journal
+        let env_join = join_journal
             .append(
                 join.clone(),
                 AppendOptions::from_record(Some(&env_right)).unwrap(),
@@ -369,7 +387,11 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
             )
         );
 
-        let ordered = journal.read_causally_ordered().await.unwrap();
+        let mut records = Vec::new();
+        for journal in [&root_journal, &left_journal, &right_journal, &join_journal] {
+            records.extend(journal.read_causally_ordered().await.unwrap());
+        }
+        let ordered = CausalOrderingService::order_envelopes_by_event_id(records).unwrap();
         let ordered_ids: Vec<_> = ordered
             .iter()
             .map(|e| e.envelope.provenance.event.id)
@@ -384,14 +406,6 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
 #[tokio::test]
 async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings() {
     let temp_dir = TempDir::new().unwrap();
-    let owner = JournalOwner::stage(StageId::new());
-    let log_path = temp_dir.path().join("diamond_like_timestamp.log");
-
-    let disk_journal = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
-        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
-    let memory_journal =
-        Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
-
     let writer_root = WriterId::from(StageId::new());
     let writer_left = WriterId::from(StageId::new());
     let writer_right = WriterId::from(StageId::new());
@@ -413,8 +427,10 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
     let mut join = ChainEventFactory::data_event(writer_join, "test.join", json!({ "n": 4 }));
     join.id = EventId::from_string("33333333333333333333333333").unwrap();
 
-    for journal in [&disk_journal, &memory_journal] {
-        let env_root = journal
+    for [root_journal, left_journal, right_journal, join_journal] in
+        independent_journal_sets::<4>(temp_dir.path())
+    {
+        let env_root = root_journal
             .append(root.clone(), Default::default())
             .await
             .unwrap();
@@ -422,7 +438,7 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
         // Append the higher EventId sibling first, then the lower EventId sibling.
         // If wall-clock timestamps were used as a concurrent tie-break, this would tend to order
         // right then left.
-        journal
+        let env_right = right_journal
             .append(
                 right.clone(),
                 AppendOptions::from_record(Some(&env_root)).unwrap(),
@@ -430,7 +446,7 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let env_left = journal
+        let env_left = left_journal
             .append(
                 left.clone(),
                 AppendOptions::from_record(Some(&env_root)).unwrap(),
@@ -438,22 +454,26 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
             .await
             .unwrap();
 
-        journal
+        join_journal
             .append(
                 merge_left.clone(),
                 AppendOptions::from_record(Some(&env_left)).unwrap(),
             )
             .await
             .unwrap();
-        journal
+        join_journal
             .append(
                 join.clone(),
-                AppendOptions::from_record(Some(&env_left)).unwrap(),
+                AppendOptions::from_record(Some(&env_right)).unwrap(),
             )
             .await
             .unwrap();
 
-        let ordered = journal.read_causally_ordered().await.unwrap();
+        let mut records = Vec::new();
+        for journal in [&root_journal, &left_journal, &right_journal, &join_journal] {
+            records.extend(journal.read_causally_ordered().await.unwrap());
+        }
+        let ordered = CausalOrderingService::order_envelopes_by_event_id(records).unwrap();
         let ordered_ids: Vec<_> = ordered
             .iter()
             .map(|e| e.envelope.provenance.event.id)

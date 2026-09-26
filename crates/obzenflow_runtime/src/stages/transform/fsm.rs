@@ -7,6 +7,7 @@
 //! Transforms process events from upstream stages and emit transformed events.
 //! They start processing immediately without waiting for a start signal.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
@@ -14,7 +15,7 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -103,7 +104,7 @@ impl futures::task::ArcWake for ContinuationWake {
 /// loop iterations. It is never serialised and never accepts another input.
 pub(crate) struct DirectFactContinuation {
     pub causal: obzenflow_core::event::CausalFrontier,
-    pub envelope: JournalRecord<ChainPayload>,
+    pub envelope: DeliveredRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     pub scope: obzenflow_core::MiddlewareExecutionScope,
@@ -118,7 +119,7 @@ pub(crate) struct DirectFactContinuation {
 }
 
 pub(crate) struct DirectFactContinuationStart {
-    pub envelope: JournalRecord<ChainPayload>,
+    pub envelope: DeliveredRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     pub scope: obzenflow_core::MiddlewareExecutionScope,
@@ -307,7 +308,7 @@ mod direct_fact_continuation_tests {
         let envelope = JournalRecord::new(JournalWriterId::new(), event);
         let continuation = DirectFactContinuation::new(
             DirectFactContinuationStart {
-                envelope,
+                envelope: envelope.into(),
                 upstream_stage: None,
                 input_position: None,
                 scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
@@ -356,7 +357,7 @@ mod direct_fact_continuation_tests {
             let envelope = JournalRecord::new(JournalWriterId::new(), event);
             let continuation = DirectFactContinuation::new(
                 DirectFactContinuationStart {
-                    envelope,
+                    envelope: envelope.into(),
                     upstream_stage: None,
                     input_position: None,
                     scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
@@ -726,7 +727,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
-    pub(crate) pending_parent: Option<JournalRecord<ChainPayload>>,
+    pub(crate) pending_parent: Option<DeliveredRecord<ChainPayload>>,
 
     /// Upstream stage awaiting a consumption ack once pending outputs are drained.
     pub(crate) pending_ack_upstream: Option<StageId>,
@@ -751,7 +752,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) drain_received: bool,
 
     /// Buffered terminal envelope (EOF or Drain) held by SCC entry points until quiescence (FLOWIP-051n).
-    pub(crate) buffered_terminal_envelope: Option<JournalRecord<ChainPayload>>,
+    pub(crate) buffered_terminal_envelope: Option<DeliveredRecord<ChainPayload>>,
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,

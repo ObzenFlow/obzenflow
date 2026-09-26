@@ -7,6 +7,7 @@
 use crate::backpressure::BackpressureWriter;
 use crate::effects::EffectInvocationContext;
 use crate::feed_plan::StageOutputContract;
+use crate::messaging::DeliveredRecord;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::{process_with_instrumentation, snapshot_stage_accounting};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
@@ -41,8 +42,8 @@ use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
-    ChainEventFactory, JournalRecord, SinkOperationFailed, SinkOperationPhase, StageFatalCode,
-    StageFatalReason, SystemEvent,
+    ChainEventFactory, SinkOperationFailed, SinkOperationPhase, StageFatalCode, StageFatalReason,
+    SystemEvent,
 };
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_fsm::StateVariant;
@@ -264,7 +265,7 @@ pub(super) async fn dispatch_running<
 async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     tracing::trace!(stage_name = %ctx.stage_name, "Sink processing event");
@@ -301,7 +302,7 @@ async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 
 async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
     signal: &FlowControlPayload,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     // FLOWIP-120n: consume the catch-up watermark before the generic control
@@ -566,9 +567,9 @@ fn protocol_fatal(detail: impl Into<String>) -> StageFatal {
 fn prepare_receipt_plan(
     subscription: &crate::messaging::UpstreamSubscription<ChainEvent>,
     contract_state: &[crate::messaging::upstream_subscription::ReaderProgress],
-    current_envelope: &JournalRecord<ChainPayload>,
+    current_envelope: &DeliveredRecord<ChainPayload>,
     report: &mut SinkConsumeReport,
-) -> Result<Vec<(JournalRecord<ChainPayload>, DeliveryPayload)>, StageFatal> {
+) -> Result<Vec<(DeliveredRecord<ChainPayload>, DeliveryPayload)>, StageFatal> {
     if subscription
         .pending_receipt_envelope(
             current_envelope.envelope.provenance.event.id,
@@ -623,7 +624,7 @@ async fn record_protocol_fatal_and_transition<
     ctx: &mut JournalSinkContext<H>,
     fatal: StageFatal,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
-    parent: Option<&JournalRecord<ChainPayload>>,
+    parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
         .writer_id
@@ -636,7 +637,7 @@ async fn record_protocol_fatal_and_transition<
             stage_id: ctx.stage_id,
             stage_key: &ctx.stage_name,
             input_position,
-            parent,
+            parent: parent.map(DeliveredRecord::record),
             lineage: ctx.lineage_policy,
         },
     )
@@ -652,11 +653,11 @@ async fn journal_sink_operation_failure<
 >(
     ctx: &mut JournalSinkContext<H>,
     input: &ChainEvent,
-    failed_receipt: &JournalRecord<ChainPayload>,
+    failed_receipt: &DeliveredRecord<ChainPayload>,
     phase: SinkOperationPhase,
     error: &SinkOperationError,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
-) -> Result<JournalRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<DeliveredRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
@@ -700,6 +701,7 @@ async fn journal_sink_operation_failure<
         Some(failed_receipt),
     )
     .await
+    .map(Into::into)
 }
 
 async fn journal_fresh_error_route<
@@ -707,11 +709,11 @@ async fn journal_fresh_error_route<
 >(
     ctx: &mut JournalSinkContext<H>,
     input: &ChainEvent,
-    causal_parent: &JournalRecord<ChainPayload>,
+    causal_parent: &DeliveredRecord<ChainPayload>,
     detail: String,
     kind: ErrorKind,
     observer_scope: MiddlewareExecutionScope,
-) -> Result<JournalRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<DeliveredRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     if !input.is_typed_input() {
         return Err("sink error route requires a typed input".into());
     }
@@ -747,6 +749,7 @@ async fn journal_fresh_error_route<
             Some(causal_parent),
         )
         .await
+        .map(Into::into)
     } else {
         use crate::stages::common::supervision::output_committer::{
             CommitOptions, OutputCommitter,
@@ -770,6 +773,7 @@ async fn journal_fresh_error_route<
             },
         )
         .await
+        .map(Into::into)
     }
 }
 
@@ -777,7 +781,7 @@ async fn journal_policy_evidence<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut JournalSinkContext<H>,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     batch: SinkPolicyEvidenceBatch,
     scope: MiddlewareExecutionScope,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -843,7 +847,7 @@ async fn journal_poisoned_lifecycle<
 async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let observer_input_position =
@@ -1249,10 +1253,10 @@ async fn journal_delivery_receipt<
 >(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    parent_envelope: &JournalRecord<ChainPayload>,
+    parent_envelope: &DeliveredRecord<ChainPayload>,
     payload: DeliveryPayload,
     scope: MiddlewareExecutionScope,
-) -> Result<JournalRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<DeliveredRecord<ChainPayload>, Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -1294,5 +1298,5 @@ async fn journal_delivery_receipt<
     })
     .await?;
     subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
-    Ok(written)
+    Ok(written.into())
 }

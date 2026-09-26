@@ -1328,6 +1328,42 @@ enabled = {prometheus}
             export_started.elapsed(),
             proof_started.elapsed()
         );
+        // Exported JSON carries data, not reader admission. Compare every
+        // report with its admitted record before using it in Studio's
+        // commitment-bearing projection.
+        use obzenflow_core::event::SupervisorRecord;
+        use obzenflow_core::journal::read::RunRecordData;
+        let mut committed_reports = std::collections::HashMap::new();
+        let mut snapshot = obzenflow_infra::journal::read::open_disk_run(&archive)
+            .await
+            .unwrap();
+        while let Some(record) = snapshot.next().await.unwrap() {
+            let (json, report) = match record.record {
+                RunRecordData::System(row) => (
+                    serde_json::to_value(&row).unwrap(),
+                    SupervisorRecord::from(*row),
+                ),
+                RunRecordData::Chain(row) => {
+                    let Some(report) = SupervisorRecord::from_chain(row.as_ref().clone()) else {
+                        continue;
+                    };
+                    (serde_json::to_value(&row).unwrap(), report)
+                }
+            };
+            assert!(committed_reports
+                .insert(*report.id(), (json, report))
+                .is_none());
+        }
+        let mut admitted_report = |line: &str, id| {
+            let (committed, report) = committed_reports
+                .remove(&id)
+                .expect("exported report must resolve to an admitted record");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(line).unwrap(),
+                committed
+            );
+            report
+        };
         let reader = std::io::BufReader::new(std::fs::File::open(&export).unwrap());
         let mut systems = Vec::<LogRecord<SystemEvent>>::new();
         let mut reports = Vec::<obzenflow_core::event::SupervisorRecord>::new();
@@ -1350,7 +1386,7 @@ enabled = {prometheus}
                     if let Some(report) =
                         obzenflow_core::event::SupervisorRecord::from_chain(row.clone())
                     {
-                        reports.push(report);
+                        reports.push(admitted_report(&line, *report.id()));
                     }
                     row.authored()
                 }
@@ -1358,7 +1394,7 @@ enabled = {prometheus}
                     let row: LogRecord<SystemEvent> = serde_json::from_str(&line)
                         .expect("valid typed system or chain export row");
                     event_ids.insert(row.envelope.provenance.event.id);
-                    reports.push(row.clone().into());
+                    reports.push(admitted_report(&line, *row.id()));
                     systems.push(row);
                     continue;
                 }
@@ -1387,6 +1423,10 @@ enabled = {prometheus}
                 }
             }
         }
+        assert!(
+            committed_reports.is_empty(),
+            "export must contain every admitted report"
+        );
         assert_eq!(inputs, (0..count).collect());
         assert_eq!(
             successes,

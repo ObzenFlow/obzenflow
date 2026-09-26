@@ -707,7 +707,7 @@ pub(super) async fn dispatch_draining<
                         stage_id: ctx.stage_id,
                         stage_key: &ctx.stage_name,
                         input_position: None,
-                        parent: ctx.terminal_envelope.as_ref(),
+                        parent: ctx.terminal_envelope.as_deref(),
                         lineage: ctx.lineage_policy,
                     },
                 )
@@ -730,7 +730,7 @@ pub(super) async fn dispatch_draining<
                                 stage_id: ctx.stage_id,
                                 stage_key: &ctx.stage_name,
                                 input_position: None,
-                                parent: ctx.terminal_envelope.as_ref(),
+                                parent: ctx.terminal_envelope.as_deref(),
                                 lineage: ctx.lineage_policy,
                             },
                         )
@@ -925,7 +925,7 @@ pub(super) async fn dispatch_draining<
                             stage_id: ctx.stage_id,
                             stage_key: &ctx.stage_name,
                             input_position: None,
-                            parent,
+                            parent: parent.map(crate::messaging::DeliveredRecord::record),
                             lineage: ctx.lineage_policy,
                         },
                     )

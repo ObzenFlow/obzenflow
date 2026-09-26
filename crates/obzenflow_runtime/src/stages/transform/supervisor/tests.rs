@@ -369,7 +369,7 @@ fn generated_continuation(
     (
         DirectFactContinuation::new(
             DirectFactContinuationStart {
-                envelope,
+                envelope: envelope.into(),
                 upstream_stage: None,
                 input_position: Some(crate::messaging::upstream_subscription::StageInputPosition(
                     1,
@@ -616,6 +616,7 @@ async fn forwarding_fan_out_keeps_independent_local_contexts() {
         .append(original.clone(), Default::default())
         .await
         .unwrap();
+    let envelope = envelope.into();
     left.forward_control_event(&envelope, &left_ctx.stage_name)
         .await
         .unwrap();

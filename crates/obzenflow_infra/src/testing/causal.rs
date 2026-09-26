@@ -5,7 +5,7 @@
 //! Exact causal proof from admitted journal snapshots, independent of the
 //! application replay projection (which deliberately excludes physical clocks).
 
-use obzenflow_core::event::CommittedCausalRef;
+use obzenflow_core::event::{CommittedCausalRef, SupervisorRecord, SystemPayload};
 use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
 use obzenflow_core::journal::read::RunRecordData;
 use std::collections::BTreeMap;
@@ -53,6 +53,25 @@ pub async fn prove_archives(
         match resolver.verify_run_record(&record) {
             CausalProof::Valid { resolved, .. } => {
                 report.valid += 1;
+                // Stage-owned contract reports live in execution rows. Inspect
+                // the semantic report while proving its original commitment.
+                let supervisor = match &record.record {
+                    RunRecordData::System(row) => {
+                        Some(SupervisorRecord::from(row.as_ref().clone()))
+                    }
+                    RunRecordData::Chain(row) => SupervisorRecord::from_chain(row.as_ref().clone()),
+                };
+                if supervisor
+                    .is_some_and(|row| matches!(row.payload, SystemPayload::ContractResult { .. }))
+                    && resolved.iter().any(|witness| {
+                        witness.reference.journal_writer_id.as_journal_id() != &record.journal.id
+                            && system_journals
+                                .get(witness.reference.journal_writer_id.as_journal_id())
+                                == Some(&false)
+                    })
+                {
+                    report.witnessed_contract_results += 1;
+                }
                 let system = matches!(record.record, RunRecordData::System(_));
                 let cross_family = resolved.iter().any(|witness| {
                     system_journals
@@ -62,11 +81,6 @@ pub async fn prove_archives(
                 if cross_family {
                     if system {
                         report.chain_to_system += 1;
-                        if matches!(&record.record, RunRecordData::System(row)
-                            if matches!(row.payload, obzenflow_core::event::SystemPayload::ContractResult { .. }))
-                        {
-                            report.witnessed_contract_results += 1;
-                        }
                     } else {
                         report.system_to_chain += 1;
                     }

@@ -8,6 +8,7 @@
 //! commit-and-reset cycle for a single pending output event. Supervisors call
 //! this in a `while let` loop to flush their `pending_outputs` queue.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
 use crate::stages::common::supervision::suspension::suspend_until;
@@ -17,7 +18,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 
-use obzenflow_core::event::{ChainEventFactory, JournalRecord};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
@@ -95,7 +96,7 @@ pub(crate) async fn drain_one_pending(
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    pending_parent: Option<&JournalRecord<ChainPayload>>,
+    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -248,7 +249,7 @@ pub(crate) async fn drain_one_pending_resolve(
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    pending_parent: Option<&JournalRecord<ChainPayload>>,
+    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,

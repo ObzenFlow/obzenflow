@@ -1,10 +1,9 @@
-use obzenflow_core::event::journal_record::SystemJournalRecord;
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::journal_record::JournalRecord;
+use obzenflow_core::event::journal_record::{JournalRecord, SystemJournalRecord};
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact, RateLimiterFact,
     RateLimiterMode,

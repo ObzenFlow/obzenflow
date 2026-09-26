@@ -176,7 +176,7 @@ async fn stateful_replay_produces_identical_aggregates() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn replay_determinism_covers_concurrent_writer_ordering() {
+async fn replay_determinism_preserves_physical_order_across_event_authors() {
     let upstream_stage = StageId::new();
     let upstream_journal: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::with_owner(
         JournalOwner::stage(upstream_stage),
@@ -209,7 +209,8 @@ async fn replay_determinism_covers_concurrent_writer_ordering() {
     let seen_run1 = run_order_sensitive_fold_once(upstream_journal.clone()).await;
     let seen_run2 = run_order_sensitive_fold_once(upstream_journal.clone()).await;
 
-    assert_eq!(seen_run1, vec![0, 1]);
+    // A physical journal has one causal sequence regardless of event authors.
+    assert_eq!(seen_run1, vec![1, 0]);
     assert_eq!(seen_run1, seen_run2);
 }
 

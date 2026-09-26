@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use crate::control_plane::ControlPlaneProvider;
-use obzenflow_core::event::journal_record::ChainJournalRecord;
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::FlowContext;
@@ -528,7 +528,7 @@ pub(crate) struct PendingReceiptMeta {
 /// This registry is intentionally broader than `pending_receipts`: forwarded
 /// data still needs an exact durable parent even though it does not contribute
 /// to the immediate upstream writer's receipt watermark.
-pub(crate) type PendingDeliveryInput = ChainJournalRecord;
+pub(crate) type PendingDeliveryInput = DeliveredRecord<ChainPayload>;
 
 #[derive(Debug)]
 pub struct ReaderProgress {

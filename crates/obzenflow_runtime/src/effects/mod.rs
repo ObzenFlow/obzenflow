@@ -24,7 +24,7 @@ pub use obzenflow_core::event::schema::{
 };
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, EventId, FlowId, JournalRecord, StageId, WriterId};
+use obzenflow_core::{ChainEvent, EventId, FlowId, StageId, WriterId};
 use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{Map, Value};

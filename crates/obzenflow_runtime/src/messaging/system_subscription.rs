@@ -96,7 +96,7 @@ where
                     envelope.id()
                 );
 
-                PollResult::Event(envelope)
+                PollResult::Event(envelope.into())
             }
             Ok(None) => {
                 // No events available right now

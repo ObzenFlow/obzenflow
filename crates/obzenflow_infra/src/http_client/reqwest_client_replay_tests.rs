@@ -12,9 +12,12 @@ use obzenflow_adapters::sources::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{ChainEvent, ChainPayload};
+use obzenflow_core::event::{
+    ChainEvent, ChainPayload, ReplayLifecycleEvent, SupervisorRecord, SystemPayload,
+};
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::journal_owner::JournalOwner;
+use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload};
 use obzenflow_dsl::{async_infinite_source, async_source, flow, sink, FlowDefinition};
@@ -225,21 +228,37 @@ fn counted_client_after_resume_marker(
 ) -> ReqwestHttpClient {
     ReqwestHttpClient::with_initializer(move || {
         let run_dir = latest_run_dir(&journal_base);
-        let manifest: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(run_dir.join("run_manifest.json"))
-                .expect("read resumed run manifest before client initialization"),
-        )
-        .expect("parse resumed run manifest before client initialization");
-        let system_journal = manifest["system_journal_file"]
-            .as_str()
-            .expect("resumed run system journal path");
-        let system_bytes = std::fs::read(run_dir.join(system_journal))
-            .expect("read resumed system journal before client initialization");
-        const RESUMED_LIVE_FRAME: &[u8] = b"\"replay_event\":\"resumed_live\"";
+        // Initializers run on the blocking pool. Read a finite committed cut
+        // now, before client construction; stage reports live on the source's
+        // execution journal and binary storage is not a JSON search surface.
+        let boundary_recorded = tokio::runtime::Handle::current().block_on(async {
+            let mut snapshot = crate::journal::read::open_disk_run(&run_dir)
+                .await
+                .expect("admit resumed run before client initialization");
+            while let Some(record) = snapshot.next().await.expect("read resumed run") {
+                if !record
+                    .journal
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.key == "src")
+                {
+                    continue;
+                }
+                if let RunRecordData::Chain(row) = record.record {
+                    if matches!(
+                        SupervisorRecord::from_chain(*row).map(|report| report.payload),
+                        Some(SystemPayload::ReplayLifecycle(
+                            ReplayLifecycleEvent::ResumedLive { .. }
+                        ))
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            false
+        });
         assert!(
-            system_bytes
-                .windows(RESUMED_LIVE_FRAME.len())
-                .any(|window| window == RESUMED_LIVE_FRAME),
+            boundary_recorded,
             "the resume boundary must be durably recorded before HTTP client initialization"
         );
 

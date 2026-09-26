@@ -8,13 +8,14 @@
 //! Unlike transforms which have single upstream, joins track two distinct upstreams
 //! (reference and stream) with different behaviors.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -384,7 +385,7 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Final stream-side EOF delivery that actually closed the stream
     /// subscription. Earlier Poison EOFs and other non-final EOF deliveries
     /// are deliberately not terminal-hook witnesses.
-    pub(crate) final_stream_eof: Option<JournalRecord<ChainPayload>>,
+    pub(crate) final_stream_eof: Option<DeliveredRecord<ChainPayload>>,
 
     /// Worst-wins join over both sides' terminal EOF kinds (FLOWIP-095k).
     pub terminal_eof_kind: Option<EofKind>,
@@ -394,7 +395,7 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// This should be the *stream EOF envelope* so that drain-time outputs can be
     /// parented with a frontier that includes stream-side ancestry even when the
     /// join emitted zero outputs prior to draining (FLOWIP-071h).
-    pub(crate) drain_parent: Option<JournalRecord<ChainPayload>>,
+    pub(crate) drain_parent: Option<DeliveredRecord<ChainPayload>>,
 
     /// Conservative high-water clock for the reference side (FLOWIP-071h interim).
     ///
@@ -446,7 +447,7 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
-    pub(crate) pending_parent: Option<JournalRecord<ChainPayload>>,
+    pub(crate) pending_parent: Option<DeliveredRecord<ChainPayload>>,
 
     /// Pending state transition once blocked outputs are fully written.
     pub(crate) pending_transition: Option<PendingTransition>,

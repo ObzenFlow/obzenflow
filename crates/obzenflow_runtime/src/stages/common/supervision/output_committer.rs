@@ -37,6 +37,7 @@
 //! framework effect/capture record path supplies only the journal, preserving
 //! its compatibility append until typed outcome facts replace it.
 
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::journal::AppendOptions;
 use std::sync::Arc;
@@ -149,7 +150,7 @@ pub(crate) fn commit_error_output(
     journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     mut event: ChainEvent,
-    parent: Option<&JournalRecord<ChainPayload>>,
+    parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> futures::future::BoxFuture<'static, Result<JournalRecord<ChainPayload>, CommitError>> {
     use futures::FutureExt;
     let journal = journal.clone();
@@ -168,7 +169,8 @@ pub(crate) fn commit_error_output(
         let written = crate::supervised_base::publication::append_inline(
             &journal,
             event,
-            AppendOptions::from_record(parent.as_ref())?.with_capture(capture),
+            AppendOptions::from_record(parent.as_ref().map(DeliveredRecord::record))?
+                .with_capture(capture),
         )
         .await?;
         if written.consumes_data_credit() {
@@ -388,7 +390,7 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_prebuilt(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let intent = if event.consumes_data_credit() {
@@ -408,7 +410,7 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_prebuilt_with_intent(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
@@ -426,7 +428,7 @@ impl OutputCommitter<'_> {
     async fn commit_prebuilt_with_intent_inline(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
@@ -449,7 +451,7 @@ impl OutputCommitter<'_> {
         let written = match crate::supervised_base::publication::append_inline(
             self.data_journal,
             event,
-            AppendOptions::from_record(parent)?.with_capture(capture),
+            AppendOptions::from_record(parent.map(DeliveredRecord::record))?.with_capture(capture),
         )
         .await
         {
@@ -475,7 +477,7 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_reserved_prebuilt(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         reservation: BackpressureReservation,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
@@ -498,7 +500,8 @@ impl OutputCommitter<'_> {
             let written = match crate::supervised_base::publication::append_inline(
                 committer.data_journal,
                 event,
-                AppendOptions::from_record(parent.as_ref())?.with_capture(capture),
+                AppendOptions::from_record(parent.as_ref().map(DeliveredRecord::record))?
+                    .with_capture(capture),
             )
             .await
             {
@@ -526,7 +529,7 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_authored_terminal(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
@@ -542,7 +545,7 @@ impl OutputCommitter<'_> {
     async fn commit_authored_terminal_inline(
         &self,
         mut event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let flow_context = self
             .flow_context
@@ -622,7 +625,7 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
@@ -640,7 +643,7 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -686,7 +689,8 @@ impl OutputCommitter<'_> {
             self.data_journal,
             group_id,
             prepared,
-            AppendOptions::from_record(parent)?.with_capture(self.observation_capture(projections)),
+            AppendOptions::from_record(parent.map(DeliveredRecord::record))?
+                .with_capture(self.observation_capture(projections)),
         )
         .await
         {
@@ -738,7 +742,7 @@ impl OutputCommitter<'_> {
     async fn prepare_prebuilt_with_intent(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<ChainEvent, CommitError> {
@@ -923,7 +927,7 @@ pub(crate) struct FrameworkObservabilityCommit<'a> {
     /// middleware may author durable framework Data facts through the same
     /// buffer, and those rows participate in B2 accounting.
     pub backpressure_writer: &'a BackpressureWriter,
-    pub parent: Option<&'a JournalRecord<ChainPayload>>,
+    pub parent: Option<&'a DeliveredRecord<ChainPayload>>,
     pub observer_scope: MiddlewareExecutionScope,
 }
 

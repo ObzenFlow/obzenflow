@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use crate::messaging::upstream_subscription::StageInputPosition;
+use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handler_error::StageFatal;
 use crate::stages::common::handlers::UnifiedJoinHandler;
@@ -28,7 +29,7 @@ use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, JournalRecord};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, StageId};
 
 use super::JoinSupervisor;
@@ -132,7 +133,7 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
 
 pub(super) async fn forward_control_to_journal<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     forward_control_event(
         envelope,
@@ -148,7 +149,7 @@ pub(super) async fn forward_control_to_journal<H: UnifiedJoinHandler>(
 pub(super) async fn record_join_stage_fatal<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
     fatal: &StageFatal,
-    parent: Option<&JournalRecord<ChainPayload>>,
+    parent: Option<&DeliveredRecord<ChainPayload>>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let writer_id = ctx
@@ -162,7 +163,7 @@ pub(super) async fn record_join_stage_fatal<H: UnifiedJoinHandler>(
             stage_id: ctx.stage_id,
             stage_key: &ctx.stage_name,
             input_position,
-            parent,
+            parent: parent.map(DeliveredRecord::record),
             lineage: ctx.lineage_policy,
         },
     )
@@ -236,7 +237,7 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     _input: &ChainEvent,
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
-    _parent: Option<&JournalRecord<ChainPayload>>,
+    _parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
@@ -266,7 +267,7 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     delivery: Option<&JoinDeliverySnapshot>,
     signal: Option<&JoinSignalSnapshot>,
     outputs: &[ChainEvent],
-    _parent: Option<&JournalRecord<ChainPayload>>,
+    _parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !ctx.observers.has_join() || scope.is_deterministic_replay() {
         return Ok(());
@@ -293,7 +294,7 @@ pub(super) fn delivery_snapshot(
     side: JoinSide,
     source_stage_id: StageId,
     stage_input_position: Option<StageInputPosition>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
     reference_high_water: &obzenflow_core::event::vector_clock::VectorClock,
 ) -> Result<JoinDeliverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
     let position =
@@ -322,7 +323,7 @@ pub(super) fn signal_snapshot(
 
 pub(super) fn observe_reference_envelope<H: UnifiedJoinHandler>(
     ctx: &mut JoinContext<H>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
 ) {
     // Conservative interim for FLOWIP-071h: merge all reference-side ancestry into one
     // high-water clock (component-wise max).

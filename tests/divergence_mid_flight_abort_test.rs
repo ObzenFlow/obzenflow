@@ -540,7 +540,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
             )
         })
         .expect("pipeline failure is committed");
-    let failed_clock = failed.commitment().unwrap().clock;
+    let failed_commitment = failed.commitment().unwrap();
     assert!(
         snapshot.iter().any(|row| matches!(
             &row.payload,
@@ -551,7 +551,7 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
             } if predicate == "signal_to_data_ratio"
         ) && CausalOrderingService::happened_before(
             &row.commitment().unwrap().clock,
-            &failed_clock
+            &failed_commitment.clock
         )),
         "the pipeline failure must causally include the admitted divergence evidence"
     );

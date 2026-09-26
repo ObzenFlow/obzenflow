@@ -7,10 +7,10 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{ChainEventFactory, ChainPayload};
@@ -410,7 +410,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// has succeeded. This lets protocol-aware stateful handlers reject an
     /// incomplete drain before the terminal signal becomes visible
     /// downstream.
-    pub terminal_envelope: Option<JournalRecord<ChainPayload>>,
+    pub terminal_envelope: Option<DeliveredRecord<ChainPayload>>,
 
     /// Whether the current drain was requested through the stage handle rather
     /// than by an upstream terminal control row.
@@ -433,7 +433,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Used as the parent for emitted aggregate events so their journal envelopes preserve
     /// happened-before relationships via vector clock propagation, even when upstream events are
     /// concurrent.
-    pub last_consumed_envelope: Option<JournalRecord<ChainPayload>>,
+    pub last_consumed_envelope: Option<DeliveredRecord<ChainPayload>>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,

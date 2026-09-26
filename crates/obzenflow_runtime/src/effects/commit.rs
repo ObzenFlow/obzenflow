@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
 
@@ -38,7 +39,7 @@ struct EffectCommitHandleInner<T, S> {
     heartbeat_state: Option<Arc<HeartbeatState>>,
     output_contract: StageOutputContract,
     backpressure_writer: BackpressureWriter,
-    parent: JournalRecord<ChainPayload>,
+    parent: DeliveredRecord<ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -57,7 +58,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) heartbeat_state: Option<Arc<HeartbeatState>>,
     pub(super) output_contract: StageOutputContract,
     pub(super) backpressure_writer: BackpressureWriter,
-    pub(super) parent: JournalRecord<ChainPayload>,
+    pub(super) parent: DeliveredRecord<ChainPayload>,
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
@@ -417,7 +418,7 @@ fn commit_handle_reuse_error() -> EffectError {
 
 pub(super) fn build_effect_attempt_started_event(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     started: EffectAttemptStarted,
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -454,7 +455,7 @@ pub(super) fn build_effect_attempt_started_event(
 
 pub(super) fn build_effect_recovery_abandoned_event(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     abandoned: EffectRecoveryAbandoned,
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -491,7 +492,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_domain_effect_success_facts(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -572,7 +573,7 @@ pub(super) async fn append_domain_effect_success_facts(
     output_contract: Option<&StageOutputContract>,
     backpressure_writer: &BackpressureWriter,
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -635,7 +636,7 @@ pub(super) async fn append_domain_effect_success_facts(
 pub(super) async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
     backpressure_writer: &BackpressureWriter,
@@ -664,7 +665,7 @@ pub(super) async fn append_effect_record(
 
 pub(super) fn build_effect_record_event(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {

@@ -11,6 +11,7 @@
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::control_strategies::SignalGate;
@@ -28,7 +29,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainPayload, JournalRecord, SinkOperationPhase, SystemEvent};
+use obzenflow_core::event::{ChainPayload, SinkOperationPhase, SystemEvent};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
@@ -992,7 +993,7 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
 
 async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
-    parent_envelope: &JournalRecord<ChainPayload>,
+    parent_envelope: &DeliveredRecord<ChainPayload>,
     payload: DeliveryPayload,
 ) -> Result<(), obzenflow_fsm::FsmError> {
     let writer_id = ctx.writer_id.ok_or_else(|| {

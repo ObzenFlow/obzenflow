@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::ChainPayload;
 
 /// Structurally metadata-only view used before effect-boundary admission.
@@ -119,7 +120,7 @@ pub struct EffectInvocationContext {
 
     pub instrumentation: Option<Arc<StageInstrumentation>>,
     pub heartbeat_state: Option<Arc<HeartbeatState>>,
-    pub parent: JournalRecord<ChainPayload>,
+    pub parent: DeliveredRecord<ChainPayload>,
     pub effect_history: Option<Arc<EffectHistory>>,
     /// Runtime execution strategy (FLOWIP-120r): one authority for the
     /// replay-versus-live decision at the effect boundary.

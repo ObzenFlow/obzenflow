@@ -16,6 +16,7 @@ mod running;
 mod tests;
 
 use super::fsm::{TransformAction, TransformContext, TransformEvent, TransformState};
+use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -31,7 +32,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::{AppendOptions, Journal};
-use obzenflow_core::{ChainEvent, JournalRecord, StageId, WriterId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::fmt::Debug;
@@ -435,7 +436,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
     pub(super) async fn check_cycle_guard_data_event(
         &mut self,
         ctx: &mut TransformContext<H>,
-        envelope: &mut JournalRecord<ChainPayload>,
+        envelope: &mut DeliveredRecord<ChainPayload>,
         upstream: Option<StageId>,
         write_error_context: &'static str,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
@@ -444,11 +445,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
         };
 
         if envelope.consumes_data_credit() {
-            let mut authored = envelope.authored();
-            let checked = guard.check_data(&mut authored);
-            envelope.envelope.provenance.event = authored.envelope.provenance.event;
-            envelope.envelope.observability = authored.envelope.observability;
-            envelope.payload = authored.payload;
+            let checked = guard.check_data(envelope.authored_mut());
             if let Err(error_event) = checked {
                 let flow_context = FlowContext {
                     flow_name: ctx.flow_name.clone(),
@@ -496,7 +493,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
 
     pub(super) async fn forward_control_event_guarded(
         &mut self,
-        envelope: &JournalRecord<ChainPayload>,
+        envelope: &DeliveredRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let should_forward = self
@@ -586,7 +583,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Transfo
     /// Helper to forward control events
     pub(super) async fn forward_control_event(
         &self,
-        envelope: &JournalRecord<ChainPayload>,
+        envelope: &DeliveredRecord<ChainPayload>,
         stage_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let _ = forward_control_event_helper(

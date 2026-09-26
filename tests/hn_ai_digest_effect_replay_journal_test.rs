@@ -2844,7 +2844,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let source_packets = |rows: Vec<JournalRecord<ChainPayload>>| {
         rows.into_iter()
             .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
-            .map(|row| serde_json::to_value(row.envelope.observability).unwrap())
+            .map(|row| serde_json::to_value(&row.envelope.observability).unwrap())
             .collect::<Vec<_>>()
     };
     let live_packets = source_packets(stage_envelopes(&live_archive, "hn_stories").await);

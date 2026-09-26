@@ -324,7 +324,7 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
                 .unwrap();
             let admissions: Vec<_> = facts
                 .into_iter()
-                .filter_map(|fact| match fact.payload {
+                .filter_map(|fact| match fact.into_parts().1 {
                     SystemPayload::PipelineLifecycle(Lifecycle::StopAdmitted { admission }) => {
                         Some(admission)
                     }

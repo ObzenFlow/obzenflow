@@ -1732,7 +1732,7 @@ fn invocation_context_with_mode(
 
         instrumentation: None,
         heartbeat_state: None,
-        parent,
+        parent: parent.into(),
         effect_history,
         runtime_execution: crate::execution::RuntimeExecution::from_effect_runtime_mode(
             effect_runtime_mode,
@@ -2026,7 +2026,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     };
     let start = build_effect_attempt_started_event(
         in_doubt_ctx.writer_id,
-        &parent,
+        &in_doubt_ctx.parent,
         started,
         descriptor,
         in_doubt_ctx.lineage,
@@ -7633,7 +7633,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
 
         instrumentation: None,
         heartbeat_state: None,
-        parent: parent.clone(),
+        parent: parent.clone().into(),
         effect_history: None,
         runtime_execution: crate::execution::RuntimeExecution::new(
             crate::execution::RuntimeMode::Live,

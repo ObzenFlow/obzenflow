@@ -923,11 +923,11 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(1);
     reader_progress[0]
-        .track_pending_delivery_input(committed_input(first.clone(), clock_1.clone()));
+        .track_pending_delivery_input(committed_input(first.clone(), clock_1.clone()).into());
     reader_progress[0].track_pending_receipt(first.id, clock_1);
     reader_progress[0].reader_seq = SeqNo(2);
     reader_progress[0]
-        .track_pending_delivery_input(committed_input(second.clone(), clock_2.clone()));
+        .track_pending_delivery_input(committed_input(second.clone(), clock_2.clone()).into());
     reader_progress[0].track_pending_receipt(second.id, clock_2.clone());
 
     let second_receipt = ChainEventFactory::delivery_event(
@@ -996,7 +996,8 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
         .clocks
         .insert(crate::testing::causal_fixture::coordinate("source"), 1);
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].track_pending_delivery_input(committed_input(forwarded.clone(), clock));
+    reader_progress[0]
+        .track_pending_delivery_input(committed_input(forwarded.clone(), clock).into());
 
     let receipt = ChainEventFactory::delivery_event(
         WriterId::from(sink_stage),
@@ -2872,7 +2873,7 @@ async fn canonical_single(
 
 async fn expect_delivery(
     subscription: &mut UpstreamSubscription<ChainEvent>,
-) -> JournalRecord<ChainPayload> {
+) -> crate::messaging::DeliveredRecord<ChainPayload> {
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::Event(envelope) => envelope,
         other => panic!(

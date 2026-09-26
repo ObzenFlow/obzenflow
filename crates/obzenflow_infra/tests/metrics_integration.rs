@@ -6,14 +6,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
 };
-use obzenflow_core::JournalRecord;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::metrics::fsm::build_metrics_aggregator_fsm;
@@ -251,7 +249,13 @@ async fn ingress_refusal_facts_do_not_invent_latest_value_totals() {
         refusal(IngressRefusalReason::RateLimited, 1, 1),
         refusal(IngressRefusalReason::Validation, 3, 2),
     ] {
-        let envelope = Box::new(JournalRecord::new(JournalWriterId::new(), event).into());
+        let envelope = Box::new(
+            ctx.system_journal
+                .append(event, Default::default())
+                .await
+                .unwrap()
+                .into(),
+        );
         MetricsAggregatorAction::ProcessReport { envelope }
             .execute(&mut ctx)
             .await
