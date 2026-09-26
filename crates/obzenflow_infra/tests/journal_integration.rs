@@ -53,7 +53,7 @@ async fn test_journal_causal_ordering() {
     let transform_envelope = journal
         .append(
             transform_event,
-            AppendOptions::new(Some(&source_envelope)), // Parent relationship
+            AppendOptions::from_record(Some(&source_envelope)).unwrap(), // Parent relationship
         )
         .await
         .expect("Failed to append transform event");
@@ -71,7 +71,7 @@ async fn test_journal_causal_ordering() {
     let _sink_envelope = journal
         .append(
             sink_event,
-            AppendOptions::new(Some(&transform_envelope)), // Parent relationship
+            AppendOptions::from_record(Some(&transform_envelope)).unwrap(), // Parent relationship
         )
         .await
         .expect("Failed to append sink event");
@@ -138,7 +138,10 @@ async fn test_journal_parallel_writers() {
     );
 
     let _result_envelope = journal
-        .append(result_event, AppendOptions::new(Some(&envelope2)))
+        .append(
+            result_event,
+            AppendOptions::from_record(Some(&envelope2)).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -179,7 +182,10 @@ async fn test_journal_event_chain() {
         );
 
         let envelope = journal
-            .append(event, AppendOptions::new(previous_envelope.as_ref()))
+            .append(
+                event,
+                AppendOptions::from_record(previous_envelope.as_ref()).unwrap(),
+            )
             .await
             .expect("Failed to append chain event");
 

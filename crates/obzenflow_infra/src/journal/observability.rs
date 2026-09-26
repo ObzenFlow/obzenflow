@@ -202,8 +202,10 @@ pub(crate) mod tests {
             prepared
                 .envelope
                 .observability
+                .as_ref()
                 .unwrap()
                 .runtime
+                .as_ref()
                 .unwrap()
                 .in_flight,
             Some(99),
@@ -259,7 +261,7 @@ pub(crate) mod tests {
         journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None)
+                obzenflow_core::journal::AppendOptions::default()
                     .with_capture(capture(captures.clone())),
             )
             .await
@@ -277,7 +279,7 @@ pub(crate) mod tests {
         journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None)
+                obzenflow_core::journal::AppendOptions::default()
                     .with_capture(capture(captures.clone())),
             )
             .await
@@ -290,7 +292,7 @@ pub(crate) mod tests {
                 .append_group(
                     "atomic",
                     vec![original.clone(); 3],
-                    obzenflow_core::journal::AppendOptions::new(None)
+                    obzenflow_core::journal::AppendOptions::default()
                         .with_capture(capture(captures.clone())),
                 )
                 .await
@@ -334,13 +336,13 @@ pub(crate) mod tests {
         let historical = journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None)
+                obzenflow_core::journal::AppendOptions::default()
                     .with_capture(JournalCapture::Historical),
             )
             .await
             .unwrap();
         assert_eq!(
-            serde_json::to_value(historical.envelope.observability).unwrap(),
+            serde_json::to_value(&historical.envelope.observability).unwrap(),
             serde_json::to_value(&original.envelope.observability).unwrap()
         );
         assert!(journal
@@ -439,7 +441,7 @@ pub(crate) mod tests {
         let record = journal
             .append(
                 original.clone(),
-                obzenflow_core::journal::AppendOptions::new(None).with_capture(
+                obzenflow_core::journal::AppendOptions::default().with_capture(
                     JournalCapture::Live(Some(Box::new(|_, _| panic!("diagnostic failure")))),
                 ),
             )

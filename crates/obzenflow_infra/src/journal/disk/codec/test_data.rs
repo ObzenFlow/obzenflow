@@ -73,6 +73,19 @@ impl Stage {
         }
     }
 
+    fn coordinate(self) -> obzenflow_core::event::CausalCoordinate {
+        obzenflow_core::event::CausalCoordinate::new(self.journal_writer())
+    }
+
+    fn commitment(self, input: u64) -> obzenflow_core::event::CommittedCausalRef {
+        obzenflow_core::event::CommittedCausalRef {
+            run_id: FlowId::from(ulid(1)),
+            journal_writer_id: self.journal_writer(),
+            sequence: self.clock(input).get(&self.coordinate()),
+            event_id: self.event_id(input),
+        }
+    }
+
     fn clock(self, input: u64) -> VectorClock {
         let mut clock = VectorClock::new();
         for stage in [Self::Source, Self::Transform, Self::Receipt] {
@@ -80,13 +93,11 @@ impl Stage {
                 break;
             }
             let sequence = if stage == Self::Source {
-                input + 2
+                input + 1
             } else {
                 input
             };
-            clock
-                .clocks
-                .insert(WriterId::from(stage.id()).to_string(), sequence);
+            clock.clocks.insert(stage.coordinate(), sequence);
         }
         clock
     }
@@ -266,6 +277,14 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
     JournalRecord::commit_event(
         event,
         JournalProvenance {
+            run_id: flow_id,
+            causal: obzenflow_core::event::CausalWitnesses {
+                previous: (emitted > 1).then(|| stage.commitment(input - 1)),
+                witnesses: upstream
+                    .map(|upstream| upstream.commitment(input))
+                    .into_iter()
+                    .collect(),
+            },
             journal_writer_id: stage.journal_writer(),
             vector_clock: stage.clock(input),
             timestamp,

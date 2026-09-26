@@ -21,6 +21,7 @@ use obzenflow_core::journal::archive::manifest::{
 };
 use obzenflow_core::journal::ArchiveStatus;
 
+use crate::journal::disk::identity::CommitmentAdmission;
 use crate::journal::disk::manifest_gate::require_current_journal_schema_version;
 use crate::journal::disk::replay_archive::derive_status_derivation_from_system_log;
 use crate::journal::disk::scanner::{
@@ -166,6 +167,13 @@ impl RunSource for DiskRunSource {
             source,
         })?;
         Ok(Box::new(JournalRows {
+            admission: CommitmentAdmission::open(&path).map_err(|error| {
+                VerifyError::CorruptRecord {
+                    journal: journal_file.to_string(),
+                    line: 0,
+                    message: error.to_string(),
+                }
+            })?,
             decoder: crate::journal::disk::codec::Decoder::new(&path),
             reader: BufReader::new(file),
             buf: Vec::new(),
@@ -186,6 +194,7 @@ impl RunSource for DiskRunSource {
 }
 
 struct JournalRows {
+    admission: CommitmentAdmission,
     decoder: crate::journal::disk::codec::Decoder,
     reader: BufReader<File>,
     buf: Vec<u8>,
@@ -232,12 +241,21 @@ impl Iterator for JournalRows {
                 self.policy,
             ) {
                 Disposition::Yield(frame) => {
-                    self.pending.extend(
-                        frame
-                            .into_records()
-                            .into_iter()
-                            .map(|record| record.into_authored()),
-                    );
+                    let records = frame.into_records();
+                    let mut admission = self.admission.clone();
+                    for record in &records {
+                        if let Err(error) = admission.admit(record) {
+                            self.done = true;
+                            return Some(Err(VerifyError::CorruptRecord {
+                                journal: self.journal.clone(),
+                                line: self.line_no,
+                                message: format!("at offset {record_offset}: {error}"),
+                            }));
+                        }
+                    }
+                    self.admission = admission;
+                    self.pending
+                        .extend(records.into_iter().map(|record| record.into_authored()));
                     self.pending.pop_front().map(Ok)
                 }
                 // A tolerated final torn tail ends the sealed history cleanly.
@@ -261,6 +279,69 @@ impl Iterator for JournalRows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn verification_rejects_missing_commitments_before_yielding_later_rows() {
+        use crate::journal::DiskJournal;
+        use obzenflow_core::event::ChainEventFactory;
+        use obzenflow_core::{Journal, JournalOwner, StageId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.log");
+        let stage = StageId::new();
+        let journal =
+            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                .unwrap();
+        let mut ends = vec![0usize];
+        for i in 0..3 {
+            journal
+                .append(
+                    ChainEventFactory::data_event(
+                        stage.into(),
+                        "data",
+                        serde_json::json!({"i": i}),
+                    ),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            ends.push(std::fs::metadata(&path).unwrap().len() as usize);
+        }
+        let original = std::fs::read(&path).unwrap();
+        for missing in [0, 1] {
+            std::fs::write(
+                &path,
+                [&original[..ends[missing]], &original[ends[missing + 1]..]].concat(),
+            )
+            .unwrap();
+            let mut rows = JournalRows {
+                admission: CommitmentAdmission::open(&path).unwrap(),
+                decoder: crate::journal::disk::codec::Decoder::new(&path),
+                reader: BufReader::new(File::open(&path).unwrap()),
+                buf: Vec::new(),
+                pending: Default::default(),
+                journal: "source.log".into(),
+                path: path.clone(),
+                line_no: 0,
+                byte_offset: 0,
+                policy: ReadPolicy::SealedScan {
+                    tolerate_torn_tail: false,
+                },
+                done: false,
+            };
+            if missing == 1 {
+                rows.next().unwrap().unwrap();
+            }
+            assert!(matches!(
+                rows.next(),
+                Some(Err(VerifyError::CorruptRecord { .. }))
+            ));
+            assert!(
+                rows.next().is_none(),
+                "a failed verification scan cannot yield a suffix"
+            );
+        }
+    }
 
     #[test]
     fn verification_rejects_non_current_manifest_shapes_before_journal_decode() {

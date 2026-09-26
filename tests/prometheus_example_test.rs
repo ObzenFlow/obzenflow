@@ -97,7 +97,7 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
         );
     }
 
-    let system = flow.system_journal().unwrap();
+    let reports = flow.report_journals();
     let archive = flow.run_substrate().locator().unwrap().path().to_path_buf();
     tokio::time::timeout(Duration::from_secs(30), flow.run())
         .await
@@ -106,7 +106,20 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
 
     // Project the actual durable records through the same adapter as Studio.
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-    let records = system.read_all_unordered().await.unwrap();
+    let mut records = Vec::new();
+    for report in reports {
+        if let obzenflow_runtime::supervised_base::SupervisorJournal::Stage { journal, .. } = report
+        {
+            records.extend(
+                journal
+                    .read_all_unordered()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(obzenflow_core::event::SupervisorRecord::from_chain),
+            );
+        }
+    }
     let changes: Vec<(Value, u64)> = records
         .iter()
         .flat_map(|record| {
@@ -119,7 +132,7 @@ async fn prometheus_demo_breaker_reopens_and_recovers_with_backpressure() {
                     }
                     let payload: Value = serde_json::from_str(&frame.data).unwrap();
                     (payload["middleware"] == "circuit_breaker")
-                        .then_some((payload, record.envelope.provenance.event.timestamp))
+                        .then_some((payload, record.timestamp()))
                 })
         })
         .collect();
@@ -761,7 +774,7 @@ mod managed_lifecycle_regressions {
                         assert_eq!(
                             serde_json::from_str::<serde_json::Value>(&frame.data).unwrap()
                                 ["error_type"],
-                            "journal_resume_not_found"
+                            "invalid_last_event_id"
                         );
                         saw_error = true;
                     }
@@ -769,7 +782,8 @@ mod managed_lifecycle_regressions {
                         assert_eq!(saw_error, unknown);
                         let payload: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
                         assert!(payload["runtime_instance_id"].as_str().is_some());
-                        assert_eq!(payload["checkpoint_event_id"].as_str(), frame.id.as_deref());
+                        assert!(payload["checkpoint_event_id"].is_null());
+                        assert!(frame.id.as_deref().unwrap().starts_with("jr1:"));
                         return frame.id.unwrap();
                     }
                     // Fresh and unknown-cursor recovery send factual snapshots
@@ -795,52 +809,54 @@ mod managed_lifecycle_regressions {
     fn assert_example_stream_matches_export(
         frames: &[obzenflow_core::web::SseFrame],
         cursor: &str,
-        systems: &[obzenflow_infra::journal::disk::log_record::LogRecord<
-            obzenflow_core::event::SystemEvent,
-        >],
+        reports: &[obzenflow_core::event::SupervisorRecord],
         count: u64,
     ) {
         use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
-        let actual: Vec<_> = frames
-            .iter()
-            .filter(|frame| frame.id.is_some())
-            .cloned()
-            .collect();
-        let last_id = actual
-            .last()
-            .expect("live events before shutdown")
-            .id
-            .as_deref()
-            .unwrap();
+        use std::collections::BTreeMap;
+        let positions: BTreeMap<obzenflow_core::JournalId, u64> =
+            serde_json::from_str(cursor.strip_prefix("jr1:").unwrap()).unwrap();
         let mut projection =
             StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-        let mut expected = Vec::new();
-        let mut resumed = false;
-        for row in systems {
-            let envelope = row.clone();
-            if resumed {
-                expected.extend(
-                    projection
-                        .project(&envelope, 0)
-                        .into_iter()
-                        .filter(|frame| frame.id.is_some()),
-                );
-            } else {
-                projection.rebuild(&envelope);
-                resumed = row.envelope.provenance.event.id.to_string() == cursor;
+        let mut expected = BTreeMap::new();
+        let key = |frame: &obzenflow_core::web::SseFrame| {
+            let payload: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
+            let commitment = &payload["commitment"];
+            commitment.is_object().then(|| {
+                (
+                    commitment["journal_writer_id"].as_str().unwrap().to_owned(),
+                    commitment["sequence"].as_u64().unwrap(),
+                    frame.event.clone(),
+                )
+            })
+        };
+        for row in reports {
+            if row.position() <= positions.get(&row.journal_id()).copied().unwrap_or(0) {
+                projection.rebuild_deferred(row);
+                continue;
             }
-            if row.envelope.provenance.event.id.to_string() == last_id {
-                break;
+            for mut frame in projection.project_deferred(row) {
+                if let Some(key) = key(&frame) {
+                    frame.id = None;
+                    assert!(expected.insert(key, frame).is_none());
+                }
             }
         }
-        assert!(
-            resumed,
-            "bootstrap cursor must name an exported durable fact"
-        );
-        assert_eq!(
-            actual, expected,
-            "hosted events must be the complete projected journal suffix"
-        );
+        let mut actual = BTreeMap::new();
+        let mut applied = BTreeMap::new();
+        for frame in frames {
+            if let Some(key) = key(frame) {
+                let previous = applied.insert(key.0.clone(), key.1).unwrap_or(0);
+                assert!(key.1 > previous, "SSE preserves each journal's order");
+                let mut frame = frame.clone();
+                frame.id = None;
+                assert!(
+                    actual.insert(key, frame).is_none(),
+                    "a committed fact is delivered once"
+                );
+            }
+        }
+        assert_eq!(actual, expected, "SSE delivers every projected committed fact after each journal cursor, independently of cross-journal scheduling");
         let completed = frames
             .iter()
             .position(|frame| {
@@ -1083,17 +1099,28 @@ mod managed_lifecycle_regressions {
         );
         let terminal = systems
             .iter()
-            .position(|row| row.event_type_name() == "system.pipeline.cancelled")
+            .find(|row| row.event_type_name() == "system.pipeline.cancelled")
             .unwrap();
         let metrics = systems
             .iter()
-            .position(|row| row.event_type_name() == "system.metrics.drained")
+            .find(|row| row.event_type_name() == "system.metrics.drained")
             .unwrap();
         let drained = systems
             .iter()
-            .position(|row| row.event_type_name() == "system.pipeline.drained")
+            .find(|row| row.event_type_name() == "system.pipeline.drained")
             .unwrap();
-        assert!(terminal < metrics && metrics < drained);
+        let before = |a: &LogRecord<SystemEvent>, b: &LogRecord<SystemEvent>| {
+            obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
+                &a.envelope.provenance.journal.vector_clock,
+                &b.envelope.provenance.journal.vector_clock,
+            )
+        };
+        assert!(before(terminal, metrics) && before(metrics, drained));
+        assert!(systems
+            .iter()
+            .any(|row| row.event_type_name() == "system.metrics.exported"
+                && before(terminal, row)
+                && before(row, metrics)));
         assert!(!systems.iter().any(|row| matches!(
             row.event_type_name(),
             "system.pipeline.completed" | "system.pipeline.failed" | "system.pipeline.not_started"
@@ -1301,8 +1328,46 @@ enabled = {prometheus}
             export_started.elapsed(),
             proof_started.elapsed()
         );
+        // Exported JSON carries data, not reader admission. Compare every
+        // report with its admitted record before using it in Studio's
+        // commitment-bearing projection.
+        use obzenflow_core::event::SupervisorRecord;
+        use obzenflow_core::journal::read::RunRecordData;
+        let mut committed_reports = std::collections::HashMap::new();
+        let mut snapshot = obzenflow_infra::journal::read::open_disk_run(&archive)
+            .await
+            .unwrap();
+        while let Some(record) = snapshot.next().await.unwrap() {
+            let (json, report) = match record.record {
+                RunRecordData::System(row) => (
+                    serde_json::to_value(&row).unwrap(),
+                    SupervisorRecord::from(*row),
+                ),
+                RunRecordData::Chain(row) => {
+                    let Some(report) = SupervisorRecord::from_chain(row.as_ref().clone()) else {
+                        continue;
+                    };
+                    (serde_json::to_value(&row).unwrap(), report)
+                }
+            };
+            assert!(committed_reports
+                .insert(*report.id(), (json, report))
+                .is_none());
+        }
+        let mut admitted_report = |line: &str, id| {
+            let (committed, report) = committed_reports
+                .remove(&id)
+                .expect("exported report must resolve to an admitted record");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(line).unwrap(),
+                committed
+            );
+            report
+        };
         let reader = std::io::BufReader::new(std::fs::File::open(&export).unwrap());
         let mut systems = Vec::<LogRecord<SystemEvent>>::new();
+        let mut reports = Vec::<obzenflow_core::event::SupervisorRecord>::new();
+        let mut journal_by_writer = std::collections::HashMap::new();
         let mut event_ids = BTreeSet::new();
         let mut parents = Vec::new();
         let mut receipts = 0;
@@ -1313,11 +1378,23 @@ enabled = {prometheus}
         for line in reader.lines() {
             let line = line.unwrap();
             let event = match serde_json::from_str::<LogRecord<obzenflow_core::ChainEvent>>(&line) {
-                Ok(row) => row.authored(),
+                Ok(row) => {
+                    journal_by_writer.insert(
+                        *row.writer_id(),
+                        row.envelope.provenance.journal.journal_writer_id,
+                    );
+                    if let Some(report) =
+                        obzenflow_core::event::SupervisorRecord::from_chain(row.clone())
+                    {
+                        reports.push(admitted_report(&line, *report.id()));
+                    }
+                    row.authored()
+                }
                 Err(_) => {
                     let row: LogRecord<SystemEvent> = serde_json::from_str(&line)
                         .expect("valid typed system or chain export row");
                     event_ids.insert(row.envelope.provenance.event.id);
+                    reports.push(admitted_report(&line, *row.id()));
                     systems.push(row);
                     continue;
                 }
@@ -1346,6 +1423,10 @@ enabled = {prometheus}
                 }
             }
         }
+        assert!(
+            committed_reports.is_empty(),
+            "export must contain every admitted report"
+        );
         assert_eq!(inputs, (0..count).collect());
         assert_eq!(
             successes,
@@ -1376,7 +1457,7 @@ enabled = {prometheus}
                 .await
                 .unwrap()
                 .unwrap();
-            assert_example_stream_matches_export(&frames, &cursor, &systems, count);
+            assert_example_stream_matches_export(&frames, &cursor, &reports, count);
             if intervals.is_some() {
                 let throughput: Vec<_> = frames
                     .iter()
@@ -1397,7 +1478,7 @@ enabled = {prometheus}
                 }
             }
         }
-        let passed_feeds: BTreeSet<_> = systems
+        let passed_feeds: BTreeSet<_> = reports
             .iter()
             .filter_map(|row| match &row.payload {
                 SystemPayload::ContractStatus {
@@ -1410,9 +1491,9 @@ enabled = {prometheus}
             })
             .collect();
         assert_eq!(passed_feeds.len(), 4);
-        assert!(!systems.iter().any(|row| matches!(
-            row.event_type_name(),
-            "system.contract.fail" | "system.contract.result.failed"
+        assert!(!reports.iter().any(|row| matches!(&row.payload,
+            SystemPayload::ContractStatus { pass: false, .. } |
+            SystemPayload::ContractResult { status: obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel::Failed, .. }
         )));
         let position = |name| {
             systems
@@ -1433,12 +1514,24 @@ enabled = {prometheus}
         if collecting {
             let terminal = position("system.pipeline.completed");
             let drained = position("system.metrics.drained");
-            assert!(terminal < drained);
-            assert!(systems[terminal + 1..drained]
+            let before = |a: &LogRecord<SystemEvent>, b: &LogRecord<SystemEvent>| {
+                obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
+                    &a.envelope.provenance.journal.vector_clock,
+                    &b.envelope.provenance.journal.vector_clock,
+                )
+            };
+            assert!(before(&systems[terminal], &systems[drained]));
+            assert!(systems
                 .iter()
-                .any(|row| row.event_type_name() == "system.metrics.exported"));
+                .any(|row| row.event_type_name() == "system.metrics.exported"
+                    && before(&systems[terminal], row)
+                    && before(row, &systems[drained])));
             let shutdown = position("system.metrics.shutdown");
-            assert!(drained < shutdown && shutdown < position("system.pipeline.drained"));
+            assert!(before(&systems[drained], &systems[shutdown]));
+            assert!(before(
+                &systems[shutdown],
+                &systems[position("system.pipeline.drained")]
+            ));
             let finalisation_ms = systems[drained]
                 .envelope
                 .provenance
@@ -1461,10 +1554,11 @@ enabled = {prometheus}
                     .find(|(_, metadata)| metadata.name == "error_processor")
                     .unwrap()
                     .0;
-                let key = obzenflow_core::WriterId::from(*transform).to_string();
-                assert!(systems[..terminal].iter().any(|row| matches!(&row.payload,
+                let writer = obzenflow_core::WriterId::from(*transform);
+                let journal = journal_by_writer[&writer];
+                assert!(systems.iter().filter(|row| row.envelope.provenance.journal.timestamp < systems[terminal].envelope.provenance.journal.timestamp).any(|row| matches!(&row.payload,
                     SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark })
-                        if watermark.clocks.get(&key).is_some_and(|sequence| *sequence > 0))), "live collection must advance before finalisation");
+                        if watermark.clocks.iter().any(|(coordinate, sequence)| coordinate.journal_writer_id == journal && *sequence > 0))), "live collection must advance before finalisation");
             }
             println!("Prometheus proof: {count} inputs, mode={mode:?}, metrics finalisation={finalisation_ms}ms, archive={}", archive.display());
         } else {

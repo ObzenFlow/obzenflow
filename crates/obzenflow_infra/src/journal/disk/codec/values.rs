@@ -102,31 +102,6 @@ pub(super) fn write(
             &serde_json::json!({"type": "Stage", "id": value}),
             out,
         )?,
-        Kind::ClockKey => {
-            let key = string(value)?;
-            // This is an explicitly typed writer key, never an application string.
-            if key
-                .parse::<ulid::Ulid>()
-                .is_ok_and(|id| id.to_string() == key)
-            {
-                out.push(1);
-                id(key, out)?;
-            } else if let Some((tag, suffix)) = [(2, "writer_stage_"), (3, "writer_system_")]
-                .into_iter()
-                .find_map(|(tag, prefix)| key.strip_prefix(prefix).map(|suffix| (tag, suffix)))
-                .filter(|(_, suffix)| {
-                    suffix
-                        .parse::<ulid::Ulid>()
-                        .is_ok_and(|id| id.to_string() == *suffix)
-                })
-            {
-                out.push(tag);
-                id(suffix, out)?;
-            } else {
-                out.push(0);
-                text(key, out);
-            }
-        }
         Kind::Timestamp => {
             let time = chrono::DateTime::parse_from_rfc3339(string(value)?)
                 .map_err(|_| invalid("invalid timestamp"))?;
@@ -202,16 +177,23 @@ pub(super) fn write(
             if object.len() != 1 {
                 return Err(invalid("unknown vector clock fields"));
             }
-            let clocks = object
-                .get("clocks")
-                .and_then(Value::as_object)
-                .ok_or_else(|| invalid("missing clock components"))?;
-            // Only the immutable ordered key names are shared. Every clock
-            // writes every complete absolute counter, including present zeros.
-            let keys = Value::Array(clocks.keys().cloned().map(Value::String).collect());
+            let entries = object
+                .get("entries")
+                .and_then(Value::as_array)
+                .ok_or_else(|| invalid("missing typed clock entries"))?;
+            let keys = Value::Array(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "journal_writer_id": entry["journal_writer_id"]
+                        })
+                    })
+                    .collect(),
+            );
             definitions.reference(DefinitionKind::ClockKeys, &keys, out)?;
-            for count in clocks.values() {
-                write(Kind::Unsigned, count, out, definitions)?;
+            for entry in entries {
+                write(Kind::Unsigned, &entry["sequence"], out, definitions)?;
             }
         }
         Kind::Definition(kind) => definitions.reference(kind, value, out)?,
@@ -246,13 +228,6 @@ pub(super) fn read(
             }
             writer["id"].clone()
         }
-        Kind::ClockKey => Value::String(match input.byte()? {
-            0 => input.text()?,
-            1 => read_id(input)?,
-            2 => format!("writer_stage_{}", read_id(input)?),
-            3 => format!("writer_system_{}", read_id(input)?),
-            _ => return Err(invalid("invalid writer key")),
-        }),
         Kind::Timestamp => {
             let seconds = i64::from_le_bytes(input.take(8)?.try_into().unwrap());
             let nanos = u32::try_from(input.unsigned()?)
@@ -319,14 +294,16 @@ pub(super) fn read(
             if keys.len() > input.remaining() {
                 return Err(invalid("missing absolute clock values"));
             }
-            let mut clocks = Map::new();
-            for writer in keys {
-                let count = Value::from(input.unsigned()?);
-                if clocks.insert(string(writer)?.into(), count).is_some() {
-                    return Err(invalid("duplicate clock writer"));
-                }
+            let mut entries = Vec::with_capacity(keys.len());
+            for coordinate in keys {
+                let mut entry = coordinate
+                    .as_object()
+                    .ok_or_else(|| invalid("invalid typed clock coordinate"))?
+                    .clone();
+                entry.insert("sequence".into(), Value::from(input.unsigned()?));
+                entries.push(Value::Object(entry));
             }
-            serde_json::json!({"clocks": clocks})
+            serde_json::json!({"entries": entries})
         }
         Kind::Definition(kind) => definitions.resolve(kind, input)?,
     })

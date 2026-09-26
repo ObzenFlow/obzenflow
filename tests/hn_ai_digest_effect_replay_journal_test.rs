@@ -948,8 +948,7 @@ fn assert_generated_chunk_authorship(
         "the generated manifest carries the complete plan without a second planning row"
     );
 
-    let chunk_clock_key = chunk_writer.to_string();
-    let seed_clock_key = seed.envelope.provenance.event.writer_id.to_string();
+    let seed_clock_key = seed.causal_coordinate();
     for envelope in generated {
         assert_eq!(
             envelope.envelope.provenance.event.writer_id, chunk_writer,
@@ -972,7 +971,7 @@ fn assert_generated_chunk_authorship(
                 .provenance
                 .journal
                 .vector_clock
-                .get(&chunk_clock_key)
+                .get(&envelope.causal_coordinate())
                 > 0,
             "generated facts advance the chunk-stage clock component"
         );
@@ -2845,7 +2844,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let source_packets = |rows: Vec<JournalRecord<ChainPayload>>| {
         rows.into_iter()
             .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
-            .map(|row| serde_json::to_value(row.envelope.observability).unwrap())
+            .map(|row| serde_json::to_value(&row.envelope.observability).unwrap())
             .collect::<Vec<_>>()
     };
     let live_packets = source_packets(stage_envelopes(&live_archive, "hn_stories").await);

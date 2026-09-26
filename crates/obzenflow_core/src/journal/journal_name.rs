@@ -14,6 +14,10 @@ use crate::StageId;
 pub enum JournalName {
     /// System journal for orchestration events
     System,
+    /// Sparse metrics supervisor reports consumed by the pipeline.
+    MetricsCoordination,
+    /// Metrics export/freshness facts, outside the parent report subscription.
+    MetricsExport,
     /// Stage journal for data events
     Stage {
         /// The unique stage ID
@@ -30,6 +34,8 @@ impl JournalName {
     pub fn to_filename(&self) -> String {
         match self {
             JournalName::System => "system.log".to_string(),
+            JournalName::MetricsCoordination => "metrics-coordination.log".to_string(),
+            JournalName::MetricsExport => "metrics-export.log".to_string(),
             JournalName::Stage {
                 id,
                 stage_type,

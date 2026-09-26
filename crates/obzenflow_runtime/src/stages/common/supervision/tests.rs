@@ -22,9 +22,7 @@ use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::payloads::execution_payload::{
     BackpressureFact, CircuitBreakerFact, ExecutionPayload,
 };
-use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, ChainPayload, JournalEvent, SystemEvent,
-};
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload, JournalEvent};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -527,6 +525,7 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
 
 #[derive(Debug)]
 struct CreditCheckingJournal {
+    records: Mutex<Vec<JournalRecord<ChainPayload>>>,
     id: JournalId,
     owner: JournalOwner,
     writer: BackpressureWriter,
@@ -560,6 +559,7 @@ impl CreditCheckingJournal {
             owner,
             writer,
             expected_credit_at_append,
+            records: Mutex::new(Vec::new()),
             appended: Mutex::new(Vec::new()),
             gate: None,
         }
@@ -574,20 +574,20 @@ impl CreditCheckingJournal {
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for CreditCheckingJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for CreditCheckingJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         let events = events
             .into_iter()
@@ -599,16 +599,21 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
             self.expected_credit_at_append
         );
         self.appended.lock().unwrap().extend(events.clone());
-        Ok(events
-            .into_iter()
-            .map(|event| JournalRecord::new(JournalWriterId::from(self.id), event))
-            .collect())
+        let mut records = self.records.lock().unwrap();
+        let mut written = Vec::new();
+        for event in events {
+            let record =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+            records.push(record.clone());
+            written.push(record);
+        }
+        Ok(written)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let credit = self.writer.min_downstream_credit();
@@ -633,28 +638,33 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
             .expect("CreditCheckingJournal: poisoned lock")
             .push(event.clone());
 
-        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
+        let mut records = self.records.lock().unwrap();
+        let record = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(record.clone());
+        Ok(record)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
         Ok(Box::new(NoopReader::<ChainEvent>::default()))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -675,18 +685,19 @@ impl<T: JournalEvent> Default for NoopReader<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent> JournalReader<T> for NoopReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for NoopReader<T> {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         0
     }
 }
 
 #[derive(Debug)]
 struct NoopJournal<T: JournalEvent> {
+    records: Mutex<Vec<JournalRecord<T::Payload>>>,
     id: JournalId,
     owner: JournalOwner,
     _marker: std::marker::PhantomData<T>,
@@ -699,50 +710,59 @@ impl<T: JournalEvent> NoopJournal<T> {
             id: JournalId::new(),
             owner,
             _marker: std::marker::PhantomData,
+            records: Mutex::new(Vec::new()),
             append_gate: None,
         }
     }
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for NoopJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         if let Some(gate) = &self.append_gate {
             gate.entered.notify_one();
             gate.release.notified().await;
         }
-        Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
+        let mut records = self.records.lock().unwrap();
+        let record = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(record.clone());
+        Ok(record)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(NoopReader::<T>::default()))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -815,7 +835,7 @@ async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_a
         let committer = OutputCommitter {
             data_journal: &journal,
             flow_context: None,
-            system_journal: None,
+
             instrumentation: Some(&instrumentation),
             heartbeat_state: None,
             output_contract: None,
@@ -891,8 +911,6 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     );
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(t)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(t)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
@@ -900,6 +918,7 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     let output_contract = output_contract_for_event_type("x");
     pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "x", json!({"n": 1})),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -924,7 +943,6 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
             t,
             None,
             &data_journal,
-            &system_journal,
             None,
             &instrumentation,
             &writer,
@@ -972,7 +990,7 @@ fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
 }
 
 #[tokio::test]
-async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
+async fn atomic_group_accounts_every_member_in_its_owned_history() {
     use super::output_committer::{
         AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
     };
@@ -988,14 +1006,6 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
         0,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-    let gate = Arc::new(CommitGate {
-        entered: tokio::sync::Notify::new(),
-        release: tokio::sync::Notify::new(),
-        result: CommitResult::Committed,
-    });
-    let mut mirror = NoopJournal::new(JournalOwner::stage(stage));
-    mirror.append_gate = Some(gate.clone());
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(mirror);
     let instrumentation = Arc::new(StageInstrumentation::new());
     let execution = RuntimeExecution::new(RuntimeMode::Live, None);
     instrumentation.bind_observations(FlowId::new(), stage.into(), &execution);
@@ -1016,7 +1026,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
                 let committer = OutputCommitter {
                     data_journal: &data_journal,
                     flow_context: Some(&flow_context),
-                    system_journal: Some(&system_journal),
+
                     instrumentation: Some(&retained),
                     heartbeat_state: None,
                     output_contract: None,
@@ -1057,9 +1067,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
             })
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
-        .await
-        .unwrap();
+    caller.await.unwrap().unwrap();
     assert_eq!(journal.appended().len(), 4);
     let rows = journal.appended();
     let selected = crate::metrics::observations::LatestObservationMap::default();
@@ -1101,12 +1109,6 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     assert_eq!(instrumentation.data_writer_seq_by_event_type()["x"].0, 2);
     assert_eq!(writer.min_downstream_credit(), 0);
     scope.close();
-    caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
-    let mut abandoned = Box::pin(scope.join());
-    assert!(futures::poll!(abandoned.as_mut()).is_pending());
-    drop(abandoned);
-    gate.release.notify_one();
     scope.join().await.unwrap();
     assert_eq!(
         instrumentation.events_emitted_total.load(Ordering::Relaxed),
@@ -1136,8 +1138,6 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
         journal.gate = Some(gate.clone());
         let journal = Arc::new(journal);
         let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
         let scope = PublicationScope::new();
         let instrumentation = Arc::new(StageInstrumentation::new());
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
@@ -1157,6 +1157,7 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                     );
                     drain_one_pending(
                         super::backpressure_drain::PendingOutput {
+                            causal: crate::supervised_base::publication::capture(),
                             event: ChainEventFactory::data_event(
                                 WriterId::from(stage_id),
                                 "x",
@@ -1168,7 +1169,6 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                         stage_id,
                         None,
                         &data_journal,
-                        &system_journal,
                         None,
                         &stage_instrumentation,
                         &stage_writer,
@@ -1256,8 +1256,6 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         writer.clone(),
         /* expected_credit_at_append */ 0,
     ));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1269,6 +1267,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1276,7 +1275,6 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1314,8 +1312,6 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         writer.clone(),
         /* expected_credit_at_append */ 0,
     ));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1328,6 +1324,7 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1335,7 +1332,6 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1370,8 +1366,6 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1384,6 +1378,7 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let err = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1391,7 +1386,6 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1433,8 +1427,6 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         writer.clone(),
         /* expected_credit_at_append */ 1,
     ));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1445,6 +1437,7 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1452,7 +1445,6 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1489,8 +1481,6 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         1,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
     let instrumentation = Arc::new(StageInstrumentation::new());
 
     let mut last_fact_id = None;
@@ -1513,6 +1503,7 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
     let mut pending_outputs = VecDeque::new();
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1520,7 +1511,6 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1577,8 +1567,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         1,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let fact =
         ChainEventFactory::data_event(WriterId::from(stage_id), "test.joined.v1", json!({"n": 1}));
@@ -1603,6 +1591,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     let mut pending_outputs = VecDeque::new();
     let error = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1610,7 +1599,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1649,6 +1637,7 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
 
     let error = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: terminal,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1656,7 +1645,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1696,8 +1684,6 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1709,6 +1695,7 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event,
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1716,7 +1703,6 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1779,8 +1765,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
         /* expected_credit_at_append */ 0,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = checking.clone();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
@@ -1789,6 +1773,7 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 1})),
             scope,
         },
@@ -1796,7 +1781,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
         s,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1854,6 +1838,7 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     // output at still-zero live credit also commits without blocking.
     let outcome2 = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 2})),
             scope,
         },
@@ -1861,7 +1846,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
         s,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1922,8 +1906,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     );
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(s)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
@@ -1935,6 +1917,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     for n in 0..3 {
         let outcome = drain_one_pending(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": n })),
                 scope: MiddlewareExecutionScope::ResumeHandler,
             },
@@ -1942,7 +1925,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
             s,
             None,
             &data_journal,
-            &system_journal,
             None,
             &instrumentation,
             &writer,
@@ -1970,6 +1952,7 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     // against a window of 2), returns BackedOff, and anchors the stall clock.
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": 99 })),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
@@ -1977,7 +1960,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         s,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,

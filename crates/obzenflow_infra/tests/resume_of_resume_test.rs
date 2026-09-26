@@ -18,16 +18,13 @@ mod replay_testkit;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{
-    ChainPayload, JournalRecord, ReplayLifecycleEvent, SystemEvent, SystemPayload,
-};
+use obzenflow_core::event::{ChainPayload, JournalRecord, ReplayLifecycleEvent};
 use obzenflow_core::journal::archive::manifest::RunManifest;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{SystemId, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
@@ -401,22 +398,17 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
     assert_eq!(resume.resumed_from, r1);
     assert_eq!(resume.resume_generation, 2);
 
-    // The system journal's resumed-live fact announces generation 2.
-    let system_journal: DiskJournal<SystemEvent> = DiskJournal::with_owner(
-        r2.join(&r2_manifest.system_journal_file),
-        JournalOwner::system(SystemId::new()),
-    )?;
-    let system_events = system_journal.read_causally_ordered().await?;
-    let generation = system_events
+    // The owning source's resumed-live fact announces generation 2.
+    let source_reports = replay_testkit::read_stage_envelopes_appended(&r2, "src").await;
+    let generation = source_reports
         .iter()
         .find_map(|envelope| match &envelope.payload {
-            SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
-                generation,
-                ..
-            }) => Some(*generation),
+            ChainPayload::Execution(ExecutionPayload::ReplayLifecycle(
+                ReplayLifecycleEvent::ResumedLive { generation, .. },
+            )) => Some(*generation),
             _ => None,
         })
-        .expect("R2's system journal must record system.replay.resumed_live");
+        .expect("R2's source must record its resumed-live fact");
     assert_eq!(generation, 2);
 
     // Bounded replay of R1 (RuntimeMode::Replay over the resumed archive):

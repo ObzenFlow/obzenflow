@@ -9,12 +9,13 @@
 //! control boundary, continuation, executor, resolver, or settlement handle.
 
 use crate::messaging::upstream_subscription::StageInputPosition;
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainPayload;
-use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId};
+use obzenflow_core::{ChainEvent, FlowId, StageId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinSide {
@@ -36,14 +37,14 @@ impl JoinDeliverySnapshot {
         side: JoinSide,
         delivered_source_stage_id: StageId,
         delivered_stage_input_position: StageInputPosition,
-        input_envelope: JournalRecord<ChainPayload>,
+        input_envelope: DeliveredRecord<ChainPayload>,
         reference_high_water: VectorClock,
     ) -> Self {
         Self {
             side,
             delivered_source_stage_id,
             delivered_stage_input_position,
-            input: input_envelope.into_authored(),
+            input: input_envelope.authored(),
             reference_high_water,
         }
     }
@@ -578,7 +579,7 @@ mod tests {
             JoinSide::Stream,
             StageId::new(),
             position,
-            JournalRecord::new(JournalWriterId::new(), event.clone()),
+            obzenflow_core::JournalRecord::new(JournalWriterId::new(), event.clone()).into(),
             VectorClock::new(),
         );
         require_position(delivery.delivered_stage_input_position());

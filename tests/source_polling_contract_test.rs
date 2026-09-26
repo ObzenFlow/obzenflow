@@ -78,6 +78,7 @@ fn policy_report(writer_id: WriterId, reason: impl Into<String>) -> ChainEvent {
         writer_id,
         ChainPayload::Execution(ExecutionPayload::StageLifecycle(
             StageLifecycleFact::Draining {
+                accounting: None,
                 stage_id: *writer_id.as_stage().expect("stage writer"),
                 reason: Some(reason.into()),
             },
@@ -1113,6 +1114,7 @@ async fn sync_and_async_idle_backoff_use_locked_caps_and_reset_on_data() -> Resu
 #[derive(Clone, Debug)]
 struct AsyncIdleInfiniteSource {
     calls: Arc<AtomicUsize>,
+    first_poll: Arc<Notify>,
 }
 
 #[async_trait]
@@ -1120,7 +1122,9 @@ impl TypedAsyncInfiniteSourceHandler for AsyncIdleInfiniteSource {
     type Output = PollingEvent;
 
     async fn next(&mut self) -> Result<Vec<Self::Output>, SourceError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_poll.notify_one();
+        }
         Ok(Vec::new())
     }
 }
@@ -1159,8 +1163,10 @@ async fn wait_for_custom_rows(
 async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed() -> Result<()> {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_flow = calls.clone();
+    let first_poll = Arc::new(Notify::new());
     let source = AsyncIdleInfiniteSource {
         calls: calls_for_flow,
+        first_poll: first_poll.clone(),
     };
     let sink = NoopSink;
     let harness = test_flow! {
@@ -1197,6 +1203,9 @@ async fn async_control_interrupts_idle_delay_after_completed_rows_are_committed(
         .await
         .map_err(|error| anyhow!("idle-interruption flow failed to start: {error}"))?;
 
+    // Startup facts cross independently polled journals. Await the first actual
+    // source poll before measuring its idle delays without advancing time.
+    first_poll.notified().await;
     wait_for_counter(&calls, 1).await;
     wait_for_custom_rows(&source_journal, 1).await;
     for (expected, advance_by) in [

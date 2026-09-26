@@ -41,7 +41,8 @@ pub(crate) enum PipelineAction {
 fn publish(ctx: &mut PipelineContext, event: SystemEvent, control: bool) -> Result<(), BoxError> {
     let journal = ctx.system_journal.clone();
     let append = async move {
-        journal.append(event, Default::default()).await?;
+        crate::supervised_base::publication::append_inline(&journal, event, Default::default())
+            .await?;
         Ok(())
     };
     let receipt = if control {
@@ -173,18 +174,38 @@ impl PipelineAction {
                 }
             }
             Self::CaptureProducerTail => {
-                let journal = ctx.system_journal.clone();
+                let stages = ctx.stage_data_journals.clone();
+                let pipeline = ctx.system_journal.clone();
                 ctx.resources.producer_tail = ProducerTail::Reading(Mutex::new(
                     async move {
-                        Ok(journal
-                            .read_last_n(1)
-                            .await?
-                            .first()
-                            .map(|row| row.envelope.provenance.event.id))
+                        let mut reads: FuturesUnordered<
+                            futures::future::BoxFuture<'static, Result<_, BoxError>>,
+                        > = FuturesUnordered::new();
+                        for (_, journal) in stages {
+                            reads.push(
+                                    async move {
+                                        Ok((*journal.id(), journal.committed_position().await?))
+                                    }
+                                    .boxed(),
+                                );
+                        }
+                        reads.push(
+                                async move {
+                                    Ok((*pipeline.id(), pipeline.committed_position().await?))
+                                }
+                                .boxed(),
+                            );
+                        let mut targets = std::collections::HashMap::new();
+                        while let Some(result) = futures::StreamExt::next(&mut reads).await {
+                            let (journal, position) = result?;
+                            targets.insert(journal, position);
+                        }
+                        Ok(targets)
                     }
                     .boxed(),
                 ));
             }
+
             Self::PublishTerminal => {
                 let (event, outcome) = ctx.progress.selected_terminal.clone().ok_or_else(|| {
                     std::io::Error::other("terminal publication without FSM selection")
@@ -194,7 +215,12 @@ impl PipelineAction {
                 let acknowledged_at = ctx.resources.terminal_ack.clone();
                 let journal = ctx.system_journal.clone();
                 drop(ctx.resources.publications.enqueue(async move {
-                    journal.append(event, Default::default()).await?;
+                    crate::supervised_base::publication::append_inline(
+                        &journal,
+                        event,
+                        Default::default(),
+                    )
+                    .await?;
                     let at = std::time::Instant::now();
                     published
                         .set(crate::pipeline::termination::PublishedTermination {

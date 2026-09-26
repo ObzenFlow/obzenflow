@@ -13,23 +13,75 @@ use crate::event::CorrelationId;
 use crate::{AdmissionSeq, EventId, JournalWriterId, WriterId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use std::ops::{Deref, DerefMut};
 
+/// Record data plus an ephemeral admission capability. Only the core journal
+/// ports admit records after successful storage operations. Decoding and public
+/// constructors produce unadmitted data; any mutable access revokes admission.
 #[derive(Debug, Clone)]
 pub struct JournalRecord<P: JournalPayload> {
+    data: JournalRecordData<P>,
+    admitted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct JournalRecordData<P: JournalPayload> {
     pub envelope: EventEnvelope<P::Provenance>,
     pub payload: P,
 }
 
+impl<P: JournalPayload> Deref for JournalRecord<P> {
+    type Target = JournalRecordData<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<P: JournalPayload> DerefMut for JournalRecord<P> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.admitted = false;
+        &mut self.data
+    }
+}
+
 impl<P: JournalPayload> JournalRecord<P> {
+    pub fn from_parts(envelope: EventEnvelope<P::Provenance>, payload: P) -> Self {
+        Self {
+            data: JournalRecordData { envelope, payload },
+            admitted: false,
+        }
+    }
+
+    pub fn into_parts(self) -> (EventEnvelope<P::Provenance>, P) {
+        (self.data.envelope, self.data.payload)
+    }
+
+    pub(crate) fn is_admitted(&self) -> bool {
+        self.admitted
+    }
+
+    pub(crate) fn admit(mut self) -> Result<Self, super::CausalError> {
+        super::PreparedCausalCommit::from_record(&self)?;
+        self.admitted = true;
+        Ok(self)
+    }
+
     pub fn new<E: JournalEvent<Payload = P>>(journal_writer_id: JournalWriterId, event: E) -> Self {
         let (authored, payload) = event.into_parts();
-        Self {
-            envelope: EventEnvelope {
+        let mut vector_clock = super::vector_clock::VectorClock::new();
+        vector_clock
+            .clocks
+            .insert(super::CausalCoordinate::new(journal_writer_id), 1);
+        Self::from_parts(
+            EventEnvelope {
                 provenance: Provenance {
                     event: authored.provenance.event,
                     journal: JournalProvenance {
+                        run_id: crate::FlowId::new(),
+                        causal: Default::default(),
                         journal_writer_id,
-                        vector_clock: super::vector_clock::VectorClock::new(),
+                        vector_clock,
                         timestamp: chrono::Utc::now(),
                         journal_group_id: None,
                         journal_group_member: None,
@@ -38,16 +90,29 @@ impl<P: JournalPayload> JournalRecord<P> {
                 observability: authored.observability.and_then(|packet| packet.validated()),
             },
             payload,
-        }
+        )
     }
 
-    /// Commit an authored event with the metadata assigned by its journal.
+    /// Prepare record data with journal-assigned metadata. This does not commit
+    /// storage or admit evidence; the successful journal operation does that.
     pub fn commit_event<E: JournalEvent<Payload = P>>(
         event: E,
         journal: JournalProvenance,
     ) -> Result<Self, serde_json::Error> {
         let (authored, payload) = event.into_parts();
         Self::commit(authored, payload, journal)
+    }
+
+    pub fn causal_coordinate(&self) -> super::CausalCoordinate {
+        super::CausalCoordinate::new(self.envelope.provenance.journal.journal_writer_id)
+    }
+
+    pub fn local_sequence(&self) -> u64 {
+        self.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .get(&self.causal_coordinate())
     }
 
     pub fn id(&self) -> &EventId {
@@ -63,14 +128,15 @@ impl<P: JournalPayload> JournalRecord<P> {
         self.envelope.provenance.event.admission_seq()
     }
     pub fn into_authored(self) -> P::Event {
+        let (envelope, payload) = self.into_parts();
         P::Event::from_parts(
             AuthoredEnvelope {
                 provenance: AuthoredProvenance {
-                    event: self.envelope.provenance.event,
+                    event: envelope.provenance.event,
                 },
-                observability: self.envelope.observability,
+                observability: envelope.observability,
             },
-            self.payload,
+            payload,
         )
     }
     pub fn authored(&self) -> P::Event {
@@ -83,8 +149,8 @@ impl<P: JournalPayload> JournalRecord<P> {
         journal: JournalProvenance,
     ) -> Result<Self, serde_json::Error> {
         payload.validate(&authored.provenance.event)?;
-        Ok(Self {
-            envelope: EventEnvelope {
+        let record = Self::from_parts(
+            EventEnvelope {
                 provenance: Provenance {
                     event: authored.provenance.event,
                     journal,
@@ -92,7 +158,10 @@ impl<P: JournalPayload> JournalRecord<P> {
                 observability: authored.observability.and_then(|packet| packet.validated()),
             },
             payload,
-        })
+        );
+        super::PreparedCausalCommit::from_record(&record)
+            .map_err(<serde_json::Error as serde::de::Error>::custom)?;
+        Ok(record)
     }
 }
 
@@ -102,6 +171,7 @@ impl<P: JournalPayload> Serialize for JournalRecord<P> {
         self.payload
             .validate(&self.envelope.provenance.event)
             .map_err(S::Error::custom)?;
+        super::PreparedCausalCommit::from_record(self).map_err(S::Error::custom)?;
         let mut record = serializer.serialize_struct("JournalRecord", 2)?;
         record.serialize_field("envelope", &self.envelope)?;
         record.serialize_field("payload", &self.payload)?;
@@ -120,10 +190,9 @@ impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
         payload
             .validate(&record.envelope.provenance.event)
             .map_err(D::Error::custom)?;
-        Ok(Self {
-            envelope: record.envelope,
-            payload,
-        })
+        let record = Self::from_parts(record.envelope, payload);
+        super::PreparedCausalCommit::from_record(&record).map_err(D::Error::custom)?;
+        Ok(record)
     }
 }
 

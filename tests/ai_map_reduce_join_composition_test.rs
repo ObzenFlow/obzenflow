@@ -15,12 +15,13 @@ use obzenflow_core::ai::{
     Many, ResolvedTokenEstimator, TokenCount, TokenEstimatorFallbackReason,
     TokenEstimatorResolutionInfo,
 };
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::CompositeActivationContext;
-use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SystemEvent, SystemPayload};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
 use obzenflow_core::journal::{Journal, RunManifest};
-use obzenflow_core::{EventId, JournalOwner, StageId, SystemId, TypedPayload, WriterId};
+use obzenflow_core::{EventId, JournalOwner, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::dsl::backpressure_clause::enforced;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -702,19 +703,13 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
             .collect::<Vec<_>>()
     );
 
-    let system = DiskJournal::<SystemEvent>::with_owner(
-        run.join(&manifest.system_journal_file),
-        JournalOwner::system(SystemId::new()),
-    )
-    .unwrap();
-    let mut reader = system.reader().await.unwrap();
     let mut join_feeds = Vec::new();
     let join_id = manifest.stages["joined"]
         .stage_id
         .parse::<StageId>()
         .unwrap();
-    while let Some(record) = reader.next().await.unwrap() {
-        if let SystemPayload::ContractStatus {
+    for record in stage_records(run, "joined").await {
+        if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
             reader,
             upstream,
             selected_event_type,
@@ -723,7 +718,7 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
             reader_seq,
             advertised_writer_seq,
             ..
-        } = &record.payload
+        }) = &record.payload
         {
             if *reader == join_id {
                 assert!(*pass);

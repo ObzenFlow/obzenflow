@@ -8,6 +8,7 @@
 //! commit-and-reset cycle for a single pending output event. Supervisors call
 //! this in a `while let` loop to flush their `pending_outputs` queue.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
 use crate::stages::common::supervision::suspension::suspend_until;
@@ -17,7 +18,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 
-use obzenflow_core::event::{ChainEventFactory, JournalRecord};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
@@ -83,6 +84,7 @@ pub(crate) enum DrainAttempt {
 /// then stays scoped as it was produced rather than re-judged at drain time.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingOutput {
+    pub(crate) causal: obzenflow_core::event::CausalFrontier,
     pub(crate) event: ChainEvent,
     pub(crate) scope: obzenflow_core::MiddlewareExecutionScope,
 }
@@ -94,8 +96,7 @@ pub(crate) async fn drain_one_pending(
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-    pending_parent: Option<&JournalRecord<ChainPayload>>,
+    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -109,7 +110,6 @@ pub(crate) async fn drain_one_pending(
         stage_id,
         heartbeat_state,
         data_journal,
-        system_journal,
         pending_parent,
         instrumentation,
         backpressure_writer,
@@ -249,8 +249,7 @@ pub(crate) async fn drain_one_pending_resolve(
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
-    pending_parent: Option<&JournalRecord<ChainPayload>>,
+    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -258,47 +257,119 @@ pub(crate) async fn drain_one_pending_resolve(
     output_contract: Option<&StageOutputContract>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
-    let is_data = pending.event.consumes_data_credit();
-    // The envelope author identifies a locally authored terminal. Inspecting
-    // the payload writer here would let conflicting producer evidence bypass
-    // the fail-closed validation in `commit_authored_terminal`.
-    let requires_terminal_frontier_seal = pending.event.writer_id == WriterId::from(stage_id)
-        && matches!(
-            &pending.event.payload,
-            ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
-        );
+    let frontier = pending.causal.clone();
+    crate::supervised_base::publication::with_snapshot(frontier, async move {
+        let is_data = pending.event.consumes_data_credit();
+        // The envelope author identifies a locally authored terminal. Inspecting
+        // the payload writer here would let conflicting producer evidence bypass
+        // the fail-closed validation in `commit_authored_terminal`.
+        let requires_terminal_frontier_seal = pending.event.writer_id == WriterId::from(stage_id)
+            && matches!(
+                &pending.event.payload,
+                ChainPayload::FlowControl(FlowControlPayload::Eof { .. })
+            );
 
-    // FLOWIP-120b Step 1: the commit core (flow/runtime enrichment, per-type
-    // counting, journal append, heartbeat tracking, middleware mirror) is owned
-    // by the shared OutputCommitter so the drain and the effects-layer effect
-    // record append do not drift. The credit reservation, requeue, and pulses
-    // stay in the drain until Step 2 moves backpressure to input admission.
-    let committer = OutputCommitter {
-        data_journal,
-        flow_context: Some(flow_context),
-        system_journal: Some(system_journal),
-        instrumentation: Some(instrumentation),
-        heartbeat_state: heartbeat_state.as_ref(),
-        output_contract,
-        backpressure_writer: None,
-        observer_scope: pending.scope,
-    };
+        // FLOWIP-120b Step 1: the commit core (flow/runtime enrichment, per-type
+        // counting, journal append, heartbeat tracking, middleware mirror) is owned
+        // by the shared OutputCommitter so the drain and the effects-layer effect
+        // record append do not drift. The credit reservation, requeue, and pulses
+        // stay in the drain until Step 2 moves backpressure to input admission.
+        let committer = OutputCommitter {
+            data_journal,
+            flow_context: Some(flow_context),
 
-    if is_data {
-        committer.validate_prebuilt(
-            &pending.event,
-            CommitOptions {
-                count_output: true,
-                validate_output_contract: true,
-            },
-        )?;
+            instrumentation: Some(instrumentation),
+            heartbeat_state: heartbeat_state.as_ref(),
+            output_contract,
+            backpressure_writer: None,
+            observer_scope: pending.scope,
+        };
 
-        // Reconstruction never blocks (FLOWIP-115e): a reconstruction-scoped
-        // output reserves in track mode, so the accounting stays true for the
-        // resume handoff while no wait, ceiling, stall fact, or pulse exists
-        // on this path. The scope is the one frozen at production time.
-        if pending.scope.is_deterministic_replay() {
-            let reservation = backpressure_writer.reserve_tracked(1);
+        if is_data {
+            committer.validate_prebuilt(
+                &pending.event,
+                CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+            )?;
+
+            // Reconstruction never blocks (FLOWIP-115e): a reconstruction-scoped
+            // output reserves in track mode, so the accounting stays true for the
+            // resume handoff while no wait, ceiling, stall fact, or pulse exists
+            // on this path. The scope is the one frozen at production time.
+            if pending.scope.is_deterministic_replay() {
+                let reservation = backpressure_writer.reserve_tracked(1);
+                committer
+                    .commit_reserved_prebuilt(
+                        pending.event,
+                        pending_parent,
+                        CommitOptions {
+                            count_output: true,
+                            validate_output_contract: false,
+                        },
+                        reservation,
+                    )
+                    .await?;
+                *backpressure_stall = None;
+                return Ok(DrainAttempt::Committed { was_data: true });
+            }
+
+            // Debug-only: emit activity pulses even when bypass is enabled, so
+            // operators can see what *would* have blocked (FLOWIP-086k).
+            emit_bypass_pulse_if_needed(
+                stage_id,
+                flow_context,
+                data_journal,
+                instrumentation,
+                backpressure_writer,
+                backpressure_pulse,
+            )
+            .await;
+
+            let Some(reservation) = backpressure_writer.reserve(1) else {
+                pending_outputs.push_front(pending);
+
+                // The stall episode anchors at the first credit miss and only
+                // its exhaustion against the CURRENT limiting edge's ceiling
+                // authors the stall fact; wakes and chunk boundaries never
+                // reset it.
+                let started = *backpressure_stall.get_or_insert_with(tokio::time::Instant::now);
+                let detail = backpressure_writer
+                    .limiting_detail()
+                    .expect("a blocked writer has enforced downstream edges");
+                let elapsed = started.elapsed();
+
+                if elapsed >= detail.stall_timeout {
+                    emit_stalled_fact(
+                        stage_id,
+                        flow_context,
+                        &detail,
+                        elapsed,
+                        data_journal,
+                        instrumentation,
+                    )
+                    .await;
+                    emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
+                    return Err(format!(
+                        "backpressure.stalled: edge {stage_id}|>{} exceeded its stall ceiling \
+                     ({} ms elapsed, timeout {} ms, window {}, in flight {})",
+                        detail.downstream,
+                        elapsed.as_millis(),
+                        detail.stall_timeout.as_millis(),
+                        detail.window,
+                        detail.in_flight,
+                    )
+                    .into());
+                }
+
+                let bound = (detail.stall_timeout - elapsed).min(CONTROL_RESPONSIVENESS_CAP);
+                let waker = backpressure_writer
+                    .credit_waker()
+                    .expect("a blocked writer has backpressure state");
+                return Ok(DrainAttempt::BackedOff { bound, waker });
+            };
+
             committer
                 .commit_reserved_prebuilt(
                     pending.event,
@@ -310,103 +381,35 @@ pub(crate) async fn drain_one_pending_resolve(
                     reservation,
                 )
                 .await?;
+
             *backpressure_stall = None;
-            return Ok(DrainAttempt::Committed { was_data: true });
-        }
 
-        // Debug-only: emit activity pulses even when bypass is enabled, so
-        // operators can see what *would* have blocked (FLOWIP-086k).
-        emit_bypass_pulse_if_needed(
-            stage_id,
-            flow_context,
-            data_journal,
-            instrumentation,
-            backpressure_writer,
-            backpressure_pulse,
-        )
-        .await;
-
-        let Some(reservation) = backpressure_writer.reserve(1) else {
-            pending_outputs.push_front(pending);
-
-            // The stall episode anchors at the first credit miss and only
-            // its exhaustion against the CURRENT limiting edge's ceiling
-            // authors the stall fact; wakes and chunk boundaries never
-            // reset it.
-            let started = *backpressure_stall.get_or_insert_with(tokio::time::Instant::now);
-            let detail = backpressure_writer
-                .limiting_detail()
-                .expect("a blocked writer has enforced downstream edges");
-            let elapsed = started.elapsed();
-
-            if elapsed >= detail.stall_timeout {
-                emit_stalled_fact(
-                    stage_id,
-                    flow_context,
-                    &detail,
-                    elapsed,
-                    data_journal,
-                    instrumentation,
-                )
-                .await;
-                emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
-                return Err(format!(
-                    "backpressure.stalled: edge {stage_id}|>{} exceeded its stall ceiling \
-                     ({} ms elapsed, timeout {} ms, window {}, in flight {})",
-                    detail.downstream,
-                    elapsed.as_millis(),
-                    detail.stall_timeout.as_millis(),
-                    detail.window,
-                    detail.in_flight,
-                )
-                .into());
+            Ok(DrainAttempt::Committed { was_data: true })
+        } else {
+            // Non-data events bypass credit gating.
+            if requires_terminal_frontier_seal {
+                committer
+                    .commit_authored_terminal(pending.event, pending_parent)
+                    .await
+                    .map_err(|e| format!("Failed to write pending terminal output: {e}"))?;
+            } else {
+                committer
+                    .commit_prebuilt(
+                        pending.event,
+                        pending_parent,
+                        CommitOptions {
+                            count_output: false,
+                            validate_output_contract: false,
+                        },
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to write pending output: {e}"))?;
             }
 
-            let bound = (detail.stall_timeout - elapsed).min(CONTROL_RESPONSIVENESS_CAP);
-            let waker = backpressure_writer
-                .credit_waker()
-                .expect("a blocked writer has backpressure state");
-            return Ok(DrainAttempt::BackedOff { bound, waker });
-        };
-
-        committer
-            .commit_reserved_prebuilt(
-                pending.event,
-                pending_parent,
-                CommitOptions {
-                    count_output: true,
-                    validate_output_contract: false,
-                },
-                reservation,
-            )
-            .await?;
-
-        *backpressure_stall = None;
-
-        Ok(DrainAttempt::Committed { was_data: true })
-    } else {
-        // Non-data events bypass credit gating.
-        if requires_terminal_frontier_seal {
-            committer
-                .commit_authored_terminal(pending.event, pending_parent)
-                .await
-                .map_err(|e| format!("Failed to write pending terminal output: {e}"))?;
-        } else {
-            committer
-                .commit_prebuilt(
-                    pending.event,
-                    pending_parent,
-                    CommitOptions {
-                        count_output: false,
-                        validate_output_contract: false,
-                    },
-                )
-                .await
-                .map_err(|e| format!("Failed to write pending output: {e}"))?;
+            Ok(DrainAttempt::Committed { was_data: false })
         }
-
-        Ok(DrainAttempt::Committed { was_data: false })
-    }
+    })
+    .await
 }
 
 /// Emit a bypass-mode activity pulse when credit would have been zero.
@@ -465,7 +468,7 @@ async fn emit_stalled_fact(
     if let Err(e) = crate::supervised_base::publication::append(
         data_journal,
         event,
-        AppendOptions::new(None)
+        AppendOptions::default()
             .with_capture(instrumentation.journal_capture(None, vec![(0, false)])),
     )
     .await

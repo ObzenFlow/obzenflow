@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::messaging::DeliveredRecord;
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
@@ -15,8 +16,7 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, JournalRecord};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
@@ -162,14 +162,14 @@ pub(super) async fn dispatch_enriching<
 
                     match resolution {
                         ControlAction::Forward => {
-                            common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                            common::forward_control_to_journal(ctx, &envelope).await?;
                             if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
-                            common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                            common::forward_control_to_journal(ctx, &envelope).await?;
 
                             if envelope.is_eof() {
                                 if last_eof_outcome
@@ -295,11 +295,7 @@ pub(super) async fn dispatch_enriching<
                         return Ok(EventLoopDirective::Continue);
                     }
 
-                    let mut merged_parent = envelope.clone();
-                    CausalOrderingService::update_with_parent(
-                        &mut merged_parent.envelope.provenance.journal.vector_clock,
-                        &ctx.reference_high_water_clock,
-                    );
+                    let merged_parent = envelope.clone();
 
                     ctx.instrumentation
                         .in_flight_count
@@ -397,7 +393,7 @@ pub(super) async fn dispatch_enriching<
                                 crate::supervised_base::publication::append(
                                     &ctx.error_journal,
                                     error_event,
-                                    AppendOptions::new(Some(&merged_parent)),
+                                    AppendOptions::from_record(Some(&merged_parent))?,
                                 )
                                 .await
                                 .map_err(|e| format!("Failed to write join error event: {e}"))?;
@@ -499,7 +495,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
-    pending_parent: Option<&JournalRecord<ChainPayload>>,
+    pending_parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
         if let Some(reader) = ctx.backpressure_readers.get(&source_id) {
@@ -532,6 +528,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         .into_iter()
         .map(
             |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event,
                 scope,
             },
@@ -545,7 +542,6 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
             ctx.stage_id,
             ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             pending_parent,
             &ctx.instrumentation,
             &ctx.backpressure_writer,

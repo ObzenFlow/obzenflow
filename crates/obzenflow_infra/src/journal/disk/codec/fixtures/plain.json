@@ -61,12 +61,23 @@
         "composite_activations": []
       },
       "journal": {
+        "run_id": "00000000000000000000000003",
         "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
         "vector_clock": {
-          "clocks": {
-            "independent-writer": 18446744073709551615,
-            "zero-writer": 0
-          }
+          "entries": [
+            {
+              "journal_writer_id": "00000000000000000000000001",
+              "sequence": 18446744073709551615
+            },
+            {
+              "journal_writer_id": "01M2R1P9BVBYAXWFEH21DRBBEP",
+              "sequence": 1
+            }
+          ]
+        },
+        "causal": {
+          "previous": null,
+          "witnesses": []
         },
         "timestamp": "2037-01-02T03:04:05.123456789Z",
         "journal_group_id": null,

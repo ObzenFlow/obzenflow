@@ -449,7 +449,7 @@ mod tests {
                 RunManifestStage {
                     dsl_var: key.to_string(),
                     stage_type: StageType::Transform,
-                    is_effectful: Some(false),
+                    is_effectful: false,
                     stage_id: format!("stage_{key}"),
                     stage_logic_version: "1".to_string(),
                     data_journal_file: format!("{key}.log"),
@@ -460,6 +460,7 @@ mod tests {
             );
         }
         RunManifest {
+            metrics_journals: None,
             journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
 
             obzenflow_version: "0.1.2".to_string(),

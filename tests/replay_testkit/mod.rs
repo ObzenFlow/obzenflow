@@ -15,7 +15,7 @@
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
-use obzenflow_core::id::{JournalId, StageId};
+use obzenflow_core::id::StageId;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::WriterId;
 use obzenflow_runtime::testing::DeliveredOrderProjection;
@@ -111,7 +111,9 @@ pub async fn read_journal_envelopes_appended<T: JournalEvent>(
     // would recover (truncate) an in-flight tail; a live reader only observes it.
     let mut reader = obzenflow_infra::journal::disk::reader::DiskJournalReader::<T>::new(
         path.to_path_buf(),
-        JournalId::new(),
+        obzenflow_infra::journal::disk::identity::read_identity(path)
+            .expect("persisted journal identity")
+            .journal_id,
         std::sync::Arc::new(tokio::sync::RwLock::new(())),
     )
     .await

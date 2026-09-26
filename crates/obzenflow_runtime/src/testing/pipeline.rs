@@ -73,4 +73,6 @@ pub use crate::pipeline::tests::supervisor::{
     producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer,
     queued_controls_cannot_starve_bootstrap_or_automatic_start,
     ready_stage_joins_cannot_starve_other_resource_completions,
+    report_gap_cannot_complete_pipeline,
+    saturated_publications_stop_report_admission_but_not_controls_or_deadlines,
 };

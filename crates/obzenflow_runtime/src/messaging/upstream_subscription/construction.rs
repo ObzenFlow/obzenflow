@@ -43,24 +43,24 @@ impl<T: JournalEvent> EmptyJournalReader<T> {
 }
 
 #[async_trait]
-impl<T> JournalReader<T> for EmptyJournalReader<T>
+impl<T> obzenflow_core::journal::JournalStorageReader<T> for EmptyJournalReader<T>
 where
     T: JournalEvent + Send + Sync + 'static,
 {
-    async fn next(
+    async fn storage_next(
         &mut self,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         0
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         true
     }
-    fn initial_prefix_complete(&self) -> std::result::Result<bool, JournalError> {
+    fn storage_initial_prefix_complete(&self) -> std::result::Result<bool, JournalError> {
         Ok(true)
     }
 }
@@ -428,7 +428,7 @@ where
             writer_id,
             contract_journal,
             config,
-            system_journal,
+            report_journal,
             reader_stage,
             control_plane,
             include_delivery_contract,
@@ -441,7 +441,7 @@ where
             config,
             writer_id,
             journal: contract_journal,
-            system_journal,
+            report_journal,
             reader_stage,
             receipt_aware_progress: include_delivery_contract,
             flow_context: None,

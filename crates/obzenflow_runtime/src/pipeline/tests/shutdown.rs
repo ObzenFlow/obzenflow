@@ -690,7 +690,10 @@ pub async fn final_marker_coalesces_late_controls_without_restarting_finalisatio
         .await
         .unwrap();
     machine
-        .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut ctx)
+        .handle(
+            PipelineFsmEvent::Journal(Box::new((envelope).into())),
+            &mut ctx,
+        )
         .await
         .unwrap();
     let EventLoopDirective::Transition(event @ PipelineFsmEvent::PhysicalSettlementSatisfied) =

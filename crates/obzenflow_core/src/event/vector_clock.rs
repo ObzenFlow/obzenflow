@@ -7,25 +7,119 @@
 //! This is a simple data structure that holds component->sequence mappings.
 //! The causal ordering logic is implemented separately in domain services.
 
-use serde::{Deserialize, Serialize};
+use super::{CausalCoordinate, CausalError};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
 use crate::journal::JournalError;
 
 use crate::event::types::EventId;
 
+/// Finite admission limit, rejected rather than silently truncating evidence.
+/// The physical codec also enforces its frame and collection byte budgets.
+pub const MAX_CAUSAL_COORDINATES: usize = 65_536;
+
+pub(super) fn bounded_entries<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Entries<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Entries<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded list of causal entries")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Vec<T>, A::Error> {
+            let mut values = Vec::new();
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == MAX_CAUSAL_COORDINATES {
+                    return Err(serde::de::Error::custom(
+                        "causal coordinate budget exceeded",
+                    ));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Entries(std::marker::PhantomData))
+}
+
 /// Vector clock data structure for causal ordering
 ///
 /// This is a pure data structure representing the causal history of an event.
 /// Use CausalOrderingService for vector clock operations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorClock {
-    /// Map from writer ID to sequence number
-    /// Using String for writer ID to keep it simple and serializable
+    /// Sequence numbers keyed by physical journal incarnation.
     ///
     /// `BTreeMap` provides deterministic iteration order, which helps keep JSON
     /// encodings stable for hashing/replay tooling.
-    pub clocks: BTreeMap<String, u64>,
+    pub clocks: BTreeMap<CausalCoordinate, u64>,
+}
+
+/// The wire format is a sorted set of typed entries, never string-parsed writer keys.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClockEntry {
+    journal_writer_id: super::JournalWriterId,
+    sequence: u64,
+}
+
+impl Serialize for VectorClock {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if self.clocks.len() > MAX_CAUSAL_COORDINATES
+            || self.clocks.values().any(|sequence| *sequence == 0)
+        {
+            return Err(serde::ser::Error::custom(
+                "invalid or oversized causal clock",
+            ));
+        }
+        let entries: Vec<_> = self
+            .clocks
+            .iter()
+            .map(|(coordinate, sequence)| ClockEntry {
+                journal_writer_id: coordinate.journal_writer_id,
+                sequence: *sequence,
+            })
+            .collect();
+        let mut wire = serializer.serialize_struct("VectorClock", 1)?;
+        wire.serialize_field("entries", &entries)?;
+        wire.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for VectorClock {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(deserialize_with = "bounded_entries")]
+            entries: Vec<ClockEntry>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let mut clocks = BTreeMap::new();
+        for entry in wire.entries {
+            if entry.sequence == 0
+                || clocks
+                    .insert(
+                        CausalCoordinate::new(entry.journal_writer_id),
+                        entry.sequence,
+                    )
+                    .is_some()
+            {
+                return Err(serde::de::Error::custom(
+                    "zero or duplicate causal coordinate",
+                ));
+            }
+        }
+        Ok(Self { clocks })
+    }
 }
 
 impl VectorClock {
@@ -37,7 +131,7 @@ impl VectorClock {
     }
 
     /// Get the sequence number for a writer
-    pub fn get(&self, writer_id: &str) -> u64 {
+    pub fn get(&self, writer_id: &CausalCoordinate) -> u64 {
         self.clocks.get(writer_id).copied().unwrap_or(0)
     }
 
@@ -58,9 +152,16 @@ pub struct CausalOrderingService;
 
 impl CausalOrderingService {
     /// Increment the vector clock for a writer
-    pub fn increment(clock: &mut VectorClock, writer_id: &str) {
-        let current = clock.get(writer_id);
-        clock.clocks.insert(writer_id.to_string(), current + 1);
+    pub fn increment(
+        clock: &mut VectorClock,
+        writer_id: &CausalCoordinate,
+    ) -> Result<(), CausalError> {
+        let next = clock
+            .get(writer_id)
+            .checked_add(1)
+            .ok_or(CausalError::SequenceExhausted)?;
+        clock.clocks.insert(*writer_id, next);
+        Ok(())
     }
 
     /// Update clock with causal dependency
@@ -68,25 +169,9 @@ impl CausalOrderingService {
         for (writer_id, &parent_seq) in &parent.clocks {
             let current = clock.get(writer_id);
             if parent_seq > current {
-                clock.clocks.insert(writer_id.clone(), parent_seq);
+                clock.clocks.insert(*writer_id, parent_seq);
             }
         }
-    }
-
-    /// Advance a writer's clock for an append: start from the writer's current
-    /// clock, merge the parent's causal history, then increment the writer.
-    /// Store-free, so each backend decides when to commit the result.
-    pub fn advance_for_append(
-        current: Option<&VectorClock>,
-        writer_key: &str,
-        parent: Option<&VectorClock>,
-    ) -> VectorClock {
-        let mut clock = current.cloned().unwrap_or_default();
-        if let Some(parent) = parent {
-            Self::update_with_parent(&mut clock, parent);
-        }
-        Self::increment(&mut clock, writer_key);
-        clock
     }
 
     /// Check if a happened before b
@@ -179,10 +264,10 @@ impl CausalOrderingService {
         let mut distance = 0;
 
         // Check all writers in both clocks
-        let mut all_writers: Vec<String> = a.clocks.keys().cloned().collect();
+        let mut all_writers: Vec<CausalCoordinate> = a.clocks.keys().cloned().collect();
         for writer in b.clocks.keys() {
             if !all_writers.contains(writer) {
-                all_writers.push(writer.clone());
+                all_writers.push(*writer);
             }
         }
 
@@ -236,6 +321,7 @@ mod tests {
         event_id: EventId,
         vector_clock: VectorClock,
     ) -> JournalRecord<ChainPayload> {
+        let coordinate = *vector_clock.clocks.keys().next().unwrap();
         let writer_id = WriterId::from(StageId::new());
         let mut event =
             ChainEventFactory::data_event(writer_id, "test.vector_clock", json!({ "ok": true }));
@@ -244,7 +330,9 @@ mod tests {
         JournalRecord::commit_event(
             event,
             JournalProvenance {
-                journal_writer_id: JournalWriterId::new(),
+                run_id: crate::FlowId::new(),
+                causal: Default::default(),
+                journal_writer_id: coordinate.journal_writer_id,
                 vector_clock,
                 timestamp: Utc::now(),
                 journal_group_id: None,
@@ -256,20 +344,20 @@ mod tests {
 
     #[test]
     fn transitivity_violation_regression_orders_deterministically() {
-        let w1 = WriterId::from(StageId::new()).to_string();
-        let w2 = WriterId::from(StageId::new()).to_string();
-        let w3 = WriterId::from(StageId::new()).to_string();
+        let w1 = CausalCoordinate::new(JournalWriterId::new());
+        let w2 = CausalCoordinate::new(JournalWriterId::new());
+        let w3 = CausalCoordinate::new(JournalWriterId::new());
 
         let mut clock_a = VectorClock::new();
-        clock_a.clocks.insert(w1.clone(), 1);
+        clock_a.clocks.insert(w1, 1);
 
         let mut clock_b = VectorClock::new();
-        clock_b.clocks.insert(w1.clone(), 1);
-        clock_b.clocks.insert(w2.clone(), 1);
+        clock_b.clocks.insert(w1, 1);
+        clock_b.clocks.insert(w2, 1);
 
         let mut clock_c = VectorClock::new();
-        clock_c.clocks.insert(w2.clone(), 1);
-        clock_c.clocks.insert(w3.clone(), 1);
+        clock_c.clocks.insert(w2, 1);
+        clock_c.clocks.insert(w3, 1);
 
         assert!(CausalOrderingService::happened_before(&clock_a, &clock_b));
         assert!(CausalOrderingService::are_concurrent(&clock_b, &clock_c));
@@ -306,20 +394,20 @@ mod tests {
 
     #[test]
     fn order_is_stable_under_permutation() {
-        let w1 = WriterId::from(StageId::new()).to_string();
-        let w2 = WriterId::from(StageId::new()).to_string();
-        let w3 = WriterId::from(StageId::new()).to_string();
+        let w1 = CausalCoordinate::new(JournalWriterId::new());
+        let w2 = CausalCoordinate::new(JournalWriterId::new());
+        let w3 = CausalCoordinate::new(JournalWriterId::new());
 
         let mut clock_a = VectorClock::new();
-        clock_a.clocks.insert(w1.clone(), 1);
+        clock_a.clocks.insert(w1, 1);
 
         let mut clock_b = VectorClock::new();
-        clock_b.clocks.insert(w1.clone(), 1);
-        clock_b.clocks.insert(w2.clone(), 1);
+        clock_b.clocks.insert(w1, 1);
+        clock_b.clocks.insert(w2, 1);
 
         let mut clock_c = VectorClock::new();
-        clock_c.clocks.insert(w2.clone(), 1);
-        clock_c.clocks.insert(w3.clone(), 1);
+        clock_c.clocks.insert(w2, 1);
+        clock_c.clocks.insert(w3, 1);
 
         let a_id = EventId::from_string("ZZZZZZZZZZZZZZZZZZZZZZZZZZ").unwrap();
         let b_id = EventId::from_string("00000000000000000000000000").unwrap();
@@ -351,24 +439,26 @@ mod tests {
 
     #[test]
     fn causal_rank_sums_components_and_respects_happened_before() {
+        let w1 = CausalCoordinate::new(JournalWriterId::new());
+        let w2 = CausalCoordinate::new(JournalWriterId::new());
         let empty = VectorClock::new();
         assert_eq!(CausalOrderingService::causal_rank(&empty), 0);
 
         let mut single = VectorClock::new();
-        single.clocks.insert("writer_1".to_string(), 3);
+        single.clocks.insert(w1, 3);
         assert_eq!(CausalOrderingService::causal_rank(&single), 3);
 
         let mut multi = VectorClock::new();
-        multi.clocks.insert("writer_1".to_string(), 2);
-        multi.clocks.insert("writer_2".to_string(), 3);
+        multi.clocks.insert(w1, 2);
+        multi.clocks.insert(w2, 3);
         assert_eq!(CausalOrderingService::causal_rank(&multi), 5);
 
         let mut a = VectorClock::new();
-        a.clocks.insert("writer_1".to_string(), 1);
+        a.clocks.insert(w1, 1);
 
         let mut b = VectorClock::new();
-        b.clocks.insert("writer_1".to_string(), 1);
-        b.clocks.insert("writer_2".to_string(), 1);
+        b.clocks.insert(w1, 1);
+        b.clocks.insert(w2, 1);
 
         assert!(CausalOrderingService::happened_before(&a, &b));
         assert!(CausalOrderingService::causal_rank(&a) < CausalOrderingService::causal_rank(&b));

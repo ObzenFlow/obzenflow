@@ -10,7 +10,7 @@ use std::str::FromStr;
 use ulid::Ulid;
 
 /// Unique identifier for a flow execution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FlowId(Ulid);
 
 impl FlowId {

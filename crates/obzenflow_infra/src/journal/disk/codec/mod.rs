@@ -65,6 +65,8 @@ pub(crate) fn prepare<P: JournalPayload>(
     store: DefinitionStore,
 ) -> Result<PreparedFrame> {
     validate_membership(records, group)?;
+    obzenflow_core::journal::limits::validate_group(records)
+        .map_err(|error| invalid(error.to_string()))?;
     let mut definitions = WriteTable::new(store, path)?;
     let mut content = Vec::new();
     match group {
@@ -107,6 +109,9 @@ pub(crate) fn prepare<P: JournalPayload>(
     let mut body = Vec::new();
     definitions.encode(&mut body);
     body.extend_from_slice(&content);
+    if body.len() > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
+        return Err(invalid("frame byte budget exceeded"));
+    }
     Ok(PreparedFrame {
         bytes: frame::encode(&body),
         definitions,
@@ -190,6 +195,10 @@ impl Decoder {
             }
             _ => return Err(invalid("unknown frame kind")),
         };
+        if count > obzenflow_core::journal::limits::MAX_GROUP_RECORDS {
+            return Err(invalid("atomic group member budget exceeded"));
+        }
+        let mut decoded_bytes = 0usize;
         let mut records = Vec::new();
         for _ in 0..count {
             definitions.begin_record();
@@ -235,19 +244,27 @@ impl Decoder {
                 sizes.observability += input.position() - start;
             }
             let start = input.position();
-            let payload: serde_json::Value = serde_json::from_slice(input.bytes()?)?;
+            let payload_bytes = input.bytes()?;
+            if payload_bytes.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES {
+                return Err(invalid("payload byte budget exceeded"));
+            }
+            let payload: serde_json::Value = serde_json::from_slice(payload_bytes)?;
             if MEASURE {
                 sizes.payload += input.position() - start;
             }
             let payload = T::Payload::decode(&provenance.event, payload)?;
             payload.validate(&provenance.event)?;
-            let record: LogRecord<T> = JournalRecord {
-                envelope: obzenflow_core::event::envelope::EventEnvelope {
+            let record: LogRecord<T> = JournalRecord::from_parts(
+                obzenflow_core::event::envelope::EventEnvelope {
                     provenance,
                     observability,
                 },
                 payload,
-            };
+            );
+            decoded_bytes += obzenflow_core::journal::limits::record_bytes(&record)?;
+            if decoded_bytes > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
+                return Err(invalid("decoded frame byte budget exceeded"));
+            }
             records.push(record);
         }
         input.finish()?;

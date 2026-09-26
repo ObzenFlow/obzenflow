@@ -32,11 +32,11 @@ use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
-    StageActivity, StageLifecycleEvent, SystemEvent, SystemPayload,
+    StageActivity, StageLifecycleEvent, SupervisorRecord, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{JournalRecord, StageId, SystemId, TypedPayload};
+use obzenflow_core::{JournalRecord, StageId, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
@@ -930,22 +930,6 @@ async fn read_stage_journal(
         .expect("PostgreSQL stage journal reads")
 }
 
-async fn read_system_journal(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
-    let manifest = replay_testkit::archive_manifest(run);
-    let file = manifest["system_journal_file"]
-        .as_str()
-        .expect("manifest contains the system journal");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run.join(file),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("PostgreSQL system journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("PostgreSQL system journal reads")
-}
-
 async fn assert_operation_failure_lifecycle(
     run: &Path,
     expected_phase: SinkOperationPhase,
@@ -978,8 +962,13 @@ async fn assert_operation_failure_lifecycle(
         expected_code.map(|code| (POSTGRES_SQLSTATE_NAMESPACE, code))
     );
 
-    let system = read_system_journal(run).await;
-    let tied_failures = system
+    let data = read_stage_journal(run, "postgres", "data_journal_file").await;
+    let reports = data
+        .iter()
+        .cloned()
+        .filter_map(SupervisorRecord::from_chain)
+        .collect::<Vec<_>>();
+    let tied_failures = reports
         .iter()
         .filter_map(|envelope| match &envelope.payload {
             SystemPayload::StageLifecycle {
@@ -998,7 +987,7 @@ async fn assert_operation_failure_lifecycle(
         "the real connector failure is the sink lifecycle's exact durable cause"
     );
     assert!(
-        !system.iter().any(|envelope| matches!(
+        !reports.iter().any(|envelope| matches!(
             &envelope.payload,
             SystemPayload::StageLifecycle {
                 stage_id,

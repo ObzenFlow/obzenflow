@@ -49,7 +49,9 @@ fn assert_json_summary(stdout: &str, stderr: &str) {
             .as_ref()
             .map_or("system", |s| s.key.as_str());
         let kind = match row.journal.kind {
-            RunJournalKind::System => "system",
+            RunJournalKind::System => "pipeline",
+            RunJournalKind::MetricsCoordination => "metrics/coordination",
+            RunJournalKind::MetricsExport => "metrics/export",
             RunJournalKind::Data => "data",
             RunJournalKind::Error => "error",
         };
@@ -152,17 +154,20 @@ async fn runtime_writer_columns_use_journaled_registration() {
     let pipeline = snapshot.identity().pipeline_writer_id;
     let mut registered = std::collections::BTreeMap::new();
     while let Some(record) = snapshot.next().await.unwrap() {
-        if let RunRecordData::System(row) = record.record {
-            if let SystemPayload::SupervisorRegistered { descriptor } = &row.payload {
-                assert!(registered
-                    .insert(row.writer_id().to_string(), descriptor.clone())
-                    .is_none());
-            } else {
-                assert!(
-                    registered.contains_key(&row.writer_id().to_string()),
-                    "a writer registers before its first operational system event"
-                );
-            }
+        let (writer, descriptor) = match &record.record {
+            RunRecordData::System(row) => (row.writer_id(), match &row.payload {
+                SystemPayload::SupervisorRegistered { descriptor } => Some(descriptor),
+                _ => None,
+            }),
+            RunRecordData::Chain(row) => (row.writer_id(), match &row.payload {
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some(descriptor),
+                _ => None,
+            }),
+        };
+        if let Some(descriptor) = descriptor {
+            assert!(registered
+                .insert(writer.to_string(), descriptor.clone())
+                .is_none());
         }
     }
     assert_eq!(registered.len(), 4); // Two stages, pipeline, metrics aggregator.
@@ -201,14 +206,43 @@ async fn runtime_writer_columns_use_journaled_registration() {
                 "summary exceeds {width} columns: {line}"
             );
         }
-        let table = text.split_once("\nsystem.log\n").unwrap().1;
+        let table = text.split_once("\nSYSTEM SUPERVISORS\n").unwrap().1;
+        let (system, application) = table.split_once("\nAPPLICATION STAGES\n").unwrap();
+        assert_eq!(
+            system.matches("Supervisor: pipeline_supervisor\n").count(),
+            1
+        );
+        assert_eq!(
+            system.matches("Supervisor: metrics_aggregator\n").count(),
+            1
+        );
+        assert!(!application.contains("Supervisor:"));
+        let (pipeline, metrics) = system
+            .split_once("Supervisor: metrics_aggregator\n")
+            .unwrap();
+        assert!(pipeline.contains("\n    system.log\n"));
+        assert!(!pipeline.contains("system.metrics.exported"));
+        assert!(metrics.contains("\n    metrics-coordination.log\n"));
+        assert!(metrics.contains("\n    metrics-export.log\n"));
+        assert_eq!(
+            metrics
+                .lines()
+                .filter(|line| line.trim_start().starts_with("Count "))
+                .count(),
+            2
+        );
+        assert!(summary
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("across 7 journals."));
         if width == 90 {
-            assert!(table
+            assert!(metrics
                 .lines()
                 .any(|line| line.contains("system.metrics.exported")
                     && line.contains("metrics_aggregator")
                     && line.contains("MetricsAggregator")));
-            assert!(table
+            assert!(pipeline
                 .lines()
                 .any(|line| line.contains("system.metrics.drain_requested")
                     && line.contains("pipeline_supervisor")
@@ -288,7 +322,9 @@ async fn cli_verify_exit_codes_follow_the_contract() {
                 .count(),
             3
         );
-        assert!(rows.iter().all(|r| r.version == 1));
+        assert!(rows
+            .iter()
+            .all(|r| r.version == obzenflow::journal::read::RUN_RECORD_VERSION));
         let mut positions = std::collections::BTreeMap::new();
         for row in &rows {
             if include_runtime {
@@ -503,13 +539,38 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         )
     }
 
+    fn journal_numbers(text: &str) -> std::collections::BTreeMap<String, usize> {
+        let mut pieces = text.split("\x1b[");
+        let mut plain = pieces.next().unwrap().to_owned();
+        for piece in pieces {
+            plain.push_str(piece.split_once('m').unwrap().1);
+        }
+        plain
+            .split_once("Journal numbers:\n")
+            .unwrap()
+            .1
+            .split_once("\n\n")
+            .unwrap()
+            .0
+            .lines()
+            .flat_map(|line| line.trim().split(" · "))
+            .map(|field| {
+                let (number, name) = field.split_once(' ').unwrap();
+                (name.to_owned(), number.parse().unwrap())
+            })
+            .collect()
+    }
+
     fn assert_palette(text: &str) {
+        let numbers = journal_numbers(text);
+        let manifest_heading = "\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m";
+        let (events, footer) = text.split_once(manifest_heading).unwrap();
         let facts: Vec<_> = text
             .lines()
             .filter(|line| {
-                line.contains("mSOURCE\x1b")
-                    || line.contains("mTRANSFORM\x1b")
-                    || line.contains("mEFFECTFUL TRANSFORM\x1b")
+                line.contains("mSOURCE (stage:")
+                    || line.contains("mTRANSFORM (stage:")
+                    || line.contains("mEFFECTFUL TRANSFORM (stage:")
             })
             .collect();
         assert!(!facts.is_empty());
@@ -518,27 +579,71 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         }
         let deliveries: Vec<_> = text
             .lines()
-            .filter(|line| line.contains("mDELIVERY\x1b"))
+            .filter(|line| line.contains("mDELIVERY (stage:"))
             .collect();
         assert!(!deliveries.is_empty());
         for line in deliveries {
-            assert_eq!(line, "\x1b[38;5;217mDELIVERY\x1b[0m");
+            assert!(line.starts_with("\x1b[38;5;217mDELIVERY (stage: "));
+            assert!(line.ends_with(")\x1b[0m"));
         }
-        for line in text.lines().filter(|line| !line.contains('⟨')) {
+        for line in events.lines().filter(|line| !line.contains('⟨')) {
             assert!(
-                line.matches('\x1b').count() <= 2,
-                "each header, equation and payload line has one color: {line}"
+                line.matches('\x1b').count()
+                    <= if line.contains("(stage:") {
+                        6
+                    } else if line.contains('←') {
+                        4
+                    } else {
+                        2
+                    },
+                "headings emphasize the stage and equations emphasize the event: {line}"
             );
         }
+        for (stage, heading, event, input, normal, reporter, output) in [
+            (
+                "web_orders",
+                "SOURCE",
+                "commerce.customer_order_placed.v1",
+                "",
+                "1;38;5;208",
+                223,
+                215,
+            ),
+            (
+                "validate_order",
+                "TRANSFORM",
+                "payment.order_validated.v1",
+                "commerce.customer_order_placed.v1",
+                "1;38;5;208",
+                223,
+                215,
+            ),
+            (
+                "authorize_payment",
+                "EFFECTFUL TRANSFORM",
+                "payment.authorized.v1",
+                "payment.order_validated.v1",
+                "1;38;5;208",
+                223,
+                215,
+            ),
+            (
+                "paid_orders",
+                "DELIVERY",
+                "sink.delivery",
+                "payment.authorized.v1",
+                "38;5;217",
+                231,
+                224,
+            ),
+        ] {
+            let number = numbers[stage];
+            assert!(text.contains(&format!(
+                "\x1b[{normal}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter}m{stage}\x1b[0m\x1b[{normal}m, journal: {number})\x1b[0m\n\x1b[1;38;5;{output}m{event}\x1b[0m\x1b[{normal}m ← {stage}({input})"
+            )));
+        }
         assert!(
-            text.contains("\x1b[1;38;5;208mSOURCE\x1b[0m\n\x1b[1;38;5;208mcommerce.customer_order_placed.v1 ← web_orders()")
-        );
-        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.order_validated.v1 ← validate_order(commerce.customer_order_placed.v1)"));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.authorized.v1 ← authorize_payment(payment.order_validated.v1)"));
-        assert!(text
-            .contains("\x1b[38;5;217mDELIVERY\x1b[0m\n\x1b[38;5;217msink.delivery ← paid_orders(payment.authorized.v1)\x1b[0m"));
-        assert!(
-            text.contains("\x1b[1;4;38;5;208m") && text.contains("\x1b[1;4;38;5;217m"),
+            text.contains("\x1b[1;4;38;5;215m") && text.contains("\x1b[1;4;38;5;224m"),
             "{text}"
         );
         for underlined in text.split("\x1b[1;4;38;5;").skip(1) {
@@ -554,12 +659,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "underline only digits: {digits:?}"
             );
         }
-        let manifest_heading = "\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m";
-        let footer = &text[text.find(manifest_heading).unwrap()..];
         for escape in footer.split("\x1b[").skip(1) {
             let code = escape.split_once('m').unwrap().0;
             assert!(
-                matches!(code, "0" | "1;38;5;255" | "38;5;252" | "38;5;245"),
+                matches!(
+                    code,
+                    "0" | "1;38;5;255" | "38;5;252" | "38;5;245" | "1;4;38;5;252"
+                ),
                 "the archive summary uses grayscale only: {code}"
             );
         }
@@ -601,6 +707,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
 
     fn assert_fact_origins(text: &str) {
+        let numbers = journal_numbers(text);
         for (event_type, input, stage, order) in [
             (
                 "payment.order_validated.v1",
@@ -641,8 +748,10 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             let block = text
                 .split("\n\n")
                 .find(|block| {
-                    block.starts_with(&format!("{heading}\n{event_type} ← "))
-                        && block.contains(&format!("\"order_id\": \"{order}\""))
+                    block.starts_with(&format!(
+                        "{heading} (stage: {stage}, journal: {})\n{event_type} ← ",
+                        numbers[stage]
+                    )) && block.contains(&format!("\"order_id\": \"{order}\""))
                 })
                 .unwrap_or_else(|| {
                     panic!("missing {event_type} with its own payload for {order}: {text}")
@@ -672,6 +781,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .unwrap();
     let baseline = latest_run_dir(temp.path());
     let (human, _) = show(&baseline, &[]);
+    let numbers = journal_numbers(&human);
     let (explicit, _) = show(&baseline, &["--explain", "--color", "never"]);
     assert!(explicit.contains("Effects are data:"));
     assert!(
@@ -693,11 +803,15 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "MANIFEST     run_manifest.json",
         "\nJOURNALS\n",
         "Each stage has separate data and error journal files.",
-        "\nStage: web_orders\n  Subscribes to: —\n",
-        "\nStage: validate_order\n  Subscribes to: store_orders, web_orders\n",
-        "\nStage: authorize_payment\n  Subscribes to: validate_order\n",
-        "  Subscribers: cancelled_orders, manual_review, paid_orders\n",
-        "  Subscribers: —\n",
+        "\nAPPLICATION STAGES\n",
+        "\nSOURCE: web_orders\n  Reads from: —\n",
+        "\nTRANSFORM: validate_order\n  Reads from: store_orders, web_orders\n",
+        "\nEFFECTFUL TRANSFORM: authorize_payment\n  Reads from: validate_order\n",
+        "\nSINK: paid_orders\n  Reads from: authorize_payment\n",
+        "  Data subscribers: cancelled_orders, manual_review, paid_orders\n",
+        "  Data subscribers: —\n",
+        "  Owns:\n    ",
+        "      Runtime readers: pipeline_supervisor\n",
         "Each stage writes business outputs to its own data journal for subscribers to read.",
         "- Forwarded control signals keep their original Author.",
         "- EOF from all required upstreams lets a supervisor drain and complete.",
@@ -706,11 +820,20 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         assert!(human.contains(teaching), "missing teaching cue {teaching}");
     }
     assert!(!human.contains("Read (subscribers) = stage(inputs)"));
-    assert!(human.lines().any(|line| line == "TRANSFORM"));
-    assert!(human.lines().any(|line| line == "DELIVERY"));
+    assert!(human.lines().any(|line| line
+        == format!(
+            "TRANSFORM (stage: validate_order, journal: {})",
+            numbers["validate_order"]
+        )));
+    assert!(human.lines().any(|line| line
+        == format!(
+            "DELIVERY (stage: paid_orders, journal: {})",
+            numbers["paid_orders"]
+        )));
     assert!(!human.contains("RUNTIME"));
     assert!(!human.contains("system.metrics.exported"));
     let (verbose, _) = show(&baseline, &["--include-runtime"]);
+    assert_eq!(journal_numbers(&verbose), numbers);
     assert!(verbose.contains("RUNTIME"));
     assert!(verbose.contains("control.eof") && !human.contains("control.eof"));
     // This demo's keyed effect records successful domain facts. Explicit
@@ -728,9 +851,86 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    fn clock_matrix(text: &str) -> &str {
+        text.split_once("\nLAST OBSERVED JOURNAL CLOCKS\n")
+            .or_else(|| text.split_once("\nFINAL JOURNAL CLOCKS\n"))
+            .unwrap()
+            .1
+            .split_once("\nEvent counts cover displayed entries")
+            .unwrap()
+            .0
+    }
+    let matrix = clock_matrix(&human);
+    assert_eq!(
+        matrix,
+        clock_matrix(&verbose),
+        "hidden runtime records still supply the last clocks"
+    );
+    let (settled, _) = show(&baseline, &["--follow"]);
+    assert_eq!(journal_numbers(&settled), numbers);
+    assert!(settled.contains("\nFINAL JOURNAL CLOCKS\n"));
+    assert_eq!(matrix, clock_matrix(&settled));
+    assert!(human.find("\nJOURNALS\n").unwrap() < human.find(matrix).unwrap());
+    assert!(human.find(matrix).unwrap() < human.find("\nSOURCE: web_orders\n").unwrap());
+    let mut last_clocks = std::collections::BTreeMap::new();
+    for row in &rows {
+        let name = match (&row.journal.stage, row.journal.kind) {
+            (Some(stage), obzenflow::journal::read::RunJournalKind::Error) => {
+                format!("{}/error", stage.key)
+            }
+            (Some(stage), _) => stage.key.clone(),
+            (_, obzenflow::journal::read::RunJournalKind::System) => "pipeline".into(),
+            (_, obzenflow::journal::read::RunJournalKind::MetricsCoordination) => {
+                "metrics/coordination".into()
+            }
+            (_, obzenflow::journal::read::RunJournalKind::MetricsExport) => "metrics/export".into(),
+            _ => panic!("expected a named journal"),
+        };
+        let clock = match &row.record {
+            RunRecordData::Chain(record) => &record.envelope.provenance.journal.vector_clock.clocks,
+            RunRecordData::System(record) => {
+                &record.envelope.provenance.journal.vector_clock.clocks
+            }
+        };
+        last_clocks.insert(name, (row.journal.id, clock));
+    }
+    let matrix_rows: Vec<_> = matrix
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<_> = line.split_whitespace().collect();
+            cells.first()?.parse::<usize>().ok()?;
+            Some(cells)
+        })
+        .collect();
+    assert_eq!(matrix_rows.len(), last_clocks.len());
+    let columns: Vec<_> = matrix
+        .lines()
+        .find(|line| line.trim_start().starts_with("#  Journal"))
+        .unwrap()
+        .split_whitespace()
+        .skip(2)
+        .collect();
+    assert_eq!(
+        columns,
+        matrix_rows.iter().map(|row| row[0]).collect::<Vec<_>>()
+    );
+    for row in &matrix_rows {
+        assert_eq!(row[0], numbers[row[1]].to_string());
+        assert_eq!(row.len(), matrix_rows.len() + 2);
+        let (_, expected) = last_clocks[row[1]];
+        for (column, journal) in matrix_rows.iter().enumerate() {
+            let coordinate = obzenflow_core::event::CausalCoordinate::new(
+                obzenflow_core::event::JournalWriterId::from_journal_id(last_clocks[journal[1]].0),
+            );
+            assert_eq!(
+                row[column + 2].parse::<u64>().unwrap(),
+                expected.get(&coordinate).copied().unwrap_or(0)
+            );
+        }
+    }
     for row in &rows {
         if let Some(stage) = &row.journal.stage {
-            assert_eq!(stage.is_effectful, Some(stage.key == "authorize_payment"));
+            assert_eq!(stage.is_effectful, stage.key == "authorize_payment");
         }
     }
     assert_record_outputs(&human, &rows);
@@ -800,11 +1000,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         text: &str,
         heading: &str,
     ) -> std::collections::BTreeMap<(String, String, String), usize> {
-        let body = text
-            .split_once(&format!("\n{heading}\n"))
-            .or_else(|| text.split_once(&format!("\n  Writes to: {heading}\n")))
-            .unwrap()
-            .1;
+        let body = text.split_once(&format!("\n    {heading}\n")).unwrap().1;
         body.lines()
             .skip_while(|line| !line.trim_start().starts_with("Count "))
             .skip(1)
@@ -830,16 +1026,15 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let mut displayed_journals = expected_journals.clone();
     let registrations: std::collections::BTreeMap<_, _> = rows
         .iter()
-        .filter_map(|row| {
-            if let RunRecordData::System(record) = &row.record {
-                if let obzenflow::journal::read::SystemPayload::SupervisorRegistered {
-                    descriptor,
-                } = &record.payload
-                {
-                    return Some((record.writer_id().to_string(), descriptor));
-                }
-            }
-            None
+        .filter_map(|row| match &row.record {
+            RunRecordData::System(record) => match &record.payload {
+                obzenflow::journal::read::SystemPayload::SupervisorRegistered { descriptor } => Some((record.writer_id().to_string(), descriptor)),
+                _ => None,
+            },
+            RunRecordData::Chain(record) => match &record.payload {
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some((record.writer_id().to_string(), descriptor)),
+                _ => None,
+            },
         })
         .collect();
     assert_eq!(
@@ -863,6 +1058,16 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             obzenflow::journal::read::RunJournalKind::System => {
                 manifest["system_journal_file"].as_str().unwrap().to_owned()
             }
+            obzenflow::journal::read::RunJournalKind::MetricsCoordination => manifest
+                ["metrics_journals"]["coordination_journal_file"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            obzenflow::journal::read::RunJournalKind::MetricsExport => manifest["metrics_journals"]
+                ["export_journal_file"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
             kind => {
                 let stage = &row.journal.stage.as_ref().unwrap().key;
                 let field = if kind == obzenflow::journal::read::RunJournalKind::Data {
@@ -931,32 +1136,36 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         selected
     );
     assert!(
-        !human.contains("\nsystem.log\n"),
+        !human.contains("\nSYSTEM SUPERVISORS\n"),
         "hidden journals need no event table"
     );
     for stage in manifest["stages"].as_object().unwrap().values() {
         let error_file = stage["error_journal_file"].as_str().unwrap();
         assert!(
-            !verbose.contains(&format!("\n{error_file}\n")),
+            !verbose.contains(&format!("\n    {error_file}\n")),
             "empty journals stay in the inventory only"
         );
     }
     let system_counts = event_table(&verbose, "system.log");
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
     for event_type in [
-        "system.stage.running",
-        "system.stage.completed",
-        "system.contract.pass",
+        "lifecycle.stage.running",
+        "lifecycle.stage.completed",
+        "execution.contract.pass",
     ] {
         assert_eq!(
-            system_counts
-                .iter()
+            expected_journals
+                .values()
+                .flat_map(|counts| counts.iter())
                 .filter(|((kind, _, _), _)| kind == event_type)
                 .map(|(_, count)| count)
                 .sum::<usize>(),
             7
         );
     }
+    assert!(system_counts
+        .keys()
+        .all(|(_, _, author_type)| author_type == "Pipeline"));
     assert_eq!(
         system_counts[&(
             "system.pipeline.completed".into(),
@@ -1618,7 +1827,13 @@ mod hosted {
                 "reader_error" => {
                     let system = path.join("system.log");
                     let hidden = path.join("system.temporarily-unavailable");
-                    std::fs::rename(&system, &hidden).unwrap();
+                    let replacement = path.join("system.observer-copy");
+                    // Replace the observer's admitted inode atomically while
+                    // keeping the application's writer and live reads available.
+                    // Removing its required journal also fails the application.
+                    std::fs::copy(&system, &replacement).unwrap();
+                    std::fs::hard_link(&system, &hidden).unwrap();
+                    std::fs::rename(&replacement, &system).unwrap();
                     assert_eq!(wait(&mut viewer).await.code(), Some(4));
                     assert!(std::fs::read_to_string(&diagnostics)
                         .unwrap()

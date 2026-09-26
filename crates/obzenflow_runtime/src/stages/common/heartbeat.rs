@@ -567,10 +567,8 @@ mod tests {
     use crate::metrics::instrumentation::StageInstrumentation;
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::journal_record::JournalRecord;
-    use obzenflow_core::event::vector_clock::CausalOrderingService;
     use obzenflow_core::event::SystemEvent;
     use obzenflow_core::id::{JournalId, SystemId};
     use obzenflow_core::journal::archive::{ReplayArchive, ReplayError};
@@ -580,7 +578,6 @@ mod tests {
     use obzenflow_core::journal::{ArchiveStatus, Journal, StatusDerivation};
     use obzenflow_core::{ChainEvent, ReaderGeneration};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn live_execution() -> RuntimeExecution {
         RuntimeExecution::new(RuntimeMode::Live, None)
@@ -673,7 +670,6 @@ mod tests {
     struct TestJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
-        seq: AtomicU64,
         events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
@@ -682,13 +678,8 @@ mod tests {
             Self {
                 id: JournalId::new(),
                 owner: Some(owner),
-                seq: AtomicU64::new(0),
                 events: Arc::new(Mutex::new(Vec::new())),
             }
-        }
-
-        fn next_seq(&self) -> u64 {
-            self.seq.fetch_add(1, Ordering::Relaxed).saturating_add(1)
         }
     }
 
@@ -698,59 +689,42 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
-        fn id(&self) -> &JournalId {
+    impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
+        fn storage_owner(&self) -> Option<&JournalOwner> {
             self.owner.as_ref()
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
-            let parent = options.parent;
-
-            let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
-
-            if let Some(parent) = parent {
-                CausalOrderingService::update_with_parent(
-                    &mut env.envelope.provenance.journal.vector_clock,
-                    &parent.envelope.provenance.journal.vector_clock,
-                );
-            }
-
-            let writer_key = env.writer_id().to_string();
-            let seq = self.next_seq();
-            env.envelope
-                .provenance
-                .journal
-                .vector_clock
-                .clocks
-                .insert(writer_key, seq);
-
-            let mut guard = self.events.lock().expect("journal events lock");
+            let mut guard = self.events.lock().unwrap();
+            let env = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
             guard.push(env.clone());
             Ok(env)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             Ok(guard.clone())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -760,7 +734,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -772,8 +746,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+    impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+        for TestJournalReader<T>
+    {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             if self.pos >= guard.len() {
                 Ok(None)
@@ -784,11 +762,11 @@ mod tests {
             }
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.pos as u64
         }
 
-        fn is_at_end(&self) -> bool {
+        fn storage_is_at_end(&self) -> bool {
             let guard = self.events.lock().expect("journal events lock");
             self.pos >= guard.len()
         }

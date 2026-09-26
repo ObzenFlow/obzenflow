@@ -461,11 +461,11 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
             .get(writer_key);
         assert!(
             seq >= *parent_seq,
-            "expected aggregate vector clock to include parent key {writer_key} at >= {parent_seq}, got {seq}"
+            "expected aggregate vector clock to include parent key {writer_key:?} at >= {parent_seq}, got {seq}"
         );
     }
 
-    let stage_writer_key = WriterId::from(event.flow_context.stage_id).to_string();
+    let stage_writer_key = aggregate_record.causal_coordinate();
     assert!(
         aggregate_record
             .envelope
@@ -474,7 +474,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
             .vector_clock
             .get(&stage_writer_key)
             > 0,
-        "expected aggregate vector clock to advance stage writer key {stage_writer_key}"
+        "expected aggregate vector clock to advance stage writer key {stage_writer_key:?}"
     );
 
     Ok(())

@@ -17,7 +17,6 @@ use crate::supervised_base::publication::{
     BoxError, PublicationScope, PublicationSettlement, SharedError,
 };
 use futures::stream::FuturesUnordered;
-use obzenflow_core::EventId;
 use std::sync::OnceLock;
 
 pub(crate) type OperationalFailure = Arc<OnceLock<SharedError>>;
@@ -27,9 +26,26 @@ type StageJoins = FuturesUnordered<BoxFuture<'static, Result<(), StageError>>>;
 pub(super) enum ProducerTail {
     #[default]
     Uncaptured,
-    Reading(Mutex<BoxFuture<'static, Result<Option<EventId>, BoxError>>>),
-    Through(EventId),
+    Reading(
+        Mutex<
+            BoxFuture<
+                'static,
+                Result<std::collections::HashMap<obzenflow_core::JournalId, u64>, BoxError>,
+            >,
+        >,
+    ),
+    Through(std::collections::HashMap<obzenflow_core::JournalId, u64>),
     Reached,
+}
+
+impl ProducerTail {
+    pub(super) fn covered(
+        &self,
+        positions: &std::collections::HashMap<obzenflow_core::JournalId, u64>,
+    ) -> bool {
+        matches!(self, Self::Reached)
+            || matches!(self, Self::Through(targets) if targets.iter().all(|(journal, through)| positions.get(journal).copied().unwrap_or(0) >= *through))
+    }
 }
 
 /// Observations of concrete owners. No task is spawned to perform a join.
@@ -44,6 +60,7 @@ pub(crate) struct PipelineResources {
     pub(super) metrics_join: Option<Mutex<BoxFuture<'static, Result<(), HandleError>>>>,
     pub(super) metrics_joined: bool,
     pub(super) producer_tail: ProducerTail,
+    pub(super) metrics_tail: ProducerTail,
     pub(super) terminal_ack: Arc<OnceLock<std::time::Instant>>,
     pub(crate) failure: OperationalFailure,
 }
@@ -61,6 +78,7 @@ impl Default for PipelineResources {
             metrics_join: None,
             metrics_joined: false,
             producer_tail: ProducerTail::Uncaptured,
+            metrics_tail: ProducerTail::Uncaptured,
             terminal_ack: Arc::new(OnceLock::new()),
             failure: Arc::new(OnceLock::new()),
         }
@@ -158,7 +176,11 @@ pub(super) enum StageCommand {
 /// Dropping an unaccepted send cancels delivery, never the receiving task.
 #[derive(Default)]
 pub(super) struct StageDelivery {
-    commands: VecDeque<(Arc<dyn StageHandle>, StageCommand)>,
+    commands: VecDeque<(
+        Arc<dyn StageHandle>,
+        StageCommand,
+        obzenflow_core::event::CausalFrontier,
+    )>,
     pending: Mutex<Option<BoxFuture<'static, Result<(), StageError>>>>,
 }
 
@@ -177,7 +199,11 @@ impl StageDelivery {
         }
         for handle in handles {
             for command in commands {
-                self.commands.push_back((handle.clone(), *command));
+                self.commands.push_back((
+                    handle.clone(),
+                    *command,
+                    crate::supervised_base::publication::capture(),
+                ));
             }
         }
         Ok(())
@@ -200,11 +226,11 @@ impl StageDelivery {
     pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(), StageError>>> {
         let pending = self.pending.get_mut().unwrap_or_else(|e| e.into_inner());
         if pending.is_none() {
-            let Some((handle, command)) = self.commands.pop_front() else {
+            let Some((handle, command, frontier)) = self.commands.pop_front() else {
                 return Poll::Ready(None);
             };
             *pending = Some(
-                async move {
+                crate::supervised_base::publication::with_snapshot(frontier, async move {
                     match command {
                         StageCommand::Initialize => handle.initialize().await,
                         StageCommand::Ready => handle.ready().await,
@@ -219,7 +245,7 @@ impl StageDelivery {
                             }
                         }
                     }
-                }
+                })
                 .boxed(),
             );
         }

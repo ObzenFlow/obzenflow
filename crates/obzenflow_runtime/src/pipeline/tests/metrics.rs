@@ -178,9 +178,13 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
         fail: false,
     });
     let mut journals = make_journals();
-    let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-    journal.metrics_ready_append = Some(metrics_gate.clone());
-    let journal: Arc<dyn obzenflow_core::journal::Journal<SystemEvent>> = Arc::new(journal);
+    let journal = new_system_journal(&mut *journals, system_id);
+    let mut metrics_journals =
+        crate::pipeline::tests::support::new_metrics_journals(&mut *journals);
+    let mut gated = ControlledJournal::new(metrics_journals.coordination.clone());
+    gated.metrics_ready_append = Some(metrics_gate.clone());
+    metrics_journals.coordination = Arc::new(gated);
+    let coordination = metrics_journals.coordination.clone();
     let (topology, source, sink) = source_sink_topology_with_source();
     let (entered, start_entered) = oneshot::channel();
     let (release, start_release) = oneshot::channel();
@@ -198,6 +202,7 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
             None,
         ))])
         .with_stages(vec![Box::new(stage)])
+        .with_metrics_journals(metrics_journals)
         .with_metrics_exporter(Arc::new(DiscardSnapshots))
         .build()
         .await
@@ -235,14 +240,17 @@ pub async fn parent_panic_retains_metrics_publication_until_repeated_flow_joins_
             .contains("panicked"));
     }
     guard.disarm();
-    let rows = journal.read_all_unordered().await.unwrap();
+    let rows = coordination.read_all_unordered().await.unwrap();
     assert_eq!(
         rows.iter()
             .filter(|row| row.event_type_name() == "system.metrics.ready")
             .count(),
         1
     );
-    assert!(!rows
+    assert!(!journal
+        .read_all_unordered()
+        .await
+        .unwrap()
         .iter()
         .any(|row| row.event_type_name() == "system.pipeline.drained"));
 }
@@ -420,6 +428,9 @@ pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
         vec![(data_stage, data)],
         Some(exporter.clone()),
     );
+    ctx.metrics_journals = Some(crate::pipeline::tests::support::new_metrics_journals(
+        &mut *journals,
+    ));
     ctx.stage_error_journals.push((error_stage, errors));
     ctx.resources.prepared_metrics = crate::pipeline::metrics::prepare_metrics(&ctx)
         .await
@@ -452,7 +463,11 @@ pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
             7
         );
     }
-    assert!(journal
+    assert!(ctx
+        .metrics_journals
+        .as_ref()
+        .unwrap()
+        .coordination
         .read_all_unordered()
         .await
         .unwrap()
@@ -479,6 +494,9 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
         Some(Arc::new(RecordingSnapshots::default())),
     );
 
+    ctx.metrics_journals = Some(crate::pipeline::tests::support::new_metrics_journals(
+        &mut *journals,
+    ));
     ctx.resources.prepared_metrics = crate::pipeline::metrics::prepare_metrics(&ctx)
         .await
         .unwrap();
@@ -558,7 +576,14 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
     .await
     .unwrap()
     .unwrap();
-    let events = system_journal.read_causally_ordered().await.unwrap();
+    let events = ctx
+        .metrics_journals
+        .as_ref()
+        .unwrap()
+        .coordination
+        .read_causally_ordered()
+        .await
+        .unwrap();
     assert!(events.iter().any(|envelope| {
         matches!(
             &envelope.payload,

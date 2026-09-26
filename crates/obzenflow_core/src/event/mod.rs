@@ -7,13 +7,16 @@
 //! This module contains all event-related domain types.
 
 // Core modules
+pub mod causal;
 pub mod chain_event;
 pub mod constants;
 pub mod envelope;
 pub mod journal_event;
 pub mod journal_record;
 pub mod observability;
+pub mod supervisor_record;
 pub mod system_event;
+pub use supervisor_record::SupervisorRecord;
 pub mod types;
 pub mod vector_clock;
 
@@ -28,6 +31,10 @@ pub mod status;
 pub mod utils;
 
 // Re-export main types at root level for convenience
+pub use causal::{
+    CausalCommit, CausalCoordinate, CausalError, CausalFrontier, CausalWitnesses,
+    CommittedCausalRef, PreparedCausalCommit,
+};
 pub use chain_event::{
     ChainEvent, ChainEventFactory, ChainPayload, CircuitBreakerAttemptSettledEventParams,
     CircuitBreakerOpenedEventParams, CircuitBreakerRecoveryCompletedEventParams,

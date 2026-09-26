@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::{
+    CausalCommit, CausalError, CausalFrontier, ChainEventFactory, ChainPayload, JournalRecord,
+    PreparedCausalCommit, SystemEvent,
+};
+use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
+use obzenflow_core::journal::{AppendOptions, Journal, JournalStorage};
+use obzenflow_core::JournalOwner;
+use obzenflow_core::{ChainEvent, FlowId, StageId};
+use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use std::sync::Arc;
+
+fn rejects_unadmitted(record: &JournalRecord<ChainPayload>) {
+    // A shape check remains useful for codecs, but cannot confer authority.
+    PreparedCausalCommit::from_record(record).unwrap();
+    assert_eq!(
+        CausalFrontier::from_record(record).unwrap_err(),
+        CausalError::UnadmittedRecord
+    );
+    assert_eq!(
+        CausalCommit::from_record(record).unwrap_err(),
+        CausalError::UnadmittedRecord
+    );
+    assert!(matches!(
+        AppendOptions::<ChainEvent>::from_record(Some(record)),
+        Err(obzenflow_core::journal::JournalError::Causal(
+            CausalError::UnadmittedRecord
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let author = StageId::new();
+        let owner = JournalOwner::stage(author);
+        let journal: Arc<dyn Journal<ChainEvent>> = if disk {
+            Arc::new(
+                DiskJournal::with_owner(directory.path().join("admission.log"), owner).unwrap(),
+            )
+        } else {
+            Arc::new(MemoryJournal::with_owner(owner))
+        };
+        let event = || {
+            ChainEventFactory::data_event(author.into(), "admission.fact", serde_json::json!({}))
+        };
+        let uncommitted = JournalRecord::new((*journal.id()).into(), event());
+        rejects_unadmitted(&uncommitted);
+        let (candidate, causal) = PreparedCausalCommit::prepare(
+            uncommitted.envelope.provenance.journal.run_id,
+            uncommitted.causal_coordinate(),
+            *uncommitted.id(),
+            None,
+            &CausalFrontier::default(),
+        )
+        .unwrap();
+        let mut provenance = uncommitted.envelope.provenance.journal.clone();
+        provenance.vector_clock = candidate.clock;
+        provenance.causal = causal;
+        let candidate_record =
+            JournalRecord::commit_event(uncommitted.into_authored(), provenance).unwrap();
+        rejects_unadmitted(&candidate_record);
+
+        let receipt = journal.append(event(), Default::default()).await.unwrap();
+        let frontier = CausalFrontier::from_record(&receipt).unwrap();
+        assert_eq!(
+            CausalFrontier::from_record(&receipt.clone()).unwrap(),
+            frontier
+        );
+        let encoded = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            encoded.as_object().unwrap().len(),
+            2,
+            "admission is never persisted"
+        );
+        let decoded = serde_json::from_value(encoded.clone()).unwrap();
+        rejects_unadmitted(&decoded);
+        let (envelope, payload) = receipt.clone().into_parts();
+        rejects_unadmitted(&JournalRecord::from_parts(envelope, payload));
+
+        let mut rewritten = receipt.clone();
+        rewritten.envelope.provenance.event.id = obzenflow_core::EventId::new();
+        rejects_unadmitted(&rewritten);
+        let mut inflated = receipt.clone();
+        inflated.envelope.provenance.journal.vector_clock.clocks.insert(
+            obzenflow_core::event::CausalCoordinate::new(obzenflow_core::JournalWriterId::new()), 99,
+        );
+        rejects_unadmitted(&inflated);
+        let mut changed_payload = receipt.clone();
+        changed_payload.payload = ChainPayload::Fact(serde_json::json!({"changed": true}));
+        rejects_unadmitted(&changed_payload);
+        let mut borrowed_mutably = receipt.clone();
+        let _ = &mut borrowed_mutably.envelope;
+        rejects_unadmitted(&borrowed_mutably);
+
+        // Revoking one copy cannot invalidate the original receipt or an
+        // already-captured frontier. Re-read membership establishes evidence.
+        assert_eq!(CausalFrontier::from_record(&receipt).unwrap(), frontier);
+        let reread = journal.read_event(receipt.id()).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&reread).unwrap(), encoded);
+        assert_eq!(CausalFrontier::from_record(&reread).unwrap(), frontier);
+        let child = journal
+            .append(event(), AppendOptions::new(frontier))
+            .await
+            .unwrap();
+        assert_eq!(
+            child.envelope.provenance.journal.causal.previous,
+            Some(CausalCommit::from_record(&receipt).unwrap().reference)
+        );
+    }
+}
+
+#[tokio::test]
+async fn storage_data_becomes_evidence_only_through_successful_journal_operations() {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let author = StageId::new();
+        let owner = JournalOwner::stage(author);
+        let storage: Box<dyn JournalStorage<ChainEvent>> = if disk {
+            Box::new(DiskJournal::with_owner(directory.path().join("storage.log"), owner).unwrap())
+        } else {
+            Box::new(MemoryJournal::with_owner(owner))
+        };
+        let event =
+            || ChainEventFactory::data_event(author.into(), "stored.fact", serde_json::json!({}));
+        let raw = storage
+            .storage_append(event(), Default::default())
+            .await
+            .unwrap();
+        rejects_unadmitted(&raw);
+        let committed = storage.read_event(raw.id()).await.unwrap().unwrap();
+        let expected = CausalFrontier::from_record(&committed).unwrap();
+        let mut reader = storage.reader().await.unwrap();
+        for record in [
+            reader.next().await.unwrap().unwrap(),
+            storage.read_all_unordered().await.unwrap().remove(0),
+            storage.read_last_n(1).await.unwrap().remove(0),
+        ] {
+            assert_eq!(CausalFrontier::from_record(&record).unwrap(), expected);
+        }
+        let members = storage
+            .append_group(
+                "admitted-group",
+                vec![event(), event()],
+                AppendOptions::new(expected),
+            )
+            .await
+            .unwrap();
+        let mut cache = CausalProofCache::new(8, 8);
+        cache
+            .admit(CausalCommit::from_record(&committed).unwrap())
+            .unwrap();
+        for member in &members {
+            let evidence = CausalCommit::from_record(member).unwrap();
+            assert!(matches!(
+                cache.verify(&evidence, &member.envelope.provenance.journal.causal),
+                CausalProof::Valid { .. }
+            ));
+            cache.admit(evidence).unwrap();
+            assert_eq!(
+                CausalFrontier::from_record(&reader.next().await.unwrap().unwrap()).unwrap(),
+                CausalFrontier::from_record(member).unwrap()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let run = FlowId::new();
+        let author = StageId::new();
+        let owner = JournalOwner::stage(author);
+        let chains: Vec<Arc<dyn Journal<ChainEvent>>> = (0..4)
+            .map(|index| {
+                if disk {
+                    Arc::new(
+                        DiskJournal::with_owner_in_run(
+                            directory.path().join(format!("{index}.log")),
+                            owner.clone(),
+                            run,
+                        )
+                        .unwrap(),
+                    ) as Arc<dyn Journal<ChainEvent>>
+                } else {
+                    Arc::new(MemoryJournal::with_owner_in_run(owner.clone(), run))
+                        as Arc<dyn Journal<ChainEvent>>
+                }
+            })
+            .collect();
+        let system: Arc<dyn Journal<SystemEvent>> = if disk {
+            Arc::new(
+                DiskJournal::with_owner_in_run(
+                    directory.path().join("system.log"),
+                    owner.clone(),
+                    run,
+                )
+                .unwrap(),
+            )
+        } else {
+            Arc::new(MemoryJournal::with_owner_in_run(owner, run))
+        };
+        let event =
+            || ChainEventFactory::data_event(author.into(), "causal.fact", serde_json::json!({}));
+        let source = chains[0].append(event(), Default::default()).await.unwrap();
+        let left = chains[1]
+            .append(
+                source.authored(),
+                AppendOptions::from_record(Some(&source)).unwrap(),
+            )
+            .await
+            .unwrap();
+        let right = chains[2]
+            .append(
+                source.authored(),
+                AppendOptions::from_record(Some(&source)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(left.id(), right.id(), "forwarded identity is immutable");
+        assert_ne!(left.causal_coordinate(), right.causal_coordinate());
+        assert!(CausalOrderingService::are_concurrent(
+            &left.envelope.provenance.journal.vector_clock,
+            &right.envelope.provenance.journal.vector_clock
+        ));
+        let mut frontier = CausalFrontier::from_record(&left).unwrap();
+        frontier
+            .merge(&CausalFrontier::from_record(&right).unwrap())
+            .unwrap();
+        let joined = chains[3]
+            .append(event(), AppendOptions::new(frontier))
+            .await
+            .unwrap();
+        let lifecycle = system
+            .append(
+                SystemEvent::stage_completed(author),
+                AppendOptions::from_record(Some(&joined)).unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrelated = system
+            .append(
+                SystemEvent::stage_running(StageId::new()),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(CausalOrderingService::happened_before(
+            &lifecycle.envelope.provenance.journal.vector_clock,
+            &unrelated.envelope.provenance.journal.vector_clock
+        ));
+        assert_eq!(unrelated.causal_coordinate(), lifecycle.causal_coordinate());
+        assert_eq!(unrelated.local_sequence(), 2);
+        assert_ne!(unrelated.writer_id(), lifecycle.writer_id());
+        let encoded_clock =
+            serde_json::to_value(&unrelated.envelope.provenance.journal.vector_clock).unwrap();
+        assert!(encoded_clock["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.get("writer_id").is_none()));
+        let authorised = chains[3]
+            .append(
+                event(),
+                AppendOptions::from_record(Some(&lifecycle)).unwrap(),
+            )
+            .await
+            .unwrap();
+        let other_author = StageId::new();
+        let members = chains[3]
+            .append_group(
+                "causal-group",
+                vec![
+                    event(),
+                    ChainEventFactory::data_event(
+                        other_author.into(),
+                        "causal.other",
+                        serde_json::json!({}),
+                    ),
+                    event(),
+                ],
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        for pair in members.windows(2) {
+            assert!(CausalOrderingService::happened_before(
+                &pair[0].envelope.provenance.journal.vector_clock,
+                &pair[1].envelope.provenance.journal.vector_clock
+            ));
+        }
+        let mut cache = CausalProofCache::new(100, 1000);
+        for record in [&source, &left, &right, &joined] {
+            let commitment = CausalCommit::from_record(record).unwrap();
+            assert!(matches!(
+                cache.verify(&commitment, &record.envelope.provenance.journal.causal),
+                CausalProof::Valid { .. }
+            ));
+            cache.admit(commitment).unwrap();
+        }
+        for record in [&lifecycle, &unrelated] {
+            let commitment = CausalCommit::from_record(record).unwrap();
+            assert!(matches!(
+                cache.verify(&commitment, &record.envelope.provenance.journal.causal),
+                CausalProof::Valid { .. }
+            ));
+            cache.admit(commitment).unwrap();
+        }
+        for record in std::iter::once(&authorised).chain(&members) {
+            let commitment = CausalCommit::from_record(record).unwrap();
+            assert!(matches!(
+                cache.verify(&commitment, &record.envelope.provenance.journal.causal),
+                CausalProof::Valid { .. }
+            ));
+            cache.admit(commitment).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stable.log");
+    let author = StageId::new();
+    let owner = JournalOwner::stage(author);
+    let journal = DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+    let id = *journal.id();
+    let mut reader = journal.reader().await.unwrap();
+    assert!(DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).is_err());
+    let clone = journal.clone();
+    drop(journal);
+    assert!(DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).is_err());
+    drop(clone);
+    let reopened = DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+    assert_eq!(reopened.id(), &id);
+    let first = reopened
+        .append(
+            ChainEventFactory::data_event(author.into(), "root", serde_json::json!({})),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reader.next().await.unwrap().unwrap().id(), first.id());
+    drop(reopened);
+    let reopened = DiskJournal::<ChainEvent>::with_owner(path, owner).unwrap();
+    let second = reopened
+        .append(first.authored(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(second.local_sequence(), 2);
+    assert_eq!(
+        second.envelope.provenance.journal.causal.previous,
+        Some(CausalCommit::from_record(&first).unwrap().reference)
+    );
+    assert_eq!(reader.next().await.unwrap().unwrap().local_sequence(), 2);
+}
+
+#[tokio::test]
+async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
+    for remove_first in [false, true] {
+        for remove_group in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("missing.log");
+            let author = StageId::new();
+            let owner = JournalOwner::stage(author);
+            let journal =
+                DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+            let event =
+                || ChainEventFactory::data_event(author.into(), "prefix", serde_json::json!({}));
+            journal.append(event(), Default::default()).await.unwrap();
+            let first_end = std::fs::metadata(&path).unwrap().len() as usize;
+            if remove_group {
+                journal
+                    .append_group("missing-group", vec![event(), event()], Default::default())
+                    .await
+                    .unwrap();
+            } else {
+                journal.append(event(), Default::default()).await.unwrap();
+            }
+            let middle_end = std::fs::metadata(&path).unwrap().len() as usize;
+            journal.append(event(), Default::default()).await.unwrap();
+            let boundary = journal.committed_position().await.unwrap();
+            let mut reader = journal.reader().await.unwrap();
+
+            // Remove a complete committed frame, preserving every remaining
+            // frame's checksum and local predecessor claim.
+            let original = std::fs::read(&path).unwrap();
+            let damaged = if remove_first {
+                original[first_end..].to_vec()
+            } else {
+                [
+                    original[..first_end].to_vec(),
+                    original[middle_end..].to_vec(),
+                ]
+                .concat()
+            };
+            std::fs::write(&path, damaged).unwrap();
+            let intact_prefix = u64::from(!remove_first);
+            if !remove_first {
+                assert_eq!(reader.next().await.unwrap().unwrap().local_sequence(), 1);
+            }
+            for _ in 0..3 {
+                assert!(
+                    reader.next().await.is_err(),
+                    "missing frame was admitted: remove_first={remove_first}, remove_group={remove_group}"
+                );
+                assert_eq!(reader.position(), intact_prefix);
+                assert!(!reader.initial_prefix_complete().unwrap());
+            }
+            let mut resumed = journal.reader_from(intact_prefix).await.unwrap();
+            assert!(resumed.next().await.is_err());
+            assert_eq!(resumed.position(), intact_prefix);
+            assert!(journal.reader_from(boundary).await.is_err());
+            assert!(journal.read_all_unordered().await.is_err());
+
+            drop((reader, resumed, journal));
+            assert!(DiskJournal::<ChainEvent>::with_owner(path, owner).is_err());
+        }
+    }
+}

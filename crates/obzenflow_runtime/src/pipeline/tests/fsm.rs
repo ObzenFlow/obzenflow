@@ -381,9 +381,12 @@ pub async fn readiness_and_start_consume_committed_pipeline_facts(
         .append(event, Default::default())
         .await
         .unwrap();
-    fsm.handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut ctx)
-        .await
-        .unwrap();
+    fsm.handle(
+        PipelineFsmEvent::Journal(Box::new((envelope).into())),
+        &mut ctx,
+    )
+    .await
+    .unwrap();
     assert!(matches!(fsm.state(), PipelineFsmState::ReadyForRun));
     let actions = fsm.handle(PipelineFsmEvent::Start, &mut ctx).await.unwrap();
     assert!(matches!(fsm.state(), PipelineFsmState::StartingSources));
@@ -398,7 +401,10 @@ pub async fn readiness_and_start_consume_committed_pipeline_facts(
         .await
         .unwrap();
     let actions = fsm
-        .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut ctx)
+        .handle(
+            PipelineFsmEvent::Journal(Box::new((envelope).into())),
+            &mut ctx,
+        )
         .await
         .unwrap();
     assert!(matches!(actions.as_slice(), [PipelineAction::StartSources]));

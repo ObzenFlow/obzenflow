@@ -373,14 +373,18 @@ enabled = false
             event_type, "system.pipeline.running",
             "failed bind cannot publish Running"
         );
-        assert!(
-            !["fact", "composite_data", "execution"].contains(&event_kind),
-            "failed bind cannot commit source data or effect records"
-        );
         assert_ne!(
             event_kind, "delivery",
             "failed bind cannot commit sink receipts"
         );
+        if event_kind != "system" {
+            let row: obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload> =
+                serde_json::from_value(record).unwrap();
+            assert!(
+                !row.consumes_data_credit(),
+                "failed bind cannot commit source data or effect records; owned startup reports are allowed"
+            );
+        }
     }
 }
 

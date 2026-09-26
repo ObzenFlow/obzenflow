@@ -10,7 +10,7 @@
 //! produces new events after archive exhaustion. Every assertion reads the
 //! event-sourced journals of the resumed run: the re-admitted recorded
 //! prefix, the authored catch-up watermarks, the
-//! `system.replay.resumed_live` fact, the manifest resume config, and the
+//! source's protected resumed-live fact, the manifest resume config, and the
 //! live tail.
 
 #[path = "../../../tests/replay_testkit/mod.rs"]
@@ -21,16 +21,13 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::handler_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{
-    ChainPayload, JournalRecord, ReplayLifecycleEvent, SystemEvent, SystemPayload,
-};
+use obzenflow_core::event::{ChainPayload, JournalRecord, ReplayLifecycleEvent};
 use obzenflow_core::journal::archive::manifest::RunManifest;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{SystemId, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
-use obzenflow_infra::journal::{disk_journals, memory_journals, DiskJournal};
+use obzenflow_infra::journal::{disk_journals, memory_journals};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
@@ -620,27 +617,26 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
     assert_eq!(resume.resumed_from, recorded_run);
     assert_eq!(resume.resume_generation, 1);
 
-    // The system journal carries the resumed-live lifecycle fact.
-    let system_journal: DiskJournal<SystemEvent> = DiskJournal::with_owner(
-        resumed_run.join(&manifest.system_journal_file),
-        JournalOwner::system(SystemId::new()),
-    )?;
-    let system_events = system_journal.read_causally_ordered().await?;
-    let resumed_live = system_events
+    // The owning source journal carries the resumed-live lifecycle fact.
+    let resumed_live = resumed_src
         .iter()
         .find(|envelope| {
             matches!(
                 &envelope.payload,
-                SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive { .. })
+                ChainPayload::Execution(ExecutionPayload::ReplayLifecycle(
+                    ReplayLifecycleEvent::ResumedLive { .. }
+                ))
             )
         })
-        .expect("the resumed run's system journal must record system.replay.resumed_live");
-    assert_eq!(resumed_live.event_type_name(), "system.replay.resumed_live");
-    if let SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::ResumedLive {
-        replayed_count,
-        generation,
-        ..
-    }) = &resumed_live.payload
+        .expect("the resumed source must record its resumed-live fact");
+    assert_eq!(resumed_live.event_type_name(), "execution.replay.lifecycle");
+    if let ChainPayload::Execution(ExecutionPayload::ReplayLifecycle(
+        ReplayLifecycleEvent::ResumedLive {
+            replayed_count,
+            generation,
+            ..
+        },
+    )) = &resumed_live.payload
     {
         assert_eq!(replayed_count.0, RECORDED);
         assert_eq!(*generation, 1);

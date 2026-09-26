@@ -902,12 +902,12 @@ where
 
         // Create services
         use obzenflow_runtime::pipeline::config::StageConfig;
-        use obzenflow_core::{SystemId, FlowId};
+        use obzenflow_core::FlowId;
 
         // Create stage-local journals using the builder pattern (FLOWIP-008)
         let flow_id = FlowId::new();
         let pipeline_system_id = obzenflow_core::SystemId::new();
-        let pipeline_id = SystemId::new();
+        let pipeline_id = pipeline_system_id;
 
         // Get the journal factory for this specific flow
         let mut journal_factory = journal_factory_provider(flow_id)
@@ -955,6 +955,27 @@ where
                     e
                 ))
             })?;
+
+        let metrics_journals = if metrics_exporter.is_some() {
+            let metrics_system_id = obzenflow_core::SystemId::new();
+            let metrics_coordination = obzenflow_core::journal::factory::FlowJournalFactory::create_system_journal(
+                &mut journal_factory, JournalName::MetricsCoordination, JournalOwner::system(metrics_system_id)
+            ).map_err(|e| FlowBuildError::JournalFactoryFailed(e.to_string()))?;
+            let metrics_export = obzenflow_core::journal::factory::FlowJournalFactory::create_system_journal(
+                &mut journal_factory, JournalName::MetricsExport, JournalOwner::system(metrics_system_id)
+            ).map_err(|e| FlowBuildError::JournalFactoryFailed(e.to_string()))?;
+            for journal in [&metrics_coordination, &metrics_export] {
+                journal.configure(JournalConfig { observability: __flow_effective.observability_policy_for(None) })
+                    .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
+            }
+            Some(obzenflow_runtime::metrics::builder::MetricsJournals {
+                system_id: metrics_system_id,
+                coordination: metrics_coordination,
+                export: metrics_export,
+            })
+        } else {
+            None
+        };
 
         control_journal.configure(JournalConfig { observability: __flow_effective.observability_policy_for(None) })
             .map_err(|error| FlowBuildError::JournalFactoryFailed(error.to_string()))?;
@@ -1054,7 +1075,7 @@ where
                 obzenflow_core::journal::archive::manifest::RunManifestStage {
                     dsl_var: name.clone(),
                     stage_type: descriptor.stage_type(),
-                    is_effectful: Some(descriptor.is_effectful()),
+                    is_effectful: descriptor.is_effectful(),
                     stage_id: stage_id.to_string(),
                     stage_logic_version: descriptor.stage_logic_version(),
                     data_journal_file,
@@ -1159,6 +1180,11 @@ where
             resume: resume_manifest,
             stages: manifest_stages,
             system_journal_file: JournalName::System.to_filename(),
+            metrics_journals: metrics_journals.as_ref().map(|journals| obzenflow_core::journal::archive::manifest::RunManifestMetrics {
+                writer_id: journals.system_id.into(),
+                coordination_journal_file: JournalName::MetricsCoordination.to_filename(),
+                export_journal_file: JournalName::MetricsExport.to_filename(),
+            }),
             // FLOWIP-010 §6a: the redacted effective config is run evidence.
             effective_config: Some(__flow_effective.manifest_evidence()),
             capabilities: manifest_capabilities,
@@ -1614,6 +1640,11 @@ where
             .with_run_substrate(__substrate.clone())
             .with_flow_effective_config(__flow_effective.clone());
 
+        let builder = if let Some(journals) = metrics_journals {
+            builder.with_metrics_journals(journals)
+        } else {
+            builder
+        };
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics_exporter(exporter)
         } else {

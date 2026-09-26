@@ -11,6 +11,7 @@ pub mod handle;
 mod lifecycle;
 pub mod max_iterations;
 mod metrics;
+pub mod reports;
 pub(crate) mod resources;
 pub mod supervisor;
 mod termination;

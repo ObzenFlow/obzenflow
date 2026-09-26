@@ -9,7 +9,6 @@ use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_fsm::StateVariant;
@@ -99,6 +98,7 @@ pub(super) async fn dispatch_draining<
                         );
                         ctx.pending_outputs.push_back(
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                causal: crate::supervised_base::publication::capture(),
                                 event,
                                 scope,
                             },
@@ -174,7 +174,8 @@ pub(super) async fn dispatch_draining<
                             } else {
                                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                                 ctx.pending_outputs.extend(results.into_iter().map(|event| {
-                                    crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+                                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(), event, scope }
                                 }));
                                 ctx.pending_subscription_ack =
                                     upstream_stage.map(|upstream| PendingSubscriptionAck {
@@ -211,7 +212,7 @@ pub(super) async fn dispatch_draining<
                         event_type = envelope.event_type(),
                         "Forwarding reference control event during join draining"
                     );
-                    common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                    common::forward_control_to_journal(ctx, &envelope).await?;
                 }
 
                 return Ok(EventLoopDirective::Continue);
@@ -300,6 +301,7 @@ pub(super) async fn dispatch_draining<
                         );
                         ctx.pending_outputs.push_back(
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                causal: crate::supervised_base::publication::capture(),
                                 event,
                                 scope,
                             },
@@ -315,11 +317,7 @@ pub(super) async fn dispatch_draining<
                     }
 
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
-                    let mut merged_parent = envelope.clone();
-                    CausalOrderingService::update_with_parent(
-                        &mut merged_parent.envelope.provenance.journal.vector_clock,
-                        &ctx.reference_high_water_clock,
-                    );
+                    let merged_parent = envelope.clone();
 
                     ctx.instrumentation
                         .in_flight_count
@@ -378,11 +376,13 @@ pub(super) async fn dispatch_draining<
                             } else {
                                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                                 ctx.pending_outputs.extend(events.into_iter().map(|event| {
-                                    crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+                                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(), event, scope }
                                 }));
                                 if let Some(kind) = framework_eof {
                                     ctx.pending_outputs.push_back(
                                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                                             event: ChainEventFactory::eof_event_with_kind(writer_id, kind),
                                             scope,
                                         },
@@ -424,7 +424,7 @@ pub(super) async fn dispatch_draining<
                                 crate::supervised_base::publication::append(
                                     &ctx.error_journal,
                                     error_event,
-                                    AppendOptions::new(Some(&merged_parent)),
+                                    AppendOptions::from_record(Some(&merged_parent))?,
                                 )
                                 .await
                                 .map_err(|e| {
@@ -439,6 +439,7 @@ pub(super) async fn dispatch_draining<
                                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                                 ctx.pending_outputs.push_back(
                                     crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                                         event: error_event,
                                         scope,
                                     },
@@ -458,7 +459,7 @@ pub(super) async fn dispatch_draining<
                         event_type = envelope.event_type(),
                         "Forwarding stream control event during join draining"
                     );
-                    common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                    common::forward_control_to_journal(ctx, &envelope).await?;
                 }
 
                 return Ok(EventLoopDirective::Continue);
@@ -576,6 +577,7 @@ pub(super) async fn dispatch_draining<
             let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
             ctx.pending_outputs.extend(events.into_iter().map(|event| {
                 crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                    causal: crate::supervised_base::publication::capture(),
                     event,
                     scope,
                 }
@@ -589,13 +591,7 @@ pub(super) async fn dispatch_draining<
         }
     }
     if !ctx.pending_outputs.is_empty() {
-        if let Some(mut frontier) = ctx.drain_parent.clone() {
-            CausalOrderingService::update_with_parent(
-                &mut frontier.envelope.provenance.journal.vector_clock,
-                &ctx.reference_high_water_clock,
-            );
-            ctx.pending_parent = Some(frontier);
-        }
+        ctx.pending_parent = ctx.drain_parent.clone();
     }
     ctx.pending_transition = Some(PendingTransition::DrainComplete);
     Ok(EventLoopDirective::Continue)
@@ -679,6 +675,7 @@ async fn dispatch_draining_live<
                     ctx.pending_outputs
                         .extend(eof_events.into_iter().map(|event| {
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                causal: crate::supervised_base::publication::capture(),
                                 event,
                                 scope,
                             }
@@ -719,18 +716,13 @@ async fn dispatch_draining_live<
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 ctx.pending_outputs.extend(events.into_iter().map(|event| {
                     crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                         event,
                         scope,
                     }
                 }));
                 if !ctx.pending_outputs.is_empty() {
-                    if let Some(mut frontier) = ctx.drain_parent.clone() {
-                        CausalOrderingService::update_with_parent(
-                            &mut frontier.envelope.provenance.journal.vector_clock,
-                            &ctx.reference_high_water_clock,
-                        );
-                        ctx.pending_parent = Some(frontier);
-                    }
+                    ctx.pending_parent = ctx.drain_parent.clone();
                 }
             }
             EofKind::Truncated => {

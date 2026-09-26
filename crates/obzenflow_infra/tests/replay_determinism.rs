@@ -176,7 +176,7 @@ async fn stateful_replay_produces_identical_aggregates() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn replay_determinism_covers_concurrent_writer_ordering() {
+async fn replay_determinism_preserves_physical_order_across_event_authors() {
     let upstream_stage = StageId::new();
     let upstream_journal: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::with_owner(
         JournalOwner::stage(upstream_stage),
@@ -209,7 +209,8 @@ async fn replay_determinism_covers_concurrent_writer_ordering() {
     let seen_run1 = run_order_sensitive_fold_once(upstream_journal.clone()).await;
     let seen_run2 = run_order_sensitive_fold_once(upstream_journal.clone()).await;
 
-    assert_eq!(seen_run1, vec![0, 1]);
+    // A physical journal has one causal sequence regardless of event authors.
+    assert_eq!(seen_run1, vec![1, 0]);
     assert_eq!(seen_run1, seen_run2);
 }
 
@@ -731,8 +732,9 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
 
     // FLOWIP-071h: join outputs must carry ancestry from both the matched reference state
     // and the triggering stream input (no fan-in ancestry loss at merge boundaries).
-    let reference_key = WriterId::from(reference_stage).to_string();
-    let stream_key = WriterId::from(stream_stage).to_string();
+    let reference_key =
+        obzenflow_core::event::CausalCoordinate::new((*reference_journal.id()).into());
+    let stream_key = obzenflow_core::event::CausalCoordinate::new((*stream_journal.id()).into());
     assert_ne!(
         joined_env
             .envelope

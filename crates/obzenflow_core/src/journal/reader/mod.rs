@@ -12,10 +12,15 @@ use crate::event::journal_record::JournalRecord;
 use crate::event::JournalEvent;
 use async_trait::async_trait;
 
+mod storage;
+pub use storage::JournalStorageReader;
+
 /// A reader that maintains position for efficient sequential journal reading
 ///
 /// This trait is designed to solve the O(n²) performance problem with large journals
 /// by keeping file handles open and tracking position, similar to database cursors.
+/// Storage adapters implement [`JournalStorageReader`]; core supplies this
+/// consumer facade and admits records only after successful reads.
 #[async_trait]
 pub trait JournalReader<T>: Send + Sync
 where
@@ -26,6 +31,9 @@ where
     /// This is an append-order cursor, not a causal-order iterator. Callers that need
     /// deterministic causal ordering should use `Journal::read_causally_ordered()` /
     /// `Journal::read_causally_after(...)` instead of `JournalReader::next()`.
+    ///
+    /// Missing or corrupt committed records are errors. A later record cannot
+    /// advance the admitted prefix past such a gap, including after a retry.
     ///
     /// Returns None if no more events are available (EOF).
     /// This method should be efficient - O(1) regardless of journal size.

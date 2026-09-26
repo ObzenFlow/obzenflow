@@ -4,6 +4,7 @@
 
 use super::*;
 use obzenflow_core::event::provenance::JournalGroupMember;
+use obzenflow_core::event::CausalFrontier;
 use obzenflow_core::journal::ArchiveStatus;
 use std::collections::{BTreeMap, HashSet};
 
@@ -78,6 +79,7 @@ pub trait EffectHistoryStore: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
+    causal: Arc<HashMap<EffectCursor, CausalFrontier>>,
     recorded_flow_id: RecordedFlowId,
     records: Arc<Vec<EffectRecord>>,
     index: Arc<HashMap<EffectCursor, Vec<usize>>>,
@@ -98,6 +100,7 @@ pub(crate) enum EffectHistorySelection {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EffectCursorHistory {
+    pub causal: CausalFrontier,
     pub records: Vec<EffectRecord>,
     pub attempts: Vec<EffectAttemptStarted>,
     pub attempt_events: BTreeMap<EffectAttemptOrdinal, ChainEvent>,
@@ -129,11 +132,13 @@ impl EffectHistory {
         stage_key: &str,
     ) -> Result<Self, EffectError> {
         let mut reader = archive.open_effect_history(stage_key).await?;
+        let mut causal = HashMap::<EffectCursor, CausalFrontier>::new();
         let mut records = Vec::new();
         let mut attempts: HashMap<EffectCursor, Vec<EffectAttemptStarted>> = HashMap::new();
         let mut abandonments = HashMap::new();
         let mut terminal_attempts = HashMap::new();
         let mut grouped_events: GroupedJournalEvents = HashMap::new();
+        let mut group_causal = HashMap::<String, CausalFrontier>::new();
         let mut attempt_positions = HashMap::new();
         let mut attempt_events = HashMap::new();
         let mut position = 0_usize;
@@ -143,6 +148,16 @@ impl EffectHistory {
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
+            if let Some(effect) = &envelope.envelope.provenance.event.effect_provenance {
+                causal
+                    .entry(effect.cursor.clone())
+                    .or_default()
+                    .merge(
+                        &CausalFrontier::from_record(&envelope)
+                            .map_err(|error| EffectError::ReplayArchive(error.to_string()))?,
+                    )
+                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
+            }
             if let Some(group_id) = envelope
                 .envelope
                 .provenance
@@ -150,6 +165,14 @@ impl EffectHistory {
                 .journal_group_id
                 .as_ref()
             {
+                group_causal
+                    .entry(group_id.clone())
+                    .or_default()
+                    .merge(
+                        &CausalFrontier::from_record(&envelope)
+                            .map_err(|error| EffectError::ReplayArchive(error.to_string()))?,
+                    )
+                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
                 grouped_events.entry(group_id.clone()).or_default().push((
                     position,
                     envelope.envelope.provenance.journal.journal_group_member,
@@ -237,6 +260,23 @@ impl EffectHistory {
             &abandonments,
             &history.records,
         )?;
+        for (cursor, frontier) in &mut causal {
+            let terminal = effect_outcome_group_id(cursor);
+            if let Some(group) = group_causal.get(terminal.as_str()) {
+                frontier
+                    .merge(group)
+                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
+            }
+            for attempt in attempts.get(cursor).into_iter().flatten() {
+                let group = effect_escape_controls_group_id(cursor, attempt.attempt);
+                if let Some(group) = group_causal.get(group.as_str()) {
+                    frontier
+                        .merge(group)
+                        .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
+                }
+            }
+        }
+        history.causal = Arc::new(causal);
         history.attempts = Arc::new(attempts);
         history.abandonments = Arc::new(abandonments);
         history.terminal_attempts = Arc::new(terminal_attempts);
@@ -250,6 +290,7 @@ impl EffectHistory {
     /// Tolerant constructor: a torn-tail incomplete outcome group is dropped as
     /// absent. `load` uses [`Self::from_records_with_policy`] for the
     /// status-derived policy.
+    #[cfg(test)]
     pub fn from_records(
         recorded_flow_id: impl Into<RecordedFlowId>,
         records: Vec<EffectRecord>,
@@ -313,6 +354,7 @@ impl EffectHistory {
             .map(|(attempt, event)| ((cursor.clone(), attempt), event))
             .collect();
         Ok(Self {
+            causal: Arc::new(HashMap::new()),
             recorded_flow_id: recorded_flow_id.into(),
             records: Arc::new(records),
             index: Arc::new(index),
@@ -387,6 +429,7 @@ impl EffectHistory {
         let terminal_attempts = index.keys().cloned().map(|cursor| (cursor, None)).collect();
 
         Ok(Self {
+            causal: Arc::new(HashMap::new()),
             recorded_flow_id,
             records: Arc::new(records),
             index: Arc::new(index),
@@ -475,6 +518,7 @@ impl EffectHistory {
             })
             .collect();
         EffectCursorHistory {
+            causal: self.causal.get(cursor).cloned().unwrap_or_default(),
             records: self
                 .find_group(cursor)
                 .unwrap_or_default()
@@ -517,9 +561,26 @@ pub(crate) async fn current_cursor_history(
         .map_err(|error| EffectError::Journal(error.to_string()))?;
     let mut history = EffectCursorHistory::default();
     let mut groups: GroupedJournalEvents = HashMap::new();
+    let mut group_causal = HashMap::<String, CausalFrontier>::new();
     let mut all_attempt_positions = HashMap::new();
 
     for (position, envelope) in envelopes.into_iter().enumerate() {
+        if envelope
+            .envelope
+            .provenance
+            .event
+            .effect_provenance
+            .as_ref()
+            .is_some_and(|effect| &effect.cursor == cursor)
+        {
+            history
+                .causal
+                .merge(
+                    &CausalFrontier::from_record(&envelope)
+                        .map_err(|error| EffectError::Journal(error.to_string()))?,
+                )
+                .map_err(|error| EffectError::Journal(error.to_string()))?;
+        }
         if let Some(group_id) = envelope
             .envelope
             .provenance
@@ -527,6 +588,14 @@ pub(crate) async fn current_cursor_history(
             .journal_group_id
             .as_ref()
         {
+            group_causal
+                .entry(group_id.clone())
+                .or_default()
+                .merge(
+                    &CausalFrontier::from_record(&envelope)
+                        .map_err(|error| EffectError::Journal(error.to_string()))?,
+                )
+                .map_err(|error| EffectError::Journal(error.to_string()))?;
             groups.entry(group_id.clone()).or_default().push((
                 position,
                 envelope.envelope.provenance.journal.journal_group_member,
@@ -614,6 +683,20 @@ pub(crate) async fn current_cursor_history(
             })
         })
         .collect();
+    let selected_groups = std::iter::once(effect_outcome_group_id(cursor)).chain(
+        history
+            .attempts
+            .iter()
+            .map(|attempt| effect_escape_controls_group_id(cursor, attempt.attempt)),
+    );
+    for group_id in selected_groups {
+        if let Some(frontier) = group_causal.get(group_id.as_str()) {
+            history
+                .causal
+                .merge(frontier)
+                .map_err(|error| EffectError::Journal(error.to_string()))?;
+        }
+    }
     validate_cursor_history(cursor, &history)?;
     Ok(history)
 }
@@ -623,6 +706,10 @@ pub(crate) fn merge_cursor_histories(
     archived: EffectCursorHistory,
     current: EffectCursorHistory,
 ) -> Result<EffectCursorHistory, EffectError> {
+    let mut causal = archived.causal;
+    causal
+        .merge(&current.causal)
+        .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
     let mut attempt_events = archived.attempt_events;
     for (attempt, event) in current.attempt_events {
         if let Some(existing) = attempt_events.insert(attempt, event.clone()) {
@@ -699,6 +786,7 @@ pub(crate) fn merge_cursor_histories(
         )));
     };
     let merged = EffectCursorHistory {
+        causal,
         records,
         attempts: attempts.into_values().collect(),
         attempt_events,

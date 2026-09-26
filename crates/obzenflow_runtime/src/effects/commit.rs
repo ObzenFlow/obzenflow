@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::ChainPayload;
 
@@ -29,16 +30,16 @@ impl<T, S> Clone for EffectCommitHandle<T, S> {
 }
 
 struct EffectCommitHandleInner<T, S> {
+    causal: obzenflow_core::event::CausalFrontier,
     publications: Option<Arc<crate::supervised_base::publication::PublicationScope>>,
     writer_id: WriterId,
     data_journal: Arc<dyn Journal<ChainEvent>>,
     flow_context: Option<FlowContext>,
-    system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     instrumentation: Option<Arc<StageInstrumentation>>,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     output_contract: StageOutputContract,
     backpressure_writer: BackpressureWriter,
-    parent: JournalRecord<ChainPayload>,
+    parent: DeliveredRecord<ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -53,12 +54,11 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) writer_id: WriterId,
     pub(super) data_journal: Arc<dyn Journal<ChainEvent>>,
     pub(super) flow_context: Option<FlowContext>,
-    pub(super) system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub(super) instrumentation: Option<Arc<StageInstrumentation>>,
     pub(super) heartbeat_state: Option<Arc<HeartbeatState>>,
     pub(super) output_contract: StageOutputContract,
     pub(super) backpressure_writer: BackpressureWriter,
-    pub(super) parent: JournalRecord<ChainPayload>,
+    pub(super) parent: DeliveredRecord<ChainPayload>,
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
@@ -98,11 +98,11 @@ where
     pub(super) fn new(params: EffectCommitHandleParams) -> Self {
         Self {
             inner: Arc::new(EffectCommitHandleInner {
+                causal: crate::supervised_base::publication::capture(),
                 publications: crate::supervised_base::publication::PublicationScope::current(),
                 writer_id: params.writer_id,
                 data_journal: params.data_journal,
                 flow_context: params.flow_context,
-                system_journal: params.system_journal,
                 instrumentation: params.instrumentation,
                 heartbeat_state: params.heartbeat_state,
                 output_contract: params.output_contract,
@@ -123,9 +123,11 @@ where
     pub async fn commit_success(&self, output: &T) -> Result<(), EffectError> {
         let handle = self.clone();
         let output = output.clone();
-        crate::supervised_base::publication::commit_in(
+        crate::supervised_base::publication::commit_in_with_frontier(
             self.inner.publications.clone(),
+            self.inner.causal.clone(),
             async move {
+                crate::supervised_base::publication::incorporate(&handle.inner.causal)?;
                 handle
                     .commit_success_inline(&output)
                     .await
@@ -198,7 +200,7 @@ where
             let committer = OutputCommitter {
                 data_journal: &self.inner.data_journal,
                 flow_context: self.inner.flow_context.as_ref(),
-                system_journal: self.inner.system_journal.as_ref(),
+
                 instrumentation: self.inner.instrumentation.as_ref(),
                 heartbeat_state: self.inner.heartbeat_state.as_ref(),
                 output_contract: Some(&self.inner.output_contract),
@@ -252,9 +254,11 @@ where
     pub async fn commit_failure(&self, error: &EffectError) -> Result<(), EffectError> {
         let handle = self.clone();
         let error = error.clone();
-        crate::supervised_base::publication::commit_in(
+        crate::supervised_base::publication::commit_in_with_frontier(
             self.inner.publications.clone(),
+            self.inner.causal.clone(),
             async move {
+                crate::supervised_base::publication::incorporate(&handle.inner.causal)?;
                 handle.commit_failure_inline(&error).await.map_err(|error| {
                     Box::new(error) as crate::supervised_base::publication::BoxError
                 })
@@ -309,7 +313,7 @@ where
             let committer = OutputCommitter {
                 data_journal: &self.inner.data_journal,
                 flow_context: None,
-                system_journal: None,
+
                 instrumentation: None,
                 heartbeat_state: None,
                 output_contract: None,
@@ -414,7 +418,7 @@ fn commit_handle_reuse_error() -> EffectError {
 
 pub(super) fn build_effect_attempt_started_event(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     started: EffectAttemptStarted,
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -451,7 +455,7 @@ pub(super) fn build_effect_attempt_started_event(
 
 pub(super) fn build_effect_recovery_abandoned_event(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     abandoned: EffectRecoveryAbandoned,
     descriptor: EffectDescriptor,
     lineage: obzenflow_core::config::LineagePolicy,
@@ -488,7 +492,7 @@ pub(super) fn build_effect_recovery_abandoned_event(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_domain_effect_success_facts(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -564,13 +568,12 @@ pub(super) fn build_domain_effect_success_facts(
 pub(super) async fn append_domain_effect_success_facts(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     flow_context: Option<&FlowContext>,
-    system_journal: Option<&Arc<dyn Journal<SystemEvent>>>,
     instrumentation: Option<&Arc<StageInstrumentation>>,
     heartbeat_state: Option<&Arc<HeartbeatState>>,
     output_contract: Option<&StageOutputContract>,
     backpressure_writer: &BackpressureWriter,
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
@@ -593,7 +596,6 @@ pub(super) async fn append_domain_effect_success_facts(
     let committer = OutputCommitter {
         data_journal,
         flow_context,
-        system_journal,
         instrumentation,
         heartbeat_state,
         output_contract,
@@ -634,7 +636,7 @@ pub(super) async fn append_domain_effect_success_facts(
 pub(super) async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
     backpressure_writer: &BackpressureWriter,
@@ -647,7 +649,7 @@ pub(super) async fn append_effect_record(
     let committer = OutputCommitter {
         data_journal,
         flow_context: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
         output_contract: None,
@@ -663,7 +665,7 @@ pub(super) async fn append_effect_record(
 
 pub(super) fn build_effect_record_event(
     writer_id: WriterId,
-    parent: &JournalRecord<ChainPayload>,
+    parent: &DeliveredRecord<ChainPayload>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError> {

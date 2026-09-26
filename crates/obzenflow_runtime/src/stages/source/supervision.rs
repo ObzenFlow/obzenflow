@@ -117,7 +117,7 @@ pub(crate) async fn record_source_cleanup_failed(
     stage_id: StageId,
     stage_name: &str,
     error: &SourceError,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
 ) -> Result<(), BoxError> {
     let event = SystemEvent::new(
         WriterId::from(stage_id),
@@ -127,7 +127,7 @@ pub(crate) async fn record_source_cleanup_failed(
             error: error.safe_summary().to_string(),
         },
     );
-    crate::supervised_base::publication::append(system_journal, event, Default::default()).await?;
+    crate::supervised_base::publication::report(report_journal, event, Default::default()).await?;
     Ok(())
 }
 
@@ -184,6 +184,7 @@ pub(crate) fn emit_batch_to_pending_outputs(
         }
         pending_outputs.push_back(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: staged_event,
                 scope,
             },
@@ -322,7 +323,6 @@ pub(crate) async fn drain_pending_outputs_sync(
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -340,7 +340,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             crate::supervised_base::publication::append(
                 error_journal,
                 event,
-                AppendOptions::new(None).with_capture(
+                AppendOptions::default().with_capture(
                     instrumentation.journal_capture(Some(pending.scope), vec![(0, false)]),
                 ),
             )
@@ -355,7 +355,6 @@ pub(crate) async fn drain_pending_outputs_sync(
             stage_id,
             heartbeat_state.clone(),
             data_journal,
-            system_journal,
             None,
             instrumentation,
             backpressure_writer,
@@ -384,7 +383,6 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -409,7 +407,7 @@ where
             crate::supervised_base::publication::append(
                 error_journal,
                 event,
-                AppendOptions::new(None).with_capture(
+                AppendOptions::default().with_capture(
                     instrumentation.journal_capture(Some(pending.scope), vec![(0, false)]),
                 ),
             )
@@ -424,7 +422,6 @@ where
             stage_id,
             heartbeat_state.clone(),
             data_journal,
-            system_journal,
             None,
             instrumentation,
             backpressure_writer,
@@ -525,15 +522,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> JournalReader<T> for EmptyReader<T>
+    impl<T> obzenflow_core::journal::JournalStorageReader<T> for EmptyReader<T>
     where
         T: obzenflow_core::event::JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.position
         }
     }
@@ -553,39 +552,41 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> Journal<T> for NoopJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for NoopJournal<T>
     where
         T: obzenflow_core::event::JournalEvent + Clone + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+        fn storage_owner(&self) -> Option<&obzenflow_core::JournalOwner> {
             None
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
             Ok(JournalRecord::new(JournalWriterId::new(), event))
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -595,7 +596,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             _count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -623,22 +624,22 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> Journal<T> for RecordingJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for RecordingJournal<T>
     where
         T: obzenflow_core::event::JournalEvent + Clone + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+        fn storage_owner(&self) -> Option<&obzenflow_core::JournalOwner> {
             None
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
-            mut options: obzenflow_core::journal::AppendOptions<'_, T>,
+            mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             let event = options.capture.prepare(0, event);
             let envelope = JournalRecord::new(JournalWriterId::new(), event);
@@ -649,7 +650,9 @@ mod tests {
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(self
                 .events
                 .lock()
@@ -657,14 +660,14 @@ mod tests {
                 .clone())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -674,7 +677,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             _count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -810,7 +813,6 @@ mod tests {
 
         let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
-        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
 
         let stage_flow_context = FlowContext {
@@ -824,6 +826,7 @@ mod tests {
         let mut pending_outputs = VecDeque::new();
         pending_outputs.push_back(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.event",
@@ -849,7 +852,6 @@ mod tests {
                 None,
                 &data_journal,
                 &error_journal,
-                &system_journal,
                 &instrumentation,
                 &writer,
                 &mut backpressure_pulse,
@@ -906,7 +908,6 @@ mod tests {
 
         let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(RecordingJournal::new());
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
-        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
         instrumentation.bind_observations(FlowId::new(), s.into(), &execution);
@@ -931,6 +932,7 @@ mod tests {
         let mut pending_outputs = VecDeque::new();
         pending_outputs.push_back(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.event",
@@ -950,7 +952,6 @@ mod tests {
                 None,
                 &data_journal,
                 &error_journal,
-                &system_journal,
                 &instrumentation,
                 &writer,
                 &mut backpressure_pulse,

@@ -15,7 +15,6 @@ use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, Read
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
-use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::archive::manifest::{
     RunManifest, EFFECT_BINDING_DESCRIPTOR_CAPABILITY, JOURNAL_SCHEMA_VERSION,
     RUN_MANIFEST_FILENAME,
@@ -125,6 +124,11 @@ impl DiskReplayArchive {
                     e
                 ),
             })?;
+
+        // Journal incarnations are manifest-bound, including empty journals.
+        // Incomplete admission cannot turn a conflicting descriptor into evidence.
+        super::identity::validate_archive_identities(&archive_path, &manifest)
+            .map_err(causal_admission_error)?;
 
         let system_log_path = archive_path.join(&manifest.system_journal_file);
         let status_derivation = match derive_status_derivation_from_system_log(&system_log_path) {
@@ -250,8 +254,13 @@ impl ReplayArchive for DiskReplayArchive {
         }
 
         let reader = DiskJournalReader::<ChainEvent>::open_existing(
-            data_path,
-            JournalId::new(),
+            data_path.clone(),
+            super::identity::read_identity(&data_path)
+                .map_err(|error| ReplayError::Io {
+                    message: "Admit archived journal identity".into(),
+                    source: std::io::Error::other(error.to_string()),
+                })?
+                .journal_id,
             self.read_write_lock.clone(),
             self.read_policy(),
         )
@@ -292,8 +301,13 @@ impl ReplayArchive for DiskReplayArchive {
         }
 
         let reader = DiskJournalReader::<ChainEvent>::open_existing(
-            data_path,
-            JournalId::new(),
+            data_path.clone(),
+            super::identity::read_identity(&data_path)
+                .map_err(|error| ReplayError::Io {
+                    message: "Admit archived journal identity".into(),
+                    source: std::io::Error::other(error.to_string()),
+                })?
+                .journal_id,
             self.read_write_lock.clone(),
             self.read_policy(),
         )
@@ -390,7 +404,7 @@ impl ReplayArchive for DiskReplayArchive {
     }
 
     /// Max recorded admission sequence across the source journals (FLOWIP-120n
-    /// F18), 0 for archives predating the field. From the same open-time scan.
+    /// F18), 0 when there are no recorded source admissions. From the same open-time scan.
     fn max_recorded_admission_seq(&self) -> obzenflow_core::AdmissionSeq {
         self.max_recorded_admission_seq
     }
@@ -440,6 +454,8 @@ fn scan_recorded_maxima(
         let mut line_no = 0u64;
         let mut offset = 0u64;
         let mut decoder = Decoder::new(&path);
+        let mut admission =
+            super::identity::CommitmentAdmission::open(&path).map_err(causal_admission_error)?;
         loop {
             let Some((consumed, termination)) =
                 read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
@@ -459,6 +475,7 @@ fn scan_recorded_maxima(
             ) {
                 Disposition::Yield(frame) => {
                     for record in frame.into_records() {
+                        admission.admit(&record).map_err(causal_admission_error)?;
                         if let ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
                             generation,
                             ..
@@ -521,6 +538,8 @@ pub(crate) fn derive_status_derivation_from_system_log(
     let mut line_no = 0u64;
     let mut offset = 0u64;
     let mut decoder = Decoder::new(path);
+    let mut admission =
+        super::identity::CommitmentAdmission::open(path).map_err(causal_admission_error)?;
 
     // FLOWIP-120q: the status-derivation bootstrap tolerates a torn tail, because
     // a crashed run legitimately leaves a torn final system record; that tail
@@ -544,6 +563,7 @@ pub(crate) fn derive_status_derivation_from_system_log(
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
+                    admission.admit(&record).map_err(causal_admission_error)?;
                     if let SystemPayload::PipelineLifecycle(event) = &record.payload {
                         match event {
                             obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
@@ -593,4 +613,10 @@ pub(crate) fn derive_status_derivation_from_system_log(
             None
         },
     })
+}
+
+fn causal_admission_error(error: obzenflow_core::journal::JournalError) -> ReplayError {
+    ReplayError::Parse {
+        message: format!("Invalid archived causal commitment: {error}"),
+    }
 }

@@ -120,6 +120,7 @@ fn reauthor_archived_effect_control(mut event: ChainEvent) -> ChainEvent {
 /// these defence-in-depth checks through this seam, and no untyped public
 /// escape exists.
 pub(crate) struct EffectsCore {
+    causal: obzenflow_core::event::CausalFrontier,
     ctx: EffectInvocationContext,
     next_effect_ordinal: EffectOrdinal,
     next_output_ordinal: EffectOutputOrdinal,
@@ -131,6 +132,7 @@ pub(crate) struct EffectsCore {
 impl EffectsCore {
     pub(crate) fn new(ctx: EffectInvocationContext) -> Self {
         Self {
+            causal: crate::supervised_base::publication::capture(),
             ctx,
             next_effect_ordinal: EffectOrdinal::new(0),
             next_output_ordinal: EffectOutputOrdinal::new(0),
@@ -138,6 +140,17 @@ impl EffectsCore {
             committed_facts: Vec::new(),
             binding_fault: None,
         }
+    }
+
+    fn incorporate_history(
+        &mut self,
+        frontier: &obzenflow_core::event::CausalFrontier,
+    ) -> Result<(), EffectError> {
+        self.causal
+            .merge(frontier)
+            .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
+        crate::supervised_base::publication::incorporate(frontier)
+            .map_err(|error| EffectError::ReplayArchive(error.to_string()))
     }
 
     fn binding_fault_error(&self) -> Option<EffectError> {
@@ -262,6 +275,8 @@ impl EffectsCore {
             .unwrap_or_default();
         let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
         let selected = merge_cursor_histories(&cursor, archived, current)?;
+        crate::supervised_base::publication::incorporate(&selected.causal)
+            .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
         match selected.select() {
             EffectHistorySelection::Miss => Ok(()),
             EffectHistorySelection::Hit(_) => Err(EffectError::EffectProvenanceMismatch(format!(
@@ -459,24 +474,26 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
-        committer
-            .commit_prebuilt(
+        crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_prebuilt(
                 event,
                 Some(&self.ctx.parent),
                 CommitOptions {
                     count_output: true,
                     validate_output_contract: true,
                 },
-            )
-            .await
-            .map_err(|e| EffectError::Journal(e.to_string()))?;
+            ),
+        )
+        .await
+        .map_err(|e| EffectError::Journal(e.to_string()))?;
         self.routed_output_fact_count = self
             .routed_output_fact_count
             .checked_add(routed_fact)
@@ -575,6 +592,7 @@ impl EffectsCore {
             .unwrap_or_default();
         let current = current_cursor_history(&self.ctx.data_journal, &cursor).await?;
         let selected = merge_cursor_histories(&cursor, archived, current)?;
+        self.incorporate_history(&selected.causal)?;
         if matches!(safety, EffectSafety::NonIdempotentAtLeastOnce) {
             validate_affine_terminal_group(&cursor, &selected)?;
         }
@@ -955,7 +973,6 @@ impl EffectsCore {
             let start_committed = start_committed.clone();
             let data_journal = self.ctx.data_journal.clone();
             let flow_context = self.ctx.flow_context.clone();
-            let system_journal = self.ctx.system_journal.clone();
             let instrumentation = self.ctx.instrumentation.clone();
             let heartbeat_state = self.ctx.heartbeat_state.clone();
             let backpressure_writer = self.ctx.backpressure_writer.clone();
@@ -964,13 +981,14 @@ impl EffectsCore {
             let parent_event = self.ctx.parent.authored();
             let lineage = self.ctx.lineage;
             let base_context = binding_context;
+            let causal = self.causal.clone();
             AffineEffectOperation::new_with_lifecycle(
                 highest_prior_attempt,
                 move |lifecycle| async move {
                     let committer = OutputCommitter {
                         data_journal: &data_journal,
                         flow_context: flow_context.as_ref(),
-                        system_journal: system_journal.as_ref(),
+
                         instrumentation: instrumentation.as_ref(),
                         heartbeat_state: heartbeat_state.as_ref(),
                         output_contract: None,
@@ -978,15 +996,17 @@ impl EffectsCore {
                         observer_scope:
                             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
                     };
-                    committer
-                        .commit_prebuilt_with_intent(
+                    crate::supervised_base::publication::with_snapshot(
+                        causal,
+                        committer.commit_prebuilt_with_intent(
                             start_event,
                             Some(&parent),
                             CommitOptions::default(),
                             StageAppendIntent::NonDataStageFact,
-                        )
-                        .await
-                        .map_err(|error| EffectError::Journal(error.to_string()))?;
+                        ),
+                    )
+                    .await
+                    .map_err(|error| EffectError::Journal(error.to_string()))?;
                     start_committed.store(true, Ordering::Release);
 
                     lifecycle.mark_started();
@@ -1129,21 +1149,23 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
-        if let Err(error) = committer
-            .commit_prebuilt_with_intent(
+        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_prebuilt_with_intent(
                 event,
                 Some(&self.ctx.parent),
                 CommitOptions::default(),
                 StageAppendIntent::NonDataStageFact,
-            )
-            .await
+            ),
+        )
+        .await
         {
             if let Some(cursor) = cursor {
                 self.ctx
@@ -1527,6 +1549,12 @@ impl EffectsCore {
 
         if let Some(history) = &self.ctx.effect_history {
             if let Some(records) = history.find_group(&cursor) {
+                let frontier = history.cursor_history(&cursor).causal;
+                self.causal
+                    .merge(&frontier)
+                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
+                crate::supervised_base::publication::incorporate(&frontier)
+                    .map_err(|error| EffectError::ReplayArchive(error.to_string()))?;
                 let output_result =
                     self.replay_capture_output(&records, cursor.clone(), descriptor_hash.clone());
                 let output = match output_result {
@@ -1607,7 +1635,6 @@ impl EffectsCore {
                 writer_id: self.ctx.writer_id,
                 data_journal: self.ctx.data_journal.clone(),
                 flow_context: self.ctx.flow_context.clone(),
-                system_journal: self.ctx.system_journal.clone(),
                 instrumentation: self.ctx.instrumentation.clone(),
                 heartbeat_state: self.ctx.heartbeat_state.clone(),
                 output_contract: self.ctx.output_contract.clone(),
@@ -2082,13 +2109,16 @@ impl EffectsCore {
     }
 
     async fn append_record(&self, record: EffectRecord) -> Result<(), EffectError> {
-        append_effect_record(
-            &self.ctx.data_journal,
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            record,
-            self.ctx.lineage,
-            &self.ctx.backpressure_writer,
+        crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            append_effect_record(
+                &self.ctx.data_journal,
+                self.ctx.writer_id,
+                &self.ctx.parent,
+                record,
+                self.ctx.lineage,
+                &self.ctx.backpressure_writer,
+            ),
         )
         .await
     }
@@ -2184,23 +2214,25 @@ impl EffectsCore {
         let routed_fact_count = self.count_routed_facts(&facts);
         self.ensure_routed_fanout_capacity(routed_fact_count)?;
         let output_ordinal = self.reserve_output_ordinals(facts.len())?;
-        let committed_events = append_domain_effect_success_facts(
-            &self.ctx.data_journal,
-            self.ctx.flow_context.as_ref(),
-            self.ctx.system_journal.as_ref(),
-            self.ctx.instrumentation.as_ref(),
-            self.ctx.heartbeat_state.as_ref(),
-            Some(&self.ctx.output_contract),
-            &self.ctx.backpressure_writer,
-            self.ctx.writer_id,
-            &self.ctx.parent,
-            cursor,
-            descriptor_hash,
-            descriptor,
-            facts,
-            output_ordinal,
-            origin,
-            self.ctx.lineage,
+        let committed_events = crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            append_domain_effect_success_facts(
+                &self.ctx.data_journal,
+                self.ctx.flow_context.as_ref(),
+                self.ctx.instrumentation.as_ref(),
+                self.ctx.heartbeat_state.as_ref(),
+                Some(&self.ctx.output_contract),
+                &self.ctx.backpressure_writer,
+                self.ctx.writer_id,
+                &self.ctx.parent,
+                cursor,
+                descriptor_hash,
+                descriptor,
+                facts,
+                output_ordinal,
+                origin,
+                self.ctx.lineage,
+            ),
         )
         .await?;
         self.routed_output_fact_count = self
@@ -2276,16 +2308,22 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
-        if let Err(error) = committer
-            .commit_atomic_group(group_id.as_str(), outcome_entries, Some(&self.ctx.parent))
-            .await
+        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_atomic_group(
+                group_id.as_str(),
+                outcome_entries,
+                Some(&self.ctx.parent),
+            ),
+        )
+        .await
         {
             self.ctx
                 .runtime_execution
@@ -2323,16 +2361,18 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
             backpressure_writer: Some(&self.ctx.backpressure_writer),
             observer_scope,
         };
-        if let Err(error) = committer
-            .commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent))
-            .await
+        if let Err(error) = crate::supervised_base::publication::with_snapshot(
+            self.causal.clone(),
+            committer.commit_atomic_group(group_id.as_str(), entries, Some(&self.ctx.parent)),
+        )
+        .await
         {
             self.ctx
                 .runtime_execution

@@ -46,11 +46,17 @@ pub(super) async fn prepare_metrics(
                 })
         })
         .collect();
-    let builder = MetricsAggregatorBuilder::new(inputs, context.system_journal.clone(), exporter)
-        .with_pipeline_writer(context.system_id.into())
-        .with_stage_metadata(metadata)
-        .with_composite_boundaries(composite_boundaries_from_topology(&context.topology))
-        .with_observation_export_interval(context.observation_export_interval);
+    let journals = context.metrics_journals.clone().ok_or_else(|| {
+        BuilderError::ContextCreationError(
+            "Metrics exporter requires metrics-owned journals".into(),
+        )
+    })?;
+    let builder =
+        MetricsAggregatorBuilder::new(inputs, context.system_journal.clone(), journals, exporter)
+            .with_pipeline_writer(context.system_id.into())
+            .with_stage_metadata(metadata)
+            .with_composite_boundaries(composite_boundaries_from_topology(&context.topology))
+            .with_observation_export_interval(context.observation_export_interval);
     builder.prepare().await.map(Some)
 }
 

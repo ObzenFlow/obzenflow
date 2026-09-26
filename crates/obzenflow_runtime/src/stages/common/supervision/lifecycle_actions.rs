@@ -16,12 +16,12 @@ pub(crate) async fn publish_running_best_effort(
     stage_label: &'static str,
     stage_id: StageId,
     stage_name: &str,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
 ) {
     let running_event = SystemEvent::stage_running(stage_id);
 
-    if let Err(e) = crate::supervised_base::publication::append(
-        system_journal,
+    if let Err(e) = crate::supervised_base::publication::report(
+        report_journal,
         running_event,
         Default::default(),
     )
@@ -45,7 +45,7 @@ pub(crate) async fn send_completion_best_effort(
     stage_label: &'static str,
     stage_id: StageId,
     stage_name: &str,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
     _data_journal: &Arc<dyn Journal<ChainEvent>>,
     _error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     instrumentation: &StageInstrumentation,
@@ -54,8 +54,8 @@ pub(crate) async fn send_completion_best_effort(
     let metrics = snapshot_stage_accounting(instrumentation);
     let completion_event = SystemEvent::stage_completed_with_accounting(stage_id, metrics);
 
-    if let Err(e) = crate::supervised_base::publication::append(
-        system_journal,
+    if let Err(e) = crate::supervised_base::publication::report(
+        report_journal,
         completion_event,
         Default::default(),
     )
@@ -77,7 +77,7 @@ pub(crate) async fn send_failure_best_effort(
     stage_id: StageId,
     stage_name: &str,
     message: &str,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
     _data_journal: &Arc<dyn Journal<ChainEvent>>,
     _error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     instrumentation: &StageInstrumentation,
@@ -102,8 +102,8 @@ pub(crate) async fn send_failure_best_effort(
         )
     };
 
-    match crate::supervised_base::publication::append(
-        system_journal,
+    match crate::supervised_base::publication::report(
+        report_journal,
         system_event,
         Default::default(),
     )
@@ -179,15 +179,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> JournalReader<T> for EmptyReader<T>
+    impl<T> obzenflow_core::journal::JournalStorageReader<T> for EmptyReader<T>
     where
         T: obzenflow_core::event::JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.position
         }
     }
@@ -207,22 +209,22 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> Journal<T> for EmptyJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for EmptyJournal<T>
     where
         T: obzenflow_core::event::JournalEvent + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+        fn storage_owner(&self) -> Option<&obzenflow_core::JournalOwner> {
             None
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             _event: T,
-            _options: obzenflow_core::journal::AppendOptions<'_, T>,
+            _options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             Err(JournalError::Implementation {
                 message: "append not supported in EmptyJournal".to_string(),
@@ -230,18 +232,20 @@ mod tests {
             })
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -251,7 +255,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             _count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -260,15 +264,17 @@ mod tests {
     }
 
     struct RecordingSystemJournal {
+        owner: obzenflow_core::JournalOwner,
         id: JournalId,
         events: Mutex<Vec<SystemEvent>>,
     }
 
     impl RecordingSystemJournal {
-        fn new() -> Self {
+        fn new(stage: StageId) -> Self {
             Self {
                 id: JournalId::new(),
                 events: Mutex::new(Vec::new()),
+                owner: obzenflow_core::JournalOwner::stage(stage),
             }
         }
 
@@ -278,19 +284,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl Journal<SystemEvent> for RecordingSystemJournal {
-        fn id(&self) -> &JournalId {
+    impl obzenflow_core::journal::JournalStorage<SystemEvent> for RecordingSystemJournal {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
-            None
+        fn storage_owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+            Some(&self.owner)
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: SystemEvent,
-            mut options: obzenflow_core::journal::AppendOptions<'_, SystemEvent>,
+            mut options: obzenflow_core::journal::AppendOptions<SystemEvent>,
         ) -> Result<JournalRecord<SystemPayload>, JournalError> {
             let event = options.capture.prepare(0, event);
             self.events
@@ -300,20 +306,20 @@ mod tests {
             Ok(JournalRecord::new(JournalWriterId::new(), event))
         }
 
-        async fn read_all_unordered(
+        async fn storage_read_all_unordered(
             &self,
         ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
             Ok(Vec::new())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
@@ -323,7 +329,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             _count: usize,
         ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
@@ -332,7 +338,8 @@ mod tests {
     }
 
     async fn exercise_failure(message: &str) -> SystemEvent {
-        let system = Arc::new(RecordingSystemJournal::new());
+        let stage_id = StageId::new();
+        let system = Arc::new(RecordingSystemJournal::new(stage_id));
         let system_journal: Arc<dyn Journal<SystemEvent>> = system.clone();
 
         let data_journal: Arc<dyn Journal<ChainEvent>> =
@@ -340,14 +347,13 @@ mod tests {
         let error_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(EmptyJournal::<ChainEvent>::new());
         let instrumentation = StageInstrumentation::new();
-        let stage_id = StageId::new();
 
         send_failure_best_effort(
             "Test",
             stage_id,
             "test_stage",
             message,
-            &system_journal,
+            &system_journal.clone().into(),
             &data_journal,
             Some(&error_journal),
             &instrumentation,

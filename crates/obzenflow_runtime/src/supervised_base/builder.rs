@@ -274,20 +274,26 @@ where
 
 /// Type-safe event sender
 pub struct EventSender<E> {
-    tx: tokio::sync::mpsc::Sender<E>,
+    tx: tokio::sync::mpsc::Sender<(E, obzenflow_core::event::CausalFrontier)>,
 }
 
 impl<E: Debug + Send + 'static> EventSender<E> {
-    pub async fn send(&self, event: E) -> Result<(), HandleError> {
-        self.tx
-            .send(event)
-            .await
-            .map_err(|_| HandleError::SupervisorNotRunning)
+    pub fn send(
+        &self,
+        event: E,
+    ) -> impl std::future::Future<Output = Result<(), HandleError>> + Send + '_ {
+        let frontier = super::publication::capture();
+        async move {
+            self.tx
+                .send((event, frontier))
+                .await
+                .map_err(|_| HandleError::SupervisorNotRunning)
+        }
     }
 
     pub fn try_send(&self, event: E) -> Result<(), HandleError> {
         self.tx
-            .try_send(event)
+            .try_send((event, super::publication::capture()))
             .map_err(|_| HandleError::SupervisorNotRunning)
     }
 }
@@ -302,27 +308,33 @@ impl<E> Clone for EventSender<E> {
 
 /// Type-safe event receiver
 pub struct EventReceiver<E> {
-    rx: Option<tokio::sync::mpsc::Receiver<E>>,
+    rx: Option<tokio::sync::mpsc::Receiver<(E, obzenflow_core::event::CausalFrontier)>>,
 }
 
 impl<E> EventReceiver<E> {
     pub async fn recv(&mut self) -> Option<E> {
-        self.rx.as_mut()?.recv().await
+        let (event, frontier) = self.rx.as_mut()?.recv().await?;
+        super::publication::admit_command(&frontier).then_some(event)
     }
 
     pub fn try_recv(&mut self) -> Result<E, tokio::sync::mpsc::error::TryRecvError> {
-        self.rx
+        let (event, frontier) = self
+            .rx
             .as_mut()
             .ok_or(tokio::sync::mpsc::error::TryRecvError::Disconnected)?
-            .try_recv()
+            .try_recv()?;
+        if !super::publication::admit_command(&frontier) {
+            return Err(tokio::sync::mpsc::error::TryRecvError::Disconnected);
+        }
+        Ok(event)
     }
 
     /// Close admission and transfer the accepted queue to retained publication.
     /// Subsequent calls cannot take or record the same commands again.
-    pub(crate) fn close_and_take(&mut self) -> Option<tokio::sync::mpsc::Receiver<E>> {
+    pub(crate) fn close_and_take(&mut self) -> Option<Self> {
         let mut receiver = self.rx.take()?;
         receiver.close();
-        Some(receiver)
+        Some(Self { rx: Some(receiver) })
     }
 }
 

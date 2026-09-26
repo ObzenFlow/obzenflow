@@ -9,8 +9,7 @@ use crate::supervised_base::handle::StandardHandle;
 use crate::supervised_base::with_external_events::ExternalControlEvent;
 use futures::FutureExt;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent};
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::CommandDiscardDisposition;
 use obzenflow_fsm::FsmError;
 use std::error::Error;
 use tokio::sync::Notify;
@@ -130,8 +129,8 @@ impl Supervisor for CleanupSupervisor {
         SupervisorKind::Transform
     }
 
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.system_journal.clone().into()
     }
 }
 
@@ -218,9 +217,10 @@ impl HandlerSupervisedCleanup for CleanupSupervisor {
 
 fn spawn(
     supervisor: CleanupSupervisor,
-    journal: terminal_commands::TestJournal,
+    mut journal: terminal_commands::TestJournal,
     wrapped: bool,
 ) -> StandardHandle<TestEvent, TestState> {
+    journal.owner = Some(obzenflow_core::JournalOwner::stage(supervisor.stage_id));
     let publications = PublicationScope::new();
     let context = TestContext {
         system_journal: Arc::new(journal),
@@ -233,7 +233,7 @@ fn spawn(
             supervisor,
             receiver,
             watcher.clone(),
-            context.system_journal.clone(),
+            (context.system_journal.clone()).into(),
         );
         SupervisorTaskBuilder::new("cleanup-supervisor")
             .with_publications(publications)

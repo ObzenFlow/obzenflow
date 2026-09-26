@@ -41,7 +41,7 @@ pub(crate) async fn forward_control_event(
     let written = crate::supervised_base::publication::append(
         data_journal,
         forward_event,
-        AppendOptions::new(Some(envelope)),
+        AppendOptions::from_record(Some(envelope))?,
     )
     .await
     .map_err(|e| format!("Failed to forward control event: {e}"))?;

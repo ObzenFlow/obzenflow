@@ -9,7 +9,6 @@ use super::{
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
-use obzenflow_core::chrono::Utc;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -19,7 +18,6 @@ use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::system_payload::{ContractResultStatusLabel, SystemPayload};
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
-use obzenflow_core::event::provenance::JournalProvenance;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -38,23 +36,17 @@ use obzenflow_core::{
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
 
 fn committed_input(event: ChainEvent, vector_clock: VectorClock) -> JournalRecord<ChainPayload> {
-    JournalRecord::commit_event(
-        event,
-        JournalProvenance {
-            journal_writer_id: JournalWriterId::new(),
-            vector_clock,
-            timestamp: Utc::now(),
-            journal_group_id: None,
-            journal_group_member: None,
-        },
-    )
-    .unwrap()
+    let mut record = JournalRecord::new(JournalWriterId::new(), event);
+    obzenflow_core::event::vector_clock::CausalOrderingService::update_with_parent(
+        &mut record.envelope.provenance.journal.vector_clock,
+        &vector_clock,
+    );
+    record
 }
 
 fn contract_flow_context(stage_id: StageId) -> obzenflow_core::event::provenance::FlowContext {
@@ -101,7 +93,7 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             writer_id: WriterId::from(owner.stage_id),
             contract_journal: journal.clone(),
             config: ContractConfig::default(),
-            system_journal: None,
+            report_journal: None,
             reader_stage: Some(owner.stage_id),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -136,7 +128,7 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             reader_path,
             reader_seq,
             ..
-        }) = env.payload
+        }) = env.into_parts().1
         else {
             panic!("expected progress")
         };
@@ -166,13 +158,13 @@ async fn contract_owner_context_covers_both_gap_paths_violation_and_final() {
         let (mut gap, mut violation, mut final_record) = (false, false, false);
         for env in events {
             assert_contract_owner(&env.authored(), &owner);
-            match env.payload {
+            match &env.payload {
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => gap = true,
                 ChainPayload::FlowControl(FlowControlPayload::AtLeastOnceViolation {
                     upstream: id,
                     ..
                 }) => {
-                    assert_eq!(id, upstream);
+                    assert_eq!(*id, upstream);
                     violation = true;
                 }
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
@@ -234,42 +226,42 @@ struct TestJournalReader<T: JournalEvent> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
         guard.push(envelope.clone());
         Ok(envelope)
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -280,7 +272,7 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -293,19 +285,21 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T>
+    for ControlledJournal<T>
+{
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let call_index = self.append_calls.fetch_add(1, Ordering::Relaxed);
@@ -316,27 +310,27 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
             });
         }
 
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
         let mut guard = self.events.lock().unwrap();
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
         guard.push(envelope.clone());
         Ok(envelope)
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -347,7 +341,7 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -360,8 +354,10 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-    async fn next(
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+    for TestJournalReader<T>
+{
+    async fn storage_next(
         &mut self,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         if self.pos >= self.events.len() {
@@ -373,11 +369,11 @@ impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.pos >= self.events.len()
     }
 }
@@ -402,19 +398,19 @@ impl<T: JournalEvent> EmfileJournal<T> {
 
 #[cfg(unix)]
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for EmfileJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         _event: T,
-        _options: AppendOptions<'_, T>,
+        _options: AppendOptions<T>,
     ) -> std::result::Result<JournalRecord<T::Payload>, JournalError> {
         Err(JournalError::Implementation {
             message: "append not supported".to_string(),
@@ -422,36 +418,31 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
         })
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    // Non-default: opening a reader returns EMFILE. reader_from delegates here,
-    // so this override stays (the default reader() would recurse via reader_from).
-    async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
-        Err(JournalError::Implementation {
-            message: "open failed".to_string(),
-            source: Box::new(io::Error::from_raw_os_error(libc::EMFILE)),
-        })
-    }
-
-    async fn reader_from(
+    // Both reader() and reader_from() fail at the same storage-open boundary.
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
-        self.reader().await
+        Err(JournalError::Implementation {
+            message: "open journal reader failed".into(),
+            source: Box::new(std::io::Error::from_raw_os_error(libc::EMFILE)),
+        })
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -505,7 +496,7 @@ async fn progress_append_failure_does_not_advance_progress_state() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -549,7 +540,7 @@ async fn final_append_failure_keeps_final_emitted_false() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -594,7 +585,7 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -655,7 +646,7 @@ async fn diagnostics_only_eof_check_does_not_emit_stall() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -723,7 +714,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -771,7 +762,7 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     let contract_owner = JournalOwner::stage(contract_stage);
     let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
 
-    let reader_stage = StageId::new();
+    let reader_stage = contract_stage;
     let system_owner = JournalOwner::stage(reader_stage);
     let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(system_owner));
 
@@ -779,7 +770,7 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -841,7 +832,7 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -851,9 +842,13 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
     let read_event_id = EventId::new();
     let receipted_event_id = EventId::new();
     let mut read_clock = VectorClock::new();
-    read_clock.clocks.insert("upstream".to_string(), 3);
+    read_clock
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 3);
     let mut receipted_clock = VectorClock::new();
-    receipted_clock.clocks.insert("upstream".to_string(), 1);
+    receipted_clock
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 1);
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(3);
@@ -905,7 +900,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -917,18 +912,22 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
     let second = ChainEventFactory::data_event(writer_id, "test.event", json!({"seq": 2}));
 
     let mut clock_1 = VectorClock::new();
-    clock_1.clocks.insert("upstream".to_string(), 1);
+    clock_1
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 1);
     let mut clock_2 = VectorClock::new();
-    clock_2.clocks.insert("upstream".to_string(), 2);
+    clock_2
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("upstream"), 2);
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     reader_progress[0].reader_seq = SeqNo(1);
     reader_progress[0]
-        .track_pending_delivery_input(committed_input(first.clone(), clock_1.clone()));
+        .track_pending_delivery_input(committed_input(first.clone(), clock_1.clone()).into());
     reader_progress[0].track_pending_receipt(first.id, clock_1);
     reader_progress[0].reader_seq = SeqNo(2);
     reader_progress[0]
-        .track_pending_delivery_input(committed_input(second.clone(), clock_2.clone()));
+        .track_pending_delivery_input(committed_input(second.clone(), clock_2.clone()).into());
     reader_progress[0].track_pending_receipt(second.id, clock_2.clone());
 
     let second_receipt = ChainEventFactory::delivery_event(
@@ -979,7 +978,7 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
         writer_id: WriterId::from(sink_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: Some(sink_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -993,9 +992,12 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
         json!({"value": 1}),
     );
     let mut clock = VectorClock::new();
-    clock.clocks.insert("source".to_string(), 1);
+    clock
+        .clocks
+        .insert(crate::testing::causal_fixture::coordinate("source"), 1);
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0].track_pending_delivery_input(committed_input(forwarded.clone(), clock));
+    reader_progress[0]
+        .track_pending_delivery_input(committed_input(forwarded.clone(), clock).into());
 
     let receipt = ChainEventFactory::delivery_event(
         WriterId::from(sink_stage),
@@ -1054,7 +1056,7 @@ async fn stall_append_failure_does_not_set_stalled_since() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config,
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1105,7 +1107,7 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1191,7 +1193,7 @@ async fn idle_reader_without_any_reads_does_not_emit_stall() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1255,7 +1257,7 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1336,7 +1338,7 @@ async fn build_upstream_with_seq_divergence(
         writer_id: writer_id_for_contracts,
         contract_journal: contract_journal.clone(),
         config: contract_config,
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane,
         include_delivery_contract: false,
@@ -1576,7 +1578,7 @@ async fn transport_only_skips_observability_events() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match data {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
         },
@@ -1601,7 +1603,7 @@ async fn transport_only_skips_observability_events() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match eof {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
         },
@@ -1694,7 +1696,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            system_journal: Some(system_journal.clone()),
+            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -1731,7 +1733,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match selected {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {
                 assert_eq!(env.event_type(), "test.selected.v1");
             }
@@ -1904,7 +1906,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            system_journal: None,
+            report_journal: None,
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2107,7 +2109,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            system_journal: Some(system_journal.clone()),
+            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2244,7 +2246,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
             writer_id: WriterId::from(reader_stage),
             contract_journal,
             config: ContractConfig::default(),
-            system_journal: Some(system_journal.clone()),
+            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2480,7 +2482,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => {
                 panic!("expected framework effect Data to be skipped and domain Data delivered, got {other:?}")
@@ -2566,7 +2568,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
         },
@@ -2577,7 +2579,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match second {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
         },
@@ -2593,7 +2595,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match third {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => panic!("expected third delivered event to be Data, got {other:?}"),
         },
@@ -2604,7 +2606,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match fourth {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected fourth delivered event to be EOF, got {other:?}"),
         },
@@ -2647,18 +2649,19 @@ impl SharedTestJournal {
     }
 
     fn append_with_clock(&self, event: ChainEvent, vector_clock: VectorClock) {
-        let envelope = JournalRecord::commit_event(
+        let mut records = self.events.lock().unwrap();
+        let mut record = crate::testing::causal_fixture::commit(
+            self.id,
             event,
-            JournalProvenance {
-                journal_writer_id: JournalWriterId::from(self.id),
-                vector_clock,
-                timestamp: chrono::Utc::now(),
-                journal_group_id: None,
-                journal_group_member: None,
-            },
+            &AppendOptions::default(),
+            &records,
         )
-        .expect("valid committed fixture");
-        self.events.lock().unwrap().push(envelope);
+        .unwrap();
+        obzenflow_core::event::vector_clock::CausalOrderingService::update_with_parent(
+            &mut record.envelope.provenance.journal.vector_clock,
+            &vector_clock,
+        );
+        records.push(record);
     }
 }
 
@@ -2668,8 +2671,8 @@ struct SharedTestJournalReader {
 }
 
 #[async_trait]
-impl JournalReader<ChainEvent> for SharedTestJournalReader {
-    async fn next(
+impl obzenflow_core::journal::JournalStorageReader<ChainEvent> for SharedTestJournalReader {
+    async fn storage_next(
         &mut self,
     ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         let guard = self.events.lock().unwrap();
@@ -2682,50 +2685,51 @@ impl JournalReader<ChainEvent> for SharedTestJournalReader {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.pos >= self.events.lock().unwrap().len()
     }
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for SharedTestJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for SharedTestJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> std::result::Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
-        self.events.lock().unwrap().push(envelope.clone());
+        let mut records = self.events.lock().unwrap();
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(envelope.clone());
         Ok(envelope)
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(self.events.lock().unwrap().clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
@@ -2735,7 +2739,7 @@ impl Journal<ChainEvent> for SharedTestJournal {
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -2771,13 +2775,14 @@ fn merge_consumption_progress(writer: StageId, seq: u64) -> ChainEvent {
     )
 }
 
-fn merge_clock(entries: &[(&str, u64)]) -> VectorClock {
+fn merge_clock(entries: &[(obzenflow_core::event::CausalCoordinate, u64)]) -> VectorClock {
     let mut clock = VectorClock::new();
     for (writer, seq) in entries {
         for _ in 0..*seq {
             obzenflow_core::event::vector_clock::CausalOrderingService::increment(
                 &mut clock, writer,
-            );
+            )
+            .unwrap();
         }
     }
     clock
@@ -2868,7 +2873,7 @@ async fn canonical_single(
 
 async fn expect_delivery(
     subscription: &mut UpstreamSubscription<ChainEvent>,
-) -> JournalRecord<ChainPayload> {
+) -> crate::messaging::DeliveredRecord<ChainPayload> {
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::Event(envelope) => envelope,
         other => panic!(
@@ -2995,13 +3000,12 @@ async fn canonical_merge_excludes_happened_before_heads() {
     let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
         canonical_pair("z_upstream", "a_upstream").await;
 
-    journal_a.append_with_clock(merge_data(stage_a, "a1"), merge_clock(&[("wa", 1)]));
-    journal_a.append_with_clock(merge_data(stage_a, "a2"), merge_clock(&[("wa", 2)]));
+    let wa = obzenflow_core::event::CausalCoordinate::new(journal_a.id.into());
+    let wb = obzenflow_core::event::CausalCoordinate::new(journal_b.id.into());
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), merge_clock(&[(wa, 1)]));
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), merge_clock(&[(wa, 2)]));
     journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
-    journal_b.append_with_clock(
-        merge_data(stage_b, "b1"),
-        merge_clock(&[("wa", 2), ("wb", 1)]),
-    );
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), merge_clock(&[(wa, 2), (wb, 1)]));
     journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
 
     let mut order = Vec::new();
@@ -3203,7 +3207,7 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         writer_id: WriterId::from(reader_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,

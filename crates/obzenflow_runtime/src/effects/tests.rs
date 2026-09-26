@@ -201,8 +201,10 @@ struct MemoryJournalReader<T: JournalEvent> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+    for MemoryJournalReader<T>
+{
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let next = self.events.get(self.position).cloned();
         if next.is_some() {
             self.position += 1;
@@ -210,25 +212,25 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
         Ok(next)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.position as u64
     }
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for MemoryJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let mut failures = self
@@ -246,19 +248,17 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             });
         }
         drop(failures);
-        let envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
-        self.events
-            .lock()
-            .expect("events lock poisoned")
-            .push(envelope.clone());
+        let mut records = self.events.lock().expect("events lock poisoned");
+        let envelope = crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
+        records.push(envelope.clone());
         Ok(envelope)
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         group_id: &str,
         events: Vec<T>,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let events = events
             .into_iter()
@@ -284,32 +284,31 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             message: format!("test group '{group_id}' exceeds u32 member capacity"),
             source: "test group too large".into(),
         })?;
-        let envelopes = events
-            .into_iter()
-            .enumerate()
-            .map(|(index, event)| {
-                let mut envelope = JournalRecord::new(JournalWriterId::from(self.id), event);
-                envelope.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
-                envelope.envelope.provenance.journal.journal_group_member =
-                    Some(JournalGroupMember {
-                        index: u32::try_from(index).expect("group size was checked"),
-                        size,
-                    });
-                envelope
-            })
-            .collect::<Vec<_>>();
-        self.events
-            .lock()
-            .expect("events lock poisoned")
-            .extend(envelopes.iter().cloned());
+        let mut records = self.events.lock().expect("events lock poisoned");
+        let mut prepared = records.clone();
+        let mut envelopes = Vec::new();
+        for (index, event) in events.into_iter().enumerate() {
+            let mut envelope =
+                crate::testing::causal_fixture::commit(self.id, event, &options, &prepared)?;
+            envelope.envelope.provenance.journal.journal_group_id = Some(group_id.to_string());
+            envelope.envelope.provenance.journal.journal_group_member = Some(JournalGroupMember {
+                index: index as u32,
+                size,
+            });
+            prepared.push(envelope.clone());
+            envelopes.push(envelope);
+        }
+        *records = prepared;
         Ok(envelopes)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(self.events())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
@@ -319,14 +318,17 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             .find(|envelope| *envelope.id() == *event_id))
     }
 
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(MemoryJournalReader {
             events: self.events(),
             position: position as usize,
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -368,19 +370,19 @@ impl FailingStartJournal {
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for FailingStartJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for FailingStartJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         self.attempted_event_types
@@ -393,18 +395,20 @@ impl Journal<ChainEvent> for FailingStartJournal {
         })
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &EventId,
     ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
@@ -414,7 +418,7 @@ impl Journal<ChainEvent> for FailingStartJournal {
         })
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -423,19 +427,19 @@ impl Journal<ChainEvent> for FailingStartJournal {
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for InspectingFailJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for InspectingFailJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
-        mut options: AppendOptions<'_, ChainEvent>,
+        mut options: AppendOptions<ChainEvent>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let event = options.capture.prepare(0, event);
         assert!(event.consumes_data_credit());
@@ -450,18 +454,20 @@ impl Journal<ChainEvent> for InspectingFailJournal {
         })
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &EventId,
     ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
@@ -471,7 +477,7 @@ impl Journal<ChainEvent> for InspectingFailJournal {
         })
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -1682,7 +1688,7 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for CommittedFailureTr
 
 fn parent_envelope(writer_id: WriterId) -> JournalRecord<ChainPayload> {
     let event = ChainEventFactory::data_event(writer_id, "test.input", json!({"id": 1}));
-    JournalRecord::new(JournalWriterId::new(), event)
+    crate::testing::causal_fixture::committed_input(JournalWriterId::new(), event)
 }
 
 fn invocation_context(
@@ -1723,10 +1729,10 @@ fn invocation_context_with_mode(
         data_journal: journal,
         flow_context: None,
         observers: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
-        parent,
+        parent: parent.into(),
         effect_history,
         runtime_execution: crate::execution::RuntimeExecution::from_effect_runtime_mode(
             effect_runtime_mode,
@@ -2020,7 +2026,7 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     };
     let start = build_effect_attempt_started_event(
         in_doubt_ctx.writer_id,
-        &parent,
+        &in_doubt_ctx.parent,
         started,
         descriptor,
         in_doubt_ctx.lineage,
@@ -2054,6 +2060,46 @@ async fn generated_pre_effect_preflight_distinguishes_miss_hit_and_in_doubt() {
     assert!(
         in_doubt_journal.events().is_empty(),
         "preflight preserves the archived Start without rematerialising or abandoning it"
+    );
+}
+
+#[tokio::test]
+async fn selected_effect_history_excludes_later_cursor_commitments() {
+    let stage = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage)));
+    let mut effects = EffectsCore::new(invocation_context(
+        journal.clone(),
+        parent_envelope(stage.into()),
+        None,
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .unwrap();
+    let cursor = cursor_started_in(&journal);
+    let erased: Arc<dyn Journal<ChainEvent>> = journal.clone();
+    let selected = current_cursor_history(&erased, &cursor)
+        .await
+        .unwrap()
+        .causal;
+    assert!(selected.witness_count() > 0);
+    effects
+        .perform(AffineCountingEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let selected_after = current_cursor_history(&erased, &cursor)
+        .await
+        .unwrap()
+        .causal;
+    assert_eq!(
+        selected_after, selected,
+        "preloading later cursors is not causal admission"
     );
 }
 
@@ -2663,7 +2709,8 @@ async fn effectful_stateful_folds_committed_facts_before_returning_decide_error(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
+    let parent =
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for_many(vec![
@@ -2727,7 +2774,8 @@ async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged()
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
+    let parent =
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for::<FirstOutput>();
@@ -2779,7 +2827,10 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let repeatable_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(repeatable_stage)));
     let mut repeatable_context = invocation_context(
         repeatable_journal,
-        JournalRecord::new(JournalWriterId::new(), repeatable_input.clone()),
+        crate::testing::causal_fixture::committed_input(
+            JournalWriterId::new(),
+            repeatable_input.clone(),
+        ),
         None,
     );
     repeatable_context.emit_enabled = true;
@@ -2821,7 +2872,10 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let ports = registry_with_binding(&binding);
     let mut transactional_context = transactional_invocation_context_with_mode(
         transactional_journal,
-        JournalRecord::new(JournalWriterId::new(), transactional_input.clone()),
+        crate::testing::causal_fixture::committed_input(
+            JournalWriterId::new(),
+            transactional_input.clone(),
+        ),
         None,
         EffectRuntimeMode::Live,
         ports,
@@ -2859,7 +2913,10 @@ async fn effectful_stateful_adapter_preserves_all_three_effect_safety_entry_poin
     let affine_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(affine_stage)));
     let mut affine_context = invocation_context(
         affine_journal,
-        JournalRecord::new(JournalWriterId::new(), affine_input.clone()),
+        crate::testing::causal_fixture::committed_input(
+            JournalWriterId::new(),
+            affine_input.clone(),
+        ),
         None,
     );
     affine_context.emit_enabled = true;
@@ -2905,7 +2962,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut live_context = invocation_context(
         live_journal.clone(),
-        JournalRecord::new(JournalWriterId::new(), input.clone()),
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         None,
     );
     live_context.emit_enabled = true;
@@ -2939,7 +2996,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let catch_up_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut catch_up_context = invocation_context_with_mode(
         catch_up_journal,
-        JournalRecord::new(JournalWriterId::new(), input.clone()),
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         Some(history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -2975,7 +3032,7 @@ async fn effectful_stateful_resume_suppresses_catch_up_and_guards_a_live_miss() 
     let miss_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut miss_context = invocation_context_with_mode(
         miss_journal,
-        JournalRecord::new(JournalWriterId::new(), input.clone()),
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         Some(miss_history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -3022,7 +3079,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
     ));
     let mut live_context = invocation_context(
         failing_journal.clone(),
-        JournalRecord::new(JournalWriterId::new(), input.clone()),
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         None,
     );
     live_context.emit_enabled = true;
@@ -3081,7 +3138,7 @@ async fn stateful_policy_fact_append_failure_resumes_without_reconsulting_or_ree
     let resume_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut resume_context = invocation_context_with_mode(
         resume_journal.clone(),
-        JournalRecord::new(JournalWriterId::new(), input.clone()),
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone()),
         Some(history),
         EffectRuntimeMode::ResumeIncomplete,
         EffectPortRegistry::new(),
@@ -3138,7 +3195,8 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
+    let parent =
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for::<FirstOutput>();
@@ -3190,7 +3248,8 @@ async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
+    let parent =
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for_many(vec![
@@ -3255,7 +3314,8 @@ async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
+    let parent =
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let mut effect_context = invocation_context(journal.clone(), parent, None);
     effect_context.emit_enabled = true;
     effect_context.output_contract = output_contract_for_many(vec![
@@ -3621,7 +3681,7 @@ async fn adapter_history_fixture(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input);
+    let parent = crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input);
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_ctx = invocation_context(journal.clone(), parent.clone(), None);
     let recorded_flow_id = live_ctx.flow_id.to_string();
@@ -3694,7 +3754,7 @@ async fn run_caught_binding_fault_adapter(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input);
+    let parent = crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input);
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let declared_binding = zero_slot_named_binding(7);
     let invocation_binding = zero_slot_named_binding(7);
@@ -3769,7 +3829,8 @@ async fn run_stateful_binding_fault_adapter(
         FirstOutput::versioned_event_type(),
         json!({ "value": 9 }),
     );
-    let parent = JournalRecord::new(JournalWriterId::new(), input.clone());
+    let parent =
+        crate::testing::causal_fixture::committed_input(JournalWriterId::new(), input.clone());
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let declared_binding = zero_slot_named_binding(7);
     let invocation_binding = zero_slot_named_binding(7);
@@ -6179,9 +6240,14 @@ fn comparable_effect_journal(
             (
                 envelope.envelope.provenance.event.id,
                 envelope.event_type(),
-                envelope.envelope.provenance.journal.journal_group_id,
+                envelope
+                    .envelope
+                    .provenance
+                    .journal
+                    .journal_group_id
+                    .clone(),
                 envelope.envelope.provenance.journal.journal_group_member,
-                serde_json::to_value(envelope.payload).expect("effect journal content serialises"),
+                serde_json::to_value(&envelope.payload).expect("effect journal content serialises"),
             )
         })
         .collect()
@@ -7564,10 +7630,10 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         data_journal: journal,
         flow_context: None,
         observers: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
-        parent: parent.clone(),
+        parent: parent.clone().into(),
         effect_history: None,
         runtime_execution: crate::execution::RuntimeExecution::new(
             crate::execution::RuntimeMode::Live,

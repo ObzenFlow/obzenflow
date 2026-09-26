@@ -15,18 +15,19 @@ use chrono::Utc;
 use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
-use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
 use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::{CausalCoordinate, CausalFrontier, PreparedCausalCommit};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::reader::JournalReader;
+#[cfg(test)]
 use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::{AppendOptions, JournalConfig};
 use obzenflow_core::journal::{
     JournalObservationReader, LocatedObservation, ObservationKey, ObservationLookup,
 };
-use std::collections::HashMap;
+use obzenflow_core::FlowId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -34,7 +35,7 @@ use super::reader::MemoryJournalReader;
 
 pub(super) struct MemoryJournalState<T: JournalEvent> {
     pub(super) events: Vec<JournalRecord<T::Payload>>,
-    writer_clocks: HashMap<WriterId, VectorClock>,
+    last_commit: Option<PreparedCausalCommit>,
     observations: ObservationIndex,
     metrics_tail: MetricsTailIndex,
 }
@@ -44,6 +45,7 @@ pub(super) struct MemoryJournalState<T: JournalEvent> {
 pub struct MemoryJournal<T: JournalEvent> {
     owner: Option<JournalOwner>,
     journal_id: JournalId,
+    run_id: FlowId,
     state: Arc<Mutex<MemoryJournalState<T>>>,
     /// Flow-shared admission sequencer (FLOWIP-120n F18); see `DiskJournal`.
     admission_sequencer: Option<Arc<AtomicU64>>,
@@ -63,9 +65,10 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             owner: None,
             journal_id: JournalId::new(),
+            run_id: FlowId::new(),
             state: Arc::new(Mutex::new(MemoryJournalState {
                 events: Vec::new(),
-                writer_clocks: HashMap::new(),
+                last_commit: None,
                 observations: ObservationIndex::default(),
                 metrics_tail: MetricsTailIndex::default(),
             })),
@@ -80,15 +83,24 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             owner: Some(owner),
             journal_id: JournalId::new(),
+            run_id: FlowId::new(),
             state: Arc::new(Mutex::new(MemoryJournalState {
                 events: Vec::new(),
-                writer_clocks: HashMap::new(),
+                last_commit: None,
                 observations: ObservationIndex::default(),
                 metrics_tail: MetricsTailIndex::default(),
             })),
             admission_sequencer: None,
             observability: JournalObservability::default(),
             _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Construct a new journal incarnation within a run before sharing it.
+    pub fn with_owner_in_run(owner: JournalOwner, run_id: FlowId) -> Self {
+        Self {
+            run_id,
+            ..Self::with_owner(owner)
         }
     }
 
@@ -103,11 +115,9 @@ impl<T: JournalEvent> MemoryJournal<T> {
     fn append_record(
         &self, // Note: &self, not &mut self
         mut event: T,
-        parent: Option<&JournalRecord<T::Payload>>,
+        frontier: &CausalFrontier,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
-        // Get writer_id from the event
-        let writer_id = *event.writer_id();
 
         let mut state = self.state.lock().unwrap();
 
@@ -121,14 +131,13 @@ impl<T: JournalEvent> MemoryJournal<T> {
             }
         }
 
-        // Compute and store this writer's next clock under the mutex.
-        let current = state.writer_clocks.get(&writer_id).cloned();
-        let vector_clock = CausalOrderingService::advance_for_append(
-            current.as_ref(),
-            &writer_id.to_string(),
-            parent.map(|p| &p.envelope.provenance.journal.vector_clock),
-        );
-        state.writer_clocks.insert(writer_id, vector_clock.clone());
+        let (commitment, causal) = PreparedCausalCommit::prepare(
+            self.run_id,
+            CausalCoordinate::new(self.journal_id.into()),
+            *event.id(),
+            state.last_commit.as_ref(),
+            frontier,
+        )?;
 
         // Create envelope with proper vector clock
         let envelope = {
@@ -138,7 +147,9 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 payload,
                 JournalProvenance {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
-                    vector_clock,
+                    run_id: self.run_id,
+                    causal,
+                    vector_clock: commitment.clock.clone(),
                     timestamp: Utc::now(),
                     journal_group_id: None,
                     journal_group_member: None,
@@ -150,7 +161,9 @@ impl<T: JournalEvent> MemoryJournal<T> {
             })?
         };
 
+        obzenflow_core::journal::limits::validate_group(std::slice::from_ref(&envelope))?;
         // Store event
+        state.last_commit = Some(commitment);
         state.events.push(envelope.clone());
         state.index_committed(1);
 
@@ -161,9 +174,10 @@ impl<T: JournalEvent> MemoryJournal<T> {
         &self,
         group_id: &str,
         mut events: Vec<T>,
-        parent: Option<&JournalRecord<T::Payload>>,
+        frontier: &CausalFrontier,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
+        obzenflow_core::journal::limits::validate_group_size(events.len())?;
         if events.is_empty() {
             return Ok(Vec::new());
         }
@@ -187,20 +201,24 @@ impl<T: JournalEvent> MemoryJournal<T> {
 
         // Build against a private clock snapshot, then publish clocks and
         // events together while holding the single state mutex.
-        let mut next_writer_clocks = state.writer_clocks.clone();
+        let mut next_last_commit = state.last_commit.clone();
         let group_size = u32::try_from(events.len()).map_err(|_| JournalError::Implementation {
             message: format!("Atomic journal group '{group_id}' exceeds u32 member capacity"),
             source: "atomic journal group is too large".into(),
         })?;
         let mut envelopes = Vec::with_capacity(events.len());
+        let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
+
         for (index, event) in events.into_iter().enumerate() {
-            let writer_id = *event.writer_id();
-            let vector_clock = CausalOrderingService::advance_for_append(
-                next_writer_clocks.get(&writer_id),
-                &writer_id.to_string(),
-                parent.map(|p| &p.envelope.provenance.journal.vector_clock),
-            );
-            next_writer_clocks.insert(writer_id, vector_clock.clone());
+            let (commitment, causal) = PreparedCausalCommit::prepare(
+                self.run_id,
+                CausalCoordinate::new(self.journal_id.into()),
+                *event.id(),
+                next_last_commit.as_ref(),
+                frontier,
+            )?;
+
+            next_last_commit = Some(commitment.clone());
             envelopes.push({
                 let (authored, payload) = event.into_parts();
                 JournalRecord::commit(
@@ -208,7 +226,9 @@ impl<T: JournalEvent> MemoryJournal<T> {
                     payload,
                     JournalProvenance {
                         journal_writer_id: JournalWriterId::from(self.journal_id),
-                        vector_clock,
+                        run_id: self.run_id,
+                        causal,
+                        vector_clock: commitment.clock.clone(),
                         timestamp: Utc::now(),
                         journal_group_id: Some(group_id.to_string()),
                         journal_group_member: Some(JournalGroupMember {
@@ -223,8 +243,9 @@ impl<T: JournalEvent> MemoryJournal<T> {
                     source: Box::new(error),
                 })?
             });
+            budget.admit(envelopes.last().expect("prepared record"))?;
         }
-        state.writer_clocks = next_writer_clocks;
+        state.last_commit = next_last_commit;
         state.events.extend(envelopes.iter().cloned());
         state.index_committed(envelopes.len());
         Ok(envelopes)
@@ -232,56 +253,58 @@ impl<T: JournalEvent> MemoryJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for MemoryJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.journal_id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    fn observation_reader(&self) -> Option<&dyn JournalObservationReader> {
+    fn storage_observation_reader(&self) -> Option<&dyn JournalObservationReader> {
         Some(self)
     }
 
-    fn configure(&self, config: JournalConfig) -> Result<(), JournalError> {
+    fn storage_configure(&self, config: JournalConfig) -> Result<(), JournalError> {
         self.observability.configure(config.observability)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
-        let AppendOptions { parent, capture } = options;
+        let AppendOptions { frontier, capture } = options;
         let (mut events, reservation) = self.observability.prepare(vec![event], capture);
         let result = self
-            .append_record(events.pop().expect("one event"), parent)
+            .append_record(events.pop().expect("one event"), &frontier)
             .map(|record| vec![record]);
         reservation.finish::<T>(&result);
         result.map(|mut records| records.pop().expect("one record"))
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         group_id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-        let AppendOptions { parent, capture } = options;
+        let AppendOptions { frontier, capture } = options;
         let (events, reservation) = self.observability.prepare(events, capture);
-        let result = self.append_records(group_id, events, parent);
+        let result = self.append_records(group_id, events, &frontier);
         reservation.finish::<T>(&result);
         result
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let state = self.state.lock().unwrap();
         Ok(state.events.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
@@ -289,14 +312,23 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(state.events.iter().find(|e| e.id() == event_id).cloned())
     }
 
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_committed_position(&self) -> Result<u64, JournalError> {
+        Ok(self.state.lock().unwrap().events.len() as u64)
+    }
+
+    async fn storage_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(MemoryJournalReader::new(
             self.state.clone(),
             position,
         )))
     }
 
-    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_metrics_tail(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let state = self.state.lock().unwrap();
         Ok(state
             .metrics_tail
@@ -306,7 +338,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             .collect())
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -446,6 +478,7 @@ impl<T: JournalEvent> JournalObservationReader for MemoryJournal<T> {
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+    use obzenflow_core::event::vector_clock::CausalOrderingService;
     use obzenflow_core::id::StageId;
     use serde_json::json;
 
@@ -492,7 +525,10 @@ mod tests {
         let event2 =
             ChainEventFactory::data_event(writer2, "test.event.2", json!({"data": "second"}));
         let envelope2 = journal
-            .append(event2, AppendOptions::new(Some(&envelope1)))
+            .append(
+                event2,
+                AppendOptions::from_record(Some(&envelope1)).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -557,13 +593,19 @@ mod tests {
 
         let event2 = ChainEventFactory::data_event(writer, "event.2", json!({"seq": 2}));
         let envelope2 = journal
-            .append(event2, AppendOptions::new(Some(&envelope1)))
+            .append(
+                event2,
+                AppendOptions::from_record(Some(&envelope1)).unwrap(),
+            )
             .await
             .unwrap();
 
         let event3 = ChainEventFactory::data_event(writer, "event.3", json!({"seq": 3}));
         journal
-            .append(event3, AppendOptions::new(Some(&envelope2)))
+            .append(
+                event3,
+                AppendOptions::from_record(Some(&envelope2)).unwrap(),
+            )
             .await
             .unwrap();
 

@@ -6,7 +6,6 @@
 
 use crate::feed_plan::FeedKey;
 use crate::id_conversions::StageIdExt;
-use crate::messaging::system_subscription::SystemSubscription;
 use crate::metrics::observations::ObservationRegistry;
 use crate::pipeline::config::SourceContractStrictMode;
 use crate::pipeline::resources::PipelineResources;
@@ -147,10 +146,13 @@ pub(crate) struct PipelineContext {
     /// Running stages tracking (for startup coordination)
     pub(crate) running_stages: std::collections::HashSet<StageId>,
 
-    /// System subscription for stage completion events from system journal
-    pub(crate) completion_subscription: Option<SystemSubscription<SystemEvent>>,
+    /// Applied physical positions, independent of prefetched rows and clocks.
+    pub(crate) report_coverage: HashMap<obzenflow_core::JournalId, u64>,
+    pub(crate) completion_subscription:
+        Option<crate::supervised_base::report_reader::ReportReaders>,
 
     /// Optional exporter for aggregated metrics snapshots
+    pub(crate) metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>>,
 
     /// Stage data journals (for metrics aggregator)

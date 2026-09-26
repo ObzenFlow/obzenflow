@@ -57,6 +57,51 @@ impl JournalPayload for ChainPayload {
         if provenance.runtime.is_some() {
             visit(MetricsTailKey::Accounting(stage));
         }
+        if let Self::Execution(execution) = self {
+            use super::execution_payload::StageLifecycleFact;
+            match execution {
+                ExecutionPayload::StageLifecycle(fact) => {
+                    visit(MetricsTailKey::StageLifecycle(stage));
+                    if matches!(
+                        fact,
+                        StageLifecycleFact::Draining {
+                            accounting: Some(_),
+                            ..
+                        } | StageLifecycleFact::Completed {
+                            accounting: Some(_),
+                            ..
+                        } | StageLifecycleFact::Cancelled {
+                            accounting: Some(_),
+                            ..
+                        } | StageLifecycleFact::Failed {
+                            accounting: Some(_),
+                            ..
+                        }
+                    ) {
+                        visit(MetricsTailKey::Accounting(stage));
+                    }
+                }
+                ExecutionPayload::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    contract_name,
+                    ..
+                } => {
+                    visit(MetricsTailKey::Contract(
+                        crate::metrics::ContractMetricEdgeKey {
+                            upstream: *upstream,
+                            downstream: *reader,
+                            selected_event_type: selected_event_type.clone(),
+                            feed_role: *feed_role,
+                            contract: contract_name.clone(),
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        }
         match self {
             Self::Execution(ExecutionPayload::HttpPullState(_)) => {
                 visit(MetricsTailKey::HttpPull(stage))

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Each live phase consumes original system-journal envelopes. Shared folding
+//! Each live phase consumes original committed supervisor reports. Shared folding
 //! retains evidence; phase handlers below name the lifecycle decisions it permits.
 
 use super::context::{record_stage_completion, ContractEdgeStatus};
@@ -17,7 +17,7 @@ use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::SourceContractStrictMode;
 use crate::pipeline::resources::ProducerTail;
 use crate::pipeline::FlowStopMode;
-use obzenflow_core::event::journal_record::SystemJournalRecord;
+use crate::supervised_base::SupervisorRecord;
 use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::{
     MetricsCoordinationEvent, PipelineLifecycleEvent, PipelineStopAdmission, StageLifecycleEvent,
@@ -31,13 +31,26 @@ fn observe<'a>(
     ctx: &mut C,
     fail: FailureDecision,
     contract_state: S,
-) -> Result<&'a SystemJournalRecord, Change> {
+) -> Result<&'a SupervisorRecord, Change> {
     let E::Journal(envelope) = event else {
         unreachable!("journal handler input");
     };
     let row = envelope;
+    if let Err(error) = row
+        .frontier()
+        .and_then(|frontier| crate::supervised_base::publication::incorporate(&frontier))
+    {
+        return Err(fail(ctx, error.to_string()));
+    }
     ctx.last_system_event_id_seen = Some(*row.id());
-    if matches!(ctx.resources.producer_tail, ProducerTail::Through(id) if id == *row.id()) {
+    ctx.report_coverage.insert(row.journal_id(), row.position());
+    tracing::trace!(
+        journal = %row.journal_id(),
+        applied_through = row.position(),
+        commit_to_admission_us = (chrono::Utc::now() - row.journal().timestamp).num_microseconds(),
+        "Pipeline applied committed supervisor report"
+    );
+    if ctx.resources.producer_tail.covered(&ctx.report_coverage) {
         ctx.resources.producer_tail = ProducerTail::Reached;
     }
     match &row.payload {
@@ -184,7 +197,7 @@ fn all_stages_completed(ctx: &C) -> bool {
     ctx.topology.num_stages() > 0 && ctx.completed_stages.len() == ctx.topology.num_stages()
 }
 
-fn own_pipeline<'a>(row: &'a SystemJournalRecord, ctx: &C) -> Option<&'a PipelineLifecycleEvent> {
+fn own_pipeline<'a>(row: &'a SupervisorRecord, ctx: &C) -> Option<&'a PipelineLifecycleEvent> {
     match &row.payload {
         SystemPayload::PipelineLifecycle(event) if *row.writer_id() == ctx.system_id.into() => {
             Some(event)
@@ -197,7 +210,7 @@ fn own_pipeline<'a>(row: &'a SystemJournalRecord, ctx: &C) -> Option<&'a Pipelin
 // EOF/quiescence/replay completion does not require all logical feed statuses.
 fn completion_boundary(
     state: S,
-    row: &SystemJournalRecord,
+    row: &SupervisorRecord,
     ctx: &mut C,
     mut actions: Vec<A>,
 ) -> Change {
@@ -216,7 +229,7 @@ fn completion_boundary(
     change(state, actions)
 }
 
-fn authorise_sources(row: &SystemJournalRecord, ctx: &mut C, actions: &mut Vec<A>) {
+fn authorise_sources(row: &SupervisorRecord, ctx: &mut C, actions: &mut Vec<A>) {
     if matches!(
         own_pipeline(row, ctx),
         Some(PipelineLifecycleEvent::Running { .. })

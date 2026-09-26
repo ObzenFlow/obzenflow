@@ -4,6 +4,8 @@
 
 //! FLOWIP-128b live/replay witness for the ordinary standalone AI surface.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow::ai::{
     ChatCompletion, ChatEffectBinding, ChatResponse, ChatResponseFormat, ChatTransformBuilder,
@@ -23,12 +25,11 @@ use obzenflow_core::event::{
     ChainEvent, ChainPayload, EffectAttemptStarted, EffectOutcomePayload, EffectRecord,
 };
 use obzenflow_core::http_client::Url;
-use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{StageId, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::dsl::error::FlowBuildError;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
     ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
@@ -395,15 +396,8 @@ async fn stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
     let relative = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .unwrap();
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::stage(StageId::new()),
-    )
-    .unwrap();
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative))
         .await
-        .unwrap()
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()

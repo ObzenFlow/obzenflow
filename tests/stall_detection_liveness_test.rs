@@ -66,7 +66,7 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         writer_id,
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some(system_journal.clone().into()),
         reader_stage: Some(stage_id),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,

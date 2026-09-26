@@ -6,6 +6,7 @@
 
 pub(crate) mod codec;
 pub mod config;
+pub mod identity;
 pub mod inspect;
 pub mod journal;
 pub mod log_record;

@@ -162,7 +162,8 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
         }
         publish(8);
         observations.offer(edge(8));
-        tokio::time::advance(Duration::from_millis(interval_ms - 1)).await;
+        // Leave one full reader polling interval before the observation deadline.
+        tokio::time::advance(Duration::from_millis(interval_ms - 20)).await;
         let fact = append(
             journal.as_ref(),
             system.into(),
@@ -172,14 +173,14 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
             },
         )
         .await;
-        assert_eq!(fast.next().await.unwrap().id, Some(fact.id().to_string()));
+        assert_eq!(fast.next().await.unwrap().id, Some(cursor(&fact)));
         assert!(
             futures::poll!(fast.next()).is_pending(),
             "live observations cannot bypass the observation deadline"
         );
         publish(9);
         observations.offer(edge(9));
-        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_millis(20)).await;
         for client in [&mut fast, &mut slow] {
             loop {
                 let frame = client.next().await.unwrap();
@@ -206,10 +207,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
         );
         attached.envelope.observability = Some(edge(10));
         let attached = journal.append(attached, Default::default()).await.unwrap();
-        assert_eq!(
-            fast.next().await.unwrap().id,
-            Some(attached.id().to_string())
-        );
+        assert_eq!(fast.next().await.unwrap().id, Some(cursor(&attached)));
         assert!(
             futures::poll!(fast.next()).is_pending(),
             "journal attachments cannot bypass the same deadline"
@@ -316,18 +314,40 @@ pub(super) async fn collect_closing(
         .expect("SSE response closes after terminal shutdown")
 }
 
+pub(super) fn cursor<P: obzenflow_core::event::payloads::JournalPayload>(
+    row: &obzenflow_core::JournalRecord<P>,
+) -> String {
+    format!(
+        "jr1:{}",
+        serde_json::to_string(&std::collections::BTreeMap::from([(
+            *row.envelope
+                .provenance
+                .journal
+                .journal_writer_id
+                .as_journal_id(),
+            row.local_sequence()
+        )]))
+        .unwrap()
+    )
+}
+
 async fn request_body(
     journal: Arc<dyn Journal<SystemEvent>>,
     definitions: Vec<CompositeDefinition>,
     last_event_id: Option<EventId>,
 ) -> Vec<SseFrame> {
+    let checkpoint = match last_event_id {
+        Some(id) => Some(match journal.read_event(&id).await.unwrap() {
+            Some(row) => cursor(&row),
+            None => format!(
+                "jr1:{}",
+                serde_json::json!({obzenflow_core::JournalId::new().to_string(): 1})
+            ),
+        }),
+        None => None,
+    };
     let (endpoint, closing) = endpoint(journal, definitions);
-    collect_closing(
-        &endpoint,
-        closing,
-        last_event_id.map(|id| id.to_string()).as_deref(),
-    )
-    .await
+    collect_closing(&endpoint, closing, checkpoint.as_deref()).await
 }
 
 pub(super) fn frames<'a>(body: &'a [SseFrame], event_name: &str) -> Vec<&'a SseFrame> {
@@ -417,7 +437,7 @@ async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
     let errors = frames(&missing, "error");
     assert!(errors
         .iter()
-        .any(|frame| { frame_payload(frame)["error_type"] == "journal_resume_not_found" }));
+        .any(|frame| { frame_payload(frame)["error_type"] == "invalid_last_event_id" }));
     let missing_status = frames(&missing, "composite_status");
     assert_eq!(missing_status.len(), 1);
     assert_eq!(frame_payload(missing_status[0])["status"], "completed");
@@ -516,12 +536,12 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
         Some(RuntimeInstanceId::new()),
         receiver,
     );
-    let mut first = open(&endpoint, Some(&prefix.id().to_string())).await;
+    let mut first = open(&endpoint, Some(&cursor(&prefix))).await;
     let fact = tokio::time::timeout(Duration::from_secs(2), first.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fact.id, Some(opened.id().to_string()));
+    assert_eq!(fact.id, Some(cursor(&opened)));
     assert_eq!(frame_payload(&fact)["revision"], 420);
     assert_eq!(frame_payload(&fact)["context"]["cooldown_ms"], 5_000);
     drop(first); // Disconnect before the optional frame belonging to this fact.
@@ -532,10 +552,10 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
         SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
     .await;
-    let resumed = collect_closing(&endpoint, closing, Some(&opened.id().to_string())).await;
+    let resumed = collect_closing(&endpoint, closing, Some(&cursor(&opened))).await;
     let terminal_index = resumed
         .iter()
-        .position(|frame| frame.id == Some(terminal.id().to_string()))
+        .position(|frame| frame.id == Some(cursor(&terminal)))
         .unwrap();
     let measurement_index = resumed
         .iter()
@@ -649,8 +669,8 @@ impl Drop for ScriptedReader {
 }
 
 #[async_trait]
-impl JournalReader<SystemEvent> for ScriptedReader {
-    async fn next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
+impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ScriptedReader {
+    async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if let Some(probe) = &self.pending_read {
             let _guard = PendingOpenGuard(probe.clone());
@@ -667,15 +687,15 @@ impl JournalReader<SystemEvent> for ScriptedReader {
         Ok(next)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.position as u64
     }
 
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
         Ok(self.position >= self.events.len())
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.position >= self.events.len()
     }
 }
@@ -739,35 +759,35 @@ impl ScriptedJournal {
 }
 
 #[async_trait]
-impl Journal<SystemEvent> for ScriptedJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<SystemEvent> for ScriptedJournal {
+    fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: SystemEvent,
-        options: AppendOptions<'_, SystemEvent>,
+        options: AppendOptions<SystemEvent>,
     ) -> Result<SystemJournalRecord, JournalError> {
         self.inner.append(event, options).await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<SystemJournalRecord>, JournalError> {
+    async fn storage_read_all_unordered(&self) -> Result<Vec<SystemJournalRecord>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
@@ -792,7 +812,10 @@ impl Journal<SystemEvent> for ScriptedJournal {
         Ok(reader)
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<SystemJournalRecord>, JournalError> {
+    async fn storage_read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<SystemJournalRecord>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }
@@ -849,9 +872,10 @@ async fn dropping_the_sse_body_drops_its_reader() {
         Some("bootstrap")
     );
     drop(body);
+    tokio::task::yield_now().await;
     assert!(
         reader_dropped.load(Ordering::SeqCst),
-        "response owns and drops its reader synchronously"
+        "response cancellation releases its owned reader task"
     );
 }
 
@@ -892,40 +916,37 @@ async fn empty_bootstrap_and_closing_admission_do_not_fabricate_cursors() {
 #[tokio::test]
 async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallback() {
     let (journal, definitions, _) = completed_tape().await;
-    let last_id = journal.read_last_n(1).await.unwrap()[0]
-        .envelope
-        .provenance
-        .event
-        .id
-        .to_string();
+    let last_id = cursor(&journal.read_last_n(1).await.unwrap()[0]);
     for cursor in [
         String::new(),
         "malformed".into(),
         EventId::new().to_string(),
+        format!(
+            "jr1:{}",
+            serde_json::to_string(&std::collections::BTreeMap::from([(
+                *journal.id(),
+                u64::MAX
+            )]))
+            .unwrap()
+        ),
+        format!(
+            "jr1:{}",
+            serde_json::to_string(&std::collections::BTreeMap::from([(
+                JournalId::new(),
+                1u64
+            )]))
+            .unwrap()
+        ),
     ] {
         let (endpoint, closing) = endpoint(journal.clone(), definitions.clone());
         let body = collect_closing(&endpoint, closing, Some(&cursor)).await;
         let error = frame_payload(&body[0]);
-        match EventId::from_string(&cursor) {
-            Err(parse_error) => assert_eq!(
-                error,
-                serde_json::json!({
-                    "error_type": "invalid_last_event_id", "message": parse_error.to_string(), "recoverable": false
-                })
-            ),
-            Ok(_) => assert_eq!(
-                error,
-                serde_json::json!({
-                    "error_type": "journal_resume_not_found",
-                    "message": "Last-Event-ID was not found in the system journal; resuming from live tail",
-                    "recoverable": true
-                })
-            ),
-        }
+        assert_eq!(error["error_type"], "invalid_last_event_id");
+        assert_eq!(error["recoverable"], false);
         assert!(body[0].id.is_none());
         let bootstrap = frames(&body, "bootstrap")[0];
         assert_eq!(bootstrap.id.as_deref(), Some(last_id.as_str()));
-        assert_eq!(frame_payload(bootstrap)["checkpoint_event_id"], last_id);
+        assert!(frame_payload(bootstrap)["checkpoint_event_id"].is_null());
         assert_eq!(frames(&body, "stage_lifecycle").len(), 2);
         assert_eq!(
             body.last().unwrap().event.as_deref(),
@@ -1006,15 +1027,15 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 ),
             )
             .await;
-            let cursor = match cursor_kind {
+            let resume_cursor = match cursor_kind {
                 "unknown" => Some(EventId::new().to_string()),
                 "fresh" => None,
                 "malformed" => Some("malformed".to_string()),
-                "known" => Some(prefix.id().to_string()),
+                "known" => Some(self::cursor(&prefix)),
                 _ => unreachable!(),
             };
             let (endpoint, closing) = endpoint(journal.clone(), vec![]);
-            let mut stream = open(&endpoint, cursor.as_deref()).await;
+            let mut stream = open(&endpoint, resume_cursor.as_deref()).await;
             let mut body = Vec::new();
             if cursor_kind != "known" {
                 loop {
@@ -1030,7 +1051,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 // Receiving the bootstrap cursor must already establish factual
                 // middleware state, even if the client disconnects immediately.
                 drop(stream);
-                stream = open(&endpoint, Some(&prefix.id().to_string())).await;
+                stream = open(&endpoint, Some(&cursor(&prefix))).await;
             }
             // Later facts must not leak into the initial snapshot.
             let closed = append(
@@ -1096,7 +1117,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                     .unwrap();
                 let closed_index = body
                     .iter()
-                    .position(|frame| frame.id == Some(closed.id().to_string()))
+                    .position(|frame| frame.id == Some(cursor(&closed)))
                     .unwrap();
                 let bootstrap_index = body
                     .iter()
@@ -1111,9 +1132,9 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             assert_eq!(frame_payload(facts[0])["revision"], 421);
             let mut expected_ids = Vec::new();
             if cursor_kind != "known" {
-                expected_ids.push(prefix.id().to_string());
+                expected_ids.push(cursor(&prefix));
             }
-            expected_ids.extend([closed.id().to_string(), terminal.id().to_string()]);
+            expected_ids.extend([cursor(&closed), cursor(&terminal)]);
             assert_eq!(
                 body.iter()
                     .filter_map(|frame| frame.id.clone())
@@ -1124,7 +1145,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             match cursor_kind {
                 "unknown" => assert_eq!(
                     frame_payload(errors[0])["error_type"],
-                    "journal_resume_not_found"
+                    "invalid_last_event_id"
                 ),
                 "malformed" => assert_eq!(
                     frame_payload(errors[0])["error_type"],
@@ -1157,6 +1178,7 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
+    tokio::task::yield_now().await;
     assert!(reader_dropped.load(Ordering::SeqCst));
     tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
         .await
@@ -1182,9 +1204,11 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
         futures::poll!(body.next()).is_pending(),
         "ready history must yield before exhausting the tape"
     );
+    tokio::task::yield_now().await;
     let reads = journal.reads.load(Ordering::SeqCst);
     assert!(reads > 0 && reads < 256);
     drop(body);
+    tokio::task::yield_now().await;
     assert!(journal.reader_dropped.load(Ordering::SeqCst));
     tokio::task::yield_now().await;
     assert_eq!(journal.reads.load(Ordering::SeqCst), reads);
@@ -1221,18 +1245,11 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
     )
     .await;
     let fact = fast.next().await.unwrap();
-    assert_eq!(
-        fact.id.as_deref(),
-        Some(running.envelope.provenance.event.id.to_string().as_str())
-    );
+    assert_eq!(fact.id.as_deref(), None);
     // Disconnect after receiving the stage message and its reconnect ID, but
     // before receiving the accompanying composite status.
     drop(fast);
-    let mut resumed = open(
-        &endpoint,
-        Some(&running.envelope.provenance.event.id.to_string()),
-    )
-    .await;
+    let mut resumed = open(&endpoint, Some(&cursor(&running))).await;
     let repaired = resumed.next().await.unwrap();
     assert_eq!(frame_payload(&repaired)["status"], "running");
     assert!(repaired.id.is_none());
@@ -1367,8 +1384,22 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         "the real factory snapshot reaches topology"
     );
     let journal = handle.system_journal().unwrap();
+    let report_journals = handle.report_journals();
+    let source_journal = report_journals
+        .iter()
+        .find_map(|report| match report {
+            obzenflow_runtime::supervised_base::SupervisorJournal::Stage { journal, context }
+                if context.stage_name == "input" =>
+            {
+                Some(journal.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
     let (endpoint, closing) = endpoint(journal.clone(), vec![]);
-    let endpoint = endpoint.with_observation_interval(Duration::from_secs(3600));
+    let endpoint = endpoint
+        .with_report_journals(report_journals.clone())
+        .with_observation_interval(Duration::from_secs(3600));
     let mut stream = open(&endpoint, None).await;
     while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {}
 
@@ -1395,7 +1426,7 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .unwrap();
     assert_eq!(
         opened["context"]["cooldown_ms"], 1,
-        "the effective cooldown survives the source journal, system mirror, and SSE"
+        "the effective cooldown survives the source journal and SSE"
     );
     let limiter = payloads
         .iter()
@@ -1413,35 +1444,54 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         pair[0]["revision"].as_u64().unwrap() < pair[1]["revision"].as_u64().unwrap()
     }));
 
-    let recorded: Vec<_> = journal
+    let recorded: Vec<_> = source_journal
         .read_all_unordered()
         .await
         .unwrap()
         .into_iter()
+        .filter_map(obzenflow_core::event::SupervisorRecord::from_chain)
         .filter(|record| matches!(record.payload, SystemPayload::MiddlewareLifecycle { .. }))
+        .map(|record| record.id().to_string())
         .collect();
-    let ids: Vec<_> = changes.iter().map(|frame| frame.id.clone()).collect();
-    assert_eq!(
-        ids,
-        recorded
+    let ids: Vec<_> = changes
+        .iter()
+        .map(|frame| {
+            frame_payload(frame)["commitment"]["event_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(ids, recorded);
+    assert!(
+        journal
+            .read_all_unordered()
+            .await
+            .unwrap()
             .iter()
-            .map(|record| Some(record.id().to_string()))
-            .collect::<Vec<_>>()
+            .all(|record| !matches!(record.payload, SystemPayload::MiddlewareLifecycle { .. })),
+        "pipeline history has no middleware mirrors"
     );
 
-    // A reconnect after Opened must still receive HalfOpen and Closed.
-    let cursor = EventId::from_string(changes[0].id.as_deref().unwrap()).unwrap();
-    let resumed = request_body(journal.clone(), vec![], Some(cursor)).await;
+    // Resume independently in each physical history after the first transition.
+    let (resumed_endpoint, resumed_closing) = self::endpoint(journal.clone(), vec![]);
+    let resumed_endpoint = resumed_endpoint.with_report_journals(report_journals.clone());
+    let resumed =
+        collect_closing(&resumed_endpoint, resumed_closing, changes[0].id.as_deref()).await;
     assert_eq!(
         frames(&resumed, "middleware_lifecycle")
             .iter()
-            .map(|frame| frame.id.clone())
+            .map(|frame| frame_payload(frame)["commitment"]["event_id"]
+                .as_str()
+                .unwrap()
+                .to_owned())
             .collect::<Vec<_>>(),
         ids[1..]
     );
 
-    // A new viewer receives the current factual state without replaying it.
-    let fresh = request_body(journal, vec![], None).await;
+    let (fresh_endpoint, fresh_closing) = self::endpoint(journal, vec![]);
+    let fresh_endpoint = fresh_endpoint.with_report_journals(report_journals);
+    let fresh = collect_closing(&fresh_endpoint, fresh_closing, None).await;
     let snapshot = frame_payload(frames(&fresh, "middleware_state_snapshot")[0]);
     let middleware = snapshot["middleware"].as_array().unwrap();
     assert_eq!(middleware.len(), 1);
@@ -1533,5 +1583,190 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
                 "errors_total": 0,
             })
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
+    use obzenflow_adapters::monitoring::MetricsReadModel;
+    use obzenflow_core::event::CausalCoordinate;
+    use obzenflow_dsl::dsl::{composition::IntoFlowMember, topology::AuthoredConnection};
+    use obzenflow_dsl::{async_source, sink};
+    use obzenflow_runtime::run_context::FlowBuildContext;
+    use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
+    use obzenflow_runtime::stages::{sink::SinkTyped, SourceError};
+    use obzenflow_runtime::supervised_base::SupervisorJournal;
+    use std::collections::HashMap;
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct Item;
+    impl obzenflow_core::TypedPayload for Item {
+        const EVENT_TYPE: &'static str = "supervision.scale";
+    }
+    #[derive(Clone, Debug)]
+    struct GatedSource {
+        gate: Arc<tokio::sync::Semaphore>,
+        emitted: bool,
+    }
+    #[async_trait::async_trait]
+    impl TypedAsyncFiniteSourceHandler for GatedSource {
+        type Output = Item;
+        async fn next(&mut self) -> Result<Option<Vec<Item>>, SourceError> {
+            if self.emitted {
+                return Ok(None);
+            }
+            self.gate.acquire().await.unwrap().forget();
+            self.emitted = true;
+            Ok(Some(vec![Item]))
+        }
+    }
+
+    // Exercise the ordinary lowering/materialisation path with a generated
+    // fan-in. Disk's large-reader fairness is separately tested in
+    // supervision_journals; this composition also runs its real 10-stage path.
+    for (disk, stages) in [(false, 2), (false, 10), (false, 100), (true, 10)] {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut members = HashMap::new();
+        let mut connections = Vec::new();
+        for index in 0..stages - 1 {
+            let name = format!("source_{index:03}");
+            let handler = GatedSource {
+                gate: gate.clone(),
+                emitted: false,
+            };
+            let mut descriptor = async_source!(Item => handler);
+            descriptor.set_name(name.clone());
+            members.insert(name.clone(), descriptor.into_flow_member());
+            connections.push(AuthoredConnection::edge(
+                name,
+                "output",
+                obzenflow_topology::EdgeKind::Forward,
+            ));
+        }
+        let output_handler = SinkTyped::new(|_: Item| async {}).idempotent();
+        let mut output = sink!(Item => output_handler);
+        output.set_name("output".into());
+        members.insert("output".into(), output.into_flow_member());
+        let lowered =
+            obzenflow_dsl::dsl::composites::lower_composites(members, connections).unwrap();
+        let model = Arc::new(MetricsReadModel::default());
+        let context = FlowBuildContext::for_tests().with_metrics_exporter(model);
+        let built = if disk {
+            obzenflow_dsl::dsl::flow_builder::build_flow(
+                "supervision_scale",
+                crate::journal::disk_journals(directory.path().to_owned()),
+                lowered,
+                context,
+                None,
+            )
+            .await
+        } else {
+            obzenflow_dsl::dsl::flow_builder::build_flow(
+                "supervision_scale",
+                crate::journal::memory_journals(),
+                lowered,
+                context,
+                None,
+            )
+            .await
+        }
+        .unwrap();
+        let handle = built.into_handle();
+        let pipeline = handle.system_journal().unwrap();
+        let journals = handle.report_journals();
+        let metrics = handle.metrics_journals().unwrap();
+        let (endpoint, closing) = endpoint(pipeline.clone(), vec![]);
+        let endpoint = endpoint.with_report_journals(journals.clone());
+        let mut stream = open(&endpoint, None).await;
+        while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {}
+        let started = std::time::Instant::now();
+        let delivery = tokio::spawn(async move { stream.collect::<Vec<_>>().await });
+        gate.add_permits(stages - 1);
+        tokio::time::timeout(Duration::from_secs(15), handle.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let settled = started.elapsed();
+        closing.send(true).unwrap();
+        let frames = tokio::time::timeout(Duration::from_secs(5), delivery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frames.last().unwrap().event.as_deref(),
+            Some("server_shutdown")
+        );
+        let history = pipeline.read_all_unordered().await.unwrap();
+        let owner = match pipeline.owner().unwrap() {
+            JournalOwner::System { system_id } => WriterId::from(*system_id),
+            _ => panic!("pipeline owner"),
+        };
+        assert!(
+            history.iter().all(|row| *row.writer_id() == owner),
+            "children cannot write system.log"
+        );
+        let terminal = history.last().unwrap();
+        assert_eq!(terminal.event_type_name(), "system.pipeline.drained");
+        let delivered: std::collections::HashSet<_> = frames
+            .iter()
+            .filter_map(|frame| {
+                let payload = frame_payload(frame);
+                payload["commitment"]["event_id"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .collect();
+        let mut completion_latencies = Vec::new();
+        for journal in &journals {
+            let SupervisorJournal::Stage { journal, .. } = journal else {
+                continue;
+            };
+            let rows = journal.read_all_unordered().await.unwrap();
+            let completed = rows
+                .iter()
+                .filter_map(|row| obzenflow_core::event::SupervisorRecord::from_chain(row.clone()))
+                .find(|row| {
+                    matches!(
+                        row.payload,
+                        SystemPayload::StageLifecycle {
+                            event: StageLifecycleEvent::Completed { .. },
+                            ..
+                        }
+                    )
+                })
+                .unwrap();
+            assert!(
+                delivered.contains(&completed.id().to_string()),
+                "Studio must deliver every stage's committed completion"
+            );
+            let position = journal.committed_position().await.unwrap();
+            assert!(
+                terminal
+                    .envelope
+                    .provenance
+                    .journal
+                    .vector_clock
+                    .get(&CausalCoordinate::new((*journal.id()).into()))
+                    >= position,
+                "pipeline drained covers settled child reports"
+            );
+            completion_latencies.push(
+                (terminal.envelope.provenance.journal.timestamp - completed.journal().timestamp)
+                    .num_microseconds()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(completion_latencies.len(), stages);
+        completion_latencies.sort_unstable();
+        let coord = metrics.coordination.read_all_unordered().await.unwrap();
+        let exports = metrics.export.read_all_unordered().await.unwrap();
+        assert!(exports
+            .iter()
+            .any(|row| row.event_type_name() == "system.metrics.exported"));
+        assert!(coord
+            .iter()
+            .all(|row| row.event_type_name() != "system.metrics.exported"));
+        eprintln!("composed backend={disk}, stages={stages}, settlement={settled:?}, Studio={:?}, stage-completion-to-pipeline-drained-us p50={} p95={} p99={} max={}, exports={}, coordination={}", started.elapsed(), completion_latencies[stages / 2], completion_latencies[(stages - 1) * 95 / 100], completion_latencies[(stages - 1) * 99 / 100], completion_latencies[stages - 1], exports.len(), coord.len());
     }
 }

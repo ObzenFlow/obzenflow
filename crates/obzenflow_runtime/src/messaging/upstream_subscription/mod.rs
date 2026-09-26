@@ -13,6 +13,7 @@
 //! - FSM owns control flow decisions (sleep, retry, transition)
 //! - Contract tracking is separated from subscription mechanics
 
+use super::DeliveredRecord;
 use obzenflow_core::event::ChainPayload;
 mod construction;
 mod contract_checking;
@@ -693,7 +694,7 @@ where
         &self,
         parent_event_id: EventId,
         reader_progress: &[ReaderProgress],
-    ) -> Option<(StageId, JournalRecord<ChainPayload>)> {
+    ) -> Option<(StageId, DeliveredRecord<ChainPayload>)> {
         reader_progress.iter().find_map(|progress| {
             progress
                 .pending_delivery_inputs

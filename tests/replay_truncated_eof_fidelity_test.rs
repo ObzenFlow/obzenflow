@@ -179,35 +179,21 @@ async fn data_rows(run_dir: &Path, stage_key: &str, event_type: &str) -> usize {
         .count()
 }
 
-/// The replay run's `system.replay.completed` facts' synthesized kinds, read
-/// through the typed system journal via the run manifest.
+/// The replay source's protected completion facts carry its synthesized kind.
 async fn synthesized_kinds(run_dir: &Path) -> Vec<Option<EofKind>> {
-    use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
-    use obzenflow_core::journal::journal_owner::JournalOwner;
-    use obzenflow_core::journal::Journal;
-    use obzenflow_core::SystemId;
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::event::ReplayLifecycleEvent;
 
-    let manifest = replay_testkit::archive_manifest(run_dir);
-    let system_file = manifest["system_journal_file"]
-        .as_str()
-        .expect("manifest names the system journal")
-        .to_string();
-    let journal: obzenflow_infra::journal::DiskJournal<SystemEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(system_file),
-            JournalOwner::system(SystemId::new()),
-        )
-        .expect("system journal should open");
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_stage_envelopes_appended(run_dir, "ticks")
         .await
-        .expect("system journal should read")
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::Completed {
-                synthesized_eof_kind,
-                ..
-            }) => Some(*synthesized_eof_kind),
+            ChainPayload::Execution(ExecutionPayload::ReplayLifecycle(
+                ReplayLifecycleEvent::Completed {
+                    synthesized_eof_kind,
+                    ..
+                },
+            )) => Some(*synthesized_eof_kind),
             _ => None,
         })
         .collect()
@@ -338,7 +324,7 @@ async fn truncated_replay_suppresses_finalization_and_records_the_kind() {
         "every EOF the stateful stage journalled is Truncated: {summer_kinds:?}"
     );
 
-    // The system journal records the fidelity decision as a fact.
+    // The source journal records the fidelity decision as a fact.
     assert_eq!(
         synthesized_kinds(&candidate).await,
         vec![Some(EofKind::Truncated)],
