@@ -87,16 +87,24 @@ fn render_record(renderer: &mut Renderer, record: &RunRecord) -> String {
     String::from_utf8(output).unwrap()
 }
 
+fn json_body(text: &str) -> Value {
+    let start = text.find("\n{\n").expect("JSON payload after the header") + 1;
+    serde_json::Deserializer::from_str(&text[start..])
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .unwrap()
+}
+
 #[test]
-fn consumption_progress_resolves_upstream_and_keeps_only_recorded_status() {
+fn consumption_progress_preserves_the_recorded_json_payload() {
     let record = progress();
     let original = serde_json::to_value(&record).unwrap();
     let mut renderer = progress_renderer();
     let text = render_record(&mut renderer, &record);
-    assert!(text.contains("RUNTIME (stage: classify, journal: 2)\ncontrol.consumption_progress ← classify\n⟨2:101⟩\nInput: thermometer (journal: 1)\nProgress: 2 · EOF: not seen\n"), "{text}");
-    assert!(!text.contains("Advertised:") && !text.contains("Stalled:"));
-    assert!(!text.contains("last_event_id") && !text.contains("journal_writer_id"));
-    assert!(!text.contains("Input watermark") && !text.contains("caught up"));
+    assert!(text.contains("RUNTIME (stage: classify, journal: 2)\ncontrol.consumption_progress ← classify\n⟨2:101⟩\n{\n"), "{text}");
+    assert_eq!(json_body(&text), original["record"]["payload"]);
+    assert!(!text.contains("Input:") && !text.contains("Progress:"));
     assert_eq!(text.matches('⟨').count(), 1);
     assert_eq!(serde_json::to_value(&record).unwrap(), original);
 
@@ -116,23 +124,19 @@ fn consumption_progress_resolves_upstream_and_keeps_only_recorded_status() {
     }
     renderer.width = 40;
     let text = render_record(&mut renderer, &record);
-    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        joined.contains(&format!(
-            "Progress: {} · EOF: seen · Advertised: 0 · Stalled: {} ms",
-            u64::MAX,
-            u64::MAX
-        )),
-        "{text}"
-    );
-    assert!(
-        text.lines().all(|line| line.chars().count() <= 40),
-        "{text}"
+    let payload = json_body(&text);
+    assert_eq!(payload["reader_seq"], u64::MAX);
+    assert_eq!(payload["eof_seen"], true);
+    assert_eq!(payload["advertised_writer_seq"], 0);
+    assert_eq!(payload["stalled_since"], u64::MAX);
+    assert_eq!(
+        payload,
+        serde_json::to_value(&record).unwrap()["record"]["payload"]
     );
 }
 
 #[test]
-fn explanatory_watermarks_share_aliases_but_never_claim_catchup_or_gain_an_underline() {
+fn explain_keeps_watermarks_in_the_json_payload_and_only_underlines_the_event_clock() {
     for equal in [false, true] {
         let mut record = progress();
         if !equal {
@@ -147,21 +151,16 @@ fn explanatory_watermarks_share_aliases_but_never_claim_catchup_or_gain_an_under
         let mut renderer = progress_renderer();
         renderer.explain = true;
         let text = render_record(&mut renderer, &record);
-        assert!(
-            text.contains("Input watermark (recorded):\n⟨1:7,3:12⟩"),
-            "{text}"
+        assert_eq!(
+            json_body(&text),
+            serde_json::to_value(&record).unwrap()["record"]["payload"]
         );
+        assert_eq!(text.matches('⟨').count(), 1);
         assert!(text
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
             .contains("do not establish that the reader has caught up"));
-        if equal {
-            assert!(text.contains("Advertised clock: same recorded clock as the input watermark."));
-            assert_eq!(text.matches("⟨1:7,3:12⟩").count(), 1);
-        } else {
-            assert!(text.contains("Advertised clock (recorded):\n⟨1:8,3:12⟩"));
-        }
         renderer.color = true;
         let colored = render_record(&mut renderer, &record);
         assert_eq!(colored.matches("\x1b[1;4;38;5;").count(), 1);
@@ -170,7 +169,7 @@ fn explanatory_watermarks_share_aliases_but_never_claim_catchup_or_gain_an_under
 }
 
 #[test]
-fn missing_and_ambiguous_upstream_metadata_never_invents_a_journal_alias() {
+fn upstream_payload_identity_is_preserved_and_terminal_controls_are_json_escaped() {
     let mut record = progress();
     if let FlowControlPayload::ConsumptionProgress { reader_path, .. } =
         progress_payload(&mut record)
@@ -178,15 +177,24 @@ fn missing_and_ambiguous_upstream_metadata_never_invents_a_journal_alias() {
         *reader_path = JournalPath("unresolved\u{1b}[2J\n\u{202e}".into());
     }
     let text = render_record(&mut progress_renderer(), &record);
-    assert!(text.contains("reader index: 99"));
+    assert_eq!(json_body(&text)["reader_index"], 99);
+    assert_eq!(
+        json_body(&text),
+        serde_json::to_value(&record).unwrap()["record"]["payload"]
+    );
     assert!(!text.contains('\x1b') && !text.contains('\u{202e}'));
     assert!(!text.contains("Input: thermometer"));
     let mut compact = progress_renderer();
     compact.compact = true;
-    compact.width = 500;
+    compact.width = 4096;
     let text = render_record(&mut compact, &record);
     assert_eq!(text.lines().count(), 1);
-    assert!(text.contains("unresolved\\u{1b}[2J\\n\\u{202e}"), "{text}");
+    let start = text.find("  {").expect("compact JSON payload") + 2;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text[start..]).unwrap(),
+        serde_json::to_value(&record).unwrap()["record"]["payload"]
+    );
+    assert!(!text.contains('\x1b') && !text.contains('\u{202e}'));
 
     let mut renderer = progress_renderer();
     let mut incarnation = fact(3, 102, &[], json!({}));
@@ -194,9 +202,13 @@ fn missing_and_ambiguous_upstream_metadata_never_invents_a_journal_alias() {
     stage.id = id(31).parse().unwrap();
     stage.key = "thermometer".into();
     renderer.context.remember(&incarnation);
-    let text = render_record(&mut renderer, &progress());
-    assert!(text.contains("Input: thermometer\n"), "{text}");
-    assert!(!text.contains("Input: thermometer (journal:"));
+    let record = progress();
+    let text = render_record(&mut renderer, &record);
+    assert_eq!(
+        json_body(&text),
+        serde_json::to_value(&record).unwrap()["record"]["payload"]
+    );
+    assert!(!text.contains("Input: thermometer"));
 }
 
 #[test]
@@ -224,20 +236,28 @@ fn hidden_payload_clocks_register_numbers_before_any_presentation_mode_uses_them
 }
 
 #[test]
-fn metrics_exports_keep_the_event_clock_and_only_explain_the_watermark_on_request() {
+fn metrics_exports_show_the_recorded_payload_in_every_human_mode() {
     let record = metrics_export();
+    let expected = serde_json::to_value(&record).unwrap()["record"]["payload"].clone();
+    for explain in [false, true] {
+        let mut renderer = progress_renderer();
+        renderer.explain = explain;
+        let text = render_record(&mut renderer, &record);
+        assert!(text.contains("system.metrics.exported ←"));
+        assert!(text.contains("⟨3:119⟩"));
+        assert_eq!(text.matches('⟨').count(), 1);
+        assert_eq!(json_body(&text), expected);
+    }
     let mut renderer = progress_renderer();
+    renderer.compact = true;
+    renderer.width = 4096;
     let text = render_record(&mut renderer, &record);
-    assert!(text.contains("system.metrics.exported ←"));
-    assert!(text.contains("⟨3:119⟩"));
-    assert!(!text.contains("watermark") && !text.contains("metrics_event"));
-    renderer.explain = true;
-    let text = render_record(&mut renderer, &record);
-    assert!(
-        text.contains("Export watermark (recorded):\n⟨1:7,4:12⟩"),
-        "{text}"
+    assert_eq!(text.lines().count(), 1);
+    let start = text.find("  {").expect("compact JSON payload") + 2;
+    assert_eq!(
+        serde_json::from_str::<Value>(&text[start..]).unwrap(),
+        expected
     );
-    assert!(text.contains("⟨3:119⟩"));
 }
 
 #[test]

@@ -399,7 +399,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             // Large atomic frames are bounded but may still be expensive to
             // decode. Keep that CPU work off Tokio's executor workers.
             let bytes = std::mem::take(&mut self.buf);
-            let mut decoder = std::mem::replace(&mut self.decoder, Decoder::new(&self.path));
+            // Retain the same archive cache if this poll is cancelled. Creating
+            // a fresh decoder here would canonicalize the archive directory
+            // and lock the global registry for every physical frame.
+            let mut decoder = self.decoder.clone();
             let (classification, decoder, bytes) = tokio::task::spawn_blocking(move || {
                 let classification = classify_frame::<T>(&bytes, &mut decoder, frame_start);
                 (classification, decoder, bytes)

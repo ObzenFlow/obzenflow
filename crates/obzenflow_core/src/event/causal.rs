@@ -211,6 +211,16 @@ pub struct PreparedCausalCommit {
 impl PreparedCausalCommit {
     /// Validate record structure without asserting that storage committed it.
     pub fn from_record<P: JournalPayload>(record: &JournalRecord<P>) -> Result<Self, CausalError> {
+        Ok(Self {
+            reference: Self::validate_record(record)?,
+            clock: record.envelope.provenance.journal.vector_clock.clone(),
+        })
+    }
+
+    /// Structural checks need no owned copy of the record's entire clock.
+    pub(crate) fn validate_record<P: JournalPayload>(
+        record: &JournalRecord<P>,
+    ) -> Result<CommittedCausalRef, CausalError> {
         let journal = &record.envelope.provenance.journal;
         if journal.vector_clock.clocks.len() > super::vector_clock::MAX_CAUSAL_COORDINATES {
             return Err(CausalError::CoordinateBudget);
@@ -245,23 +255,24 @@ impl PreparedCausalCommit {
         {
             return Err(CausalError::ConflictingCommitment);
         }
+        if previous
+            .is_some_and(|reference| journal.causal.witnesses.binary_search(&reference).is_ok())
+        {
+            return Err(CausalError::ConflictingCommitment);
+        }
         for reference in previous.iter().chain(&journal.causal.witnesses) {
             if reference.sequence == 0
                 || reference.sequence > journal.vector_clock.get(&reference.coordinate())
                 || (reference.coordinate() == coordinate && reference.sequence >= sequence)
-                || journal.causal.witnesses.contains(reference) && Some(*reference) == previous
             {
                 return Err(CausalError::ConflictingCommitment);
             }
         }
-        Ok(Self {
-            reference: CommittedCausalRef {
-                run_id: journal.run_id,
-                journal_writer_id: journal.journal_writer_id,
-                sequence,
-                event_id: *record.id(),
-            },
-            clock: journal.vector_clock.clone(),
+        Ok(CommittedCausalRef {
+            run_id: journal.run_id,
+            journal_writer_id: journal.journal_writer_id,
+            sequence,
+            event_id: *record.id(),
         })
     }
 

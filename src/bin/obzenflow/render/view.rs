@@ -17,7 +17,7 @@ use std::fmt;
 
 #[path = "view/body.rs"]
 mod body;
-pub(super) use body::{payload_clocks, BodyView, ProgressView, UpstreamView};
+pub(super) use body::{payload_clocks, BodyView};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct JournalNumber(usize);
@@ -97,10 +97,6 @@ impl<'a> ClockView<'a> {
             })
             .collect()
     }
-
-    pub fn same_history(&self, other: &Self) -> bool {
-        self.values == other.values
-    }
 }
 
 pub(super) struct EvidenceView<'a> {
@@ -178,7 +174,7 @@ impl<'a> EventView<'a> {
     }
 
     pub fn body(&self) -> BodyView<'a> {
-        BodyView::from_record(self.record, self.context)
+        BodyView::from_record(self.record)
     }
 
     pub fn evidence(&self) -> EvidenceView<'a> {

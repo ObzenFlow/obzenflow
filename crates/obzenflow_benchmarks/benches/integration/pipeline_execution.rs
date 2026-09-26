@@ -456,10 +456,83 @@ fn bench_metrics_reporting(c: &mut Criterion) {
     group.finish();
 }
 
+/// Isolate record costs from pipeline scheduling. Every input has a real local
+/// predecessor and an admitted, increasingly wide frontier; preparation is
+/// outside the measured loop.
+fn bench_causal_record_costs(c: &mut Criterion) {
+    use obzenflow_core::event::{CausalCommit, CausalFrontier, ChainEventFactory};
+    use obzenflow_core::journal::{limits::record_bytes, AppendOptions};
+    use obzenflow_core::{Journal, JournalOwner, StageId};
+    use obzenflow_infra::journal::MemoryJournal;
+    use std::hint::black_box;
+
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("causal_record_costs");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    for witnesses in [1, 32, 1024] {
+        let record = rt.block_on(async {
+            let event = |stage| {
+                ChainEventFactory::data_event(stage, "bench.causal_record", Default::default())
+            };
+            let mut frontier = CausalFrontier::default();
+            for _ in 0..witnesses {
+                let stage = StageId::new();
+                let parent = MemoryJournal::with_owner(JournalOwner::stage(stage));
+                let record = parent
+                    .append(event(stage.into()), Default::default())
+                    .await
+                    .unwrap();
+                frontier
+                    .merge(&CausalFrontier::from_record(&record).unwrap())
+                    .unwrap();
+            }
+            let stage = StageId::new();
+            let destination = MemoryJournal::with_owner(JournalOwner::stage(stage));
+            destination
+                .append(event(stage.into()), Default::default())
+                .await
+                .unwrap();
+            destination
+                .append(event(stage.into()), AppendOptions::new(frontier))
+                .await
+                .unwrap()
+        });
+        assert_eq!(
+            record.envelope.provenance.journal.causal.witnesses.len(),
+            witnesses
+        );
+        group.bench_with_input(
+            BenchmarkId::new("commitment", witnesses),
+            &record,
+            |b, record| {
+                b.iter(|| black_box(CausalCommit::from_record(black_box(record)).unwrap()));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("byte_budget", witnesses),
+            &record,
+            |b, record| {
+                b.iter(|| black_box(record_bytes(black_box(record)).unwrap()));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("authored", witnesses),
+            &record,
+            |b, record| {
+                b.iter(|| black_box(record.authored()));
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_total_execution_time,
     bench_execution_time_per_event,
-    bench_metrics_reporting
+    bench_metrics_reporting,
+    bench_causal_record_costs
 );
 criterion_main!(benches);

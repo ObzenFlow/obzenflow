@@ -120,6 +120,8 @@ obzenflow show /path/to/run
 
 Add `--include-runtime` for runtime and system records, `--full` for complete displayed records and the manifest, `--compact` for one-line records, or `--explain` for teaching notes. The same viewing options apply to `start --follow`.
 
+Payloads display as JSON for every record category, including runtime progress and metrics exports.
+
 `--follow` keeps reading newly committed records from disk until execution settles and the CLI catches up, or Ctrl-C detaches. `show --follow` does not use HTTP:
 
 ```bash

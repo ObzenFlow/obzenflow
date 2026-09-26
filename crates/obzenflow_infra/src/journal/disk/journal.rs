@@ -526,11 +526,8 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             })?
         };
 
-        // Create log record
-        let record = envelope.clone();
-
         let mut prepared = codec::prepare(
-            std::slice::from_ref(&record),
+            std::slice::from_ref(&envelope),
             None,
             &self.path,
             self.definitions.clone(),
@@ -614,7 +611,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         self.index
             .write()
             .await
-            .insert(record.id().as_ulid(), committed.offset);
+            .insert(envelope.id().as_ulid(), committed.offset);
         *self.last_commit.write().await = Some(commitment);
         self.observations.committed(
             std::slice::from_ref(&envelope),

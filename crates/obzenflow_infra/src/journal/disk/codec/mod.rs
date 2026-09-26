@@ -118,6 +118,7 @@ pub(crate) fn prepare<P: JournalPayload>(
     })
 }
 
+#[derive(Clone)]
 pub(crate) struct Decoder {
     path: PathBuf,
     store: DefinitionStore,

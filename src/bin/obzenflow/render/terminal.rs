@@ -6,10 +6,7 @@
 //! identity resolution belong to view.rs; this module never matches core events.
 
 use super::payload::{abbreviated, compact, pretty, safe_text, wrap_fields};
-use super::view::{
-    BodyView, Category, ClockView, EventView, HeaderView, InputsView, ProgressView, ReplayNote,
-    UpstreamView,
-};
+use super::view::{Category, ClockView, EventView, HeaderView, InputsView, ReplayNote};
 use super::Error;
 use serde::Serialize;
 use std::io::Write;
@@ -126,11 +123,12 @@ impl TerminalRenderer {
             ),
         ];
         if matches!(self.options.mode, OutputMode::Compact) {
-            let mut line = format!("{}  {}", header.heading, plain(&relation_spans));
-            if let Some(body) = self.compact_body(&view.body())? {
-                line.push_str("  ");
-                line.push_str(&body);
-            }
+            let line = format!(
+                "{}  {}  {}",
+                header.heading,
+                plain(&relation_spans),
+                compact(&view.body())?
+            );
             writeln!(
                 output,
                 "{}",
@@ -178,7 +176,7 @@ impl TerminalRenderer {
             // above the same payload inside its canonical envelope.
             self.json(output, view.source(), false)?;
         } else {
-            self.body(output, &view.body(), &header, explain)?;
+            self.json(output, &view.body(), header.category == Category::Runtime)?;
         }
         if explain {
             self.spans(
@@ -188,92 +186,6 @@ impl TerminalRenderer {
             )?;
         }
         writeln!(output)?;
-        Ok(())
-    }
-
-    fn compact_body(&self, body: &BodyView<'_>) -> Result<Option<String>, Error> {
-        Ok(match body {
-            BodyView::Verbatim(payload) => Some(compact(payload)?),
-            BodyView::EffectOutcome(payload) => Some(compact(payload)?),
-            BodyView::EffectAttempt(payload) => Some(compact(payload)?),
-            BodyView::EffectRecovery(payload) => Some(compact(payload)?),
-            BodyView::ConsumptionProgress(progress) => Some(format!(
-                "Input: {} · {}",
-                safe_text(&upstream(&progress.upstream)),
-                plain(&progress_fields(progress))
-            )),
-            BodyView::MetricsExport(_) => None,
-        })
-    }
-
-    fn body(
-        &self,
-        output: &mut impl Write,
-        body: &BodyView<'_>,
-        header: &HeaderView<'_>,
-        explain: bool,
-    ) -> Result<(), Error> {
-        let runtime = header.category == Category::Runtime;
-        let palette = Palette::from(header);
-        match body {
-            BodyView::Verbatim(payload) => self.json(output, payload, runtime)?,
-            BodyView::EffectOutcome(payload) => self.json(output, payload, runtime)?,
-            BodyView::EffectAttempt(payload) => self.json(output, payload, runtime)?,
-            BodyView::EffectRecovery(payload) => self.json(output, payload, runtime)?,
-            BodyView::MetricsExport(clock) if explain => {
-                self.spans(
-                    output,
-                    &palette,
-                    &[Span::new("Export watermark (recorded):", Role::Muted)],
-                )?;
-                writeln!(output, "{}", self.clock(clock, header))?;
-            }
-            BodyView::MetricsExport(_) => {}
-            BodyView::ConsumptionProgress(progress) => {
-                self.spans(
-                    output,
-                    &palette,
-                    &[
-                        Span::new("Input: ", Role::Normal),
-                        Span::new(upstream(&progress.upstream), Role::Output),
-                    ],
-                )?;
-                self.spans(output, &palette, &progress_fields(progress))?;
-                if explain {
-                    if let Some(clock) = &progress.input_clock {
-                        self.spans(
-                            output,
-                            &palette,
-                            &[Span::new("Input watermark (recorded):", Role::Muted)],
-                        )?;
-                        writeln!(output, "{}", self.clock(clock, header))?;
-                    }
-                    if let Some(clock) = &progress.advertised_clock {
-                        if progress
-                            .input_clock
-                            .as_ref()
-                            .is_some_and(|input| input.same_history(clock))
-                        {
-                            self.spans(
-                                output,
-                                &palette,
-                                &[Span::new(
-                                    "Advertised clock: same recorded clock as the input watermark.",
-                                    Role::Muted,
-                                )],
-                            )?;
-                        } else {
-                            self.spans(
-                                output,
-                                &palette,
-                                &[Span::new("Advertised clock (recorded):", Role::Muted)],
-                            )?;
-                            writeln!(output, "{}", self.clock(clock, header))?;
-                        }
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -385,44 +297,4 @@ impl TerminalRenderer {
 
 fn plain(spans: &[Span]) -> String {
     spans.iter().map(|span| span.text.as_str()).collect()
-}
-
-fn upstream(input: &UpstreamView<'_>) -> String {
-    match input {
-        UpstreamView::Known {
-            name,
-            journal: Some(number),
-        } => format!("{name} (journal: {number})"),
-        UpstreamView::Known {
-            name,
-            journal: None,
-        } => (*name).into(),
-        UpstreamView::Unresolved { path, index } => {
-            format!("{path} (unresolved; reader index: {})", index.0)
-        }
-    }
-}
-
-fn progress_fields(progress: &ProgressView<'_>) -> Vec<Span> {
-    let mut spans = vec![
-        Span::new("Progress: ", Role::Normal),
-        Span::new(progress.sequence.0.to_string(), Role::Output),
-        Span::new(
-            if progress.eof_seen {
-                " · EOF: seen"
-            } else {
-                " · EOF: not seen"
-            },
-            Role::Normal,
-        ),
-    ];
-    if let Some(advertised) = progress.advertised {
-        spans.push(Span::new(" · Advertised: ", Role::Normal));
-        spans.push(Span::new(advertised.0.to_string(), Role::Output));
-    }
-    if let Some(duration) = progress.stalled {
-        spans.push(Span::new(" · Stalled: ", Role::Normal));
-        spans.push(Span::new(format!("{} ms", duration.0), Role::Output));
-    }
-    spans
 }

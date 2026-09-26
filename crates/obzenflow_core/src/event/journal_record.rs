@@ -62,7 +62,7 @@ impl<P: JournalPayload> JournalRecord<P> {
     }
 
     pub(crate) fn admit(mut self) -> Result<Self, super::CausalError> {
-        super::PreparedCausalCommit::from_record(&self)?;
+        super::PreparedCausalCommit::validate_record(&self)?;
         self.admitted = true;
         Ok(self)
     }
@@ -140,7 +140,15 @@ impl<P: JournalPayload> JournalRecord<P> {
         )
     }
     pub fn authored(&self) -> P::Event {
-        self.clone().into_authored()
+        P::Event::from_parts(
+            AuthoredEnvelope {
+                provenance: AuthoredProvenance {
+                    event: self.envelope.provenance.event.clone(),
+                },
+                observability: self.envelope.observability.clone(),
+            },
+            self.payload.clone(),
+        )
     }
 
     pub fn commit(
@@ -159,7 +167,7 @@ impl<P: JournalPayload> JournalRecord<P> {
             },
             payload,
         );
-        super::PreparedCausalCommit::from_record(&record)
+        super::PreparedCausalCommit::validate_record(&record)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         Ok(record)
     }
@@ -171,7 +179,7 @@ impl<P: JournalPayload> Serialize for JournalRecord<P> {
         self.payload
             .validate(&self.envelope.provenance.event)
             .map_err(S::Error::custom)?;
-        super::PreparedCausalCommit::from_record(self).map_err(S::Error::custom)?;
+        super::PreparedCausalCommit::validate_record(self).map_err(S::Error::custom)?;
         let mut record = serializer.serialize_struct("JournalRecord", 2)?;
         record.serialize_field("envelope", &self.envelope)?;
         record.serialize_field("payload", &self.payload)?;
@@ -191,7 +199,7 @@ impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
             .validate(&record.envelope.provenance.event)
             .map_err(D::Error::custom)?;
         let record = Self::from_parts(record.envelope, payload);
-        super::PreparedCausalCommit::from_record(&record).map_err(D::Error::custom)?;
+        super::PreparedCausalCommit::validate_record(&record).map_err(D::Error::custom)?;
         Ok(record)
     }
 }
