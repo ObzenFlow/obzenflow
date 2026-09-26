@@ -29,12 +29,41 @@ pub(super) struct ClockComponent {
     pub value: u64,
 }
 
+pub(super) struct ObservedClock {
+    pub position: JournalPosition,
+    pub values: BTreeMap<CausalCoordinate, u64>,
+}
+
+pub(super) struct JournalContext {
+    pub journal: RunJournal,
+    pub name: String,
+    pub last_clock: Option<ObservedClock>,
+}
+
+impl JournalContext {
+    fn new(journal: &RunJournal) -> Self {
+        let name = match (&journal.stage, journal.kind) {
+            (Some(stage), RunJournalKind::Error) => format!("{}/error", stage.key),
+            (Some(stage), _) => stage.key.clone(),
+            (_, RunJournalKind::System) => "pipeline".into(),
+            (_, RunJournalKind::MetricsCoordination) => "metrics/coordination".into(),
+            (_, RunJournalKind::MetricsExport) => "metrics/export".into(),
+            _ => journal.id.to_string(),
+        };
+        Self {
+            journal: journal.clone(),
+            name,
+            last_clock: None,
+        }
+    }
+}
+
 pub(super) struct Context {
     causal: CausalProofCache,
     causal_error: Option<String>,
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
-    journals: BTreeMap<obzenflow_core::JournalId, String>,
+    pub journals: BTreeMap<obzenflow_core::JournalId, JournalContext>,
     references: BTreeMap<String, Reference>,
     insertion_order: VecDeque<String>,
 }
@@ -42,17 +71,9 @@ pub(super) struct Context {
 impl Context {
     pub fn new<'a>(journals: impl Iterator<Item = &'a RunJournal>) -> Self {
         let mut stages = BTreeMap::new();
-        let mut journal_names = BTreeMap::new();
+        let mut journal_contexts = BTreeMap::new();
         for journal in journals {
-            let name = match (&journal.stage, journal.kind) {
-                (Some(stage), RunJournalKind::Error) => format!("{}/error", stage.key),
-                (Some(stage), _) => stage.key.clone(),
-                (_, RunJournalKind::System) => "pipeline".into(),
-                (_, RunJournalKind::MetricsCoordination) => "metrics/coordination".into(),
-                (_, RunJournalKind::MetricsExport) => "metrics/export".into(),
-                _ => journal.id.to_string(),
-            };
-            journal_names.insert(journal.id, name);
+            journal_contexts.insert(journal.id, JournalContext::new(journal));
             if let Some(stage) = &journal.stage {
                 stages.insert(stage.key.clone(), stage.clone());
             }
@@ -76,7 +97,7 @@ impl Context {
                     key: stage.key,
                 })
                 .collect(),
-            journals: journal_names,
+            journals: journal_contexts,
             references: BTreeMap::new(),
             supervisors: BTreeMap::new(),
             insertion_order: VecDeque::new(),
@@ -84,6 +105,22 @@ impl Context {
     }
 
     pub fn remember(&mut self, record: &RunRecord) {
+        // Physical journal position chooses the last clock, independently of
+        // display filtering, cross-journal visitation and forwarded event IDs.
+        let journal = self
+            .journals
+            .entry(record.journal.id)
+            .or_insert_with(|| JournalContext::new(&record.journal));
+        if journal
+            .last_clock
+            .as_ref()
+            .is_none_or(|last| last.position < record.position)
+        {
+            journal.last_clock = Some(ObservedClock {
+                position: record.position,
+                values: clock(record).clone(),
+            });
+        }
         if let Err(error) = self.causal.admit_run_record(record) {
             self.causal_error = Some(error.to_string());
         }
@@ -200,7 +237,7 @@ impl Context {
                 let name = self
                     .journals
                     .get(coordinate.journal_writer_id.as_journal_id())
-                    .cloned()
+                    .map(|journal| journal.name.clone())
                     .unwrap_or_else(|| coordinate.journal_writer_id.as_journal_id().to_string());
                 ClockComponent {
                     coordinate: *coordinate,

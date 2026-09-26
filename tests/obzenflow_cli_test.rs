@@ -511,12 +511,14 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
 
     fn assert_palette(text: &str) {
+        let manifest_heading = "\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m";
+        let (events, footer) = text.split_once(manifest_heading).unwrap();
         let facts: Vec<_> = text
             .lines()
             .filter(|line| {
-                line.contains("mSOURCE\x1b")
-                    || line.contains("mTRANSFORM\x1b")
-                    || line.contains("mEFFECTFUL TRANSFORM\x1b")
+                line.contains("mSOURCE (stage:")
+                    || line.contains("mTRANSFORM (stage:")
+                    || line.contains("mEFFECTFUL TRANSFORM (stage:")
             })
             .collect();
         assert!(!facts.is_empty());
@@ -525,25 +527,26 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         }
         let deliveries: Vec<_> = text
             .lines()
-            .filter(|line| line.contains("mDELIVERY\x1b"))
+            .filter(|line| line.contains("mDELIVERY (stage:"))
             .collect();
         assert!(!deliveries.is_empty());
         for line in deliveries {
-            assert_eq!(line, "\x1b[38;5;217mDELIVERY\x1b[0m");
+            assert!(line.starts_with("\x1b[38;5;217mDELIVERY (stage: "));
+            assert!(line.ends_with(")\x1b[0m"));
         }
-        for line in text.lines().filter(|line| !line.contains('⟨')) {
+        for line in events.lines().filter(|line| !line.contains('⟨')) {
             assert!(
-                line.matches('\x1b').count() <= 2,
-                "each header, equation and payload line has one color: {line}"
+                line.matches('\x1b').count() <= if line.contains('←') { 4 } else { 2 },
+                "output equations may emphasize the event name; other lines keep one style: {line}"
             );
         }
         assert!(
-            text.contains("\x1b[1;38;5;208mSOURCE\x1b[0m\n\x1b[1;38;5;208mcommerce.customer_order_placed.v1 ← web_orders()")
+            text.contains("\x1b[1;38;5;208mSOURCE (stage: web_orders)\x1b[0m\n\x1b[1;38;5;215mcommerce.customer_order_placed.v1\x1b[0m\x1b[1;38;5;208m ← web_orders()")
         );
-        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.order_validated.v1 ← validate_order(commerce.customer_order_placed.v1)"));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM\x1b[0m\n\x1b[1;38;5;208mpayment.authorized.v1 ← authorize_payment(payment.order_validated.v1)"));
+        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM (stage: validate_order)\x1b[0m\n\x1b[1;38;5;215mpayment.order_validated.v1\x1b[0m\x1b[1;38;5;208m ← validate_order(commerce.customer_order_placed.v1)"));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: authorize_payment)\x1b[0m\n\x1b[1;38;5;215mpayment.authorized.v1\x1b[0m\x1b[1;38;5;208m ← authorize_payment(payment.order_validated.v1)"));
         assert!(text
-            .contains("\x1b[38;5;217mDELIVERY\x1b[0m\n\x1b[38;5;217msink.delivery ← paid_orders(payment.authorized.v1)\x1b[0m"));
+            .contains("\x1b[38;5;217mDELIVERY (stage: paid_orders)\x1b[0m\n\x1b[1;38;5;224msink.delivery\x1b[0m\x1b[38;5;217m ← paid_orders(payment.authorized.v1)\x1b[0m"));
         assert!(
             text.contains("\x1b[1;4;38;5;208m") && text.contains("\x1b[1;4;38;5;217m"),
             "{text}"
@@ -561,12 +564,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "underline only digits: {digits:?}"
             );
         }
-        let manifest_heading = "\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m";
-        let footer = &text[text.find(manifest_heading).unwrap()..];
         for escape in footer.split("\x1b[").skip(1) {
             let code = escape.split_once('m').unwrap().0;
             assert!(
-                matches!(code, "0" | "1;38;5;255" | "38;5;252" | "38;5;245"),
+                matches!(
+                    code,
+                    "0" | "1;38;5;255" | "38;5;252" | "38;5;245" | "1;4;38;5;252"
+                ),
                 "the archive summary uses grayscale only: {code}"
             );
         }
@@ -648,7 +652,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             let block = text
                 .split("\n\n")
                 .find(|block| {
-                    block.starts_with(&format!("{heading}\n{event_type} ← "))
+                    block.starts_with(&format!("{heading} (stage: {stage})\n{event_type} ← "))
                         && block.contains(&format!("\"order_id\": \"{order}\""))
                 })
                 .unwrap_or_else(|| {
@@ -713,8 +717,12 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         assert!(human.contains(teaching), "missing teaching cue {teaching}");
     }
     assert!(!human.contains("Read (subscribers) = stage(inputs)"));
-    assert!(human.lines().any(|line| line == "TRANSFORM"));
-    assert!(human.lines().any(|line| line == "DELIVERY"));
+    assert!(human
+        .lines()
+        .any(|line| line == "TRANSFORM (stage: validate_order)"));
+    assert!(human
+        .lines()
+        .any(|line| line == "DELIVERY (stage: paid_orders)"));
     assert!(!human.contains("RUNTIME"));
     assert!(!human.contains("system.metrics.exported"));
     let (verbose, _) = show(&baseline, &["--include-runtime"]);
@@ -735,6 +743,71 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    fn clock_matrix(text: &str) -> &str {
+        text.split_once("\nLAST OBSERVED JOURNAL CLOCKS\n")
+            .or_else(|| text.split_once("\nFINAL JOURNAL CLOCKS\n"))
+            .unwrap()
+            .1
+            .split_once("\nEvent counts cover displayed entries")
+            .unwrap()
+            .0
+    }
+    let matrix = clock_matrix(&human);
+    assert_eq!(
+        matrix,
+        clock_matrix(&verbose),
+        "hidden runtime records still supply the last clocks"
+    );
+    let (settled, _) = show(&baseline, &["--follow"]);
+    assert!(settled.contains("\nFINAL JOURNAL CLOCKS\n"));
+    assert_eq!(matrix, clock_matrix(&settled));
+    assert!(human.find("\nJOURNALS\n").unwrap() < human.find(matrix).unwrap());
+    assert!(human.find(matrix).unwrap() < human.find("\nStage: web_orders\n").unwrap());
+    let mut last_clocks = std::collections::BTreeMap::new();
+    for row in &rows {
+        let name = match (&row.journal.stage, row.journal.kind) {
+            (Some(stage), obzenflow::journal::read::RunJournalKind::Error) => {
+                format!("{}/error", stage.key)
+            }
+            (Some(stage), _) => stage.key.clone(),
+            (_, obzenflow::journal::read::RunJournalKind::System) => "pipeline".into(),
+            (_, obzenflow::journal::read::RunJournalKind::MetricsCoordination) => {
+                "metrics/coordination".into()
+            }
+            (_, obzenflow::journal::read::RunJournalKind::MetricsExport) => "metrics/export".into(),
+            _ => panic!("expected a named journal"),
+        };
+        let clock = match &row.record {
+            RunRecordData::Chain(record) => &record.envelope.provenance.journal.vector_clock.clocks,
+            RunRecordData::System(record) => {
+                &record.envelope.provenance.journal.vector_clock.clocks
+            }
+        };
+        last_clocks.insert(name, (row.journal.id, clock));
+    }
+    let matrix_rows: Vec<_> = matrix
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<_> = line.split_whitespace().collect();
+            cells.first()?.parse::<usize>().ok()?;
+            Some(cells)
+        })
+        .collect();
+    assert_eq!(matrix_rows.len(), last_clocks.len());
+    for (index, row) in matrix_rows.iter().enumerate() {
+        assert_eq!(row[0], (index + 1).to_string());
+        assert_eq!(row.len(), matrix_rows.len() + 2);
+        let (_, expected) = last_clocks[row[1]];
+        for (column, journal) in matrix_rows.iter().enumerate() {
+            let coordinate = obzenflow_core::event::CausalCoordinate::new(
+                obzenflow_core::event::JournalWriterId::from_journal_id(last_clocks[journal[1]].0),
+            );
+            assert_eq!(
+                row[column + 2].parse::<u64>().unwrap(),
+                expected.get(&coordinate).copied().unwrap_or(0)
+            );
+        }
+    }
     for row in &rows {
         if let Some(stage) = &row.journal.stage {
             assert_eq!(stage.is_effectful, stage.key == "authorize_payment");

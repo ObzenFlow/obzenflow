@@ -7,6 +7,9 @@
 
 use super::*;
 
+#[path = "summary/clocks.rs"]
+mod clocks;
+
 const HEADING: &str = "1;38;5;255";
 const BODY: &str = "38;5;252";
 const MUTED: &str = "38;5;245";
@@ -43,6 +46,7 @@ impl Renderer {
                 }
                 self.manifest_summary(output, manifest)?;
                 self.journal_summary(output, manifest)?;
+                self.clock_summary(output, progress)?;
                 self.event_summary(output, manifest)?;
                 writeln!(output)?;
             }

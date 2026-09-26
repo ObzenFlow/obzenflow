@@ -105,6 +105,182 @@ fn event_counts_keep_physical_journals_separate_for_the_same_event_type() {
     }
 }
 
+fn matrix_text(renderer: &Renderer, progress: &RunReadProgress) -> String {
+    let mut output = Vec::new();
+    renderer.clock_summary(&mut output, progress).unwrap();
+    String::from_utf8(output).unwrap()
+}
+
+#[test]
+fn clock_matrix_tracks_hidden_and_forwarded_records_by_journal_position() {
+    let source = fact(1, 10, &[], json!({}));
+    let transform = fact(2, 11, &[10], json!({}));
+    let mut empty = fact(3, 12, &[], json!({})).journal;
+    empty.stage.as_mut().unwrap().key = "empty_stage".into();
+    let mut error = empty.clone();
+    error.id = serde_json::from_value(json!(id(4))).unwrap();
+    error.kind = RunJournalKind::Error;
+    let mut renderer = Renderer::new(
+        &ViewArgs::default(),
+        false,
+        false,
+        [&source.journal, &transform.journal, &empty, &error].into_iter(),
+    );
+    let mut output = Vec::new();
+    for record in [source, transform.clone(), fact(1, 13, &[], json!({}))] {
+        renderer.record(&mut output, record).unwrap();
+    }
+    let mut forwarded = fact(1, 13, &[], json!({}));
+    forwarded.journal = transform.journal.clone();
+    forwarded.position = JournalPosition(14);
+    if let RunRecordData::Chain(row) = &mut forwarded.record {
+        row.envelope.provenance.journal.journal_writer_id = forwarded.journal.id.into();
+        row.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(coordinate(2), 14);
+    }
+    renderer.record(&mut output, forwarded).unwrap();
+    assert_eq!(
+        renderer.context.journals[&transform.journal.id]
+            .last_clock
+            .as_ref()
+            .unwrap()
+            .position,
+        JournalPosition(14)
+    );
+
+    let mut hidden = execution(
+        15,
+        &[13],
+        ExecutionPayload::AccumulatorProgress {
+            inputs_since_last_report: 1,
+        },
+    );
+    if let RunRecordData::Chain(row) = &mut hidden.record {
+        row.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(coordinate(1), 13);
+    }
+    renderer.record(&mut output, hidden).unwrap();
+    renderer.context.remember(&transform); // Revisiting an older record cannot replace the tail.
+    let text = matrix_text(&renderer, &RunReadProgress::default());
+    let rows: Vec<Vec<_>> = text
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<_> = line.split_whitespace().collect();
+            cells.first()?.parse::<usize>().ok()?;
+            Some(cells)
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            vec!["1", "thermometer", "13", "0", "0"],
+            vec!["2", "classify", "13", "15", "0"],
+            vec!["3", "empty_stage", "—", "—", "—"],
+        ]
+    );
+    assert!(
+        !text.contains("/error"),
+        "empty error journals need no matrix row"
+    );
+    renderer.color = true;
+    let colored = matrix_text(&renderer, &RunReadProgress::default());
+    assert_eq!(colored.matches("\x1b[1;4;38;5;252m").count(), 2);
+    assert!(colored.contains("\x1b[1;4;38;5;252m15\x1b[0m"));
+    assert!(
+        colored.contains("\x1b[38;5;252m13\x1b[0m"),
+        "inherited history is not underlined"
+    );
+}
+
+#[test]
+fn clock_matrix_requires_settlement_and_preserves_wide_counters_and_external_histories() {
+    let mut renderer = renderer();
+    renderer.width = 40;
+    let mut record = fact(1, u64::MAX, &[], json!({}));
+    if let RunRecordData::Chain(row) = &mut record.record {
+        row.envelope
+            .provenance
+            .journal
+            .vector_clock
+            .clocks
+            .insert(coordinate(9), 7);
+    }
+    renderer.context.remember(&record);
+    let event_id = serde_json::from_value(json!(id(100))).unwrap();
+    let mut progress = RunReadProgress {
+        outcome: Some(RecordedRunOutcome {
+            event_id,
+            outcome: RunOutcome::Completed,
+        }),
+        drained_event_id: Some(event_id),
+        ..Default::default()
+    };
+    let observed = matrix_text(&renderer, &progress);
+    assert!(observed.contains("LAST OBSERVED JOURNAL CLOCKS"));
+    assert!(observed.contains(&u64::MAX.to_string()));
+    assert!(
+        observed.lines().all(|line| line.chars().count() <= 40),
+        "{observed}"
+    );
+    renderer.width = 160;
+    let wide = matrix_text(&renderer, &progress);
+    let external = coordinate(9).journal_writer_id.as_journal_id().to_string();
+    assert!(wide
+        .lines()
+        .any(|line| line.split_whitespace().collect::<Vec<_>>()
+            == ["3", external.as_str(), "—", "—", "—"]));
+    assert!(wide
+        .lines()
+        .any(|line| line.split_whitespace().collect::<Vec<_>>()
+            == ["1", "thermometer", &u64::MAX.to_string(), "0", "7"]));
+    progress.settled_prefix = Some(SettledRunPrefix {
+        terminal_event_id: event_id,
+        drained_event_id: event_id,
+        end_positions: BTreeMap::new(),
+    });
+    assert!(matrix_text(&renderer, &progress).contains("\nFINAL JOURNAL CLOCKS\n"));
+}
+
+#[test]
+fn large_clock_matrices_are_explicit_and_split_into_complete_column_panels() {
+    let journals: Vec<_> = (1..=20)
+        .map(|index| {
+            let mut journal = fact(index, 100, &[], json!({})).journal;
+            journal.stage.as_mut().unwrap().key = format!("stage_{index:02}");
+            journal
+        })
+        .collect();
+    let mut renderer = Renderer::new(&ViewArgs::default(), false, false, journals.iter());
+    renderer.width = 40;
+    let summary = matrix_text(&renderer, &RunReadProgress::default());
+    assert!(summary.contains("20 journals; use --full"));
+    assert!(!summary.contains("stage_01"));
+    renderer.full = true;
+    let complete = matrix_text(&renderer, &RunReadProgress::default());
+    let columns: Vec<_> = complete
+        .lines()
+        .filter(|line| line.trim_start().starts_with("#  Journal"))
+        .flat_map(|line| {
+            line.split_whitespace()
+                .skip(2)
+                .map(|column| column.parse::<usize>().unwrap())
+        })
+        .collect();
+    assert_eq!(columns, (1..=20).collect::<Vec<_>>());
+    assert!(
+        complete.lines().all(|line| line.chars().count() <= 40),
+        "{complete}"
+    );
+}
+
 fn execution(event: u64, parents: &[u64], payload: ExecutionPayload) -> RunRecord {
     let mut record = fact(2, event, parents, json!({}));
     record.kind = if matches!(payload, ExecutionPayload::EffectRecord(_)) {
@@ -210,7 +386,8 @@ fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() 
     let text = String::from_utf8(output).unwrap();
     assert!(!text.contains("RUNTIME") && !text.contains("inputs_since_last_report"));
     assert_eq!(
-        text.matches("TRANSFORM\nsensor.classified.v1 ← ").count(),
+        text.matches("TRANSFORM (stage: classify)\nsensor.classified.v1 ← ")
+            .count(),
         3,
         "a hidden journal boundary must still separate facts: {text}"
     );
@@ -265,13 +442,13 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
         }
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("\x1b[38;5;217mEFFECT\x1b[0m\n\x1b[38;5;217mobzenflow.effect_record.v1 ← classify(sensor.reading.v1)\x1b[0m"));
+        assert!(text.contains("\x1b[38;5;217mEFFECT (stage: classify)\x1b[0m\n\x1b[1;38;5;224mobzenflow.effect_record.v1\x1b[0m\x1b[38;5;217m ← classify(sensor.reading.v1)\x1b[0m"));
         assert!(
             text.contains("\"outcome\": \"failed\"")
                 && text.contains("\"effect_type\": \"sensor.calibrate\"")
         );
         assert!(text.contains("\"error_message\": \"calibration unavailable\""));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM\x1b[0m\n\x1b[1;38;5;208msensor.classified.v1 ← classify(sensor.reading.v1)\x1b[0m"));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: classify)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m"));
         assert_eq!(text.contains("RUNTIME"), verbose);
         if verbose {
             let runtime = text
@@ -289,9 +466,9 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
 
 #[test]
 fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
-    for (stage_type, heading, color) in [
-        (StageType::Transform, "EFFECTFUL TRANSFORM", 208),
-        (StageType::Stateful, "EFFECTFUL STATEFUL", 114),
+    for (stage_type, heading, color, output_color) in [
+        (StageType::Transform, "EFFECTFUL TRANSFORM", 208, 215),
+        (StageType::Stateful, "EFFECTFUL STATEFUL", 114, 157),
     ] {
         let mut renderer = renderer();
         renderer.color = true;
@@ -307,10 +484,10 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
-            "\x1b[1;38;5;{color}m{heading}\x1b[0m\n\x1b[1;38;5;{color}msensor.classified.v1 ← classify(sensor.reading.v1)\x1b[0m"
+            "\x1b[1;38;5;{color}m{heading} (stage: classify)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified.v1\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading.v1)\x1b[0m"
         )), "{text}");
         assert!(
-            !text.contains("mEFFECT\x1b"),
+            !text.contains("mEFFECT (stage:"),
             "capability is not an effect invocation"
         );
     }
@@ -364,7 +541,14 @@ fn stage_capability_comes_from_the_manifest_regardless_of_effect_provenance() {
             .split("\n\n")
             .filter_map(|block| block.lines().next())
             .collect();
-        assert_eq!(headings, ["SOURCE", expected, expected]);
+        assert_eq!(
+            headings,
+            [
+                "SOURCE (stage: thermometer)".to_owned(),
+                format!("{expected} (stage: classify)"),
+                format!("{expected} (stage: classify)"),
+            ]
+        );
     }
 }
 
@@ -431,21 +615,21 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains(&format!(
-            "SOURCE\nsensor.reading.v1 ← thermometer()\n{}",
+            "SOURCE (stage: thermometer)\nsensor.reading.v1 ← thermometer()\n{}",
             displayed_clock(1, 100)
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "TRANSFORM\nsensor.classified.v1 ← classify(sensor.reading.v1)\n{}",
+            "TRANSFORM (stage: classify)\nsensor.classified.v1 ← classify(sensor.reading.v1)\n{}",
             displayed_clock(2, 101)
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "TRANSFORM\nsensor.cooling_requested.v1 ← classify(sensor.reading.v1)\n{}",
+            "TRANSFORM (stage: classify)\nsensor.cooling_requested.v1 ← classify(sensor.reading.v1)\n{}",
             displayed_clock(2, 102)
         )),
         "{text}"
@@ -485,7 +669,9 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     ] {
         let block = text
             .split("\n\n")
-            .find(|block| block.starts_with(&format!("TRANSFORM\n{event_type} ← ")))
+            .find(|block| {
+                block.starts_with(&format!("TRANSFORM (stage: classify)\n{event_type} ← "))
+            })
             .unwrap();
         let payload_start = block.find("\n{\n").unwrap() + 1;
         let payload: Value = serde_json::from_str(&block[payload_start..]).unwrap();
@@ -513,13 +699,17 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(
-        text.matches("TRANSFORM\nsensor.classified.v1 ← ").count(),
+        text.matches("TRANSFORM (stage: classify)\nsensor.classified.v1 ← ")
+            .count(),
         2,
         "{text}"
     );
     assert_eq!(
         text.lines()
-            .filter(|line| matches!(*line, "SOURCE" | "TRANSFORM"))
+            .filter(|line| matches!(
+                *line,
+                "SOURCE (stage: thermometer)" | "TRANSFORM (stage: classify)"
+            ))
             .count(),
         3,
         "matching values do not establish shared parents"
@@ -700,15 +890,15 @@ fn writer_highlight_uses_recorded_identity_and_row_color_instead_of_counter_size
         "merged history stays gray"
     );
     assert!(text.contains(
-        "\x1b[1;38;5;208mSOURCE\x1b[0m\n\x1b[1;38;5;208msensor.reading.v1 ← thermometer()\x1b[0m"
+        "\x1b[1;38;5;208mSOURCE (stage: thermometer)\x1b[0m\n\x1b[1;38;5;215msensor.reading.v1\x1b[0m\x1b[1;38;5;208m ← thermometer()\x1b[0m"
     ));
     assert!(
-        text.contains("\x1b[1;38;5;208mTRANSFORM\x1b[0m\n\x1b[1;38;5;208msensor.classified.v1 ← classify(sensor.reading.v1)\x1b[0m")
+        text.contains("\x1b[1;38;5;208mTRANSFORM (stage: classify)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m")
     );
     for line in text.lines().filter(|line| !line.contains('⟨')) {
         assert!(
-            line.matches('\x1b').count() <= 2,
-            "only clocks may switch colors within a line: {line}"
+            line.matches('\x1b').count() <= if line.contains('←') { 4 } else { 2 },
+            "output equations may emphasize the event name; other lines keep one style: {line}"
         );
     }
     for underlined in text.split("\x1b[1;4;38;5;").skip(1) {
@@ -747,7 +937,7 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
-            "\x1b[1;38;5;114m{heading}\x1b[0m\n\x1b[1;38;5;114msensor.classified.v1 ← classify(sensor.calibration.v1, sensor.reading.v1)\x1b[0m"
+            "\x1b[1;38;5;114m{heading} (stage: classify)\x1b[0m\n\x1b[1;38;5;157msensor.classified.v1\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration.v1, sensor.reading.v1)\x1b[0m"
         )), "{text}");
         assert!(text.contains("\x1b[1;4;38;5;114m101\x1b[0m"));
         assert!(text.contains("  \"celsius\": 40"));

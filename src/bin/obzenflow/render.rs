@@ -33,6 +33,13 @@ enum Category {
     Runtime,
 }
 
+#[derive(Clone, Copy)]
+enum TextEmphasis {
+    Normal,
+    Output,
+    JournalCounter,
+}
+
 impl Category {
     fn of(record: &RunRecord) -> Self {
         match &record.record {
@@ -172,18 +179,18 @@ impl Renderer {
                 run.flow_id,
                 if follow { "follow" } else { "snapshot" }
             )?;
-            writeln!(output, "{}", self.dim("Clocks ⟨author@journal:sequence⟩"))?;
+            writeln!(output, "{}", self.dim("Clocks ⟨journal:sequence⟩"))?;
             writeln!(
                 output,
                 "{}",
                 self.dim("Facts orange · stateful/join outputs green · effects/deliveries pink · runtime gray")
             )?;
-            writeln!(output, "{}", self.dim("Output ← stage(recorded inputs). Clocks belong to outputs; the writer's digits are underlined."))?;
+            writeln!(output, "{}", self.dim("Output ← stage(recorded inputs). The reporting journal's counter is underlined."))?;
             writeln!(
                 output,
                 "{}",
                 self.dim(
-                    "Counters track writer history, including hidden runtime records (--include-runtime)."
+                    "Counters track journal history, including hidden runtime records (--include-runtime)."
                 )
             )?;
             writeln!(output, "{}\n", self.dim("Headings name stage kinds, or EFFECT/DELIVERY evidence. … marks shortened values; --full shows complete records."))?;
@@ -353,12 +360,43 @@ impl Renderer {
                     &format!("{heading}  {relation}  {}", compact(&value)),
                     self.width,
                 );
-                writeln!(output, "{}", self.record_text(record, &line, false))?;
+                writeln!(
+                    output,
+                    "{}",
+                    self.record_text(record, &line, TextEmphasis::Normal)
+                )?;
                 continue;
             }
-            writeln!(output, "{}", self.record_text(record, heading, false))?;
-            for line in wrap_fields(&[relation], self.width) {
-                writeln!(output, "{}", self.record_text(record, &line, false))?;
+            let heading = if record.journal.stage.is_some() {
+                format!("{heading} (stage: {stage})")
+            } else {
+                heading.into()
+            };
+            for line in wrap_fields(&[heading], self.width) {
+                writeln!(
+                    output,
+                    "{}",
+                    self.record_text(record, &line, TextEmphasis::Normal)
+                )?;
+            }
+            // Wrap plain text before styling, including event names that span
+            // lines. Only the recorded output gets the brighter shade.
+            let mut remaining_output = output_type.as_str();
+            for (index, line) in wrap_fields(&[relation], self.width).iter().enumerate() {
+                let (indent, text) = if index == 0 {
+                    ("", line.as_str())
+                } else {
+                    ("  ", &line[2..])
+                };
+                let highlighted = remaining_output.len().min(text.len());
+                let (event, rest) = text.split_at(highlighted);
+                remaining_output = remaining_output[highlighted..].trim_start();
+                writeln!(
+                    output,
+                    "{indent}{}{}",
+                    self.record_text(record, event, TextEmphasis::Output),
+                    self.record_text(record, rest, TextEmphasis::Normal),
+                )?;
             }
             writeln!(output, "{}", self.record_clock(record))?;
             if self.explain || self.full {
@@ -459,7 +497,6 @@ impl Renderer {
 
     fn record_clock(&self, record: &RunRecord) -> String {
         let values = clock(record);
-        let runtime = Category::of(record) == Category::Runtime;
         let components = self.context.clock_components(
             values,
             uses_inputs(record) || record.kind == RunRecordKind::SourceFact,
@@ -471,9 +508,8 @@ impl Renderer {
                 let digits = component.value.to_string();
                 let digits = if component.coordinate.journal_writer_id.as_journal_id()
                     == &record.journal.id
-                    && !runtime
                 {
-                    self.record_text(record, &digits, true)
+                    self.record_text(record, &digits, TextEmphasis::JournalCounter)
                 } else {
                     self.dim(&digits)
                 };
@@ -491,28 +527,32 @@ impl Renderer {
         )
     }
 
-    fn record_text(&self, record: &RunRecord, text: &str, writer: bool) -> String {
+    fn record_text(&self, record: &RunRecord, text: &str, emphasis: TextEmphasis) -> String {
         let text = safe_text(text);
-        if !self.color {
+        if !self.color || text.is_empty() {
             return text;
         }
         let category = Category::of(record);
-        let color = match category {
+        let (color, output_color) = match category {
             Category::Fact => match record.journal.stage.as_ref().map(|stage| stage.stage_type) {
                 // Read-model styling is a stage-role cue. These remain facts
                 // in the journal; no mutable state snapshot is inferred.
-                Some(StageType::Stateful | StageType::Join) => 114, // green
-                _ => 208,                                           // orange
+                Some(StageType::Stateful | StageType::Join) => (114, 157), // green
+                _ => (208, 215),                                           // orange
             },
-            Category::Effect | Category::Delivery => 217, // light pink
-            Category::Runtime => 245,                     // gray
+            Category::Effect | Category::Delivery => (217, 224), // light pink
+            Category::Runtime => (245, 250),                     // gray
         };
-        let emphasis = if writer {
-            "1;4;"
-        } else if category == Category::Fact {
-            "1;"
+        let color = if matches!(emphasis, TextEmphasis::Output) {
+            output_color
         } else {
-            ""
+            color
+        };
+        let emphasis = match emphasis {
+            TextEmphasis::JournalCounter => "1;4;",
+            TextEmphasis::Output => "1;",
+            TextEmphasis::Normal if category == Category::Fact => "1;",
+            TextEmphasis::Normal => "",
         };
         format!("\x1b[{emphasis}38;5;{color}m{text}\x1b[0m")
     }
