@@ -53,6 +53,8 @@ pub struct CausalWitnesses {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CausalError {
+    #[error("causal evidence requires an unchanged record from a successful journal append or admitted reader")]
+    UnadmittedRecord,
     #[error("causal reference does not match committed record")]
     ConflictingCommitment,
     #[error("causal evidence claims a destination sequence beyond its committed prefix")]
@@ -136,15 +138,78 @@ impl CausalFrontier {
     }
 }
 
-/// Provider-owned candidate/committed state for one coordinate. Prepare against
-/// private state, then install it only once the append or complete group commits.
+/// Evidence from an unchanged, admitted journal record. Preparation and decoding
+/// alone cannot construct this type. Its contents are read-only.
+///
+/// ```compile_fail
+/// use obzenflow_core::event::CausalCommit;
+/// fn change_evidence(mut committed: CausalCommit) {
+///     committed.reference.sequence = 42;
+/// }
+/// ```
 #[derive(Debug, Clone)]
-pub struct CausalCommit {
+pub struct CausalCommit(PreparedCausalCommit);
+
+impl std::ops::Deref for CausalCommit {
+    type Target = PreparedCausalCommit;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl CausalCommit {
+    pub fn from_record<P: JournalPayload>(record: &JournalRecord<P>) -> Result<Self, CausalError> {
+        if !record.is_admitted() {
+            return Err(CausalError::UnadmittedRecord);
+        }
+        Ok(Self(PreparedCausalCommit::from_record(record)?))
+    }
+
+    pub fn frontier(&self) -> CausalFrontier {
+        self.0.preparation_frontier()
+    }
+
+    pub fn into_prepared(self) -> PreparedCausalCommit {
+        self.0
+    }
+
+    pub fn verify(
+        &self,
+        provenance: &CausalWitnesses,
+        resolved: &[Self],
+    ) -> Result<VectorClock, CausalError> {
+        self.0
+            .verify_resolved(provenance, resolved.iter().map(|commit| &commit.0))
+    }
+}
+
+/// Provider-owned arithmetic for one coordinate. This is candidate data, not
+/// evidence of commitment. Keep it private until the whole append/group commits.
+/// It cannot enter an append frontier or a proof cache.
+///
+/// ```compile_fail
+/// use obzenflow_core::event::PreparedCausalCommit;
+/// fn publish_candidate(candidate: PreparedCausalCommit) {
+///     let _ = candidate.frontier();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use obzenflow_core::event::PreparedCausalCommit;
+/// use obzenflow_core::journal::causal::CausalProofCache;
+/// fn prove_candidate(cache: &mut CausalProofCache, candidate: PreparedCausalCommit) {
+///     cache.admit(candidate).unwrap();
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct PreparedCausalCommit {
     pub reference: CommittedCausalRef,
     pub clock: VectorClock,
 }
 
-impl CausalCommit {
+impl PreparedCausalCommit {
+    /// Validate record structure without asserting that storage committed it.
     pub fn from_record<P: JournalPayload>(record: &JournalRecord<P>) -> Result<Self, CausalError> {
         let journal = &record.envelope.provenance.journal;
         if journal.vector_clock.clocks.len() > super::vector_clock::MAX_CAUSAL_COORDINATES {
@@ -200,7 +265,7 @@ impl CausalCommit {
         })
     }
 
-    pub fn frontier(&self) -> CausalFrontier {
+    fn preparation_frontier(&self) -> CausalFrontier {
         CausalFrontier {
             clock: self.clock.clone(),
             witnesses: self
@@ -228,7 +293,7 @@ impl CausalCommit {
         if input.clock.get(&coordinate) > sequence {
             return Err(CausalError::FutureDestination);
         }
-        let mut frontier = previous.map(Self::frontier).unwrap_or_default();
+        let mut frontier = previous.map(Self::preparation_frontier).unwrap_or_default();
         frontier.merge(input)?;
         let previous_ref = previous.map(|previous| previous.reference);
         let witnesses = CausalWitnesses {
@@ -266,6 +331,14 @@ impl CausalCommit {
         &self,
         provenance: &CausalWitnesses,
         resolved: &[Self],
+    ) -> Result<VectorClock, CausalError> {
+        self.verify_resolved(provenance, resolved.iter())
+    }
+
+    fn verify_resolved<'a>(
+        &self,
+        provenance: &CausalWitnesses,
+        resolved: impl ExactSizeIterator<Item = &'a Self>,
     ) -> Result<VectorClock, CausalError> {
         let references: Vec<_> = provenance
             .previous

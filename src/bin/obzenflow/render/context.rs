@@ -8,7 +8,7 @@
 use obzenflow::journal::read::*;
 use obzenflow_core::event::CausalCoordinate;
 use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
 
 const MAX_REFERENCES: usize = 4096;
 
@@ -25,7 +25,7 @@ pub(super) struct Stage {
 
 pub(super) struct ClockComponent {
     pub coordinate: CausalCoordinate,
-    pub name: String,
+    pub number: usize,
     pub value: u64,
 }
 
@@ -64,6 +64,8 @@ pub(super) struct Context {
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     pub journals: BTreeMap<obzenflow_core::JournalId, JournalContext>,
+    journal_numbers: BTreeMap<obzenflow_core::JournalId, usize>,
+    journal_label_updates: BTreeSet<obzenflow_core::JournalId>,
     references: BTreeMap<String, Reference>,
     insertion_order: VecDeque<String>,
 }
@@ -87,6 +89,32 @@ impl Context {
             };
             (rank, stage.key.clone())
         });
+        // Number the whole inventory before observing records. Empty error
+        // journals keep their slots even when omitted from the final matrix.
+        // Put data journals first so the common clocks use the small numbers.
+        let mut ordered: Vec<_> = journal_contexts.values().collect();
+        ordered.sort_by_key(|journal| {
+            let kind = match journal.journal.kind {
+                RunJournalKind::System => 0,
+                RunJournalKind::MetricsCoordination => 1,
+                RunJournalKind::MetricsExport => 2,
+                RunJournalKind::Data => 3,
+                RunJournalKind::Error => 4,
+            };
+            let stage = journal.journal.stage.as_ref().map_or(0, |owner| {
+                stages
+                    .iter()
+                    .position(|stage| stage.key == owner.key)
+                    .unwrap_or(stages.len())
+            });
+            (kind, stage, journal.journal.id)
+        });
+        let journal_numbers: BTreeMap<_, _> = ordered
+            .into_iter()
+            .enumerate()
+            .map(|(index, journal)| (journal.journal.id, index + 1))
+            .collect();
+        let journal_label_updates = journal_numbers.keys().copied().collect();
         Self {
             causal: CausalProofCache::new(MAX_REFERENCES, MAX_REFERENCES * 256),
             causal_error: None,
@@ -98,6 +126,8 @@ impl Context {
                 })
                 .collect(),
             journals: journal_contexts,
+            journal_numbers,
+            journal_label_updates,
             references: BTreeMap::new(),
             supervisors: BTreeMap::new(),
             insertion_order: VecDeque::new(),
@@ -105,12 +135,22 @@ impl Context {
     }
 
     pub fn remember(&mut self, record: &RunRecord) {
+        if let Entry::Vacant(entry) = self.journals.entry(record.journal.id) {
+            // An earlier clock may have referenced this journal before its
+            // metadata arrived. Resolve its legend name without renumbering.
+            entry.insert(JournalContext::new(&record.journal));
+            self.journal_label_updates.insert(record.journal.id);
+        }
+        self.number_journal(record.journal.id);
+        for coordinate in clock(record).keys() {
+            self.number_journal(*coordinate.journal_writer_id.as_journal_id());
+        }
         // Physical journal position chooses the last clock, independently of
         // display filtering, cross-journal visitation and forwarded event IDs.
         let journal = self
             .journals
-            .entry(record.journal.id)
-            .or_insert_with(|| JournalContext::new(&record.journal));
+            .get_mut(&record.journal.id)
+            .expect("observed journal has metadata");
         if journal
             .last_clock
             .as_ref()
@@ -225,27 +265,48 @@ impl Context {
         }
     }
 
+    fn number_journal(&mut self, id: obzenflow_core::JournalId) {
+        let next = self.journal_numbers.len() + 1;
+        if let Entry::Vacant(entry) = self.journal_numbers.entry(id) {
+            entry.insert(next);
+            self.journal_label_updates.insert(id);
+        }
+    }
+
+    pub fn journal_number(&self, id: &obzenflow_core::JournalId) -> usize {
+        self.journal_numbers[id]
+    }
+
+    pub fn take_journal_labels(&mut self) -> Vec<(usize, String)> {
+        let mut labels: Vec<_> = std::mem::take(&mut self.journal_label_updates)
+            .into_iter()
+            .map(|id| {
+                let name = self
+                    .journals
+                    .get(&id)
+                    .map(|journal| journal.name.clone())
+                    .unwrap_or_else(|| id.to_string());
+                (self.journal_number(&id), name)
+            })
+            .collect();
+        labels.sort_by_key(|(number, _)| *number);
+        labels
+    }
+
     pub fn clock_components(
         &self,
         values: &BTreeMap<CausalCoordinate, u64>,
-        _vector: bool,
-        _run: &RunIdentity,
     ) -> Vec<ClockComponent> {
-        values
+        let mut components: Vec<_> = values
             .iter()
-            .map(|(coordinate, value)| {
-                let name = self
-                    .journals
-                    .get(coordinate.journal_writer_id.as_journal_id())
-                    .map(|journal| journal.name.clone())
-                    .unwrap_or_else(|| coordinate.journal_writer_id.as_journal_id().to_string());
-                ClockComponent {
-                    coordinate: *coordinate,
-                    name,
-                    value: *value,
-                }
+            .map(|(coordinate, value)| ClockComponent {
+                coordinate: *coordinate,
+                number: self.journal_number(coordinate.journal_writer_id.as_journal_id()),
+                value: *value,
             })
-            .collect()
+            .collect();
+        components.sort_by_key(|component| component.number);
+        components
     }
 }
 

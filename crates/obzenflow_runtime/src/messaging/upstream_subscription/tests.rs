@@ -36,7 +36,6 @@ use obzenflow_core::{
 };
 use serde_json::json;
 use std::collections::HashMap;
-use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
@@ -129,7 +128,7 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             reader_path,
             reader_seq,
             ..
-        }) = env.payload
+        }) = env.into_parts().1
         else {
             panic!("expected progress")
         };
@@ -159,13 +158,13 @@ async fn contract_owner_context_covers_both_gap_paths_violation_and_final() {
         let (mut gap, mut violation, mut final_record) = (false, false, false);
         for env in events {
             assert_contract_owner(&env.authored(), &owner);
-            match env.payload {
+            match &env.payload {
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => gap = true,
                 ChainPayload::FlowControl(FlowControlPayload::AtLeastOnceViolation {
                     upstream: id,
                     ..
                 }) => {
-                    assert_eq!(id, upstream);
+                    assert_eq!(*id, upstream);
                     violation = true;
                 }
                 ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
@@ -227,16 +226,16 @@ struct TestJournalReader<T: JournalEvent> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
         mut options: AppendOptions<T>,
@@ -248,21 +247,21 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -273,7 +272,7 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -286,16 +285,18 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T>
+    for ControlledJournal<T>
+{
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
         mut options: AppendOptions<T>,
@@ -315,21 +316,21 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -340,7 +341,7 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -353,8 +354,10 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-    async fn next(
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+    for TestJournalReader<T>
+{
+    async fn storage_next(
         &mut self,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         if self.pos >= self.events.len() {
@@ -366,11 +369,11 @@ impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.pos >= self.events.len()
     }
 }
@@ -395,16 +398,16 @@ impl<T: JournalEvent> EmfileJournal<T> {
 
 #[cfg(unix)]
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for EmfileJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         _event: T,
         _options: AppendOptions<T>,
@@ -415,36 +418,31 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
         })
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    // Non-default: opening a reader returns EMFILE. reader_from delegates here,
-    // so this override stays (the default reader() would recurse via reader_from).
-    async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
-        Err(JournalError::Implementation {
-            message: "open failed".to_string(),
-            source: Box::new(io::Error::from_raw_os_error(libc::EMFILE)),
-        })
-    }
-
-    async fn reader_from(
+    // Both reader() and reader_from() fail at the same storage-open boundary.
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
-        self.reader().await
+        Err(JournalError::Implementation {
+            message: "open journal reader failed".into(),
+            source: Box::new(std::io::Error::from_raw_os_error(libc::EMFILE)),
+        })
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> std::result::Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -1579,7 +1577,7 @@ async fn transport_only_skips_observability_events() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match data {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
         },
@@ -1604,7 +1602,7 @@ async fn transport_only_skips_observability_events() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match eof {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
         },
@@ -1734,7 +1732,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match selected {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {
                 assert_eq!(env.event_type(), "test.selected.v1");
             }
@@ -2483,7 +2481,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => {
                 panic!("expected framework effect Data to be skipped and domain Data delivered, got {other:?}")
@@ -2569,7 +2567,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
         },
@@ -2580,7 +2578,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match second {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
         },
@@ -2596,7 +2594,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match third {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {}
             other => panic!("expected third delivered event to be Data, got {other:?}"),
         },
@@ -2607,7 +2605,7 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match fourth {
-        PollResult::Event(env) => match env.payload {
+        PollResult::Event(env) => match &env.payload {
             ChainPayload::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected fourth delivered event to be EOF, got {other:?}"),
         },
@@ -2672,8 +2670,8 @@ struct SharedTestJournalReader {
 }
 
 #[async_trait]
-impl JournalReader<ChainEvent> for SharedTestJournalReader {
-    async fn next(
+impl obzenflow_core::journal::JournalStorageReader<ChainEvent> for SharedTestJournalReader {
+    async fn storage_next(
         &mut self,
     ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         let guard = self.events.lock().unwrap();
@@ -2686,26 +2684,26 @@ impl JournalReader<ChainEvent> for SharedTestJournalReader {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.pos >= self.events.lock().unwrap().len()
     }
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for SharedTestJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for SharedTestJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
         mut options: AppendOptions<ChainEvent>,
@@ -2717,20 +2715,20 @@ impl Journal<ChainEvent> for SharedTestJournal {
         Ok(envelope)
     }
 
-    async fn read_all_unordered(
+    async fn storage_read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(self.events.lock().unwrap().clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> std::result::Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
@@ -2740,7 +2738,7 @@ impl Journal<ChainEvent> for SharedTestJournal {
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> std::result::Result<Vec<JournalRecord<ChainPayload>>, JournalError> {

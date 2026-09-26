@@ -433,8 +433,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl JournalReader<SystemEvent> for ControlledReader {
-        async fn next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
+    impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ControlledReader {
+        async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
             if let Some((entered, release)) = self.gate.take() {
                 entered.notify_one();
@@ -444,13 +444,13 @@ mod tests {
             self.position += u64::from(row.is_some());
             Ok(row)
         }
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.position
         }
-        fn is_at_end(&self) -> bool {
+        fn storage_is_at_end(&self) -> bool {
             self.rows.is_empty()
         }
-        fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
             Ok(self.rows.is_empty())
         }
     }

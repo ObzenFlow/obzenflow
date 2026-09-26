@@ -34,7 +34,7 @@ pub async fn read_latest_runtime_context(
         .await
         .ok()?
         .into_iter()
-        .find_map(|record| record.envelope.provenance.event.runtime)
+        .find_map(|record| record.into_parts().0.provenance.event.runtime)
 }
 
 /// Read the most recent `RuntimeProvenance` from a journal's tail for a specific
@@ -54,7 +54,7 @@ pub async fn read_latest_runtime_context_for_stage(
         .ok()?
         .into_iter()
         .find_map(|record| {
-            let event = record.envelope.provenance.event;
+            let event = record.into_parts().0.provenance.event;
             (event.flow_context.stage_id == stage_id && event.writer_id == WriterId::from(stage_id))
                 .then_some(event.runtime)
                 .flatten()
@@ -81,7 +81,7 @@ pub async fn read_stage_metrics_from_tail(
                 if let Some(packet) = &record.envelope.observability {
                     observations.offer_recorded(packet);
                 }
-                let event = record.envelope.provenance.event;
+                let event = record.into_parts().0.provenance.event;
                 if event.flow_context.stage_id == stage_id
                     && event.writer_id == WriterId::from(stage_id)
                 {
@@ -209,16 +209,16 @@ mod tests {
     }
 
     #[async_trait]
-    impl Journal<ChainEvent> for InMemoryChainJournal {
-        fn id(&self) -> &JournalId {
+    impl obzenflow_core::journal::JournalStorage<ChainEvent> for InMemoryChainJournal {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
+        fn storage_owner(&self) -> Option<&JournalOwner> {
             self.owner.as_ref()
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: ChainEvent,
             mut options: obzenflow_core::journal::AppendOptions<ChainEvent>,
@@ -231,27 +231,27 @@ mod tests {
             Ok(envelope)
         }
 
-        async fn read_metrics_tail(
+        async fn storage_read_metrics_tail(
             &self,
         ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             Ok(self.events.lock().unwrap().iter().rev().cloned().collect())
         }
 
-        async fn read_all_unordered(
+        async fn storage_read_all_unordered(
             &self,
         ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &obzenflow_core::EventId,
         ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
@@ -262,7 +262,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             count: usize,
         ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -275,8 +275,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl JournalReader<ChainEvent> for InMemoryReader {
-        async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
+    impl obzenflow_core::journal::JournalStorageReader<ChainEvent> for InMemoryReader {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             if self.pos >= self.events.len() {
                 Ok(None)
             } else {
@@ -286,11 +288,11 @@ mod tests {
             }
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.pos as u64
         }
 
-        fn is_at_end(&self) -> bool {
+        fn storage_is_at_end(&self) -> bool {
             self.pos >= self.events.len()
         }
     }

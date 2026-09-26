@@ -16,7 +16,8 @@ use async_trait::async_trait;
 
 /// Core journal trait - defines what a journal must do
 ///
-/// Infrastructure will implement this trait with actual storage
+/// Infrastructure implements [`super::JournalStorage`] with actual storage;
+/// core supplies this facade and admits evidence only after successful operations.
 /// Generic over T which is the event type (ChainEvent or SystemEvent)
 #[async_trait]
 pub trait Journal<T>: Send + Sync

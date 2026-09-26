@@ -202,8 +202,10 @@ pub(crate) mod tests {
             prepared
                 .envelope
                 .observability
+                .as_ref()
                 .unwrap()
                 .runtime
+                .as_ref()
                 .unwrap()
                 .in_flight,
             Some(99),
@@ -340,7 +342,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            serde_json::to_value(historical.envelope.observability).unwrap(),
+            serde_json::to_value(&historical.envelope.observability).unwrap(),
             serde_json::to_value(&original.envelope.observability).unwrap()
         );
         assert!(journal

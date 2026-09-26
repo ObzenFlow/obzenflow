@@ -143,7 +143,7 @@ impl CausalProofCache {
                     .into_iter()
                     .map(|evidence| ResolvedCausalWitness {
                         reference: evidence.reference,
-                        clock: evidence.clock,
+                        clock: evidence.into_prepared().clock,
                     })
                     .collect(),
                 commitment: commitment.reference,

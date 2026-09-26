@@ -777,7 +777,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn causal_input() -> JournalRecord<obzenflow_core::event::ChainPayload> {
-        JournalRecord::new(
+        crate::testing::causal_fixture::committed_input(
             obzenflow_core::JournalWriterId::new(),
             obzenflow_core::event::ChainEventFactory::data_event(
                 obzenflow_core::StageId::new().into(),

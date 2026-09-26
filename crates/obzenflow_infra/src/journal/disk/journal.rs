@@ -21,12 +21,14 @@ use obzenflow_core::event::identity::{EventId, JournalWriterId};
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
 use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{CausalCommit, CausalCoordinate, CausalFrontier};
+use obzenflow_core::event::{CausalCoordinate, CausalFrontier, PreparedCausalCommit};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::reader::JournalReader;
-use obzenflow_core::journal::{AppendOptions, Journal, JournalConfig};
+#[cfg(test)]
+use obzenflow_core::journal::Journal;
+use obzenflow_core::journal::{AppendOptions, JournalConfig};
 use obzenflow_core::FlowId;
 #[cfg(test)]
 use obzenflow_core::WriterId;
@@ -85,7 +87,7 @@ pub struct DiskJournal<T: JournalEvent> {
     /// Writers take a write lock; readers take a read lock to avoid torn lines.
     read_write_lock: Arc<RwLock<()>>,
     /// Last committed record of this physical journal, independent of authorship
-    last_commit: Arc<RwLock<Option<CausalCommit>>>,
+    last_commit: Arc<RwLock<Option<PreparedCausalCommit>>>,
     /// Set when a failed append could not be rolled back, leaving the file in an
     /// unknown state. Further appends are rejected until the journal is reopened.
     poisoned: Arc<AtomicBool>,
@@ -276,7 +278,7 @@ impl<T: JournalEvent> DiskJournal<T> {
 
 /// In-memory index (`event_id -> byte offset`) plus the last physical journal commitment
 /// rebuilt from a journal file.
-type RebuiltIndex = (HashMap<Ulid, u64>, Option<CausalCommit>, u64);
+type RebuiltIndex = (HashMap<Ulid, u64>, Option<PreparedCausalCommit>, u64);
 
 fn open_append_file(
     path: &Path,
@@ -338,7 +340,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
 ) -> Result<RebuiltIndex, JournalError> {
     let mut admission = super::identity::CommitmentAdmission::open(log_path)?;
     let mut index = HashMap::with_capacity(10000);
-    let mut last_commit: Option<CausalCommit> = None;
+    let mut last_commit: Option<PreparedCausalCommit> = None;
 
     if !log_path.exists() {
         return Ok((index, last_commit, 0));
@@ -493,7 +495,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         // and flush succeed below.
         let (commitment, causal) = {
             let last_commit = self.last_commit.read().await;
-            CausalCommit::prepare(
+            PreparedCausalCommit::prepare(
                 self.run_id,
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
@@ -677,16 +679,16 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         let mut next_last_commit = self.last_commit.read().await.clone();
         let mut envelopes = Vec::with_capacity(events.len());
         let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
-        let mut group_frontier = frontier.clone();
+
         for (index, event) in events.into_iter().enumerate() {
-            let (commitment, causal) = CausalCommit::prepare(
+            let (commitment, causal) = PreparedCausalCommit::prepare(
                 self.run_id,
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
                 next_last_commit.as_ref(),
-                &group_frontier,
+                frontier,
             )?;
-            group_frontier.merge(&commitment.frontier())?;
+
             next_last_commit = Some(commitment.clone());
             let timestamp = Utc::now();
             envelopes.push({
@@ -800,24 +802,26 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for DiskJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.journal_id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    fn observation_reader(&self) -> Option<&dyn obzenflow_core::journal::JournalObservationReader> {
+    fn storage_observation_reader(
+        &self,
+    ) -> Option<&dyn obzenflow_core::journal::JournalObservationReader> {
         Some(&self.observations)
     }
 
-    fn configure(&self, config: JournalConfig) -> Result<(), JournalError> {
+    fn storage_configure(&self, config: JournalConfig) -> Result<(), JournalError> {
         self.observability.configure(config.observability)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
         options: AppendOptions<T>,
@@ -836,7 +840,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         .await
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         group_id: &str,
         events: Vec<T>,
@@ -854,7 +858,9 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         .await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let mut events = Vec::new();
 
         if !self.path.exists() {
@@ -920,7 +926,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Ok(events)
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
@@ -1003,7 +1009,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         }
     }
 
-    async fn committed_position(&self) -> Result<u64, JournalError> {
+    async fn storage_committed_position(&self) -> Result<u64, JournalError> {
         let _guard = self.read_write_lock.read().await;
         Ok(self
             .last_commit
@@ -1013,7 +1019,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             .map_or(0, |commit| commit.reference.sequence))
     }
 
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         // Writer-confirmed progress is independent of the optional observation
         // index. Later appends cannot extend this connection's bootstrap cut.
         let end = self
@@ -1032,11 +1041,13 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         ))
     }
 
-    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_metrics_tail(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.observations.metrics_tail().await
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -1375,7 +1386,7 @@ mod tests {
             super::super::observations::DiskObservationReader::<ChainEvent>::open(path.clone())
                 .unwrap();
         let identity = super::super::identity::read_identity(&path).unwrap();
-        let mut previous = Some(CausalCommit::from_record(&committed).unwrap());
+        let mut previous = Some(PreparedCausalCommit::from_record(&committed).unwrap());
         let uncertain = super::super::identity::fixture_record(
             identity,
             crate::journal::observability::tests::event(stage, 2),

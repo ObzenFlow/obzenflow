@@ -241,15 +241,17 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> JournalReader<T> for EmptyReader<T>
+    impl<T> obzenflow_core::journal::JournalStorageReader<T> for EmptyReader<T>
     where
         T: obzenflow_core::event::JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.position
         }
     }
@@ -271,19 +273,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> Journal<T> for FailAppendJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for FailAppendJournal<T>
     where
         T: obzenflow_core::event::JournalEvent + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
+        fn storage_owner(&self) -> Option<&JournalOwner> {
             Some(&self.owner)
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
             _options: obzenflow_core::journal::AppendOptions<T>,
@@ -298,18 +300,20 @@ mod tests {
             })
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -319,7 +323,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             _count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

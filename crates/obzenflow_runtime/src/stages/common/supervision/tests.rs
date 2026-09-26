@@ -574,16 +574,16 @@ impl CreditCheckingJournal {
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for CreditCheckingJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for CreditCheckingJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
@@ -604,18 +604,13 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         for event in events {
             let record =
                 crate::testing::causal_fixture::commit(self.id, event, &options, &records)?;
-            options
-                .frontier
-                .merge(&obzenflow_core::event::CausalFrontier::from_record(
-                    &record,
-                )?)?;
             records.push(record.clone());
             written.push(record);
         }
         Ok(written)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
         mut options: AppendOptions<ChainEvent>,
@@ -649,25 +644,27 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         Ok(record)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
         Ok(Box::new(NoopReader::<ChainEvent>::default()))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -688,12 +685,12 @@ impl<T: JournalEvent> Default for NoopReader<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent> JournalReader<T> for NoopReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for NoopReader<T> {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         0
     }
 }
@@ -720,16 +717,16 @@ impl<T: JournalEvent> NoopJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for NoopJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
         mut options: AppendOptions<T>,
@@ -745,22 +742,27 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
         Ok(record)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(NoopReader::<T>::default()))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

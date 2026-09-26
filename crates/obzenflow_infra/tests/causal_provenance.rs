@@ -3,13 +3,172 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{CausalCommit, CausalFrontier, ChainEventFactory, SystemEvent};
+use obzenflow_core::event::{
+    CausalCommit, CausalError, CausalFrontier, ChainEventFactory, ChainPayload, JournalRecord,
+    PreparedCausalCommit, SystemEvent,
+};
 use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
-use obzenflow_core::journal::{AppendOptions, Journal};
+use obzenflow_core::journal::{AppendOptions, Journal, JournalStorage};
 use obzenflow_core::JournalOwner;
 use obzenflow_core::{ChainEvent, FlowId, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use std::sync::Arc;
+
+fn rejects_unadmitted(record: &JournalRecord<ChainPayload>) {
+    // A shape check remains useful for codecs, but cannot confer authority.
+    PreparedCausalCommit::from_record(record).unwrap();
+    assert_eq!(
+        CausalFrontier::from_record(record).unwrap_err(),
+        CausalError::UnadmittedRecord
+    );
+    assert_eq!(
+        CausalCommit::from_record(record).unwrap_err(),
+        CausalError::UnadmittedRecord
+    );
+    assert!(matches!(
+        AppendOptions::<ChainEvent>::from_record(Some(record)),
+        Err(obzenflow_core::journal::JournalError::Causal(
+            CausalError::UnadmittedRecord
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let author = StageId::new();
+        let owner = JournalOwner::stage(author);
+        let journal: Arc<dyn Journal<ChainEvent>> = if disk {
+            Arc::new(
+                DiskJournal::with_owner(directory.path().join("admission.log"), owner).unwrap(),
+            )
+        } else {
+            Arc::new(MemoryJournal::with_owner(owner))
+        };
+        let event = || {
+            ChainEventFactory::data_event(author.into(), "admission.fact", serde_json::json!({}))
+        };
+        let uncommitted = JournalRecord::new((*journal.id()).into(), event());
+        rejects_unadmitted(&uncommitted);
+        let (candidate, causal) = PreparedCausalCommit::prepare(
+            uncommitted.envelope.provenance.journal.run_id,
+            uncommitted.causal_coordinate(),
+            *uncommitted.id(),
+            None,
+            &CausalFrontier::default(),
+        )
+        .unwrap();
+        let mut provenance = uncommitted.envelope.provenance.journal.clone();
+        provenance.vector_clock = candidate.clock;
+        provenance.causal = causal;
+        let candidate_record =
+            JournalRecord::commit_event(uncommitted.into_authored(), provenance).unwrap();
+        rejects_unadmitted(&candidate_record);
+
+        let receipt = journal.append(event(), Default::default()).await.unwrap();
+        let frontier = CausalFrontier::from_record(&receipt).unwrap();
+        assert_eq!(
+            CausalFrontier::from_record(&receipt.clone()).unwrap(),
+            frontier
+        );
+        let encoded = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            encoded.as_object().unwrap().len(),
+            2,
+            "admission is never persisted"
+        );
+        let decoded = serde_json::from_value(encoded.clone()).unwrap();
+        rejects_unadmitted(&decoded);
+        let (envelope, payload) = receipt.clone().into_parts();
+        rejects_unadmitted(&JournalRecord::from_parts(envelope, payload));
+
+        let mut rewritten = receipt.clone();
+        rewritten.envelope.provenance.event.id = obzenflow_core::EventId::new();
+        rejects_unadmitted(&rewritten);
+        let mut inflated = receipt.clone();
+        inflated.envelope.provenance.journal.vector_clock.clocks.insert(
+            obzenflow_core::event::CausalCoordinate::new(obzenflow_core::JournalWriterId::new()), 99,
+        );
+        rejects_unadmitted(&inflated);
+        let mut changed_payload = receipt.clone();
+        changed_payload.payload = ChainPayload::Fact(serde_json::json!({"changed": true}));
+        rejects_unadmitted(&changed_payload);
+        let mut borrowed_mutably = receipt.clone();
+        let _ = &mut borrowed_mutably.envelope;
+        rejects_unadmitted(&borrowed_mutably);
+
+        // Revoking one copy cannot invalidate the original receipt or an
+        // already-captured frontier. Re-read membership establishes evidence.
+        assert_eq!(CausalFrontier::from_record(&receipt).unwrap(), frontier);
+        let reread = journal.read_event(receipt.id()).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&reread).unwrap(), encoded);
+        assert_eq!(CausalFrontier::from_record(&reread).unwrap(), frontier);
+        let child = journal
+            .append(event(), AppendOptions::new(frontier))
+            .await
+            .unwrap();
+        assert_eq!(
+            child.envelope.provenance.journal.causal.previous,
+            Some(CausalCommit::from_record(&receipt).unwrap().reference)
+        );
+    }
+}
+
+#[tokio::test]
+async fn storage_data_becomes_evidence_only_through_successful_journal_operations() {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let author = StageId::new();
+        let owner = JournalOwner::stage(author);
+        let storage: Box<dyn JournalStorage<ChainEvent>> = if disk {
+            Box::new(DiskJournal::with_owner(directory.path().join("storage.log"), owner).unwrap())
+        } else {
+            Box::new(MemoryJournal::with_owner(owner))
+        };
+        let event =
+            || ChainEventFactory::data_event(author.into(), "stored.fact", serde_json::json!({}));
+        let raw = storage
+            .storage_append(event(), Default::default())
+            .await
+            .unwrap();
+        rejects_unadmitted(&raw);
+        let committed = storage.read_event(raw.id()).await.unwrap().unwrap();
+        let expected = CausalFrontier::from_record(&committed).unwrap();
+        let mut reader = storage.reader().await.unwrap();
+        for record in [
+            reader.next().await.unwrap().unwrap(),
+            storage.read_all_unordered().await.unwrap().remove(0),
+            storage.read_last_n(1).await.unwrap().remove(0),
+        ] {
+            assert_eq!(CausalFrontier::from_record(&record).unwrap(), expected);
+        }
+        let members = storage
+            .append_group(
+                "admitted-group",
+                vec![event(), event()],
+                AppendOptions::new(expected),
+            )
+            .await
+            .unwrap();
+        let mut cache = CausalProofCache::new(8, 8);
+        cache
+            .admit(CausalCommit::from_record(&committed).unwrap())
+            .unwrap();
+        for member in &members {
+            let evidence = CausalCommit::from_record(member).unwrap();
+            assert!(matches!(
+                cache.verify(&evidence, &member.envelope.provenance.journal.causal),
+                CausalProof::Valid { .. }
+            ));
+            cache.admit(evidence).unwrap();
+            assert_eq!(
+                CausalFrontier::from_record(&reader.next().await.unwrap().unwrap()).unwrap(),
+                CausalFrontier::from_record(member).unwrap()
+            );
+        }
+    }
+}
 
 #[tokio::test]
 async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {

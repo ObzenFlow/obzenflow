@@ -133,16 +133,16 @@ async fn registration_failure_prevents_both_supervisor_runners_from_executing() 
 }
 
 #[async_trait::async_trait]
-impl Journal<SystemEvent> for TestJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<SystemEvent> for TestJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: SystemEvent,
         mut options: AppendOptions<SystemEvent>,
@@ -167,11 +167,13 @@ impl Journal<SystemEvent> for TestJournal {
         Ok(record)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
         Ok(self.records.lock().unwrap().clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         id: &EventId,
     ) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
@@ -184,14 +186,14 @@ impl Journal<SystemEvent> for TestJournal {
             .cloned())
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
         unreachable!("terminal mailbox tests read committed records directly")
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {

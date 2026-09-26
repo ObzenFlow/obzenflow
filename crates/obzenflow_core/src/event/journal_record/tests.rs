@@ -388,7 +388,13 @@ fn malformed_timing_omits_only_its_family_and_measured_zero_remains_present() {
         },
     });
     let committed = JournalRecord::<ChainPayload>::commit_event(authored, journal).unwrap();
-    let runtime = committed.envelope.observability.unwrap().runtime.unwrap();
+    let runtime = committed
+        .into_parts()
+        .0
+        .observability
+        .unwrap()
+        .runtime
+        .unwrap();
     assert_eq!(runtime.in_flight, Some(0));
     assert!(runtime.timing.is_none());
 }

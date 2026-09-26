@@ -298,16 +298,16 @@ impl CycleDepthFaultJournal {
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for CycleDepthFaultJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for CycleDepthFaultJournal {
+    fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
         options: AppendOptions<ChainEvent>,
@@ -315,7 +315,7 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
         self.inner.append(self.corrupt(event), options).await
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         group_id: &str,
         events: Vec<ChainEvent>,
@@ -333,25 +333,27 @@ impl Journal<ChainEvent> for CycleDepthFaultJournal {
             .await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
         self.inner.reader_from(position).await
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {

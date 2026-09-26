@@ -13,6 +13,7 @@ const DIAGONAL: &str = "1;4;38;5;252";
 
 struct ClockRow<'a> {
     id: JournalId,
+    number: usize,
     name: String,
     values: Option<&'a BTreeMap<CausalCoordinate, u64>>,
 }
@@ -31,41 +32,15 @@ impl Renderer {
             .flat_map(|clock| clock.values.keys())
             .map(|coordinate| *coordinate.journal_writer_id.as_journal_id())
             .collect();
-        let mut journals: Vec<_> = self
-            .context
-            .journals
-            .values()
-            .filter(|journal| {
-                journal.journal.kind != RunJournalKind::Error
-                    || journal.last_clock.is_some()
-                    || referenced.contains(&journal.journal.id)
-            })
-            .collect();
-        journals.sort_by_key(|journal| {
-            let kind = match journal.journal.kind {
-                RunJournalKind::System => 0,
-                RunJournalKind::MetricsCoordination => 1,
-                RunJournalKind::MetricsExport => 2,
-                RunJournalKind::Data | RunJournalKind::Error => 3,
-            };
-            let stage = journal.journal.stage.as_ref().map_or(0, |owner| {
-                self.context
-                    .stages
-                    .iter()
-                    .position(|stage| stage.key == owner.key)
-                    .unwrap_or(self.context.stages.len())
-            });
-            (
-                kind,
-                stage,
-                journal.journal.kind == RunJournalKind::Error,
-                journal.journal.id,
-            )
+        let journals = self.context.journals.values().filter(|journal| {
+            journal.journal.kind != RunJournalKind::Error
+                || journal.last_clock.is_some()
+                || referenced.contains(&journal.journal.id)
         });
         let mut rows: Vec<_> = journals
-            .iter()
             .map(|journal| ClockRow {
                 id: journal.journal.id,
+                number: self.context.journal_number(&journal.journal.id),
                 name: safe_text(&journal.name),
                 values: journal.last_clock.as_ref().map(|clock| &clock.values),
             })
@@ -78,10 +53,12 @@ impl Renderer {
                 .filter(|id| !self.context.journals.contains_key(id))
                 .map(|id| ClockRow {
                     id: *id,
+                    number: self.context.journal_number(id),
                     name: id.to_string(),
                     values: None,
                 }),
         );
+        rows.sort_by_key(|row| row.number);
         if rows.is_empty() {
             return Ok(());
         }
@@ -107,14 +84,14 @@ impl Renderer {
             );
         }
         for line in [
-            "Rows: last recorded clocks, including runtime. Columns: journal numbers at left.",
+            "Rows: last recorded clocks, including runtime. Columns use the same journal numbers as event clocks.",
             "Cell: latest counter from the column journal included in the row's clock.",
             "Diagonal: own counter. 0: no recorded history. —: no event observed.",
         ] {
             self.summary_line(output, MUTED, line)?;
         }
 
-        let index_width = rows.len().to_string().len();
+        let index_width = rows.last().unwrap().number.to_string().len();
         let counter_width = rows
             .iter()
             .filter_map(|row| row.values)
@@ -143,12 +120,12 @@ impl Renderer {
             writeln!(output)?;
             let mut header = format!("  {:>index_width$}  {:<name_width$}", "#", "Journal");
             for column in columns {
-                header.push_str(&format!("  {:>counter_width$}", column + 1));
+                header.push_str(&format!("  {:>counter_width$}", rows[*column].number));
             }
             self.summary_write(output, MUTED, &header)?;
             for (index, row) in rows.iter().enumerate() {
                 let names = cell_lines(&row.name, name_width);
-                let mut line = format!("  {:>index_width$}  {:<name_width$}", index + 1, names[0]);
+                let mut line = format!("  {:>index_width$}  {:<name_width$}", row.number, names[0]);
                 for column in columns {
                     let coordinate =
                         CausalCoordinate::new(JournalWriterId::from_journal_id(rows[*column].id));

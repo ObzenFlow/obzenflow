@@ -208,16 +208,16 @@ struct TestJournalReader<T: JournalEvent> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
         mut options: AppendOptions<T>,
@@ -229,26 +229,31 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         Ok(env)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(TestJournalReader {
             events: self.events.clone(),
             pos: position as usize,
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -260,8 +265,10 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+    for TestJournalReader<T>
+{
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         if self.pos >= guard.len() {
             Ok(None)
@@ -272,11 +279,11 @@ impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         let guard = self.events.lock().unwrap();
         self.pos >= guard.len()
     }

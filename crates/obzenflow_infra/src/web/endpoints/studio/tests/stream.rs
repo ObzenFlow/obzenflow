@@ -669,8 +669,8 @@ impl Drop for ScriptedReader {
 }
 
 #[async_trait]
-impl JournalReader<SystemEvent> for ScriptedReader {
-    async fn next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
+impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ScriptedReader {
+    async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         if let Some(probe) = &self.pending_read {
             let _guard = PendingOpenGuard(probe.clone());
@@ -687,15 +687,15 @@ impl JournalReader<SystemEvent> for ScriptedReader {
         Ok(next)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.position as u64
     }
 
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
         Ok(self.position >= self.events.len())
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.position >= self.events.len()
     }
 }
@@ -759,16 +759,16 @@ impl ScriptedJournal {
 }
 
 #[async_trait]
-impl Journal<SystemEvent> for ScriptedJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<SystemEvent> for ScriptedJournal {
+    fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: SystemEvent,
         options: AppendOptions<SystemEvent>,
@@ -776,18 +776,18 @@ impl Journal<SystemEvent> for ScriptedJournal {
         self.inner.append(event, options).await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<SystemJournalRecord>, JournalError> {
+    async fn storage_read_all_unordered(&self) -> Result<Vec<SystemJournalRecord>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         position: u64,
     ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
@@ -812,7 +812,10 @@ impl Journal<SystemEvent> for ScriptedJournal {
         Ok(reader)
     }
 
-    async fn read_last_n(&self, count: usize) -> Result<Vec<SystemJournalRecord>, JournalError> {
+    async fn storage_read_last_n(
+        &self,
+        count: usize,
+    ) -> Result<Vec<SystemJournalRecord>, JournalError> {
         self.inner.read_last_n(count).await
     }
 }

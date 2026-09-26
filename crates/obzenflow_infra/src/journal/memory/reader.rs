@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::reader::JournalReader;
 use std::sync::{Arc, Mutex};
 
 use super::journal::MemoryJournalState;
@@ -37,8 +36,10 @@ impl<T: JournalEvent> MemoryJournalReader<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+    for MemoryJournalReader<T>
+{
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let env = {
             let state = self.state.lock().unwrap();
             state.events.get(self.position as usize).cloned()
@@ -55,15 +56,15 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
         Ok(env)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.position
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.position as usize >= self.state.lock().unwrap().events.len()
     }
 
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
         Ok(self.position >= self.initial_len)
     }
 }

@@ -645,11 +645,13 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl<T> JournalReader<T> for RecordingJournalReader<T>
+    impl<T> obzenflow_core::journal::JournalStorageReader<T> for RecordingJournalReader<T>
     where
         T: JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self
                 .events
                 .lock()
@@ -663,25 +665,25 @@ mod tests {
             Ok(Some(envelope))
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.pos as u64
         }
     }
 
     #[async_trait::async_trait]
-    impl<T> Journal<T> for RecordingJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for RecordingJournal<T>
     where
         T: JournalEvent + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
+        fn storage_owner(&self) -> Option<&JournalOwner> {
             self.owner.as_ref()
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
             mut options: obzenflow_core::journal::AppendOptions<T>,
@@ -694,12 +696,14 @@ mod tests {
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             Ok(guard.clone())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             event_id: &obzenflow_core::event::types::EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
@@ -707,7 +711,7 @@ mod tests {
             Ok(guard.iter().find(|e| e.id() == event_id).cloned())
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -717,7 +721,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

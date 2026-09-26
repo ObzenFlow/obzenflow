@@ -318,7 +318,7 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
         .read_causally_ordered()
         .await?
         .into_iter()
-        .filter_map(|envelope| match envelope.payload {
+        .filter_map(|envelope| match envelope.into_parts().1 {
             ChainPayload::Execution(ExecutionPayload::SourceCleanupFailed {
                 stage_name,
                 error,

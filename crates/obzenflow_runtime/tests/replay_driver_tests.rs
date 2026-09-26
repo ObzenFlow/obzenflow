@@ -24,8 +24,8 @@ struct TestReader {
 }
 
 #[async_trait]
-impl JournalReader<ChainEvent> for TestReader {
-    async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
+impl obzenflow_core::journal::JournalStorageReader<ChainEvent> for TestReader {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         if self.fail {
             return Err(JournalError::Implementation {
                 message: "simulated corrupt archive record".to_string(),
@@ -40,36 +40,51 @@ impl JournalReader<ChainEvent> for TestReader {
         Ok(None)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.at_end_hint && self.pos >= self.envelopes.len()
     }
 }
 
+// Model an archived record crossing the reader port before using it as evidence.
+async fn admitted_fixture(record: JournalRecord<ChainPayload>) -> JournalRecord<ChainPayload> {
+    TestReader {
+        envelopes: vec![record],
+        pos: 0,
+        at_end_hint: true,
+        fail: false,
+    }
+    .next()
+    .await
+    .unwrap()
+    .unwrap()
+}
+
 #[tokio::test]
 async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
-    use obzenflow_core::event::{CausalCommit, CausalFrontier};
+    use obzenflow_core::event::{CausalFrontier, PreparedCausalCommit};
 
     let writer = WriterId::from(StageId::new());
     let event = || ChainEventFactory::data_event(writer, "test.event", serde_json::json!({}));
-    let first = JournalRecord::new(JournalWriterId::new(), event());
-    let later_input = JournalRecord::new(JournalWriterId::new(), event());
+    let first = admitted_fixture(JournalRecord::new(JournalWriterId::new(), event())).await;
+    let later_input = admitted_fixture(JournalRecord::new(JournalWriterId::new(), event())).await;
     let next_event = event();
-    let (next, witnesses) = CausalCommit::prepare(
+    let (next, witnesses) = PreparedCausalCommit::prepare(
         first.envelope.provenance.journal.run_id,
         first.causal_coordinate(),
         next_event.id,
-        Some(&CausalCommit::from_record(&first).unwrap()),
+        Some(&PreparedCausalCommit::from_record(&first).unwrap()),
         &CausalFrontier::from_record(&later_input).unwrap(),
     )
     .unwrap();
     let mut provenance = first.envelope.provenance.journal.clone();
     provenance.vector_clock = next.clock;
     provenance.causal = witnesses;
-    let second = JournalRecord::commit_event(next_event, provenance).unwrap();
+    let second =
+        admitted_fixture(JournalRecord::commit_event(next_event, provenance).unwrap()).await;
     let reader = Box::new(TestReader {
         envelopes: vec![first.clone(), second.clone()],
         pos: 0,
@@ -90,7 +105,11 @@ async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
         );
         assert_eq!(
             replayed.origin.references(),
-            vec![CausalCommit::from_record(&original).unwrap().reference]
+            vec![
+                PreparedCausalCommit::from_record(&original)
+                    .unwrap()
+                    .reference
+            ]
         );
     }
 }

@@ -539,7 +539,30 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         )
     }
 
+    fn journal_numbers(text: &str) -> std::collections::BTreeMap<String, usize> {
+        let mut pieces = text.split("\x1b[");
+        let mut plain = pieces.next().unwrap().to_owned();
+        for piece in pieces {
+            plain.push_str(piece.split_once('m').unwrap().1);
+        }
+        plain
+            .split_once("Journal numbers:\n")
+            .unwrap()
+            .1
+            .split_once("\n\n")
+            .unwrap()
+            .0
+            .lines()
+            .flat_map(|line| line.trim().split(" · "))
+            .map(|field| {
+                let (number, name) = field.split_once(' ').unwrap();
+                (name.to_owned(), number.parse().unwrap())
+            })
+            .collect()
+    }
+
     fn assert_palette(text: &str) {
+        let numbers = journal_numbers(text);
         let manifest_heading = "\x1b[1;38;5;255mMANIFEST     run_manifest.json\x1b[0m";
         let (events, footer) = text.split_once(manifest_heading).unwrap();
         let facts: Vec<_> = text
@@ -576,13 +599,49 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
                 "headings emphasize the stage and equations emphasize the event: {line}"
             );
         }
-        assert!(
-            text.contains("\x1b[1;38;5;208mSOURCE (stage: \x1b[0m\x1b[1;38;5;223mweb_orders\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215mcommerce.customer_order_placed.v1\x1b[0m\x1b[1;38;5;208m ← web_orders()")
-        );
-        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mvalidate_order\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215mpayment.order_validated.v1\x1b[0m\x1b[1;38;5;208m ← validate_order(commerce.customer_order_placed.v1)"));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mauthorize_payment\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215mpayment.authorized.v1\x1b[0m\x1b[1;38;5;208m ← authorize_payment(payment.order_validated.v1)"));
-        assert!(text
-            .contains("\x1b[38;5;217mDELIVERY (stage: \x1b[0m\x1b[1;38;5;231mpaid_orders\x1b[0m\x1b[38;5;217m)\x1b[0m\n\x1b[1;38;5;224msink.delivery\x1b[0m\x1b[38;5;217m ← paid_orders(payment.authorized.v1)\x1b[0m"));
+        for (stage, heading, event, input, normal, reporter, output) in [
+            (
+                "web_orders",
+                "SOURCE",
+                "commerce.customer_order_placed.v1",
+                "",
+                "1;38;5;208",
+                223,
+                215,
+            ),
+            (
+                "validate_order",
+                "TRANSFORM",
+                "payment.order_validated.v1",
+                "commerce.customer_order_placed.v1",
+                "1;38;5;208",
+                223,
+                215,
+            ),
+            (
+                "authorize_payment",
+                "EFFECTFUL TRANSFORM",
+                "payment.authorized.v1",
+                "payment.order_validated.v1",
+                "1;38;5;208",
+                223,
+                215,
+            ),
+            (
+                "paid_orders",
+                "DELIVERY",
+                "sink.delivery",
+                "payment.authorized.v1",
+                "38;5;217",
+                231,
+                224,
+            ),
+        ] {
+            let number = numbers[stage];
+            assert!(text.contains(&format!(
+                "\x1b[{normal}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter}m{stage}\x1b[0m\x1b[{normal}m, journal: {number})\x1b[0m\n\x1b[1;38;5;{output}m{event}\x1b[0m\x1b[{normal}m ← {stage}({input})"
+            )));
+        }
         assert!(
             text.contains("\x1b[1;4;38;5;215m") && text.contains("\x1b[1;4;38;5;224m"),
             "{text}"
@@ -648,6 +707,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     }
 
     fn assert_fact_origins(text: &str) {
+        let numbers = journal_numbers(text);
         for (event_type, input, stage, order) in [
             (
                 "payment.order_validated.v1",
@@ -688,8 +748,10 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             let block = text
                 .split("\n\n")
                 .find(|block| {
-                    block.starts_with(&format!("{heading} (stage: {stage})\n{event_type} ← "))
-                        && block.contains(&format!("\"order_id\": \"{order}\""))
+                    block.starts_with(&format!(
+                        "{heading} (stage: {stage}, journal: {})\n{event_type} ← ",
+                        numbers[stage]
+                    )) && block.contains(&format!("\"order_id\": \"{order}\""))
                 })
                 .unwrap_or_else(|| {
                     panic!("missing {event_type} with its own payload for {order}: {text}")
@@ -719,6 +781,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         .unwrap();
     let baseline = latest_run_dir(temp.path());
     let (human, _) = show(&baseline, &[]);
+    let numbers = journal_numbers(&human);
     let (explicit, _) = show(&baseline, &["--explain", "--color", "never"]);
     assert!(explicit.contains("Effects are data:"));
     assert!(
@@ -757,15 +820,20 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         assert!(human.contains(teaching), "missing teaching cue {teaching}");
     }
     assert!(!human.contains("Read (subscribers) = stage(inputs)"));
-    assert!(human
-        .lines()
-        .any(|line| line == "TRANSFORM (stage: validate_order)"));
-    assert!(human
-        .lines()
-        .any(|line| line == "DELIVERY (stage: paid_orders)"));
+    assert!(human.lines().any(|line| line
+        == format!(
+            "TRANSFORM (stage: validate_order, journal: {})",
+            numbers["validate_order"]
+        )));
+    assert!(human.lines().any(|line| line
+        == format!(
+            "DELIVERY (stage: paid_orders, journal: {})",
+            numbers["paid_orders"]
+        )));
     assert!(!human.contains("RUNTIME"));
     assert!(!human.contains("system.metrics.exported"));
     let (verbose, _) = show(&baseline, &["--include-runtime"]);
+    assert_eq!(journal_numbers(&verbose), numbers);
     assert!(verbose.contains("RUNTIME"));
     assert!(verbose.contains("control.eof") && !human.contains("control.eof"));
     // This demo's keyed effect records successful domain facts. Explicit
@@ -799,6 +867,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "hidden runtime records still supply the last clocks"
     );
     let (settled, _) = show(&baseline, &["--follow"]);
+    assert_eq!(journal_numbers(&settled), numbers);
     assert!(settled.contains("\nFINAL JOURNAL CLOCKS\n"));
     assert_eq!(matrix, clock_matrix(&settled));
     assert!(human.find("\nJOURNALS\n").unwrap() < human.find(matrix).unwrap());
@@ -834,8 +903,19 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         })
         .collect();
     assert_eq!(matrix_rows.len(), last_clocks.len());
-    for (index, row) in matrix_rows.iter().enumerate() {
-        assert_eq!(row[0], (index + 1).to_string());
+    let columns: Vec<_> = matrix
+        .lines()
+        .find(|line| line.trim_start().starts_with("#  Journal"))
+        .unwrap()
+        .split_whitespace()
+        .skip(2)
+        .collect();
+    assert_eq!(
+        columns,
+        matrix_rows.iter().map(|row| row[0]).collect::<Vec<_>>()
+    );
+    for row in &matrix_rows {
+        assert_eq!(row[0], numbers[row[1]].to_string());
         assert_eq!(row.len(), matrix_rows.len() + 2);
         let (_, expected) = last_clocks[row[1]];
         for (column, journal) in matrix_rows.iter().enumerate() {

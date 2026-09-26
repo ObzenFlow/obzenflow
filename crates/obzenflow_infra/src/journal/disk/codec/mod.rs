@@ -254,13 +254,13 @@ impl Decoder {
             }
             let payload = T::Payload::decode(&provenance.event, payload)?;
             payload.validate(&provenance.event)?;
-            let record: LogRecord<T> = JournalRecord {
-                envelope: obzenflow_core::event::envelope::EventEnvelope {
+            let record: LogRecord<T> = JournalRecord::from_parts(
+                obzenflow_core::event::envelope::EventEnvelope {
                     provenance,
                     observability,
                 },
                 payload,
-            };
+            );
             decoded_bytes += obzenflow_core::journal::limits::record_bytes(&record)?;
             if decoded_bytes > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
                 return Err(invalid("decoded frame byte budget exceeded"));

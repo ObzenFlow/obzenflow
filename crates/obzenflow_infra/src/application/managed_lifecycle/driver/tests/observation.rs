@@ -144,8 +144,8 @@ struct GatedReader {
     saw_ready: bool,
 }
 #[async_trait::async_trait]
-impl JournalReader<SystemEvent> for GatedReader {
-    async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
+impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for GatedReader {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
         let event = match self.held.take() {
             Some(event) => Some(event),
             None => {
@@ -195,10 +195,10 @@ impl JournalReader<SystemEvent> for GatedReader {
         }
         Ok(event)
     }
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.inner.position()
     }
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
         Ok(self.held.is_none() && self.inner.initial_prefix_complete()?)
     }
 }

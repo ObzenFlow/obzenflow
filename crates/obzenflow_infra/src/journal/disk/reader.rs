@@ -17,6 +17,7 @@ use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
+#[cfg(test)]
 use obzenflow_core::journal::reader::JournalReader;
 use std::collections::VecDeque;
 use std::fs::File as StdFile;
@@ -510,15 +511,15 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+impl<T: JournalEvent> obzenflow_core::journal::JournalStorageReader<T> for DiskJournalReader<T> {
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
         let end = self
             .initial_end
             .ok_or(JournalError::InitialPrefixUnsupported)?;
         Ok(self.read_offset > end || (self.read_offset == end && self.pending.is_empty()))
     }
 
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         // Don't permanently latch at_end: a live-tail reader retries after EOF to
         // pick up new appends. Only previously buffered complete frames can be
         // reused. A partial buffered suffix may have been repaired since the
@@ -616,11 +617,11 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.position
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.at_end
     }
 }

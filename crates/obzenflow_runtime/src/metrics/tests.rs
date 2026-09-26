@@ -61,21 +61,21 @@ impl<T: JournalEvent> ObservedJournal<T> {
     }
 }
 #[async_trait]
-impl<T: JournalEvent> Journal<T> for ObservedJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent> obzenflow_core::journal::JournalStorage<T> for ObservedJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
         options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         self.inner.append(event, options).await
     }
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         id: &str,
         events: Vec<T>,
@@ -83,22 +83,29 @@ impl<T: JournalEvent> Journal<T> for ObservedJournal<T> {
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(id, events, options).await
     }
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         id: &EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_event(id).await
     }
-    async fn reader_from(&self, _: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(&self, _: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         panic!("metrics must never create a sequential reader")
     }
-    async fn read_last_n(&self, _: usize) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_last_n(
+        &self,
+        _: usize,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         panic!("metrics must never expand a backwards history search")
     }
-    async fn read_metrics_tail(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_metrics_tail(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.probe.calls.fetch_add(1, Ordering::SeqCst);
         self.probe.active.fetch_add(1, Ordering::SeqCst);
         let _reading = Reading(self.probe.clone());

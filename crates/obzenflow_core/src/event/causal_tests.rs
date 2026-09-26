@@ -6,8 +6,27 @@ use super::*;
 use crate::event::ChainEventFactory;
 use crate::journal::causal::{CausalProof, CausalProofCache};
 
+// Algebra fixtures use private core construction. Public admission is exercised
+// through real journal providers in the causal_provenance integration tests.
+fn prepare(
+    run: FlowId,
+    coordinate: CausalCoordinate,
+    event: EventId,
+    previous: Option<&CausalCommit>,
+    input: &CausalFrontier,
+) -> Result<(CausalCommit, CausalWitnesses), CausalError> {
+    PreparedCausalCommit::prepare(
+        run,
+        coordinate,
+        event,
+        previous.map(|commit| &commit.0),
+        input,
+    )
+    .map(|(candidate, witnesses)| (CausalCommit(candidate), witnesses))
+}
+
 fn root(run: FlowId) -> CausalCommit {
-    CausalCommit::prepare(
+    prepare(
         run,
         CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
@@ -22,7 +41,7 @@ fn root(run: FlowId) -> CausalCommit {
 fn frontier_merge_is_associative_commutative_and_idempotent_including_ties() {
     let run = FlowId::new();
     let a = root(run);
-    let (b, _) = CausalCommit::prepare(
+    let (b, _) = prepare(
         run,
         CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
@@ -30,7 +49,7 @@ fn frontier_merge_is_associative_commutative_and_idempotent_including_ties() {
         &a.frontier(),
     )
     .unwrap();
-    let (c, _) = CausalCommit::prepare(
+    let (c, _) = prepare(
         run,
         CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
@@ -69,7 +88,7 @@ fn exact_proof_rejects_invented_components_and_conflicting_full_references() {
     let b = root(run);
     let mut input = a.frontier();
     input.merge(&b.frontier()).unwrap();
-    let (mut child, witnesses) = CausalCommit::prepare(
+    let (mut child, witnesses) = prepare(
         run,
         CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
@@ -89,6 +108,7 @@ fn exact_proof_rejects_invented_components_and_conflicting_full_references() {
         CausalProof::Valid { .. }
     ));
     child
+        .0
         .clock
         .clocks
         .insert(root(run).reference.coordinate(), 999);
@@ -97,13 +117,13 @@ fn exact_proof_rejects_invented_components_and_conflicting_full_references() {
         CausalProof::Invalid { .. }
     ));
     let mut impostor = a.clone();
-    impostor.reference.event_id = EventId::new();
+    impostor.0.reference.event_id = EventId::new();
     assert_eq!(
         cache.admit(impostor).unwrap_err(),
         CausalError::ConflictingCommitment
     );
     let mut wrong_run = a.clone();
-    wrong_run.reference.run_id = FlowId::new();
+    wrong_run.0.reference.run_id = FlowId::new();
     assert_eq!(
         cache.admit(wrong_run).unwrap_err(),
         CausalError::ConflictingCommitment
@@ -125,14 +145,13 @@ fn destination_claims_and_counter_exhaustion_fail_before_preparation() {
     let mut prior = root(run);
     let coordinate = prior.reference.coordinate();
     assert_eq!(
-        CausalCommit::prepare(run, coordinate, EventId::new(), None, &prior.frontier())
-            .unwrap_err(),
+        prepare(run, coordinate, EventId::new(), None, &prior.frontier()).unwrap_err(),
         CausalError::FutureDestination
     );
-    prior.reference.sequence = u64::MAX;
-    prior.clock.clocks.insert(coordinate, u64::MAX);
+    prior.0.reference.sequence = u64::MAX;
+    prior.0.clock.clocks.insert(coordinate, u64::MAX);
     assert_eq!(
-        CausalCommit::prepare(
+        prepare(
             run,
             coordinate,
             EventId::new(),
@@ -160,7 +179,9 @@ fn admission_rejects_legacy_keys_duplicate_coordinates_and_malformed_references(
     zero["sequence"] = json!(0);
     assert!(serde_json::from_value::<VectorClock>(json!({"entries": [zero]})).is_err());
 
-    let reference = CausalCommit::from_record(&record).unwrap().reference;
+    let reference = PreparedCausalCommit::from_record(&record)
+        .unwrap()
+        .reference;
     for malformed in [
         reference,
         CommittedCausalRef {
@@ -170,7 +191,7 @@ fn admission_rejects_legacy_keys_duplicate_coordinates_and_malformed_references(
     ] {
         let mut invalid = record.clone();
         invalid.envelope.provenance.journal.causal.witnesses = vec![malformed];
-        assert!(CausalFrontier::from_record(&invalid).is_err());
+        assert!(PreparedCausalCommit::from_record(&invalid).is_err());
     }
     let mut invalid = record;
     invalid
@@ -184,7 +205,7 @@ fn admission_rejects_legacy_keys_duplicate_coordinates_and_malformed_references(
         run_id: FlowId::new(),
         ..reference
     });
-    assert!(CausalFrontier::from_record(&invalid).is_err());
+    assert!(PreparedCausalCommit::from_record(&invalid).is_err());
 }
 
 #[test]
@@ -199,7 +220,7 @@ fn witnesses_stay_linear_in_coordinates_independent_of_history_length() {
         let mut previous = None;
         let mut total_bytes = 0;
         for _ in 0..512 {
-            let (commitment, witnesses) = CausalCommit::prepare(
+            let (commitment, witnesses) = prepare(
                 run,
                 coordinate,
                 EventId::new(),

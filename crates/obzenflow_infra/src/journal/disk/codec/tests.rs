@@ -166,7 +166,8 @@ fn origin_metadata_keeps_application_keys_and_values_opaque() {
     let source = test_data::record(test_data::Stage::Source, 0);
     let mut origin = serde_json::to_value(
         source
-            .envelope
+            .into_parts()
+            .0
             .provenance
             .event
             .correlation
@@ -308,9 +309,11 @@ fn representative_records_preserve_all_fields_and_attribute_complete_origin_cost
     println!("Origins: {origin_count}; stage counts/provenance bytes/inline origins: {families:?}");
 }
 
-#[test]
-fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
-    use obzenflow_core::event::{CausalCommit, CausalCoordinate, CausalFrontier};
+#[tokio::test]
+async fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::CausalFrontier;
+    use obzenflow_core::journal::{AppendOptions, Journal};
     use obzenflow_core::FlowId;
 
     for participants in [1usize, 8, 32] {
@@ -318,53 +321,40 @@ fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
         let path = dir.path().join("causal-growth.log");
         let store = DefinitionStore::default();
         let run = FlowId::new();
-        let mut inputs = (0..participants)
+        let inputs = (0..participants)
             .map(|_| {
-                CausalCommit::prepare(
+                MemoryJournal::<ChainEvent>::with_owner_in_run(
+                    obzenflow_core::JournalOwner::stage(StageId::new()),
                     run,
-                    CausalCoordinate::new(JournalWriterId::new()),
-                    EventId::new(),
-                    None,
-                    &CausalFrontier::default(),
                 )
-                .unwrap()
-                .0
             })
             .collect::<Vec<_>>();
-        let mut original = record();
-        let destination = original.causal_coordinate();
+        let destination = MemoryJournal::<ChainEvent>::with_owner_in_run(
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+            run,
+        );
         let mut frontier = CausalFrontier::default();
-        let mut previous = None;
         let mut total = 0;
         let mut early_max = 0;
         for index in 0..512 {
             // Repeated fan-in advances every independent input; the fold must
             // replace its evidence rather than keep a history of contributors.
-            for input in &mut inputs {
-                *input = CausalCommit::prepare(
-                    run,
-                    input.reference.coordinate(),
-                    EventId::new(),
-                    Some(input),
-                    &CausalFrontier::default(),
-                )
-                .unwrap()
-                .0;
-                frontier.merge(&input.frontier()).unwrap();
+            for input in &inputs {
+                let committed = input
+                    .append(record().into_authored(), Default::default())
+                    .await
+                    .unwrap();
+                frontier
+                    .merge(&CausalFrontier::from_record(&committed).unwrap())
+                    .unwrap();
             }
-            original.envelope.provenance.event.id = EventId::new();
-            let (commitment, witnesses) = CausalCommit::prepare(
-                run,
-                destination,
-                *original.id(),
-                previous.as_ref(),
-                &frontier,
-            )
-            .unwrap();
-            let journal = &mut original.envelope.provenance.journal;
-            journal.run_id = run;
-            journal.vector_clock = commitment.clock.clone();
-            journal.causal = witnesses;
+            let original = destination
+                .append(
+                    record().into_authored(),
+                    AppendOptions::new(frontier.clone()),
+                )
+                .await
+                .unwrap();
             let (offset, bytes) = persist(&path, &original, store.clone());
             let restored = decode(&path, offset, &bytes).unwrap();
             assert_eq!(
@@ -377,7 +367,9 @@ fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
             }
             assert!(bytes.len() <= early_max + 16 * (participants + 1));
             assert!(bytes.len() < 2048 + 256 * (participants + 1));
-            frontier.merge(&commitment.frontier()).unwrap();
+            frontier
+                .merge(&CausalFrontier::from_record(&original).unwrap())
+                .unwrap();
             // These are the only variable-sized fields retained by a frontier:
             // fixed-width counter/coordinate and witness/coordinate map entries.
             assert_eq!(frontier.clock().clocks.len(), participants + 1);
@@ -385,7 +377,6 @@ fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
             assert!(
                 original.envelope.provenance.journal.causal.witnesses.len() <= participants + 1
             );
-            previous = Some(commitment);
         }
         assert_eq!(std::fs::metadata(&path).unwrap().len(), total as u64);
         assert!(total < 512 * (2048 + 256 * (participants + 1)));
@@ -778,7 +769,7 @@ fn current_schema_fixtures_preserve_bytes_and_logical_records() {
             serde_json::to_vec(&record).unwrap(),
             serde_json::to_vec(&restored).unwrap()
         );
-        if let Some(packet) = record.envelope.observability {
+        if let Some(packet) = record.into_parts().0.observability {
             let families =
                 obzenflow_core::event::observability::observation_families(packet).unwrap();
             assert_eq!(families.len(), 25);

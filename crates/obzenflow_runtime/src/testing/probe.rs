@@ -547,11 +547,13 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl<T> JournalReader<T> for MemoryJournalReader<T>
+    impl<T> obzenflow_core::journal::JournalStorageReader<T> for MemoryJournalReader<T>
     where
         T: JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             let guard = self
                 .events
                 .lock()
@@ -565,25 +567,25 @@ mod tests {
             Ok(Some(envelope))
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.pos as u64
         }
     }
 
     #[async_trait::async_trait]
-    impl<T> Journal<T> for MemoryJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for MemoryJournal<T>
     where
         T: JournalEvent + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
+        fn storage_owner(&self) -> Option<&JournalOwner> {
             self.owner.as_ref()
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
             mut options: obzenflow_core::journal::AppendOptions<T>,
@@ -596,12 +598,14 @@ mod tests {
             Ok(envelope)
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             Ok(guard.clone())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             event_id: &obzenflow_core::event::types::EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
@@ -609,7 +613,7 @@ mod tests {
             Ok(guard.iter().find(|e| e.id() == event_id).cloned())
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -619,7 +623,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -735,7 +739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stage_writer_seq_errors_when_vector_clock_is_missing_writer_component() {
+    async fn reader_rejects_a_record_with_no_journal_clock_component() {
         let mut topology_builder = TopologyBuilder::new();
         let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
         topology_builder.add_stage(Some("sink".to_string()));
@@ -749,19 +753,20 @@ mod tests {
 
         let event = ChainEventFactory::data_event(writer_id, "data", serde_json::json!({}));
         let mut envelope = JournalRecord::new(stage_journal_impl.id.into(), event);
-        // Deliberately corrupt an admitted test double to exercise probe diagnostics.
+        // Corruption must fail at admission, before the probe exposes data.
         envelope.envelope.provenance.journal.vector_clock = VectorClock::new();
         stage_journal_impl.push_envelope(envelope);
 
         let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
         let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
 
-        let observed = probe.expect_event(1).await.expect("expect first data");
-        let err = observed
-            .stage_writer_seq()
-            .expect_err("missing stage writer seq should error");
+        let err = probe
+            .expect_event(1)
+            .await
+            .err()
+            .expect("invalid record must not be admitted");
         assert!(
-            matches!(err, JournalProbeError::MissingStageWriterSeq { .. }),
+            matches!(&err, JournalProbeError::JournalRead(reason) if reason.contains("no positive local sequence")),
             "unexpected error: {err:?}"
         );
     }

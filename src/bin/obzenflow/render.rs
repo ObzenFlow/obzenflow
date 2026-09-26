@@ -173,7 +173,7 @@ impl Renderer {
     }
 
     pub(super) fn begin(
-        &self,
+        &mut self,
         output: &mut impl Write,
         run: &RunIdentity,
         follow: bool,
@@ -185,23 +185,41 @@ impl Renderer {
                 run.flow_id,
                 if follow { "follow" } else { "snapshot" }
             )?;
-            writeln!(output, "{}", self.dim("Clocks ⟨journal:sequence⟩"))?;
-            writeln!(
-                output,
-                "{}",
-                self.dim("Facts orange · stateful/join outputs green · effects/deliveries pink · runtime gray")
-            )?;
-            writeln!(output, "{}", self.dim("Output ← stage(recorded inputs). The reporting journal's counter is underlined."))?;
-            writeln!(
-                output,
-                "{}",
-                self.dim(
-                    "Counters track journal history, including hidden runtime records (--include-runtime)."
-                )
-            )?;
-            writeln!(output, "{}\n", self.dim("Headings name stage kinds, or EFFECT/DELIVERY evidence. … marks shortened values; --full shows complete records."))?;
+            for text in [
+                "Clocks ⟨journal number:counter⟩. Numbers stay fixed in this view, including the final matrix.",
+                "Facts orange · stateful/join outputs green · effects/deliveries pink · runtime gray",
+                "Output ← stage(recorded inputs). The reporting journal's counter is underlined.",
+                "Counters track journal history, including hidden runtime records (--include-runtime).",
+                "Headings name stage kinds, or EFFECT/DELIVERY evidence. … marks shortened values; --full shows complete records.",
+            ] {
+                for line in wrap_fields(&[text.into()], self.width) {
+                    writeln!(output, "{}", self.dim(&line))?;
+                }
+            }
+            writeln!(output)?;
+            self.journal_legend(output)?;
         }
         output.flush()?;
+        Ok(())
+    }
+
+    fn journal_legend(&mut self, output: &mut impl Write) -> Result<(), Error> {
+        if self.jsonl || self.compact {
+            return Ok(());
+        }
+        let labels = self.context.take_journal_labels();
+        if labels.is_empty() {
+            return Ok(());
+        }
+        writeln!(output, "{}", self.dim("Journal numbers:"))?;
+        let fields: Vec<_> = labels
+            .into_iter()
+            .map(|(number, name)| format!("{number} {}", safe_text(&name)))
+            .collect();
+        for line in wrap_fields(&fields, self.width.saturating_sub(2)) {
+            writeln!(output, "{}", self.dim(&format!("  {line}")))?;
+        }
+        writeln!(output)?;
         Ok(())
     }
 
@@ -245,6 +263,7 @@ impl Renderer {
             // Hidden rows still supply causal context and journal boundaries.
             // Filtering them before buffering could join non-adjacent facts.
             self.context.remember(&record);
+            self.journal_legend(output)?;
             self.pending.push_back(record);
             self.drain_ready(output, false)?;
             if self.pending.len() >= MAX_PENDING {
@@ -376,7 +395,8 @@ impl Renderer {
             }
             let prefix = format!("{heading} (stage: ");
             let stage_range = prefix.len()..prefix.len() + stage.len();
-            let heading = format!("{prefix}{stage})");
+            let journal = self.context.journal_number(&record.journal.id);
+            let heading = format!("{prefix}{stage}, journal: {journal})");
             self.record_emphasized_lines(
                 output,
                 record,
@@ -528,41 +548,39 @@ impl Renderer {
     }
 
     fn record_clock(&self, record: &RunRecord) -> String {
-        let values = clock(record);
-        let components = self.context.clock_components(
-            values,
-            uses_inputs(record) || record.kind == RunRecordKind::SourceFact,
-            &record.run,
-        );
-        let components = components
-            .into_iter()
-            .map(|component| {
-                let reporting =
-                    component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id;
-                let name = if reporting {
-                    self.record_text(
-                        record,
-                        &format!("{}:", component.name),
-                        TextEmphasis::Output,
-                    )
-                } else {
-                    self.dim(&format!("{}:", safe_text(&component.name)))
-                };
-                let digits = component.value.to_string();
-                let digits = if reporting {
-                    self.record_text(record, &digits, TextEmphasis::JournalCounter)
-                } else {
-                    self.dim(&digits)
-                };
-                format!("{name}{digits}")
-            })
-            .collect::<Vec<_>>();
-        format!(
-            "{}{}{}",
-            self.dim("⟨"),
-            components.join(&self.dim(",")),
-            self.dim("⟩")
-        )
+        let mut result = self.dim("⟨");
+        let mut columns = 1;
+        for (index, component) in self
+            .context
+            .clock_components(clock(record))
+            .iter()
+            .enumerate()
+        {
+            let label = format!("{}:", component.number);
+            let digits = component.value.to_string();
+            let cell_width = label.len() + digits.len();
+            if index > 0 {
+                result.push_str(&self.dim(","));
+                columns += 1;
+                // Reserve a column for the closing bracket or trailing comma.
+                // Count plain ASCII cells, never the ANSI styling bytes.
+                if columns + cell_width + 1 > self.width {
+                    result.push_str("\n  ");
+                    columns = 2;
+                }
+            }
+            let reporting =
+                component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id;
+            if reporting {
+                result.push_str(&self.record_text(record, &label, TextEmphasis::Output));
+                result.push_str(&self.record_text(record, &digits, TextEmphasis::JournalCounter));
+            } else {
+                result.push_str(&self.dim(&format!("{label}{digits}")));
+            }
+            columns += cell_width;
+        }
+        result.push_str(&self.dim("⟩"));
+        result
     }
 
     fn record_text(&self, record: &RunRecord, text: &str, emphasis: TextEmphasis) -> String {

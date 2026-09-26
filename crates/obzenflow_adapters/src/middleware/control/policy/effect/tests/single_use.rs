@@ -7,13 +7,11 @@
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
 use obzenflow_core::event::{
-    CausalCommit, CausalCoordinate, CausalFrontier, ChainPayload, JournalRecord,
+    CausalCoordinate, CausalFrontier, ChainPayload, JournalRecord, PreparedCausalCommit,
 };
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
-use obzenflow_core::{
-    BoundedBindingEvidence, FlowId, JournalId, JournalOwner, JournalWriterId, TypedPayload,
-};
+use obzenflow_core::{BoundedBindingEvidence, FlowId, JournalId, JournalOwner, TypedPayload};
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
     transactional_effect_port_slot, Effect, EffectBindingEvidence, EffectBindingUse,
@@ -34,7 +32,7 @@ use obzenflow_runtime::stages::common::handlers::{
 struct AppendOnlyJournal {
     id: JournalId,
     run_id: FlowId,
-    clocks: Mutex<std::collections::HashMap<obzenflow_core::WriterId, CausalCommit>>,
+    clocks: Mutex<std::collections::HashMap<obzenflow_core::WriterId, PreparedCausalCommit>>,
     owner: JournalOwner,
     fail_append: bool,
 }
@@ -54,10 +52,10 @@ impl AppendOnlyJournal {
         &self,
         event: ChainEvent,
         input: &CausalFrontier,
-        clocks: &mut std::collections::HashMap<obzenflow_core::WriterId, CausalCommit>,
+        clocks: &mut std::collections::HashMap<obzenflow_core::WriterId, PreparedCausalCommit>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let writer = event.writer_id;
-        let (commitment, causal) = CausalCommit::prepare(
+        let (commitment, causal) = PreparedCausalCommit::prepare(
             self.run_id,
             CausalCoordinate::new(self.id.into()),
             event.id,
@@ -77,31 +75,31 @@ impl AppendOnlyJournal {
 struct EmptyJournalReader;
 
 #[async_trait]
-impl JournalReader<ChainEvent> for EmptyJournalReader {
-    async fn next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
+impl obzenflow_core::journal::JournalStorageReader<ChainEvent> for EmptyJournalReader {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         0
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         true
     }
 }
 
 #[async_trait]
-impl Journal<ChainEvent> for AppendOnlyJournal {
-    fn id(&self) -> &JournalId {
+impl obzenflow_core::journal::JournalStorage<ChainEvent> for AppendOnlyJournal {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         Some(&self.owner)
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: ChainEvent,
         mut options: AppendOptions<ChainEvent>,
@@ -116,7 +114,7 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
         self.prepare(event, &options.frontier, &mut self.clocks.lock().unwrap())
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         _group_id: &str,
         events: Vec<ChainEvent>,
@@ -138,34 +136,33 @@ impl Journal<ChainEvent> for AppendOnlyJournal {
         let mut records = Vec::new();
         for event in events {
             let record = self.prepare(event, &options.frontier, &mut prepared)?;
-            options
-                .frontier
-                .merge(&CausalFrontier::from_record(&record)?)?;
             records.push(record);
         }
         *clocks = prepared;
         Ok(records)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
         Ok(Vec::new())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(
+    async fn storage_reader_from(
         &self,
         _position: u64,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
         Ok(Box::new(EmptyJournalReader))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         _count: usize,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
@@ -279,21 +276,25 @@ impl TransactionalEffectPort<TransactionProbe> for TransactionProbePort {
     }
 }
 
-fn effect_context(
+async fn effect_context(
     stage_id: StageId,
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
 ) -> (EffectInvocationContext, EffectBindingUse<TransactionProbe>) {
     let writer_id = WriterId::from(stage_id);
-    let parent = JournalRecord::new(
-        JournalWriterId::new(),
-        ChainEventFactory::data_event(
-            writer_id,
-            TransactionProbeInput::versioned_event_type(),
-            json!(TransactionProbeInput),
-        ),
-    );
+    let upstream = AppendOnlyJournal::new(JournalOwner::stage(stage_id), false);
+    let parent = upstream
+        .append(
+            ChainEventFactory::data_event(
+                writer_id,
+                TransactionProbeInput::versioned_event_type(),
+                json!(TransactionProbeInput),
+            ),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     let binding = EffectRegistrationBuilder::<TransactionProbe>::new(
         LogicalEffectBindingName::new("tx").unwrap(),
         TransactionProbeEvidence,
@@ -398,7 +399,7 @@ async fn invoke_with_boundary_mode(
     trace: Arc<Mutex<Vec<String>>>,
     mode: TransactionProbeMode,
 ) -> EffectError {
-    let (context, binding) = effect_context(stage_id, calls, trace, mode);
+    let (context, binding) = effect_context(stage_id, calls, trace, mode).await;
     let input = context.parent.authored().clone();
     let terminal_error = Arc::new(Mutex::new(None));
     let adapter = EffectfulTransformHandlerAdapter::new(

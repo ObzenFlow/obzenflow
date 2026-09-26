@@ -78,12 +78,12 @@ async fn periodic_capture_reduces_representative_storage_without_changing_protec
         dense_packets += usize::from(control.envelope.observability.is_some());
         sparse_packets += usize::from(treatment.envelope.observability.is_some());
         assert_eq!(
-            serde_json::to_value(control.payload).unwrap(),
-            serde_json::to_value(treatment.payload).unwrap()
+            serde_json::to_value(&control.payload).unwrap(),
+            serde_json::to_value(&treatment.payload).unwrap()
         );
         assert_eq!(
-            serde_json::to_value(control.envelope.provenance.event).unwrap(),
-            serde_json::to_value(treatment.envelope.provenance.event).unwrap()
+            serde_json::to_value(&control.envelope.provenance.event).unwrap(),
+            serde_json::to_value(&treatment.envelope.provenance.event).unwrap()
         );
         tokio::time::advance(Duration::from_millis(1)).await;
     }

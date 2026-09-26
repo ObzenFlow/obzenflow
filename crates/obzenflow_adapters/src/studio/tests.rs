@@ -132,8 +132,31 @@ fn throughput_sse_and_prometheus_share_retained_values_without_capture_or_cursor
     assert_eq!(reconnect.current_measurements(), vec![frame]);
 }
 
+// Projection tests start after an archive reader has admitted the record.
+fn stored_record(writer: JournalWriterId, event: SystemEvent) -> SystemJournalRecord {
+    use obzenflow_core::journal::{JournalError, JournalReader, JournalStorageReader};
+
+    struct Stored(Option<SystemJournalRecord>);
+    #[async_trait::async_trait]
+    impl JournalStorageReader<SystemEvent> for Stored {
+        async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
+            Ok(self.0.take())
+        }
+        fn storage_position(&self) -> u64 {
+            u64::from(self.0.is_none())
+        }
+    }
+    let mut reader = Stored(Some(JournalRecord::new(writer, event)));
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(reader.next())
+        .unwrap()
+        .unwrap()
+}
+
 fn fact(event: SystemPayload) -> SystemJournalRecord {
-    JournalRecord::new(
+    stored_record(
         JournalWriterId::from(JournalId::new()),
         SystemEvent::new(WriterId::from(SystemId::new()), event),
     )
@@ -394,7 +417,7 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
         let journal = envelope.envelope.provenance.journal.journal_writer_id;
         let mut stage_event = envelope.into_authored();
         stage_event.writer_id = WriterId::from(stage);
-        let stage_envelope = JournalRecord::new(journal, stage_event);
+        let stage_envelope = stored_record(journal, stage_event);
         let mut expected = expected;
         expected["stage_id"] = json!(stage.to_string());
         assert_fact_payload(
@@ -477,7 +500,7 @@ fn discarded_commands_remain_visible_as_journal_backed_studio_facts() {
         ),
     ] {
         let stage_id = StageId::new();
-        let envelope = JournalRecord::new(
+        let envelope = stored_record(
             JournalWriterId::from(JournalId::new()),
             SystemEvent::new(
                 WriterId::from(stage_id),
@@ -521,7 +544,7 @@ fn supervisor_registration_preserves_writer_identity_in_studio() {
         supervision: SupervisionMode::SelfSupervised,
     };
     let expected = json!({"writer_id": writer, "descriptor": descriptor});
-    let envelope = JournalRecord::new(
+    let envelope = stored_record(
         JournalWriterId::from(JournalId::new()),
         SystemEvent::new(writer, SystemPayload::SupervisorRegistered { descriptor }),
     );
@@ -723,7 +746,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         payload(live.middleware_snapshot(456).as_ref().unwrap()),
         final_snapshot
     );
-    let Input::Fact(mut carrier) = factual(
+    let Input::Fact(carrier) = factual(
         10,
         MiddlewareFact::CircuitBreaker(CircuitBreakerFact::HalfOpen {
             test_request_count: 1,
@@ -734,7 +757,10 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     let Input::Measurement(stale) = measured(1, summary(999)) else {
         unreachable!()
     };
-    carrier.envelope.observability = Some(*stale);
+    let writer = carrier.envelope.provenance.journal.journal_writer_id;
+    let mut authored = carrier.into_authored();
+    authored.envelope.observability = Some(*stale);
+    let carrier = Box::new(stored_record(writer, authored));
     let frames = live.project(&(*carrier).clone().into(), 789);
     assert_eq!(
         frames.len(),

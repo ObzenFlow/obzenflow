@@ -191,8 +191,8 @@ impl CommitmentAdmission {
     pub(crate) fn admit<P: obzenflow_core::event::payloads::JournalPayload>(
         &mut self,
         record: &obzenflow_core::JournalRecord<P>,
-    ) -> Result<obzenflow_core::event::CausalCommit, JournalError> {
-        let commitment = obzenflow_core::event::CausalCommit::from_record(record)?;
+    ) -> Result<obzenflow_core::event::PreparedCausalCommit, JournalError> {
+        let commitment = obzenflow_core::event::PreparedCausalCommit::from_record(record)?;
         let reference = commitment.reference;
         if reference.run_id != self.identity.run_id
             || reference.journal_writer_id.as_journal_id() != &self.identity.journal_id
@@ -222,10 +222,10 @@ pub(super) fn write_fixture_identity(path: &Path, identity: JournalIdentity) {
 pub(super) fn fixture_record<T: obzenflow_core::event::JournalEvent>(
     identity: JournalIdentity,
     event: T,
-    previous: &mut Option<obzenflow_core::event::CausalCommit>,
+    previous: &mut Option<obzenflow_core::event::PreparedCausalCommit>,
 ) -> obzenflow_core::JournalRecord<T::Payload> {
-    use obzenflow_core::event::{CausalCommit, CausalCoordinate, CausalFrontier};
-    let (commitment, causal) = CausalCommit::prepare(
+    use obzenflow_core::event::{CausalCoordinate, CausalFrontier, PreparedCausalCommit};
+    let (commitment, causal) = PreparedCausalCommit::prepare(
         identity.run_id,
         CausalCoordinate::new(identity.journal_id.into()),
         *event.id(),

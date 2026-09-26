@@ -384,14 +384,16 @@ mod tests {
 
     struct FailingReader(Option<JournalRecord<SystemPayload>>);
     #[async_trait::async_trait]
-    impl JournalReader<SystemEvent> for FailingReader {
-        async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
+    impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for FailingReader {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
             match self.0.take() {
                 Some(event) => Ok(Some(event)),
                 None => Err(JournalError::Full),
             }
         }
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             u64::from(self.0.is_none())
         }
     }

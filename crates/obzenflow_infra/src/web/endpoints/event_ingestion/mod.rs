@@ -640,16 +640,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T: JournalEvent + 'static> Journal<T> for FailingAppendJournal<T> {
-        fn id(&self) -> &JournalId {
+    impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T>
+        for FailingAppendJournal<T>
+    {
+        fn storage_id(&self) -> &JournalId {
             self.inner.id()
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
+        fn storage_owner(&self) -> Option<&JournalOwner> {
             self.inner.owner()
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             _event: T,
             _options: obzenflow_core::journal::AppendOptions<T>,
@@ -660,25 +662,27 @@ mod tests {
             })
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             self.inner.read_all_unordered().await
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             self.inner.read_event(event_id).await
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
             self.inner.reader_from(position).await
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -824,7 +828,7 @@ mod tests {
             .await
             .expect("read system journal")
             .into_iter()
-            .filter_map(|env| match env.payload {
+            .filter_map(|env| match env.into_parts().1 {
                 SystemPayload::IngressRefusal {
                     reason,
                     event_count,
@@ -843,7 +847,7 @@ mod tests {
             .await
             .expect("read system journal")
             .into_iter()
-            .filter_map(|env| match env.payload {
+            .filter_map(|env| match env.into_parts().1 {
                 SystemPayload::IngressRefusal {
                     reason,
                     event_count,
@@ -881,7 +885,7 @@ mod tests {
                 reason,
                 event_count,
                 ..
-            } = record.payload
+            } = record.into_parts().1
             {
                 *totals
                     .entry((ingress_key, reason.as_str().to_owned()))
@@ -2092,7 +2096,7 @@ mod tests {
             .await
             .expect("read system journal")
             .into_iter()
-            .filter_map(|env| match env.payload {
+            .filter_map(|env| match env.into_parts().1 {
                 SystemPayload::IngressRefusal {
                     reason,
                     event_count,

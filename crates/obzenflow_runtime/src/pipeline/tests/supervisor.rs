@@ -24,7 +24,6 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{SystemEvent, SystemPayload};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_error::JournalError;
-use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::{JournalRecord, StageId, SystemId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,8 +38,8 @@ struct PausedReader {
 }
 
 #[async_trait]
-impl JournalReader<SystemEvent> for PausedReader {
-    async fn next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
+impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for PausedReader {
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
         let _guard = match &self.lock {
             Some(lock) => Some(lock.read().await),
             None => None,
@@ -55,13 +54,13 @@ impl JournalReader<SystemEvent> for PausedReader {
         }
         Ok(row)
     }
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         u64::from(self.row.is_none())
     }
-    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
         Ok(self.row.is_none())
     }
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         self.row.is_none()
     }
 }
