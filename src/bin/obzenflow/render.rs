@@ -345,7 +345,7 @@ impl Renderer {
         let input = self.input_name(first);
         for record in records {
             let heading = category.heading(record, &self.context);
-            let value = display_payload(record)?;
+            let value = display_payload(record, self.full)?;
             // The recorded output leads once; the arrow explains its origin.
             // Sources have no upstream event argument. This is observation,
             // not evaluation or a claim that the stage is a pure function.
@@ -362,10 +362,11 @@ impl Renderer {
                 relation.push_str(" [processing error]");
             }
             if self.compact {
-                let line = abbreviated(
-                    &format!("{heading}  {relation}  {}", compact(&value)),
-                    self.width,
-                );
+                let mut line = format!("{heading}  {relation}");
+                if let Some(value) = &value {
+                    line.push_str(&format!("  {}", compact(value)));
+                }
+                let line = abbreviated(&line, self.width);
                 writeln!(
                     output,
                     "{}",
@@ -411,7 +412,9 @@ impl Renderer {
                     writeln!(output, "{line}")?;
                 }
             }
-            self.payload_lines(output, &value, category)?;
+            if let Some(value) = &value {
+                self.payload_lines(output, value, category)?;
+            }
             if self.explain {
                 for line in wrap_fields(&[gloss(record, &self.context).into()], self.width) {
                     writeln!(output, "{}", self.dim(&line))?;
@@ -537,10 +540,10 @@ impl Renderer {
                 let reporting =
                     component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id;
                 let name = if reporting {
-                    format!(
-                        "{}{}",
-                        self.record_text(record, &component.name, TextEmphasis::Reporter),
-                        self.dim(":")
+                    self.record_text(
+                        record,
+                        &format!("{}:", component.name),
+                        TextEmphasis::Output,
                     )
                 } else {
                     self.dim(&format!("{}:", safe_text(&component.name)))
@@ -681,8 +684,18 @@ fn same_branch(a: &RunRecord, b: &RunRecord) -> bool {
     }
 }
 
-fn display_payload(record: &RunRecord) -> Result<Value, Error> {
-    Ok(match &record.record {
+fn display_payload(record: &RunRecord, full: bool) -> Result<Option<Value>, Error> {
+    // Export notices retain their event and causal clock in the normal view.
+    // The freshness watermark is available in --full and untouched --jsonl.
+    if !full
+        && matches!(&record.record, RunRecordData::System(row) if matches!(
+            row.payload,
+            SystemPayload::MetricsCoordination(obzenflow_core::event::MetricsCoordinationEvent::Exported { .. })
+        ))
+    {
+        return Ok(None);
+    }
+    Ok(Some(match &record.record {
         RunRecordData::Chain(row) => match &row.payload {
             // The outcome is the teaching surface. Cursor hashes and descriptor
             // plumbing remain available in --full and --jsonl records.
@@ -705,7 +718,7 @@ fn display_payload(record: &RunRecord) -> Result<Value, Error> {
             _ => serde_json::to_value(&row.payload)?,
         },
         RunRecordData::System(row) => serde_json::to_value(&row.payload)?,
-    })
+    }))
 }
 
 fn gloss(record: &RunRecord, context: &Context) -> &'static str {

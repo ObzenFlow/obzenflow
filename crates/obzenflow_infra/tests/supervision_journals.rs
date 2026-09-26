@@ -116,6 +116,88 @@ async fn physical_reports_continue_after_data_eof_and_filtered_prefixes() {
 }
 
 #[tokio::test]
+async fn missing_commitments_fail_before_report_coverage_crosses_the_gap() {
+    use obzenflow_core::event::CausalError;
+    use obzenflow_core::journal::JournalError;
+    use obzenflow_runtime::supervised_base::report_reader::ReportReaderError;
+
+    for missing_business_record in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("child.log");
+        let stage = StageId::new();
+        let journal = Arc::new(
+            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                .unwrap(),
+        );
+        journal
+            .append(report(stage), Default::default())
+            .await
+            .unwrap();
+        let first_end = std::fs::metadata(&path).unwrap().len() as usize;
+        let middle = if missing_business_record {
+            ChainEventFactory::data_event(stage.into(), "business", serde_json::json!({}))
+        } else {
+            report(stage)
+        };
+        journal.append(middle, Default::default()).await.unwrap();
+        let middle_end = std::fs::metadata(&path).unwrap().len() as usize;
+        journal
+            .append(report(stage), Default::default())
+            .await
+            .unwrap();
+        let boundary = journal.committed_position().await.unwrap();
+        assert_eq!(boundary, 3);
+
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(
+            &path,
+            [
+                original[..first_end].to_vec(),
+                original[middle_end..].to_vec(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let mut readers = ReportReaders::default();
+        readers.stage(journal.clone());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match std::future::poll_fn(|cx| readers.poll_next(cx)).await {
+                    Ok(ReportRead::Record(record)) => assert_eq!(record.position(), 1),
+                    Ok(ReportRead::Coverage { through, .. }) => assert!(through <= 1),
+                    Err(error) => {
+                        assert!(matches!(
+                            error.downcast_ref::<ReportReaderError>(),
+                            Some(ReportReaderError::Read {
+                                journal: id,
+                                source: JournalError::Causal(CausalError::ConflictingCommitment),
+                            }) if id == journal.id()
+                        ));
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("missing report evidence must fail, not stall");
+        let diagnostics = readers.diagnostics();
+        assert!(diagnostics[0].scanned_through <= 1);
+        assert!(diagnostics[0].delivered_through <= 1);
+        assert!(!readers.initial_prefix_complete());
+        obzenflow_runtime::testing::pipeline::report_gap_cannot_complete_pipeline(
+            || {
+                Box::new(obzenflow_infra::journal::MemoryJournalFactory::new(
+                    FlowId::new(),
+                ))
+            },
+            journal,
+            2,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn a_hundred_ready_journals_are_fair_and_keep_their_own_order() {
     for disk in [false, true] {
         let started = std::time::Instant::now();

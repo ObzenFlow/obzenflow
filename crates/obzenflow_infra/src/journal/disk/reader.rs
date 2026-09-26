@@ -9,6 +9,7 @@
 //! cancellation discards it and the next poll reopens at the committed offset.
 
 use super::codec::Decoder;
+use super::identity::CommitmentAdmission;
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::journal_record::JournalRecord;
@@ -58,8 +59,7 @@ fn observer_io(error: std::io::Error) -> JournalError {
 
 /// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
-    identity: super::identity::JournalIdentity,
-    last_commit: Option<obzenflow_core::event::CausalCommit>,
+    admission: CommitmentAdmission,
     decoder: Decoder,
     /// Current position (number of committed events read)
     position: u64,
@@ -133,8 +133,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
-            identity,
-            last_commit: None,
+            admission: CommitmentAdmission::new(identity),
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
@@ -185,8 +184,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })?;
 
         Ok(Self {
-            identity,
-            last_commit: None,
+            admission: CommitmentAdmission::new(identity),
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
@@ -225,6 +223,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 let mut input =
                     std::io::BufReader::new(file.try_clone().map_err(observer_io)?.take(length));
                 let mut decoder = Decoder::new(&scan_path);
+                let mut admission = CommitmentAdmission::open(&scan_path)?;
                 let mut buf = Vec::new();
                 let mut end = 0;
                 while let Some((consumed, termination)) =
@@ -235,7 +234,12 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         termination,
                         ReadPolicy::LiveTail,
                     ) {
-                        Disposition::Yield(_) => end += consumed as u64,
+                        Disposition::Yield(frame) => {
+                            for record in frame.into_records() {
+                                admission.admit(&record)?;
+                            }
+                            end += consumed as u64;
+                        }
                         Disposition::Skip | Disposition::EndOfCommittedRecords => break,
                         Disposition::Corrupt(problem) => {
                             return Err(JournalError::Implementation {
@@ -336,10 +340,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     }
 
     /// Read one logical record from `reader` under the current policy, advancing
-    /// `read_offset` and `position` exactly as a committed read does. The
-    /// reader advances past corruption only when a checked header establishes
-    /// the next physical boundary. Returns the disposition plus
-    /// the byte offset where the disposed frame began, for
+    /// `read_offset` and `position` only after prefix admission. A checked
+    /// header cannot authorise skipping a corrupt commitment. Returns the
+    /// disposition plus the byte offset where the disposed frame began, for
     /// corruption reporting. Leaves `at_end`/`stall_polls` to the caller. Clean
     /// EOF maps to `EndOfCommittedRecords`.
     async fn advance_one<B: tokio::io::AsyncBufRead + Unpin>(
@@ -411,34 +414,13 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 Disposition::Yield(frame) => {
                     let group_id = frame.group_id().map(str::to_string);
                     let records = frame.into_records();
-                    let mut last_commit = self.last_commit.clone();
+                    // Validate the whole group privately before publishing any
+                    // member or advancing either the physical or logical cursor.
+                    let mut admission = self.admission.clone();
                     for record in &records {
-                        let commitment = obzenflow_core::event::CausalCommit::from_record(record)?;
-                        let previous = last_commit.as_ref().map(|previous| previous.reference);
-                        if commitment.reference.run_id != self.identity.run_id
-                            || commitment.reference.journal_writer_id.as_journal_id()
-                                != &self.identity.journal_id
-                            || previous.is_some_and(|previous| {
-                                commitment.reference.sequence <= previous.sequence
-                                    || record
-                                        .envelope
-                                        .provenance
-                                        .journal
-                                        .causal
-                                        .previous
-                                        .is_some_and(|claimed| {
-                                            claimed.sequence == previous.sequence
-                                                && claimed != previous
-                                        })
-                            })
-                        {
-                            return Err(
-                                obzenflow_core::event::CausalError::ConflictingCommitment.into()
-                            );
-                        }
-                        last_commit = Some(commitment);
+                        admission.admit(record)?;
                     }
-                    self.last_commit = last_commit;
+                    self.admission = admission;
                     self.read_offset += consumed as u64;
                     self.pending_group_id = group_id;
                     self.pending_group_size = self
@@ -483,14 +465,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         }),
                         frame_start,
                     ))
-                }
-                Disposition::Corrupt(problem) => {
-                    if super::codec::frame::frame_length(&self.buf)
-                        .is_ok_and(|length| length == consumed)
-                    {
-                        self.read_offset += consumed as u64;
-                    }
-                    Ok((Disposition::Corrupt(problem), frame_start))
                 }
                 other => Ok((other, frame_start)),
             }
@@ -568,9 +542,7 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         // There is no await between committed cursor advancement and returning
         // the record. An interrupted I/O await leaves buffered_reader empty;
         // read_offset still identifies the next unconsumed physical frame.
-        if matches!(&disposition, Disposition::Yield(_))
-            || (matches!(&disposition, Disposition::Corrupt(_)) && self.read_offset > frame_start)
-        {
+        if matches!(&disposition, Disposition::Yield(_)) {
             self.buffered_reader = Some(reader);
         }
         match disposition {
@@ -620,8 +592,8 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                 Ok(None)
             }
             Disposition::Corrupt(problem) => {
-                // A checked header permits best-effort continuation at its next
-                // boundary. An invalid header leaves the cursor at the error.
+                // Keep the cursor before the unread commitment. Retrying may
+                // observe a repaired frame, never silently admit a later suffix.
                 self.stall_polls = 0;
                 tracing::error!(
                     read_offset = frame_start,
@@ -668,6 +640,64 @@ mod tests {
     pub(super) struct FrameReadGate {
         pub(super) entered: tokio::sync::Notify,
         pub(super) release: tokio::sync::Notify,
+    }
+
+    #[tokio::test]
+    async fn a_gap_inside_an_atomic_group_exposes_none_of_its_members() {
+        use super::super::log_record::serialize_atomic_group;
+        use crate::journal::DiskJournal;
+        use obzenflow_core::{Journal, JournalOwner};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("group-gap.log");
+        let stage = StageId::new();
+        let journal =
+            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                .unwrap();
+        let event = || ChainEventFactory::data_event(stage.into(), "group", serde_json::json!({}));
+        let first = journal.append(event(), Default::default()).await.unwrap();
+        let mut group = journal
+            .append_group("gap", vec![event(), event(), event()], Default::default())
+            .await
+            .unwrap();
+        group.remove(1);
+        for (index, record) in group.iter_mut().enumerate() {
+            record.envelope.provenance.journal.journal_group_member = Some(JournalGroupMember {
+                index: index as u32,
+                size: 2,
+            });
+        }
+        let bytes = [
+            serialize_record(&first).unwrap(),
+            serialize_atomic_group("gap", &group).unwrap(),
+        ]
+        .concat();
+        let end = bytes.len() as u64;
+        std::fs::write(&path, bytes).unwrap();
+        let mut reader = DiskJournalReader::<ChainEvent>::new(
+            path.clone(),
+            *journal.id(),
+            Arc::new(RwLock::new(())),
+        )
+        .await
+        .unwrap()
+        .with_initial_end(end);
+        assert_eq!(reader.next().await.unwrap().unwrap().local_sequence(), 1);
+        for _ in 0..3 {
+            assert!(matches!(
+                reader.next().await,
+                Err(JournalError::Causal(
+                    obzenflow_core::event::CausalError::ConflictingCommitment
+                ))
+            ));
+            assert_eq!(reader.position(), 1);
+            assert!(!reader.initial_prefix_complete().unwrap());
+        }
+        assert!(
+            DiskJournalReader::<ChainEvent>::open_observer(path, *journal.id())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -800,7 +830,10 @@ mod tests {
             let first = make_record();
             write_framed_record(&mut file, &first);
             let committed_end = file.as_file().metadata().unwrap().len();
-            file.write_all(&serialize_record(&make_record()).unwrap()[..20])
+            // Retrying an uncommitted frame keeps the same candidate; preparing
+            // another fixture here would leave a hole in the committed chain.
+            let second = make_record();
+            file.write_all(&serialize_record(&second).unwrap()[..20])
                 .unwrap();
             let mut reader = DiskJournalReader::<ChainEvent>::new(
                 file.path().to_path_buf(),
@@ -837,7 +870,6 @@ mod tests {
             file.as_file_mut()
                 .seek(SeekFrom::Start(committed_end))
                 .unwrap();
-            let second = make_record();
             write_framed_record(&mut file, &second);
             assert_eq!(
                 reader

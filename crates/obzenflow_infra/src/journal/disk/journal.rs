@@ -336,7 +336,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
     log_path: &Path,
     confirmed_end: Option<u64>,
 ) -> Result<RebuiltIndex, JournalError> {
-    let identity = super::identity::read_identity(log_path)?;
+    let mut admission = super::identity::CommitmentAdmission::open(log_path)?;
     let mut index = HashMap::with_capacity(10000);
     let mut last_commit: Option<CausalCommit> = None;
 
@@ -371,21 +371,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
         ) {
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
-                    let commitment = CausalCommit::from_record(&record)?;
-                    let previous = last_commit.as_ref().map(|previous| previous.reference);
-                    if record.envelope.provenance.journal.causal.previous != previous {
-                        return Err(
-                            obzenflow_core::event::CausalError::ConflictingCommitment.into()
-                        );
-                    }
-                    if commitment.reference.run_id != identity.run_id
-                        || commitment.reference.journal_writer_id.as_journal_id()
-                            != &identity.journal_id
-                    {
-                        return Err(
-                            obzenflow_core::event::CausalError::ConflictingCommitment.into()
-                        );
-                    }
+                    let commitment = admission.admit(&record)?;
                     index.insert(record.id().as_ulid(), record_offset);
                     last_commit = Some(commitment);
                 }
@@ -891,6 +877,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         let mut buf = Vec::new();
         let mut offset = 0u64;
         let mut decoder = Decoder::new(&self.path);
+        let mut admission = super::identity::CommitmentAdmission::open(&self.path)?;
 
         while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
             .await
@@ -909,7 +896,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 },
             ) {
                 Disposition::Yield(frame) => {
-                    events.extend(frame.into_records());
+                    for record in frame.into_records() {
+                        admission.admit(&record)?;
+                        events.push(record);
+                    }
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
@@ -1897,11 +1887,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_tail_reader_resumes_after_a_corrupt_record() {
-        // FLOWIP-120q live-tail observer resilience: a live reader that hits a
-        // corrupt committed record reports it once, then resumes at the next
-        // record on the following poll, so a best-effort observer that keeps
-        // polling recovers rather than losing the rest of the stream.
+    async fn live_tail_reader_retains_its_prefix_until_corruption_is_repaired() {
+        // A checked physical boundary cannot discharge a missing commitment.
+        // Sequential readers retain the last admitted prefix, while the explicit
+        // best-effort tail view remains available for observation.
         let test_id = Uuid::new_v4();
         let test_dir =
             std::path::PathBuf::from(format!("target/test-logs/resume_corrupt_{test_id}"));
@@ -1921,7 +1910,8 @@ mod tests {
 
         // Flip a byte inside the second record's body so its CRC no longer matches: committed corruption
         // with intact records on either side.
-        let mut bytes = std::fs::read(&log_path).unwrap();
+        let original = std::fs::read(&log_path).unwrap();
+        let mut bytes = original.clone();
         let first_end = codec::frame::frame_length(&bytes).unwrap();
         let second_end = first_end + codec::frame::frame_length(&bytes[first_end..]).unwrap();
         let target = second_end - codec::frame::TRAILER_LEN - 1;
@@ -1933,14 +1923,22 @@ mod tests {
             reader.next().await.unwrap().is_some(),
             "the first record reads cleanly"
         );
-        assert!(
-            reader.next().await.is_err(),
-            "the corrupt middle record is reported as an error"
-        );
-        assert!(
-            reader.next().await.unwrap().is_some(),
-            "the reader resumes at the record after the corrupt one"
-        );
+        for _ in 0..3 {
+            assert!(reader.next().await.is_err());
+            assert_eq!(reader.position(), 1);
+            assert!(!reader.initial_prefix_complete().unwrap());
+        }
+        assert_eq!(log.read_last_n(1).await.unwrap()[0].local_sequence(), 3);
+
+        std::fs::write(&log_path, original).unwrap();
+        for sequence in 2..=3 {
+            assert_eq!(
+                reader.next().await.unwrap().unwrap().local_sequence(),
+                sequence
+            );
+            assert_eq!(reader.position(), sequence);
+        }
+        assert!(reader.initial_prefix_complete().unwrap());
 
         // Without a checked header, continuation has no known frame boundary.
         // Repeated polls must report the same position instead of searching

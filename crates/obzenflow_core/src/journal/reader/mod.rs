@@ -27,6 +27,9 @@ where
     /// deterministic causal ordering should use `Journal::read_causally_ordered()` /
     /// `Journal::read_causally_after(...)` instead of `JournalReader::next()`.
     ///
+    /// Missing or corrupt committed records are errors. A later record cannot
+    /// advance the admitted prefix past such a gap, including after a retry.
+    ///
     /// Returns None if no more events are available (EOF).
     /// This method should be efficient - O(1) regardless of journal size.
     async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError>;

@@ -640,3 +640,73 @@ pub async fn saturated_publications_stop_report_admission_but_not_controls_or_de
     };
     assert_eq!(report.id(), row.id());
 }
+
+pub async fn report_gap_cannot_complete_pipeline(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+    child: Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
+    missing_position: u64,
+) {
+    use crate::pipeline::fsm::build_pipeline_fsm_with_initial;
+    use crate::pipeline::termination::ExecutionOutcome;
+    use crate::supervised_base::report_reader::ReportReaders;
+    use obzenflow_fsm::FsmAction;
+
+    let mut ctx = make_fsm_context(make_journals);
+    let id = *child.id();
+    let boundary = child.committed_position().await.unwrap();
+    assert!(boundary > missing_position);
+    let mut readers = ReportReaders::default();
+    readers.stage(child);
+    ctx.completion_subscription = Some(readers);
+    ctx.resources.stages_joined = true;
+    ctx.resources.producer_tail = ProducerTail::Through([(id, boundary)].into());
+    let (_sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
+    let mut supervisor = PipelineSupervisor::new(
+        ctx.system_id,
+        receiver,
+        watcher,
+        ctx.resources.failure.clone(),
+    );
+    let mut machine = build_pipeline_fsm_with_initial(PipelineFsmState::CatchingUpProducers);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(machine.state(), PipelineFsmState::Finished { .. }) {
+            if let EventLoopDirective::Transition(event) = supervisor
+                .dispatch_state(machine.state(), &mut ctx)
+                .await
+                .unwrap()
+            {
+                for action in machine.handle(event, &mut ctx).await.unwrap() {
+                    action.execute(&mut ctx).await.unwrap();
+                }
+            }
+            assert!(ctx.report_coverage.get(&id).copied().unwrap_or(0) < missing_position);
+            assert!(!ctx.resources.producer_tail.covered(&ctx.report_coverage));
+        }
+    })
+    .await
+    .expect("missing evidence must settle through the failure path");
+    assert!(ctx.progress.journal_failed);
+    assert!(ctx.resources.failure.get().is_some());
+    assert!(matches!(
+        machine.state(),
+        PipelineFsmState::Finished {
+            outcome: ExecutionOutcome::Failed(_)
+        }
+    ));
+    assert!(ctx.progress.selected_terminal.is_none());
+    assert!(!ctx
+        .system_journal
+        .read_all_unordered()
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| {
+            matches!(
+                row.payload,
+                SystemPayload::PipelineLifecycle(
+                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. }
+                        | obzenflow_core::event::PipelineLifecycleEvent::Drained
+                )
+            )
+        }));
+}

@@ -161,14 +161,17 @@ fn export_journal_file<R: JournalEvent>(
             policy,
         ) {
             Disposition::Yield(frame) => {
-                for record in frame.into_records() {
+                let records = frame.into_records();
+                for record in &records {
                     admission
-                        .admit(&record)
+                        .admit(record)
                         .map_err(|error| JournalInspectError::Corrupt {
                             path: path.into(),
                             offset: record_offset,
                             problem: error.to_string(),
                         })?;
+                }
+                for record in records {
                     serde_json::to_writer(&mut *out, &record).map_err(|e| {
                         JournalInspectError::Io {
                             path: path.to_path_buf(),
@@ -230,14 +233,17 @@ fn inspect_chain_journal(
             policy,
         ) {
             Disposition::Yield(frame) => {
-                for record in frame.into_records() {
+                let records = frame.into_records();
+                for record in &records {
                     admission
-                        .admit(&record)
+                        .admit(record)
                         .map_err(|error| JournalInspectError::Corrupt {
                             path: path.into(),
                             offset: record_offset,
                             problem: error.to_string(),
                         })?;
+                }
+                for record in records {
                     let ty = record.event_type();
                     if event_type.is_some_and(|filter| filter != ty.as_str()) {
                         continue;
@@ -344,6 +350,75 @@ pub(crate) fn load_manifest(run_dir: &Path) -> Result<RunManifest, JournalInspec
 mod tests {
     use super::*;
     use obzenflow_core::journal::JournalReader;
+
+    #[tokio::test]
+    async fn missing_commitments_cannot_produce_a_complete_export_or_terminal_status() {
+        use crate::journal::DiskJournal;
+        use obzenflow_core::event::{SystemEventFactory, SystemPayload};
+        use obzenflow_core::{Journal, JournalOwner, SystemId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("system.log");
+        let system = SystemId::new();
+        let journal =
+            DiskJournal::<SystemEvent>::with_owner(path.clone(), JournalOwner::system(system))
+                .unwrap();
+        let factory = SystemEventFactory::new(system);
+        journal
+            .append(factory.pipeline_starting(), Default::default())
+            .await
+            .unwrap();
+        let first_end = std::fs::metadata(&path).unwrap().len() as usize;
+        journal
+            .append(factory.pipeline_running(), Default::default())
+            .await
+            .unwrap();
+        let middle_end = std::fs::metadata(&path).unwrap().len() as usize;
+        journal
+            .append(
+                factory.pipeline_completed(
+                    obzenflow_core::event::types::DurationMs(1),
+                    obzenflow_core::metrics::FlowLifecycleMetricsSnapshot {
+                        events_in_total: 0,
+                        events_out_total: 0,
+                        errors_total: 0,
+                    },
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let original = std::fs::read(&path).unwrap();
+        for missing_first in [false, true] {
+            let bytes = if missing_first {
+                original[first_end..].to_vec()
+            } else {
+                [
+                    original[..first_end].to_vec(),
+                    original[middle_end..].to_vec(),
+                ]
+                .concat()
+            };
+            std::fs::write(&path, bytes).unwrap();
+            assert!(derive_status_derivation_from_system_log(&path).is_err());
+            let mut output = Vec::new();
+            assert!(matches!(
+                export_journal_file::<SystemEvent>(
+                    &path,
+                    ReadPolicy::SealedScan {
+                        tolerate_torn_tail: false
+                    },
+                    &mut output,
+                ),
+                Err(JournalInspectError::Corrupt { .. })
+            ));
+            for line in String::from_utf8(output).unwrap().lines() {
+                let record: obzenflow_core::JournalRecord<SystemPayload> =
+                    serde_json::from_str(line).unwrap();
+                assert_eq!(record.local_sequence(), 1);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn observation_omission_preserves_full_records_through_reader_and_export() {

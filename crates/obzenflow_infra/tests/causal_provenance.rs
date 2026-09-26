@@ -201,3 +201,67 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
     );
     assert_eq!(reader.next().await.unwrap().unwrap().local_sequence(), 2);
 }
+
+#[tokio::test]
+async fn missing_committed_frames_cannot_advance_a_journal_prefix() {
+    for remove_first in [false, true] {
+        for remove_group in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("missing.log");
+            let author = StageId::new();
+            let owner = JournalOwner::stage(author);
+            let journal =
+                DiskJournal::<ChainEvent>::with_owner(path.clone(), owner.clone()).unwrap();
+            let event =
+                || ChainEventFactory::data_event(author.into(), "prefix", serde_json::json!({}));
+            journal.append(event(), Default::default()).await.unwrap();
+            let first_end = std::fs::metadata(&path).unwrap().len() as usize;
+            if remove_group {
+                journal
+                    .append_group("missing-group", vec![event(), event()], Default::default())
+                    .await
+                    .unwrap();
+            } else {
+                journal.append(event(), Default::default()).await.unwrap();
+            }
+            let middle_end = std::fs::metadata(&path).unwrap().len() as usize;
+            journal.append(event(), Default::default()).await.unwrap();
+            let boundary = journal.committed_position().await.unwrap();
+            let mut reader = journal.reader().await.unwrap();
+
+            // Remove a complete committed frame, preserving every remaining
+            // frame's checksum and local predecessor claim.
+            let original = std::fs::read(&path).unwrap();
+            let damaged = if remove_first {
+                original[first_end..].to_vec()
+            } else {
+                [
+                    original[..first_end].to_vec(),
+                    original[middle_end..].to_vec(),
+                ]
+                .concat()
+            };
+            std::fs::write(&path, damaged).unwrap();
+            let intact_prefix = u64::from(!remove_first);
+            if !remove_first {
+                assert_eq!(reader.next().await.unwrap().unwrap().local_sequence(), 1);
+            }
+            for _ in 0..3 {
+                assert!(
+                    reader.next().await.is_err(),
+                    "missing frame was admitted: remove_first={remove_first}, remove_group={remove_group}"
+                );
+                assert_eq!(reader.position(), intact_prefix);
+                assert!(!reader.initial_prefix_complete().unwrap());
+            }
+            let mut resumed = journal.reader_from(intact_prefix).await.unwrap();
+            assert!(resumed.next().await.is_err());
+            assert_eq!(resumed.position(), intact_prefix);
+            assert!(journal.reader_from(boundary).await.is_err());
+            assert!(journal.read_all_unordered().await.is_err());
+
+            drop((reader, resumed, journal));
+            assert!(DiskJournal::<ChainEvent>::with_owner(path, owner).is_err());
+        }
+    }
+}

@@ -168,45 +168,40 @@ pub(super) fn open_identity(
     Ok((identity, file))
 }
 
-/// Sequential admission for scanners that interpret records before exposing a reader.
-pub(super) struct CommitmentAdmission {
+/// Admission of a contiguous committed prefix, independent of record authorship.
+/// A valid frame or a higher sequence alone cannot prove the intervening history.
+#[derive(Clone)]
+pub(crate) struct CommitmentAdmission {
     identity: JournalIdentity,
     previous: Option<obzenflow_core::event::CommittedCausalRef>,
 }
 
 impl CommitmentAdmission {
-    pub(super) fn open(path: &Path) -> Result<Self, JournalError> {
-        Ok(Self {
-            identity: read_identity(path)?,
-            previous: Default::default(),
-        })
+    pub(super) fn new(identity: JournalIdentity) -> Self {
+        Self {
+            identity,
+            previous: None,
+        }
     }
 
-    pub(super) fn admit<P: obzenflow_core::event::payloads::JournalPayload>(
+    pub(crate) fn open(path: &Path) -> Result<Self, JournalError> {
+        Ok(Self::new(read_identity(path)?))
+    }
+
+    pub(crate) fn admit<P: obzenflow_core::event::payloads::JournalPayload>(
         &mut self,
         record: &obzenflow_core::JournalRecord<P>,
-    ) -> Result<(), JournalError> {
+    ) -> Result<obzenflow_core::event::CausalCommit, JournalError> {
         let commitment = obzenflow_core::event::CausalCommit::from_record(record)?;
         let reference = commitment.reference;
         if reference.run_id != self.identity.run_id
             || reference.journal_writer_id.as_journal_id() != &self.identity.journal_id
-            || self.previous.as_ref().is_some_and(|previous| {
-                reference.sequence <= previous.sequence
-                    || record
-                        .envelope
-                        .provenance
-                        .journal
-                        .causal
-                        .previous
-                        .is_some_and(|claimed| {
-                            claimed.sequence == previous.sequence && claimed != *previous
-                        })
-            })
+            || record.envelope.provenance.journal.causal.previous != self.previous
         {
             return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
         }
         self.previous = Some(reference);
-        Ok(())
+        Ok(commitment)
     }
 }
 

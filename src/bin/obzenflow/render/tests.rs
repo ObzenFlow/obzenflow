@@ -571,9 +571,9 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
                 runtime.contains("(stage: \x1b[0m\x1b[1;38;5;255mclassify\x1b[0m\x1b[38;5;245m)")
             );
             assert!(runtime.contains(&format!("\x1b[1;38;5;250m{}\x1b[0m", event_type(&progress))));
-            assert!(runtime.contains(
-                "\x1b[1;38;5;255mclassify\x1b[0m\x1b[38;5;245m:\x1b[0m\x1b[1;4;38;5;250m102\x1b[0m"
-            ));
+            assert!(
+                runtime.contains("\x1b[1;38;5;250mclassify:\x1b[0m\x1b[1;4;38;5;250m102\x1b[0m")
+            );
             assert!(!runtime.contains("38;5;208m") && !runtime.contains("38;5;217m"));
         }
     }
@@ -748,6 +748,9 @@ fn emphasis_preserves_wrapped_unicode_stage_and_event_names() {
             .collect::<String>();
         assert_eq!(highlighted_stage, stage_name);
         let highlighted_event = colored
+            .split_once('⟨')
+            .unwrap()
+            .0
             .split("\x1b[1;38;5;215m")
             .skip(1)
             .map(|piece| piece.split_once("\x1b[0m").unwrap().0)
@@ -1061,10 +1064,12 @@ fn reporting_journal_highlight_uses_identity_and_row_color_instead_of_counter_si
         assert_eq!(
             text.matches(&format!("\x1b[1;38;5;223m{stage}\x1b[0m"))
                 .count(),
-            2,
-            "the heading and reporting clock name share the brightest shade"
+            1,
+            "only the heading's stage name uses the brightest shade"
         );
-        assert!(text.contains(&format!("\x1b[1;38;5;223m{stage}\x1b[0m\x1b[38;5;245m:\x1b[0m\x1b[1;4;38;5;215m{counter}\x1b[0m")));
+        assert!(text.contains(&format!(
+            "\x1b[1;38;5;215m{stage}:\x1b[0m\x1b[1;4;38;5;215m{counter}\x1b[0m"
+        )));
     }
     assert!(text.contains(
         "\x1b[1;38;5;208mSOURCE (stage: \x1b[0m\x1b[1;38;5;223mthermometer\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215msensor.reading.v1\x1b[0m\x1b[1;38;5;208m ← thermometer()\x1b[0m"
