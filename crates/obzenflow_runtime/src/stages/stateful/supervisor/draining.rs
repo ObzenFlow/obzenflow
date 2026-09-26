@@ -128,7 +128,6 @@ pub(super) async fn dispatch_draining<
             sup.stage_id,
             ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             ctx.last_consumed_envelope.as_ref(),
             &ctx.instrumentation,
             &ctx.backpressure_writer,
@@ -276,7 +275,7 @@ pub(super) async fn dispatch_draining<
                             data_journal: ctx.data_journal.clone(),
                             flow_context: Some(flow_context.clone()),
                             observers: Some(ctx.observers.clone()),
-                            system_journal: Some(ctx.system_journal.clone()),
+
                             instrumentation: Some(ctx.instrumentation.clone()),
                             heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                             parent: envelope.clone(),
@@ -469,7 +468,7 @@ pub(super) async fn dispatch_draining<
                                                 FrameworkObservabilityCommit {
                                                     flow_context: &flow_context,
                                                     data_journal: &ctx.data_journal,
-                                                    system_journal: Some(&ctx.system_journal),
+
                                                     instrumentation: Some(&ctx.instrumentation),
                                                     heartbeat_state: ctx
                                                         .heartbeat
@@ -854,7 +853,7 @@ pub(super) async fn dispatch_draining<
                         FrameworkObservabilityCommit {
                             flow_context: &flow_context,
                             data_journal: &ctx.data_journal,
-                            system_journal: Some(&ctx.system_journal),
+
                             instrumentation: Some(&ctx.instrumentation),
                             heartbeat_state: ctx
                                 .heartbeat

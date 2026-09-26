@@ -291,7 +291,7 @@ pub struct InfiniteSourceContext<H> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: crate::execution::RuntimeExecution,
@@ -343,7 +343,7 @@ pub struct InfiniteSourceContextInit {
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
     pub runtime_execution: crate::execution::RuntimeExecution,
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     pub instrumentation: Arc<StageInstrumentation>,
@@ -362,7 +362,7 @@ impl<H> InfiniteSourceContext<H> {
             flow_id: init.flow_id,
             data_journal: init.data_journal,
             error_journal: init.error_journal,
-            system_journal: init.system_journal,
+            report_journal: init.report_journal,
             runtime_execution: init.runtime_execution,
             bus: init.bus,
             writer_id: None,
@@ -591,8 +591,8 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     )
                 };
 
-                match crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                match crate::supervised_base::publication::report(
+                    &ctx.report_journal,
                     system_event,
                     Default::default(),
                 )
@@ -647,8 +647,8 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 // Write running event to system journal
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
 
-                if let Err(e) = crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    &ctx.report_journal,
                     running_event,
                     Default::default(),
                 )
@@ -696,8 +696,8 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 let completion_event =
                     SystemEvent::stage_completed_with_accounting(ctx.stage_id, metrics);
 
-                if let Err(e) = crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    &ctx.report_journal,
                     completion_event,
                     Default::default(),
                 )

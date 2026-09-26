@@ -16,9 +16,9 @@ use std::error::Error;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
-#[derive(Default)]
 pub(super) struct TestJournal {
     id: JournalId,
+    pub(super) owner: Option<JournalOwner>,
     records: Mutex<Vec<JournalRecord<SystemPayload>>>,
     attempts: AtomicUsize,
     first_append_gate: Option<(Arc<Notify>, Arc<Notify>)>,
@@ -26,7 +26,25 @@ pub(super) struct TestJournal {
     allow_registration: bool,
 }
 
+impl Default for TestJournal {
+    fn default() -> Self {
+        Self {
+            id: JournalId::new(),
+            owner: Some(JournalOwner::stage(StageId::new_const(1))),
+            records: Mutex::new(Vec::new()),
+            attempts: AtomicUsize::new(0),
+            first_append_gate: None,
+            fail: false,
+            allow_registration: false,
+        }
+    }
+}
+
 impl TestJournal {
+    pub(super) fn with_owner(mut self, owner: JournalOwner) -> Self {
+        self.owner = Some(owner);
+        self
+    }
     pub(super) fn failing_registration() -> Self {
         Self {
             fail: true,
@@ -54,6 +72,11 @@ async fn registration_failure_prevents_both_supervisor_runners_from_executing() 
     for handler_supervised in [false, true] {
         let journal = Arc::new(TestJournal {
             fail: true,
+            owner: Some(if handler_supervised {
+                JournalOwner::stage(StageId::new_const(1))
+            } else {
+                JournalOwner::system(SystemId::new_const(1))
+            }),
             ..Default::default()
         });
         let publications = PublicationScope::new();
@@ -116,7 +139,7 @@ impl Journal<SystemEvent> for TestJournal {
     }
 
     fn owner(&self) -> Option<&JournalOwner> {
-        None
+        self.owner.as_ref()
     }
 
     async fn append(
@@ -210,14 +233,18 @@ async fn terminal_mailbox_records_each_command_once_and_rejects_later_sends() {
         let mut pending_send =
             tokio_test::task::spawn(sender.send(ExternalEventTestEvent::Initialize));
         tokio_test::assert_pending!(pending_send.poll());
-        let stage_id = StageId::new();
+        let stage_id = StageId::new_const(1);
         let inner = ExternalEventTestHandlerSupervisor {
             name: "terminal-worker".into(),
             dispatch_calls: Arc::new(AtomicUsize::new(0)),
             stage_id,
         };
-        let mut supervisor =
-            HandlerSupervisedWithExternalEvents::new(inner, receiver, watcher, journal.clone());
+        let mut supervisor = HandlerSupervisedWithExternalEvents::new(
+            inner,
+            receiver,
+            watcher,
+            (journal.clone()).into(),
+        );
         let mut context = ExternalEventTestContext;
         supervisor
             .dispatch_state(&state, &mut context)
@@ -299,8 +326,8 @@ async fn terminal_mailbox_retains_the_whole_queue_when_recording_waiter_is_cance
         owner
             .enter(record_terminal_commands(
                 &mut receiver,
-                target,
-                WriterId::from(StageId::new()),
+                (target).into(),
+                WriterId::from(StageId::new_const(1)),
                 "worker",
                 "Drained",
             ))
@@ -387,8 +414,11 @@ impl Supervisor for CompletionSupervisor {
         SupervisorKind::Transform
     }
 
-    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        Arc::new(TestJournal::default())
+    fn report_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> crate::supervised_base::SupervisorJournal {
+        Arc::new(TestJournal::default()).into()
     }
 
     fn name(&self) -> &str {
@@ -451,7 +481,7 @@ async fn terminal_mailbox_records_errors_arriving_during_completion_actions() {
             CompletionSupervisor,
             receiver,
             watcher.clone(),
-            journal.clone(),
+            (journal.clone()).into(),
         );
         let task = SupervisorTaskBuilder::new("completion-worker").spawn_handler_supervised(
             supervisor,
@@ -517,7 +547,7 @@ async fn terminal_mailbox_journal_failure_is_retained_by_supervisor_join() {
         CompletionSupervisor,
         receiver,
         watcher.clone(),
-        journal.clone(),
+        (journal.clone()).into(),
     );
     let context = CompletionContext {
         entered: Arc::new(Notify::new()),

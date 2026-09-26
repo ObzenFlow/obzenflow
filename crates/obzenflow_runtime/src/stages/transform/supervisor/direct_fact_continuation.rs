@@ -112,7 +112,7 @@ pub(super) async fn start_if_eligible<
         data_journal: ctx.data_journal.clone(),
         flow_context: Some(flow_context.clone()),
         observers: Some(ctx.observers.clone()),
-        system_journal: Some(ctx.system_journal.clone()),
+
         instrumentation: Some(ctx.instrumentation.clone()),
         heartbeat_state: handler_heartbeat_state.clone(),
         parent: future_envelope,
@@ -288,7 +288,7 @@ async fn finish_success<
                 FrameworkObservabilityCommit {
                     flow_context,
                     data_journal: &ctx.data_journal,
-                    system_journal: Some(&ctx.system_journal),
+
                     instrumentation: Some(&ctx.instrumentation),
                     heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
                     backpressure_writer: &ctx.backpressure_writer,
@@ -354,7 +354,6 @@ async fn finish_success<
                 .as_ref()
                 .map(|heartbeat| heartbeat.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             Some(&continuation.envelope),
             &ctx.instrumentation,
             &ctx.backpressure_writer,

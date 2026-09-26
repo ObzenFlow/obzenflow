@@ -12,7 +12,7 @@ use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -676,7 +676,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Writer ID for this transform (initialized during setup)
     pub writer_id: Option<WriterId>,
@@ -790,7 +790,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                         writer_id,
                         contract_journal: ctx.data_journal.clone(),
                         config: ContractConfig::default(),
-                        system_journal: Some(ctx.system_journal.clone()),
+                        report_journal: Some(ctx.report_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
@@ -849,7 +849,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     "Transform",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                 )
                 .await;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
@@ -972,7 +972,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     "Transform",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),
@@ -1005,7 +1005,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     ctx.stage_id,
                     &ctx.stage_name,
                     message,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),

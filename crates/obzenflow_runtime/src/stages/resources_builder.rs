@@ -297,8 +297,8 @@ pub struct StageResources {
     /// Stage's own journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// Shared system journal for lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    /// Owned publication destination for protected supervisor reports
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Upstream journals for reading events
     pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
@@ -811,9 +811,39 @@ impl StageResourcesBuilder {
 
             let resources = StageResources {
                 flow_id: self.flow_id,
+                report_journal: crate::supervised_base::SupervisorJournal::stage(
+                    data_journal.clone(),
+                    obzenflow_core::event::provenance::FlowContext {
+                        flow_id: self.flow_id.to_string(),
+                        flow_name: self.topology.flow_name(),
+                        stage_type: match stage_info.stage_type {
+                            obzenflow_topology::StageType::FiniteSource => {
+                                obzenflow_core::event::context::StageType::FiniteSource
+                            }
+                            obzenflow_topology::StageType::InfiniteSource => {
+                                obzenflow_core::event::context::StageType::InfiniteSource
+                            }
+                            obzenflow_topology::StageType::Transform => {
+                                obzenflow_core::event::context::StageType::Transform
+                            }
+                            obzenflow_topology::StageType::Stateful => {
+                                obzenflow_core::event::context::StageType::Stateful
+                            }
+                            obzenflow_topology::StageType::Sink => {
+                                obzenflow_core::event::context::StageType::Sink
+                            }
+                            obzenflow_topology::StageType::Join => {
+                                obzenflow_core::event::context::StageType::Join
+                            }
+                        },
+                        ..obzenflow_core::event::provenance::FlowContext::new(
+                            stage_info.name.clone(),
+                            stage_id,
+                        )
+                    },
+                ),
                 data_journal,
                 error_journal,
-                system_journal: self.system_journal.clone(),
                 upstream_journals: upstream_journals.clone(),
                 upstream_stage_names,
                 output_contract,

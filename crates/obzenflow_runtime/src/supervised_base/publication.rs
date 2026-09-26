@@ -123,6 +123,7 @@ pub(crate) struct PublicationScope {
     state: Mutex<State>,
     slots: Arc<Semaphore>,
     control_slots: Arc<Semaphore>,
+    host_slots: Arc<Semaphore>,
     ordered: bool,
 }
 
@@ -164,11 +165,32 @@ impl PublicationScope {
             }),
             slots: Arc::new(Semaphore::new(64)),
             control_slots: Arc::new(Semaphore::new(control_capacity)),
+            host_slots: Arc::new(Semaphore::new(8)),
         })
     }
 
     pub(crate) fn current() -> Option<Arc<Self>> {
         CURRENT.try_with(|context| context.scope.clone()).ok()
+    }
+
+    pub(crate) fn has_capacity(&self, count: usize) -> bool {
+        self.slots.available_permits() >= count
+    }
+
+    pub(crate) fn wait_for_capacity(
+        self: &Arc<Self>,
+        count: u32,
+    ) -> BoxFuture<'static, Result<(), BoxError>> {
+        let slots = self.slots.clone();
+        async move {
+            let permit = slots
+                .acquire_many_owned(count)
+                .await
+                .map_err(|_| Box::new(AdmissionClosed) as BoxError)?;
+            drop(permit);
+            Ok(())
+        }
+        .boxed()
     }
 
     /// Incorporated inputs only. Prefetch and optional telemetry never call this.
@@ -231,6 +253,7 @@ impl PublicationScope {
         }
         self.slots.close();
         self.control_slots.close();
+        self.host_slots.close();
     }
 
     pub(crate) fn first_failure(&self) -> Option<SharedError> {
@@ -308,6 +331,27 @@ impl PublicationScope {
                 .await
                 .map_err(|_| AdmissionClosed)?;
             scope.register(slot, operation, snapshot)?.await
+        }
+        .boxed()
+    }
+
+    /// Host commands share the publication owner and writer tail, with their
+    /// own bounded admission pool. They cannot consume the FSM's output
+    /// headroom between its admission check and transition actions.
+    pub(crate) fn accept_host<T: Send + 'static>(
+        self: &Arc<Self>,
+        operation: impl Future<Output = Result<T, BoxError>> + Send + 'static,
+    ) -> BoxFuture<'static, Result<T, BoxError>> {
+        let scope = self.clone();
+        let frontier = self.capture();
+        async move {
+            let slot = scope
+                .host_slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| Box::new(AdmissionClosed) as BoxError)?;
+            scope.register(slot, operation, frontier)?.await
         }
         .boxed()
     }
@@ -553,6 +597,28 @@ pub(crate) fn commit_in_with_frontier<T: Send + 'static>(
 
 /// Raw stage/control publications also cross the execution scope. More complex
 /// consumers enclose this append and their accounting in one `commit` operation.
+pub(crate) fn report(
+    journal: &super::SupervisorJournal,
+    event: obzenflow_core::event::SystemEvent,
+    options: AppendOptions<obzenflow_core::event::SystemEvent>,
+) -> BoxFuture<'static, Result<super::SupervisorRecord, BoxError>> {
+    let journal = journal.clone();
+    commit(async move {
+        journal
+            .append_inline(event, options)
+            .await
+            .map_err(Into::into)
+    })
+}
+
+pub(crate) async fn report_inline(
+    journal: &super::SupervisorJournal,
+    event: obzenflow_core::event::SystemEvent,
+    options: AppendOptions<obzenflow_core::event::SystemEvent>,
+) -> Result<super::SupervisorRecord, JournalError> {
+    journal.append_inline(event, options).await
+}
+
 pub(crate) fn append<T: JournalEvent + 'static>(
     journal: &Arc<dyn Journal<T>>,
     event: T,

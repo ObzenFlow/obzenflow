@@ -134,7 +134,7 @@ async fn build_cycle_entry_harness<
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
         direct_fact_continuation: None,
         error_journal,
-        system_journal: system_journal.clone(),
+        report_journal: (system_journal.clone()).into(),
         writer_id: None,
         lineage_policy: obzenflow_core::config::LineagePolicy::default(),
         subscription: None,
@@ -478,7 +478,7 @@ async fn build_transform_harness<
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
         direct_fact_continuation: None,
         error_journal,
-        system_journal: system_journal.clone(),
+        report_journal: (system_journal.clone()).into(),
         writer_id: None,
         lineage_policy: obzenflow_core::config::LineagePolicy::default(),
         subscription: None,
@@ -1132,7 +1132,7 @@ async fn terminal_transform_records_queued_controls_and_errors_without_executing
             supervisor,
             receiver,
             watcher,
-            ctx.system_journal.clone(),
+            ctx.report_journal.clone(),
         );
         assert!(matches!(
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
@@ -1143,7 +1143,7 @@ async fn terminal_transform_records_queued_controls_and_errors_without_executing
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
             EventLoopDirective::Terminate
         ));
-        let records = ctx.system_journal.read_all_unordered().await.unwrap();
+        let records = ctx.report_journal.read_all_unordered().await.unwrap();
         assert_eq!(records.len(), 2);
         assert!(
             matches!(&records[0].payload, obzenflow_core::event::SystemPayload::SupervisorCommandDiscarded {
@@ -1195,7 +1195,7 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         supervisor,
         receiver,
         watcher,
-        ctx.system_journal.clone(),
+        ctx.report_journal.clone(),
     );
 
     let state = TransformState::<ExpandHandler>::Running;

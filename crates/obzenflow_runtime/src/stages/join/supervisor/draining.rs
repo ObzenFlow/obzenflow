@@ -212,7 +212,7 @@ pub(super) async fn dispatch_draining<
                         event_type = envelope.event_type(),
                         "Forwarding reference control event during join draining"
                     );
-                    common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                    common::forward_control_to_journal(ctx, &envelope).await?;
                 }
 
                 return Ok(EventLoopDirective::Continue);
@@ -459,7 +459,7 @@ pub(super) async fn dispatch_draining<
                         event_type = envelope.event_type(),
                         "Forwarding stream control event during join draining"
                     );
-                    common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                    common::forward_control_to_journal(ctx, &envelope).await?;
                 }
 
                 return Ok(EventLoopDirective::Continue);

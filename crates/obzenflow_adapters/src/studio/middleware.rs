@@ -5,12 +5,12 @@
 //! Factual revisions and selected measurements are independent Studio updates.
 
 use super::messages::*;
-use obzenflow_core::event::journal_record::SystemJournalRecord;
 use obzenflow_core::event::observability::{ObservabilityContext, ObservationRecord};
 use obzenflow_core::event::payloads::execution_payload::{
     CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::SupervisorRecord;
 use obzenflow_core::event::SystemPayload;
 use obzenflow_core::{web::SseFrame, StageId};
 use std::collections::{BTreeSet, HashMap};
@@ -40,8 +40,8 @@ fn limiter_label(mode: RateLimiterMode) -> &'static str {
 }
 
 impl MiddlewareView {
-    pub(super) fn observe(&mut self, record: &SystemJournalRecord) {
-        self.last_vector_clock = Some(record.envelope.provenance.journal.vector_clock.clone());
+    pub(super) fn observe(&mut self, record: &SupervisorRecord) {
+        self.last_vector_clock = Some(record.journal().vector_clock.clone());
         let SystemPayload::MiddlewareLifecycle {
             stage_id,
             stage_name,
@@ -72,7 +72,7 @@ impl MiddlewareView {
                 if entry.revision.is_none_or(|previous| revision > previous) {
                     entry.state = Some(state_to.into());
                     entry.revision = Some(revision);
-                    entry.state_updated_at_ms = Some(record.envelope.provenance.event.timestamp);
+                    entry.state_updated_at_ms = Some(record.timestamp());
                 }
             }
             Some(MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ModeChange {
@@ -83,7 +83,7 @@ impl MiddlewareView {
                 if entry.revision.is_none_or(|previous| revision > previous) {
                     entry.mode = Some(mode);
                     entry.revision = Some(revision);
-                    entry.state_updated_at_ms = Some(record.envelope.provenance.event.timestamp);
+                    entry.state_updated_at_ms = Some(record.timestamp());
                 }
             }
             _ => {}

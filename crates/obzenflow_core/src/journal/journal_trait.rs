@@ -29,6 +29,19 @@ where
     /// Get the owner of this journal (if any)
     fn owner(&self) -> Option<&JournalOwner>;
 
+    /// Count of the committed append prefix at this journal. Capture only after
+    /// the relevant producers have settled; this is not a cross-journal cut.
+    async fn committed_position(&self) -> Result<u64, JournalError> {
+        Ok(self.read_last_n(1).await?.first().map_or(0, |record| {
+            record
+                .envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&crate::event::CausalCoordinate::new((*self.id()).into()))
+        }))
+    }
+
     fn observation_reader(&self) -> Option<&dyn super::JournalObservationReader> {
         None
     }
@@ -58,7 +71,8 @@ where
     /// Append an event to the journal
     ///
     /// The implementation MUST:
-    /// 1. Generate appropriate vector clock based on writer and parent
+    /// 1. Merge the preceding physical journal commit and the admitted frontier,
+    ///    then increment only this journal incarnation's clock component.
     /// 2. Ensure atomic append operation
     /// 3. Return the complete JournalRecord with causal information
     /// 4. Apply journal policy to inherited and deferred optional attachments.
@@ -66,6 +80,8 @@ where
     ///    attachments exactly. Payload and provenance are never sampled.
     /// 5. Retain an initiated physical commit through storage bookkeeping if
     ///    the caller stops waiting. Cancellation is not rollback.
+    /// 6. Enforce [`super::limits`] before commitment so readers have finite
+    ///    record and atomic-group materialisation bounds.
     ///
     /// An error certifies non-commit, except `JournalError::CommitIndeterminate`.
     /// That result means storage may have committed and must not be retried.

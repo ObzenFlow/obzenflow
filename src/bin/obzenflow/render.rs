@@ -459,7 +459,6 @@ impl Renderer {
 
     fn record_clock(&self, record: &RunRecord) -> String {
         let values = clock(record);
-        let writer = writer_id(record);
         let runtime = Category::of(record) == Category::Runtime;
         let components = self.context.clock_components(
             values,
@@ -470,8 +469,8 @@ impl Renderer {
             .into_iter()
             .map(|component| {
                 let digits = component.value.to_string();
-                let digits = if component.coordinate.writer_id.to_string() == writer
-                    && component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id
+                let digits = if component.coordinate.journal_writer_id.as_journal_id()
+                    == &record.journal.id
                     && !runtime
                 {
                     self.record_text(record, &digits, true)
@@ -533,7 +532,9 @@ impl Renderer {
 
 fn journal_label(kind: RunJournalKind) -> &'static str {
     match kind {
-        RunJournalKind::System => "system",
+        RunJournalKind::System => "pipeline",
+        RunJournalKind::MetricsCoordination => "metrics/coordination",
+        RunJournalKind::MetricsExport => "metrics/export",
         RunJournalKind::Data => "data",
         RunJournalKind::Error => "error",
     }

@@ -49,7 +49,9 @@ fn assert_json_summary(stdout: &str, stderr: &str) {
             .as_ref()
             .map_or("system", |s| s.key.as_str());
         let kind = match row.journal.kind {
-            RunJournalKind::System => "system",
+            RunJournalKind::System => "pipeline",
+            RunJournalKind::MetricsCoordination => "metrics/coordination",
+            RunJournalKind::MetricsExport => "metrics/export",
             RunJournalKind::Data => "data",
             RunJournalKind::Error => "error",
         };
@@ -152,17 +154,20 @@ async fn runtime_writer_columns_use_journaled_registration() {
     let pipeline = snapshot.identity().pipeline_writer_id;
     let mut registered = std::collections::BTreeMap::new();
     while let Some(record) = snapshot.next().await.unwrap() {
-        if let RunRecordData::System(row) = record.record {
-            if let SystemPayload::SupervisorRegistered { descriptor } = &row.payload {
-                assert!(registered
-                    .insert(row.writer_id().to_string(), descriptor.clone())
-                    .is_none());
-            } else {
-                assert!(
-                    registered.contains_key(&row.writer_id().to_string()),
-                    "a writer registers before its first operational system event"
-                );
-            }
+        let (writer, descriptor) = match &record.record {
+            RunRecordData::System(row) => (row.writer_id(), match &row.payload {
+                SystemPayload::SupervisorRegistered { descriptor } => Some(descriptor),
+                _ => None,
+            }),
+            RunRecordData::Chain(row) => (row.writer_id(), match &row.payload {
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some(descriptor),
+                _ => None,
+            }),
+        };
+        if let Some(descriptor) = descriptor {
+            assert!(registered
+                .insert(writer.to_string(), descriptor.clone())
+                .is_none());
         }
     }
     assert_eq!(registered.len(), 4); // Two stages, pipeline, metrics aggregator.
@@ -832,16 +837,15 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let mut displayed_journals = expected_journals.clone();
     let registrations: std::collections::BTreeMap<_, _> = rows
         .iter()
-        .filter_map(|row| {
-            if let RunRecordData::System(record) = &row.record {
-                if let obzenflow::journal::read::SystemPayload::SupervisorRegistered {
-                    descriptor,
-                } = &record.payload
-                {
-                    return Some((record.writer_id().to_string(), descriptor));
-                }
-            }
-            None
+        .filter_map(|row| match &row.record {
+            RunRecordData::System(record) => match &record.payload {
+                obzenflow::journal::read::SystemPayload::SupervisorRegistered { descriptor } => Some((record.writer_id().to_string(), descriptor)),
+                _ => None,
+            },
+            RunRecordData::Chain(record) => match &record.payload {
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some((record.writer_id().to_string(), descriptor)),
+                _ => None,
+            },
         })
         .collect();
     assert_eq!(
@@ -865,6 +869,16 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
             obzenflow::journal::read::RunJournalKind::System => {
                 manifest["system_journal_file"].as_str().unwrap().to_owned()
             }
+            obzenflow::journal::read::RunJournalKind::MetricsCoordination => manifest
+                ["metrics_journals"]["coordination_journal_file"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            obzenflow::journal::read::RunJournalKind::MetricsExport => manifest["metrics_journals"]
+                ["export_journal_file"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
             kind => {
                 let stage = &row.journal.stage.as_ref().unwrap().key;
                 let field = if kind == obzenflow::journal::read::RunJournalKind::Data {
@@ -946,19 +960,23 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     let system_counts = event_table(&verbose, "system.log");
     assert_eq!(system_counts.values().sum::<usize>(), system_count);
     for event_type in [
-        "system.stage.running",
-        "system.stage.completed",
-        "system.contract.pass",
+        "lifecycle.stage.running",
+        "lifecycle.stage.completed",
+        "execution.contract.pass",
     ] {
         assert_eq!(
-            system_counts
-                .iter()
+            expected_journals
+                .values()
+                .flat_map(|counts| counts.iter())
                 .filter(|((kind, _, _), _)| kind == event_type)
                 .map(|(_, count)| count)
                 .sum::<usize>(),
             7
         );
     }
+    assert!(system_counts
+        .keys()
+        .all(|(_, _, author_type)| author_type == "Pipeline"));
     assert_eq!(
         system_counts[&(
             "system.pipeline.completed".into(),

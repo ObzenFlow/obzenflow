@@ -58,6 +58,7 @@ fn write_manifest(dir: &Path) {
     );
 
     let manifest = RunManifest {
+        metrics_journals: None,
         journal_schema_version: JOURNAL_SCHEMA_VERSION.to_string(),
 
         obzenflow_version: OBZENFLOW_VERSION.to_string(),

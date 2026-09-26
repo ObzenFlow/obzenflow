@@ -94,7 +94,7 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             writer_id: WriterId::from(owner.stage_id),
             contract_journal: journal.clone(),
             config: ContractConfig::default(),
-            system_journal: None,
+            report_journal: None,
             reader_stage: Some(owner.stage_id),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -498,7 +498,7 @@ async fn progress_append_failure_does_not_advance_progress_state() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -542,7 +542,7 @@ async fn final_append_failure_keeps_final_emitted_false() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -587,7 +587,7 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -648,7 +648,7 @@ async fn diagnostics_only_eof_check_does_not_emit_stall() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -716,7 +716,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -764,7 +764,7 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     let contract_owner = JournalOwner::stage(contract_stage);
     let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
 
-    let reader_stage = StageId::new();
+    let reader_stage = contract_stage;
     let system_owner = JournalOwner::stage(reader_stage);
     let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(system_owner));
 
@@ -772,7 +772,7 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -834,7 +834,7 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -902,7 +902,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -980,7 +980,7 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
         writer_id: WriterId::from(sink_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: Some(sink_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -1057,7 +1057,7 @@ async fn stall_append_failure_does_not_set_stalled_since() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config,
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1108,7 +1108,7 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1194,7 +1194,7 @@ async fn idle_reader_without_any_reads_does_not_emit_stall() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1258,7 +1258,7 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1339,7 +1339,7 @@ async fn build_upstream_with_seq_divergence(
         writer_id: writer_id_for_contracts,
         contract_journal: contract_journal.clone(),
         config: contract_config,
-        system_journal: Some(system_journal.clone()),
+        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane,
         include_delivery_contract: false,
@@ -1697,7 +1697,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            system_journal: Some(system_journal.clone()),
+            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -1907,7 +1907,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            system_journal: None,
+            report_journal: None,
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2110,7 +2110,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            system_journal: Some(system_journal.clone()),
+            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2247,7 +2247,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
             writer_id: WriterId::from(reader_stage),
             contract_journal,
             config: ContractConfig::default(),
-            system_journal: Some(system_journal.clone()),
+            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -3001,8 +3001,8 @@ async fn canonical_merge_excludes_happened_before_heads() {
     let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
         canonical_pair("z_upstream", "a_upstream").await;
 
-    let wa = obzenflow_core::event::CausalCoordinate::new(journal_a.id.into(), stage_a.into());
-    let wb = obzenflow_core::event::CausalCoordinate::new(journal_b.id.into(), stage_b.into());
+    let wa = obzenflow_core::event::CausalCoordinate::new(journal_a.id.into());
+    let wb = obzenflow_core::event::CausalCoordinate::new(journal_b.id.into());
     journal_a.append_with_clock(merge_data(stage_a, "a1"), merge_clock(&[(wa, 1)]));
     journal_a.append_with_clock(merge_data(stage_a, "a2"), merge_clock(&[(wa, 2)]));
     journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
@@ -3208,7 +3208,7 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         writer_id: WriterId::from(reader_stage),
         contract_journal,
         config: ContractConfig::default(),
-        system_journal: None,
+        report_journal: None,
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,

@@ -118,6 +118,7 @@ mod tests {
             );
         }
         RunManifest {
+            metrics_journals: None,
             journal_schema_version:
                 obzenflow_core::journal::archive::manifest::JOURNAL_SCHEMA_VERSION.to_string(),
 

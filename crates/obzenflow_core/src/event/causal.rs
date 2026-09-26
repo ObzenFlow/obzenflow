@@ -7,7 +7,7 @@
 
 use super::payloads::JournalPayload;
 use super::vector_clock::{CausalOrderingService, VectorClock};
-use super::{EventId, JournalRecord, JournalWriterId, WriterId};
+use super::{EventId, JournalRecord, JournalWriterId};
 use crate::FlowId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,15 +20,11 @@ mod tests;
 #[serde(deny_unknown_fields)]
 pub struct CausalCoordinate {
     pub journal_writer_id: JournalWriterId,
-    pub writer_id: WriterId,
 }
 
 impl CausalCoordinate {
-    pub fn new(journal_writer_id: JournalWriterId, writer_id: WriterId) -> Self {
-        Self {
-            journal_writer_id,
-            writer_id,
-        }
+    pub fn new(journal_writer_id: JournalWriterId) -> Self {
+        Self { journal_writer_id }
     }
 }
 
@@ -37,14 +33,13 @@ impl CausalCoordinate {
 pub struct CommittedCausalRef {
     pub run_id: FlowId,
     pub journal_writer_id: JournalWriterId,
-    pub writer_id: WriterId,
     pub sequence: u64,
     pub event_id: EventId,
 }
 
 impl CommittedCausalRef {
     pub fn coordinate(&self) -> CausalCoordinate {
-        CausalCoordinate::new(self.journal_writer_id, self.writer_id)
+        CausalCoordinate::new(self.journal_writer_id)
     }
 }
 
@@ -163,7 +158,7 @@ impl CausalCommit {
         {
             return Err(CausalError::MissingSequence);
         }
-        let coordinate = CausalCoordinate::new(journal.journal_writer_id, *record.writer_id());
+        let coordinate = CausalCoordinate::new(journal.journal_writer_id);
         let sequence = journal.vector_clock.get(&coordinate);
         if sequence == 0 {
             return Err(CausalError::MissingSequence);
@@ -198,7 +193,6 @@ impl CausalCommit {
             reference: CommittedCausalRef {
                 run_id: journal.run_id,
                 journal_writer_id: journal.journal_writer_id,
-                writer_id: *record.writer_id(),
                 sequence,
                 event_id: *record.id(),
             },
@@ -257,7 +251,6 @@ impl CausalCommit {
                 reference: CommittedCausalRef {
                     run_id,
                     journal_writer_id: coordinate.journal_writer_id,
-                    writer_id: coordinate.writer_id,
                     sequence,
                     event_id,
                 },

@@ -1723,7 +1723,7 @@ fn invocation_context_with_mode(
         data_journal: journal,
         flow_context: None,
         observers: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
         parent,
@@ -7604,7 +7604,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         data_journal: journal,
         flow_context: None,
         observers: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
         parent: parent.clone(),

@@ -63,6 +63,14 @@ pub fn export_jsonl(run_dir: &Path, output: Option<&Path>) -> Result<(), Journal
 
     let system_path = run_dir.join(&manifest.system_journal_file);
     export_journal_file::<SystemEvent>(&system_path, policy, &mut out)?;
+    if let Some(metrics) = &manifest.metrics_journals {
+        for file in [
+            &metrics.coordination_journal_file,
+            &metrics.export_journal_file,
+        ] {
+            export_journal_file::<SystemEvent>(&run_dir.join(file), policy, &mut out)?;
+        }
+    }
 
     for key in sorted_stage_keys(&manifest) {
         let stage = &manifest.stages[&key];
@@ -391,7 +399,7 @@ mod tests {
             });
             let mut clock = VectorClock::new();
             clock.clocks.insert(
-                obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new(), writer),
+                obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new()),
                 index as u64 + 1,
             );
             packet.runtime_snapshot = Some(RuntimeSnapshot {

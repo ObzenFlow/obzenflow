@@ -95,7 +95,6 @@ pub(crate) async fn drain_one_pending(
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     pending_parent: Option<&JournalRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
@@ -110,7 +109,6 @@ pub(crate) async fn drain_one_pending(
         stage_id,
         heartbeat_state,
         data_journal,
-        system_journal,
         pending_parent,
         instrumentation,
         backpressure_writer,
@@ -250,7 +248,6 @@ pub(crate) async fn drain_one_pending_resolve(
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     pending_parent: Option<&JournalRecord<ChainPayload>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
@@ -279,7 +276,7 @@ pub(crate) async fn drain_one_pending_resolve(
         let committer = OutputCommitter {
             data_journal,
             flow_context: Some(flow_context),
-            system_journal: Some(system_journal),
+
             instrumentation: Some(instrumentation),
             heartbeat_state: heartbeat_state.as_ref(),
             output_contract,

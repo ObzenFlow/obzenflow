@@ -299,6 +299,7 @@ pub(crate) async fn bind_managed_host(
                 Some(runtime_instance_id.clone()),
                 shutdown.subscribe(),
             )
+            .with_report_journals(flow_handle.report_journals())
             .with_observation_interval(observation_interval),
         ))?;
     }

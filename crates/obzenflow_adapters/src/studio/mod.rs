@@ -29,9 +29,7 @@ use obzenflow_core::composite::{
     CompositeDefinition, CompositeLifecycleProjection, CompositeProjectionError,
 };
 use obzenflow_core::event::observability::{ObservabilityContext, ObservationSource};
-use obzenflow_core::event::{
-    journal_record::SystemJournalRecord, PipelineLifecycleEvent, SystemPayload,
-};
+use obzenflow_core::event::{PipelineLifecycleEvent, SupervisorRecord, SystemPayload};
 use obzenflow_core::{web::SseFrame, EventId};
 use obzenflow_runtime::metrics::observations::LatestObservationMap;
 use stages::StageLifecycleView;
@@ -103,22 +101,22 @@ impl StudioProjection {
     }
 
     /// Apply a past journal entry without producing messages.
-    pub fn rebuild(&mut self, envelope: &SystemJournalRecord) {
+    pub fn rebuild(&mut self, envelope: &SupervisorRecord) {
         self.observe(envelope);
-        if let Some(packet) = &envelope.envelope.observability {
+        if let Some(packet) = envelope.observability() {
             self.project_retained_measurements(packet.clone());
         }
     }
 
     /// Apply a journal entry and return its messages. Only middleware snapshots
     /// use `timestamp_ms`; event messages keep their recorded timestamps.
-    pub fn project(&mut self, envelope: &SystemJournalRecord, timestamp_ms: u64) -> Vec<SseFrame> {
+    pub fn project(&mut self, envelope: &SupervisorRecord, timestamp_ms: u64) -> Vec<SseFrame> {
         // `state_from` must describe the circuit breaker before this entry is applied.
         let mut frames = Vec::new();
         frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
         let composite = self.observe(envelope);
         frames.extend(composite.as_ref().and_then(composite_status_frame));
-        if let Some(packet) = &envelope.envelope.observability {
+        if let Some(packet) = envelope.observability() {
             frames.extend(self.project_retained_measurements(packet.clone()));
         }
         if matches!(
@@ -148,7 +146,7 @@ impl StudioProjection {
 
     /// Fold facts immediately, retaining only the latest attached observation
     /// per key for subsequent SSE emission turns.
-    pub fn project_deferred(&mut self, envelope: &SystemJournalRecord) -> Vec<SseFrame> {
+    pub fn project_deferred(&mut self, envelope: &SupervisorRecord) -> Vec<SseFrame> {
         let mut frames = Vec::new();
         frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
         let composite = self.observe(envelope);
@@ -163,13 +161,13 @@ impl StudioProjection {
         frames
     }
 
-    pub fn rebuild_deferred(&mut self, envelope: &SystemJournalRecord) {
+    pub fn rebuild_deferred(&mut self, envelope: &SupervisorRecord) {
         self.observe(envelope);
         self.retain_latest_observations(envelope);
     }
 
-    fn retain_latest_observations(&self, envelope: &SystemJournalRecord) {
-        if let Some(packet) = &envelope.envelope.observability {
+    fn retain_latest_observations(&self, envelope: &SupervisorRecord) {
+        if let Some(packet) = envelope.observability() {
             let _ = self.latest_observations.select_recorded(packet.clone());
         }
     }
@@ -302,7 +300,7 @@ impl StudioProjection {
         matches!(self.flow_state, ObservedFlowState::Active)
     }
 
-    fn observe(&mut self, envelope: &SystemJournalRecord) -> Option<CompositeStatusSnapshot> {
+    fn observe(&mut self, envelope: &SupervisorRecord) -> Option<CompositeStatusSnapshot> {
         self.stages.observe(envelope);
         let composite = self.composites.observe(envelope);
         self.middleware.observe(envelope);
@@ -310,7 +308,7 @@ impl StudioProjection {
         composite
     }
 
-    fn observe_pipeline(&mut self, envelope: &SystemJournalRecord) {
+    fn observe_pipeline(&mut self, envelope: &SupervisorRecord) {
         let SystemPayload::PipelineLifecycle(event) = &envelope.payload else {
             return;
         };

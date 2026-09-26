@@ -7,12 +7,10 @@
 
 use super::messages::{ContractEdge, MetricsUpdate, Observation, StudioMessage};
 use super::{middleware::MiddlewareView, ContractBoundaryAliases};
-use obzenflow_core::event::{
-    journal_record::SystemJournalRecord, MetricsCoordinationEvent, SystemPayload,
-};
+use obzenflow_core::event::{MetricsCoordinationEvent, SupervisorRecord, SystemPayload};
 use obzenflow_core::web::SseFrame;
 
-pub(super) fn stage_message(envelope: &SystemJournalRecord) -> Option<StudioMessage<'_>> {
+pub(super) fn stage_message(envelope: &SupervisorRecord) -> Option<StudioMessage<'_>> {
     let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
         return None;
     };
@@ -24,7 +22,7 @@ pub(super) fn stage_message(envelope: &SystemJournalRecord) -> Option<StudioMess
 }
 
 pub(super) fn frame(
-    envelope: &SystemJournalRecord,
+    envelope: &SupervisorRecord,
     middleware: &MiddlewareView,
     aliases: &ContractBoundaryAliases,
 ) -> Option<SseFrame> {
@@ -38,13 +36,7 @@ pub(super) fn frame(
         SystemPayload::StageLifecycle { .. } => stage_message(envelope)?,
         SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
         SystemPayload::ReplayLifecycle(event) => StudioMessage::ReplayLifecycle {
-            stage_id: envelope
-                .envelope
-                .provenance
-                .event
-                .writer_id
-                .as_stage()
-                .map(|id| id.to_string()),
+            stage_id: envelope.writer_id().as_stage().map(|id| id.to_string()),
             event,
             at,
         },
@@ -146,7 +138,7 @@ pub(super) fn frame(
         SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark }) => {
             StudioMessage::MetricsWatermark {
                 watermark,
-                export_id: envelope.envelope.provenance.event.id,
+                export_id: *envelope.id(),
                 at,
             }
         }
@@ -162,18 +154,19 @@ pub(super) fn frame(
         },
         SystemPayload::IngressRefusal { .. } => return None,
     };
-    Some(message.frame(Some(envelope.envelope.provenance.event.id)))
+    Some(message.frame(Some(*envelope.id())))
 }
 
-fn observation(envelope: &SystemJournalRecord) -> Observation<'_> {
+fn observation(envelope: &SupervisorRecord) -> Observation<'_> {
     Observation {
         commitment: Some(
-            obzenflow_core::event::CausalCommit::from_record(envelope)
+            envelope
+                .commitment()
                 .expect("admitted system commitment")
                 .reference,
         ),
-        timestamp_ms: envelope.envelope.provenance.event.timestamp,
-        vector_clock: Some(&envelope.envelope.provenance.journal.vector_clock),
+        timestamp_ms: envelope.timestamp(),
+        vector_clock: Some(&envelope.journal().vector_clock),
         capture: None,
     }
 }

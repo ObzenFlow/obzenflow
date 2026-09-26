@@ -3,10 +3,10 @@
 // https://obzenflow.dev
 
 //! [`MetricsBarrier`] (FLOWIP-114h): wait for the metrics aggregator to
-//! have exported a selected current carrier at a stage writer position via the metrics-watermark
+//! have exported a selected current carrier at a stage journal position via the metrics-watermark
 //! `SystemEvent` stream, or to have published its drain-complete signal.
 //!
-//! The barrier consumes [`crate::pipeline::FlowHandle::system_journal`] and
+//! The barrier consumes [`crate::pipeline::FlowHandle::metrics_journals`] and
 //! filters for `MetricsCoordination::Exported` / `MetricsCoordination::Drained`
 //! events. It does not invent a new aggregator surface; the events it relies
 //! on are emitted by the production actions in `metrics/fsm.rs`.
@@ -14,14 +14,14 @@
 //! coverage. Drained means the available buffer was published and readers stopped.
 //!
 //! Cursor semantic is catch-up-then-poll: construction records a baseline
-//! over the system journal and the wait loops scan from that baseline so a
+//! over the owned metrics journals and the wait loops scan from that baseline so a
 //! covering watermark appended before the wait begins still resolves the
 //! barrier.
 
 use crate::testing::FlowTestHarness;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::system_payload::{MetricsCoordinationEvent, SystemPayload};
-use obzenflow_core::event::{SystemEvent, WriterId};
+use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use std::sync::Arc;
@@ -34,14 +34,12 @@ pub enum MetricsBarrierError {
     #[error("metrics shut down without publishing the final buffer")]
     ShutdownWithoutDrain,
 
-    /// The handle was built without a system journal. Metrics watermark
-    /// events live on the system journal, so a flow without one cannot
-    /// produce the signals the barrier waits on.
+    /// The handle has no metrics-owned export and coordination histories.
     #[error(
-        "flow handle has no system journal; \
-         cannot construct MetricsBarrier on a flow built without one"
+        "flow handle has no metrics journals; \
+         cannot construct MetricsBarrier on a flow built without metrics"
     )]
-    MissingSystemJournal,
+    MissingMetricsJournals,
 
     /// `try_on_stage` could not resolve the named stage in the topology.
     #[error("unknown stage `{0}` for MetricsBarrier::try_on_stage")]
@@ -51,8 +49,8 @@ pub enum MetricsBarrierError {
     #[error("ambiguous stage `{0}`: multiple stages share this name")]
     AmbiguousStage(String),
 
-    /// Reading the system journal failed.
-    #[error("failed to read system journal: {0}")]
+    /// Reading a metrics-owned history failed.
+    #[error("failed to read metrics journal: {0}")]
     JournalRead(String),
 
     /// The handle has no topology, so a stage-name lookup cannot succeed.
@@ -60,18 +58,20 @@ pub enum MetricsBarrierError {
     MissingTopology,
 }
 
-/// A wait surface over the metrics aggregator's coordination stream.
+/// A wait surface over the metrics aggregator's export and coordination histories.
 ///
 /// Construct before [`crate::pipeline::FlowHandle::run`] consumes the handle.
 /// The barrier owns a cloned `Arc<dyn Journal<SystemEvent>>` and remains usable
 /// after the handle has been moved.
 pub struct MetricsBarrier {
     system_journal: Arc<dyn Journal<SystemEvent>>,
+    coordination: Arc<dyn Journal<SystemEvent>>,
+    coordination_offset: u64,
     /// Coordinate the watermark map uses for this stage, or `None` for the
     /// flow-wide drain barrier. Matches the production ExportMetrics action,
-    /// which keys entries by the data-journal incarnation and stage author.
+    /// which keys entries by the data-journal incarnation.
     stage_writer_key: Option<obzenflow_core::event::CausalCoordinate>,
-    /// Catch-up baseline: total envelopes already present on the system
+    /// Catch-up baseline: total envelopes already present on the export
     /// journal at construction time. The wait loop scans from this offset
     /// before polling for newly appended events.
     baseline_offset: u64,
@@ -79,29 +79,32 @@ pub struct MetricsBarrier {
 
 impl MetricsBarrier {
     /// Build a stage-targeted barrier. Resolves the stage name through the
-    /// flow's topology to a `StageId`, then combines the data-journal
-    /// incarnation with `WriterId::from(stage_id)` for the watermark key.
+    /// flow's topology to a `StageId`, then uses its data-journal incarnation for the watermark key.
     pub async fn try_on_stage(
         handle: &FlowTestHarness,
         stage_name: &str,
     ) -> Result<Self, MetricsBarrierError> {
-        let system_journal = handle
-            .system_journal()
-            .ok_or(MetricsBarrierError::MissingSystemJournal)?;
+        let metrics = handle
+            .metrics_journals()
+            .ok_or(MetricsBarrierError::MissingMetricsJournals)?;
+        let system_journal = metrics.export;
+        let coordination = metrics.coordination;
+        let coordination_offset = current_journal_offset(&coordination).await?;
 
-        let stage_id = resolve_stage_id(handle, stage_name)?;
+        resolve_stage_id(handle, stage_name)?;
         let (_, journal) = handle
             .stage_journal_for_test(stage_name)
             .map_err(|error| MetricsBarrierError::JournalRead(error.to_string()))?;
         let stage_writer_key = Some(obzenflow_core::event::CausalCoordinate::new(
             (*journal.id()).into(),
-            WriterId::from(stage_id),
         ));
 
         let baseline_offset = current_journal_offset(&system_journal).await?;
 
         Ok(Self {
             system_journal,
+            coordination,
+            coordination_offset,
             stage_writer_key,
             baseline_offset,
         })
@@ -109,14 +112,19 @@ impl MetricsBarrier {
 
     /// Build a flow-wide barrier for waiting on the drain-complete signal.
     pub async fn try_on_flow(handle: &FlowTestHarness) -> Result<Self, MetricsBarrierError> {
-        let system_journal = handle
-            .system_journal()
-            .ok_or(MetricsBarrierError::MissingSystemJournal)?;
+        let metrics = handle
+            .metrics_journals()
+            .ok_or(MetricsBarrierError::MissingMetricsJournals)?;
+        let system_journal = metrics.export;
+        let coordination = metrics.coordination;
+        let coordination_offset = current_journal_offset(&coordination).await?;
 
         let baseline_offset = current_journal_offset(&system_journal).await?;
 
         Ok(Self {
             system_journal,
+            coordination,
+            coordination_offset,
             stage_writer_key: None,
             baseline_offset,
         })
@@ -163,9 +171,9 @@ impl MetricsBarrier {
     /// Wait for successful final buffer publication and reader shutdown.
     /// A Shutdown event without Drained reports failure, not successful completion.
     pub async fn wait_for_drained(&self) -> Result<(), MetricsBarrierError> {
-        let mut scan_from = self.baseline_offset;
+        let mut scan_from = self.coordination_offset;
         loop {
-            let envelopes = read_journal_from(&self.system_journal, scan_from).await?;
+            let envelopes = read_journal_from(&self.coordination, scan_from).await?;
             let next_scan_from = scan_from + envelopes.len() as u64;
             for env in envelopes {
                 match &env.payload {
@@ -258,13 +266,14 @@ mod tests {
     use obzenflow_core::event::observability::NoObservations;
     use obzenflow_core::event::payloads::system_payload::MetricsCoordinationEvent;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload, WriterId};
+    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemPayload};
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::StageId;
+    use obzenflow_core::WriterId;
     use obzenflow_topology::TopologyBuilder;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -404,6 +413,13 @@ mod tests {
             })
             .collect();
         let extras = FlowHandleExtras {
+            metrics_journals: Some(crate::metrics::builder::MetricsJournals {
+                system_id: obzenflow_core::SystemId::new(),
+                coordination: system_journal.clone(),
+                export: system_journal.clone(),
+            }),
+            report_journals: vec![],
+            pipeline_reports: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 
@@ -444,6 +460,9 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            metrics_journals: None,
+            report_journals: vec![],
+            pipeline_reports: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 
@@ -474,9 +493,9 @@ mod tests {
         let err = MetricsBarrier::try_on_flow(&harness)
             .await
             .err()
-            .expect("expected MissingSystemJournal");
+            .expect("expected MissingMetricsJournals");
         assert!(
-            matches!(err, MetricsBarrierError::MissingSystemJournal),
+            matches!(err, MetricsBarrierError::MissingMetricsJournals),
             "unexpected error: {err:?}"
         );
     }
@@ -640,10 +659,8 @@ mod tests {
 
         let stage_id = StageId::from_topology_id(stage_topo_id);
         let other_id = StageId::from_topology_id(other_topo_id);
-        let other_key = obzenflow_core::event::CausalCoordinate::new(
-            obzenflow_core::JournalWriterId::new(),
-            WriterId::from(other_id),
-        );
+        let other_key =
+            obzenflow_core::event::CausalCoordinate::new(obzenflow_core::JournalWriterId::new());
 
         let harness = harness_with_system_journal(system_journal.clone(), Some(topology));
         let barrier = MetricsBarrier::try_on_stage(&harness, "stage")

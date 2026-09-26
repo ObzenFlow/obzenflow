@@ -149,6 +149,24 @@ pub(in crate::pipeline) fn new_system_journal(
         .expect("create system journal")
 }
 
+pub(in crate::pipeline) fn new_metrics_journals(
+    journals: &mut dyn FlowJournalFactory,
+) -> crate::metrics::builder::MetricsJournals {
+    let system_id = SystemId::new();
+    crate::metrics::builder::MetricsJournals {
+        system_id,
+        coordination: journals
+            .create_system_journal(
+                JournalName::MetricsCoordination,
+                JournalOwner::system(system_id),
+            )
+            .unwrap(),
+        export: journals
+            .create_system_journal(JournalName::MetricsExport, JournalOwner::system(system_id))
+            .unwrap(),
+    }
+}
+
 pub(in crate::pipeline) fn new_stage_journal(
     journals: &mut dyn FlowJournalFactory,
     stage_id: StageId,
@@ -224,12 +242,19 @@ pub(in crate::pipeline) fn test_context(
         topology,
         flow_name: "test_flow".to_string(),
         flow_id: FlowId::new(),
-        system_journal,
+        system_journal: system_journal.clone(),
         stage_supervisors: HashMap::new(),
         source_supervisors: HashMap::new(),
         completed_stages: Vec::new(),
         running_stages: HashSet::new(),
-        completion_subscription,
+        completion_subscription: completion_subscription.map(|subscription| {
+            crate::supervised_base::report_reader::ReportReaders::from_system_reader(
+                *system_journal.id(),
+                subscription.into_reader(),
+            )
+        }),
+        metrics_journals: None,
+        report_coverage: Default::default(),
         metrics_exporter: None,
         resources: Default::default(),
         progress: Default::default(),
@@ -501,10 +526,12 @@ pub(in crate::pipeline) fn spawn_supervisor_loop(
 ) -> JoinHandle<Result<(), BoxError>> {
     tokio::spawn(async move {
         if context.completion_subscription.is_none() {
-            context.completion_subscription = Some(SystemSubscription::new(
-                context.system_journal.reader().await?,
-                "test_pipeline".into(),
-            ));
+            context.completion_subscription = Some(
+                crate::supervised_base::report_reader::ReportReaders::from_system_reader(
+                    *context.system_journal.id(),
+                    context.system_journal.reader().await?,
+                ),
+            );
         }
         context.expected_sources = context.source_supervisors.keys().copied().collect();
         if matches!(
@@ -601,13 +628,15 @@ pub(in crate::pipeline) fn make_context(
         topology: make_topology(),
         flow_name: "test_flow".to_string(),
         flow_id: FlowId::new(),
-        system_journal,
+        system_journal: system_journal.clone(),
         stage_supervisors: HashMap::new(),
         source_supervisors: HashMap::new(),
         completed_stages: Vec::new(),
         running_stages: HashSet::new(),
         completion_subscription: None,
         metrics_exporter,
+        metrics_journals: None,
+        report_coverage: Default::default(),
         resources: Default::default(),
         progress: Default::default(),
         stage_data_journals,
@@ -633,5 +662,7 @@ pub(in crate::pipeline) fn make_fsm_context(
     let mut journals = make_journals();
     let system_id = SystemId::new();
     let system_journal = new_system_journal(&mut *journals, system_id);
-    make_context(system_id, system_journal, Vec::new(), None)
+    let mut context = make_context(system_id, system_journal, Vec::new(), None);
+    context.metrics_journals = Some(new_metrics_journals(&mut *journals));
+    context
 }

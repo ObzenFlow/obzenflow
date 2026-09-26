@@ -10,10 +10,7 @@ fn id(value: u64) -> String {
 }
 
 fn coordinate(stage: u64) -> obzenflow_core::event::CausalCoordinate {
-    serde_json::from_value(
-        json!({"journal_writer_id":id(stage),"writer_id":{"type":"Stage","id":id(stage)}}),
-    )
-    .unwrap()
+    serde_json::from_value(json!({"journal_writer_id":id(stage)})).unwrap()
 }
 
 fn displayed_clock(stage: u64, sequence: u64) -> String {
@@ -22,7 +19,7 @@ fn displayed_clock(stage: u64, sequence: u64) -> String {
     } else {
         "classify"
     };
-    format!("⟨{name}@journal_{}:{sequence}⟩", id(stage))
+    format!("⟨{name}:{sequence}⟩")
 }
 
 fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
@@ -42,7 +39,7 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
         )
     };
     serde_json::from_value(json!({
-        "version": 2,
+        "version": 3,
         "run": {"flow_id": id(10), "pipeline_writer_id": {"type":"System", "id":id(11)}},
         "journal": {"id":id(stage), "kind":"data", "stage":{"key":key, "id":id(stage), "stage_type":stage_type,"is_effectful":false}},
         "position":event,
@@ -59,8 +56,8 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
                 "journal": {
                     "journal_writer_id":id(stage),
                     "run_id":id(10),
-                    "causal":{"previous":{"run_id":id(10),"journal_writer_id":id(stage),"writer_id":{"type":"Stage","id":id(stage)},"sequence":event-1,"event_id":id(event-1)},"witnesses":[]},
-                    "vector_clock":{"entries":[{"journal_writer_id":id(stage),"writer_id":{"type":"Stage","id":id(stage)},"sequence":event}]},
+                    "causal":{"previous":{"run_id":id(10),"journal_writer_id":id(stage),"sequence":event-1,"event_id":id(event-1)},"witnesses":[]},
+                    "vector_clock":{"entries":[{"journal_writer_id":id(stage),"sequence":event}]},
                     "timestamp":"2026-09-23T00:00:00Z", "journal_group_id":null, "journal_group_member":null
                 }
             }},
@@ -614,12 +611,7 @@ fn clocks_keep_unknown_writers_and_do_not_derive_causality_from_dominance() {
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
-        text.contains(&format!(
-            "⟨thermometer@journal_{}:100,{}@journal_{}:12⟩",
-            id(1),
-            coordinate(3).writer_id,
-            id(3)
-        )),
+        text.contains(&format!("⟨thermometer:100,journal_{}:12⟩", id(3))),
         "{text}"
     );
     assert!(text.contains("input not recorded"), "{text}");

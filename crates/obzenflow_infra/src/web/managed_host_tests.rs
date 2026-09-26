@@ -364,7 +364,16 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
     let mut tail = String::new();
     socket.read_to_string(&mut tail).await.unwrap();
     close.await.unwrap().unwrap();
-    assert!(tail.contains(&format!("id:{}", terminal.envelope.provenance.event.id)));
+    let cursor = format!(
+        "jr1:{}",
+        serde_json::to_string(&std::collections::BTreeMap::from([(
+            *journal.id(),
+            terminal.local_sequence(),
+        )]))
+        .unwrap()
+    );
+    assert!(tail.contains(&format!("id:{cursor}")));
+    assert!(tail.contains(&serde_json::to_string(terminal.id()).unwrap()));
     assert!(
         tail.find("event:flow_lifecycle").unwrap() < tail.find("event:server_shutdown").unwrap()
     );

@@ -17,7 +17,7 @@ pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 /// One version for the journal records, physical frames, and run manifest.
 /// Breaking any of these contracts requires a bump here and fresh archives.
 /// Framework package versions are provenance only, never archive admission gates.
-pub const JOURNAL_SCHEMA_VERSION: &str = "8.0";
+pub const JOURNAL_SCHEMA_VERSION: &str = "9.0";
 pub const EFFECT_ATTEMPT_HISTORY_CAPABILITY: &str = "effect_attempt_history";
 pub const BOUNDED_DIRECT_FACT_ADMISSION_CAPABILITY: &str = "bounded_direct_fact_admission";
 /// Every persisted effect descriptor carries an explicit portless/named binding identity.
@@ -42,6 +42,7 @@ pub struct RunManifest {
     pub resume: Option<RunManifestResumeConfig>,
     pub stages: HashMap<String, RunManifestStage>,
     pub system_journal_file: String,
+    pub metrics_journals: Option<RunManifestMetrics>,
     /// FLOWIP-010 §6a: redacted effective config with provenance, recorded
     /// at flow build. Omission is the current schema's representation of no
     /// effective-config evidence.
@@ -54,6 +55,13 @@ pub struct RunManifest {
     /// exact versioned physical input event type.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bounded_direct_fact_admission: Vec<RunManifestDirectFactAdmission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunManifestMetrics {
+    pub writer_id: crate::event::WriterId,
+    pub coordination_journal_file: String,
+    pub export_journal_file: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

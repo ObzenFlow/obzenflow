@@ -196,20 +196,12 @@ impl Layout {
                     ]
                 }
             }
-            S::Coordinate => {
-                const {
-                    &[
-                        field("journal_writer_id", K::Id),
-                        field("writer_id", K::Struct(S::Writer)),
-                    ]
-                }
-            }
+            S::Coordinate => const { &[field("journal_writer_id", K::Id)] },
             S::Commitment => {
                 const {
                     &[
                         field("run_id", K::FlowId),
                         field("journal_writer_id", K::Definition(D::JournalWriter)),
-                        field("writer_id", K::Definition(D::Writer)),
                         field("sequence", K::Unsigned),
                         field("event_id", K::Id),
                     ]

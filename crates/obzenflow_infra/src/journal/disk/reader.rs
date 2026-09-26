@@ -59,8 +59,7 @@ fn observer_io(error: std::io::Error) -> JournalError {
 /// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
     identity: super::identity::JournalIdentity,
-    commitments:
-        std::collections::HashMap<obzenflow_core::WriterId, obzenflow_core::event::CausalCommit>,
+    last_commit: Option<obzenflow_core::event::CausalCommit>,
     decoder: Decoder,
     /// Current position (number of committed events read)
     position: u64,
@@ -135,7 +134,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
         Ok(Self {
             identity,
-            commitments: std::collections::HashMap::new(),
+            last_commit: None,
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
@@ -187,7 +186,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
         Ok(Self {
             identity,
-            commitments: std::collections::HashMap::new(),
+            last_commit: None,
             decoder: Decoder::new(&path),
             position: 0,
             read_offset: 0,
@@ -393,20 +392,29 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 gate.release.notified().await;
             }
 
-            match dispose(
-                classify_frame::<T>(&self.buf, &mut self.decoder, frame_start),
-                termination,
-                self.policy,
-            ) {
+            // Large atomic frames are bounded but may still be expensive to
+            // decode. Keep that CPU work off Tokio's executor workers.
+            let bytes = std::mem::take(&mut self.buf);
+            let mut decoder = std::mem::replace(&mut self.decoder, Decoder::new(&self.path));
+            let (classification, decoder, bytes) = tokio::task::spawn_blocking(move || {
+                let classification = classify_frame::<T>(&bytes, &mut decoder, frame_start);
+                (classification, decoder, bytes)
+            })
+            .await
+            .map_err(|error| JournalError::Implementation {
+                message: "Journal decoder task failed".into(),
+                source: Box::new(error),
+            })?;
+            self.decoder = decoder;
+            self.buf = bytes;
+            match dispose(classification, termination, self.policy) {
                 Disposition::Yield(frame) => {
                     let group_id = frame.group_id().map(str::to_string);
                     let records = frame.into_records();
-                    let mut commitments = self.commitments.clone();
+                    let mut last_commit = self.last_commit.clone();
                     for record in &records {
                         let commitment = obzenflow_core::event::CausalCommit::from_record(record)?;
-                        let previous = commitments
-                            .get(record.writer_id())
-                            .map(|previous| previous.reference);
+                        let previous = last_commit.as_ref().map(|previous| previous.reference);
                         if commitment.reference.run_id != self.identity.run_id
                             || commitment.reference.journal_writer_id.as_journal_id()
                                 != &self.identity.journal_id
@@ -428,9 +436,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                                 obzenflow_core::event::CausalError::ConflictingCommitment.into()
                             );
                         }
-                        commitments.insert(*record.writer_id(), commitment);
+                        last_commit = Some(commitment);
                     }
-                    self.commitments = commitments;
+                    self.last_commit = last_commit;
                     self.read_offset += consumed as u64;
                     self.pending_group_id = group_id;
                     self.pending_group_size = self
@@ -782,7 +790,7 @@ mod tests {
                 super::super::identity::open_identity(file.path(), None).unwrap();
             drop(lease);
             let journal_id = identity.journal_id;
-            let mut previous = std::collections::HashMap::new();
+            let mut previous = None;
             let stage = StageId::new();
             let mut make_record = || {
                 let event =
@@ -879,7 +887,7 @@ mod tests {
         let (identity, lease) = super::super::identity::open_identity(&path, None).unwrap();
         drop(lease);
         let journal_id = identity.journal_id;
-        let mut previous = std::collections::HashMap::new();
+        let mut previous = None;
         for i in 0..5 {
             let event = ChainEventFactory::data_event(
                 writer_id,
@@ -920,7 +928,7 @@ mod tests {
         let (identity, lease) = super::super::identity::open_identity(&path, None).unwrap();
         drop(lease);
         let journal_id = identity.journal_id;
-        let mut previous = std::collections::HashMap::new();
+        let mut previous = None;
         for i in 0..10 {
             let event = ChainEventFactory::data_event(
                 writer_id,

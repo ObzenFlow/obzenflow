@@ -892,7 +892,7 @@ impl FlowApplication {
                         // FLOWIP-115d: hand hosted ingress surfaces the host system
                         // journal so they can append refusal facts. A surface with
                         // refusal recording enabled fails startup here if it is None.
-                        system_journal: flow_handle.system_journal(),
+                        pipeline_reports: flow_handle.pipeline_reports(),
                     }) {
                         Ok(wired) => application
                             .tasks

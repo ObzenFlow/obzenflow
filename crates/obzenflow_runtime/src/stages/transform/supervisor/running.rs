@@ -96,7 +96,6 @@ async fn dispatch_running_inner<
                 sup.stage_id,
                 ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                 &ctx.data_journal,
-                &ctx.system_journal,
                 ctx.pending_parent.as_ref(),
                 &ctx.instrumentation,
                 &ctx.backpressure_writer,
@@ -510,7 +509,7 @@ async fn dispatch_running_inner<
                             data_journal: ctx.data_journal.clone(),
                             flow_context: Some(flow_context.clone()),
                             observers: Some(ctx.observers.clone()),
-                            system_journal: Some(ctx.system_journal.clone()),
+
                             instrumentation: Some(ctx.instrumentation.clone()),
                             heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                             parent: envelope_clone.clone(),
@@ -614,7 +613,7 @@ async fn dispatch_running_inner<
                                         FrameworkObservabilityCommit {
                                             flow_context,
                                             data_journal: &ctx.data_journal,
-                                            system_journal: Some(&ctx.system_journal),
+
                                             instrumentation: Some(&ctx.instrumentation),
                                             heartbeat_state: ctx
                                                 .heartbeat
@@ -672,7 +671,6 @@ async fn dispatch_running_inner<
                                     sup.stage_id,
                                     ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                                     &ctx.data_journal,
-                                    &ctx.system_journal,
                                     Some(&envelope),
                                     &ctx.instrumentation,
                                     &ctx.backpressure_writer,

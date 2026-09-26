@@ -16,12 +16,12 @@ pub(crate) async fn publish_running_best_effort(
     stage_label: &'static str,
     stage_id: StageId,
     stage_name: &str,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
 ) {
     let running_event = SystemEvent::stage_running(stage_id);
 
-    if let Err(e) = crate::supervised_base::publication::append(
-        system_journal,
+    if let Err(e) = crate::supervised_base::publication::report(
+        report_journal,
         running_event,
         Default::default(),
     )
@@ -45,7 +45,7 @@ pub(crate) async fn send_completion_best_effort(
     stage_label: &'static str,
     stage_id: StageId,
     stage_name: &str,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
     _data_journal: &Arc<dyn Journal<ChainEvent>>,
     _error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     instrumentation: &StageInstrumentation,
@@ -54,8 +54,8 @@ pub(crate) async fn send_completion_best_effort(
     let metrics = snapshot_stage_accounting(instrumentation);
     let completion_event = SystemEvent::stage_completed_with_accounting(stage_id, metrics);
 
-    if let Err(e) = crate::supervised_base::publication::append(
-        system_journal,
+    if let Err(e) = crate::supervised_base::publication::report(
+        report_journal,
         completion_event,
         Default::default(),
     )
@@ -77,7 +77,7 @@ pub(crate) async fn send_failure_best_effort(
     stage_id: StageId,
     stage_name: &str,
     message: &str,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
     _data_journal: &Arc<dyn Journal<ChainEvent>>,
     _error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
     instrumentation: &StageInstrumentation,
@@ -102,8 +102,8 @@ pub(crate) async fn send_failure_best_effort(
         )
     };
 
-    match crate::supervised_base::publication::append(
-        system_journal,
+    match crate::supervised_base::publication::report(
+        report_journal,
         system_event,
         Default::default(),
     )
@@ -260,15 +260,17 @@ mod tests {
     }
 
     struct RecordingSystemJournal {
+        owner: obzenflow_core::JournalOwner,
         id: JournalId,
         events: Mutex<Vec<SystemEvent>>,
     }
 
     impl RecordingSystemJournal {
-        fn new() -> Self {
+        fn new(stage: StageId) -> Self {
             Self {
                 id: JournalId::new(),
                 events: Mutex::new(Vec::new()),
+                owner: obzenflow_core::JournalOwner::stage(stage),
             }
         }
 
@@ -284,7 +286,7 @@ mod tests {
         }
 
         fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
-            None
+            Some(&self.owner)
         }
 
         async fn append(
@@ -332,7 +334,8 @@ mod tests {
     }
 
     async fn exercise_failure(message: &str) -> SystemEvent {
-        let system = Arc::new(RecordingSystemJournal::new());
+        let stage_id = StageId::new();
+        let system = Arc::new(RecordingSystemJournal::new(stage_id));
         let system_journal: Arc<dyn Journal<SystemEvent>> = system.clone();
 
         let data_journal: Arc<dyn Journal<ChainEvent>> =
@@ -340,14 +343,13 @@ mod tests {
         let error_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(EmptyJournal::<ChainEvent>::new());
         let instrumentation = StageInstrumentation::new();
-        let stage_id = StageId::new();
 
         send_failure_best_effort(
             "Test",
             stage_id,
             "test_stage",
             message,
-            &system_journal,
+            &system_journal.clone().into(),
             &data_journal,
             Some(&error_journal),
             &instrumentation,

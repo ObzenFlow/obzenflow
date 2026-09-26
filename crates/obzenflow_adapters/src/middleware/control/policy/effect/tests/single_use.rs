@@ -59,7 +59,7 @@ impl AppendOnlyJournal {
         let writer = event.writer_id;
         let (commitment, causal) = CausalCommit::prepare(
             self.run_id,
-            CausalCoordinate::new(self.id.into(), writer),
+            CausalCoordinate::new(self.id.into()),
             event.id,
             clocks.get(&writer),
             input,
@@ -325,7 +325,7 @@ fn effect_context(
         )),
         flow_context: None,
         observers: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
         parent,

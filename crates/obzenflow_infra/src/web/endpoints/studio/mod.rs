@@ -25,7 +25,7 @@ use tokio::sync::watch;
 use crate::web::RuntimeInstanceId;
 
 pub(crate) struct StudioUpdatesEndpoint {
-    journal: Arc<dyn Journal<SystemEvent>>,
+    journals: Vec<obzenflow_runtime::supervised_base::SupervisorJournal>,
     projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
@@ -40,7 +40,7 @@ impl StudioUpdatesEndpoint {
         closing: watch::Receiver<bool>,
     ) -> Self {
         Self {
-            journal,
+            journals: vec![journal.into()],
             projection,
             runtime_instance_id,
             closing,
@@ -48,6 +48,14 @@ impl StudioUpdatesEndpoint {
                 obzenflow_runtime::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
             ),
         }
+    }
+
+    pub(crate) fn with_report_journals(
+        mut self,
+        journals: Vec<obzenflow_runtime::supervised_base::SupervisorJournal>,
+    ) -> Self {
+        self.journals = journals;
+        self
     }
 
     pub(crate) fn with_observation_interval(mut self, interval: std::time::Duration) -> Self {
@@ -77,7 +85,7 @@ impl HttpEndpoint for StudioUpdatesEndpoint {
             .find(|(name, _)| name.eq_ignore_ascii_case("last-event-id"))
             .map(|(_, value)| value.as_str());
         Ok(ManagedResponse::Sse(SseBody::new(stream::connection(
-            self.journal.clone(),
+            self.journals.clone(),
             self.projection.clone(),
             self.runtime_instance_id.clone(),
             self.closing.clone(),

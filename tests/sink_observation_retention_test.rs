@@ -15,7 +15,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, StageFatalCode, StageFatalRecorded,
-    StageLifecycleEvent, SystemEvent, SystemPayload,
+    StageLifecycleEvent, SupervisorRecord, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
@@ -477,20 +477,22 @@ async fn poisoned_cause_remains_primary_when_observation_also_panics() {
         .expect("fresh error route");
 
     let stage_id = operation.1.stage_id;
-    let lifecycle = read_system(&run)
-        .await
-        .into_iter()
-        .find_map(|envelope| match envelope.payload {
-            SystemPayload::StageLifecycle {
-                stage_id: failed_stage,
-                event:
-                    StageLifecycleEvent::Failed {
-                        causal_event_id, ..
-                    },
-            } if failed_stage == stage_id => {
-                Some((envelope.envelope.provenance.event.id, causal_event_id))
+    let lifecycle = data
+        .iter()
+        .cloned()
+        .filter_map(SupervisorRecord::from_chain)
+        .find_map(|envelope| {
+            let id = *envelope.id();
+            match envelope.payload {
+                SystemPayload::StageLifecycle {
+                    stage_id: failed_stage,
+                    event:
+                        StageLifecycleEvent::Failed {
+                            causal_event_id, ..
+                        },
+                } if failed_stage == stage_id => Some((id, causal_event_id)),
+                _ => None,
             }
-            _ => None,
         })
         .expect("poisoned lifecycle failure");
     assert_eq!(lifecycle.1, Some(route.id));
@@ -563,7 +565,7 @@ async fn admission_panic_is_redacted_and_creates_no_receipt_or_writer_call() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn policy_evidence_is_runtime_stamped_parented_and_mirrored() {
+async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
     let (_temp, run, result, calls, observations) =
         run_case(WriterMode::BufferedBatch, PolicyMode::EmitEvidence).await;
     result.expect("allowed evidence does not affect settlement");
@@ -611,17 +613,25 @@ async fn policy_evidence_is_runtime_stamped_parented_and_mirrored() {
         assert!(input.admission_seq < evidence.admission_seq);
     }
 
-    let mirrored = read_system(&run)
-        .await
-        .into_iter()
-        .filter_map(|envelope| match envelope.payload {
-            SystemPayload::MiddlewareLifecycle { origin, .. } => Some(origin.event_id),
-            _ => None,
-        })
+    let reports = sink
+        .iter()
+        .cloned()
+        .filter_map(SupervisorRecord::from_chain)
+        .filter(|report| matches!(report.payload, SystemPayload::MiddlewareLifecycle { .. }))
         .collect::<Vec<_>>();
     assert_eq!(
-        mirrored,
+        reports
+            .iter()
+            .map(|report| *report.id())
+            .collect::<Vec<_>>(),
         evidence.iter().map(|event| event.id).collect::<Vec<_>>()
+    );
+    assert!(
+        read_system(&run)
+            .await
+            .iter()
+            .all(|row| !matches!(row.payload, SystemPayload::MiddlewareLifecycle { .. })),
+        "middleware reports stay in their original stage journal"
     );
     assert_eq!(
         calls.lock().expect("call log").as_slice(),

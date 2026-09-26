@@ -181,9 +181,16 @@ pub(super) fn write(
                 .get("entries")
                 .and_then(Value::as_array)
                 .ok_or_else(|| invalid("missing typed clock entries"))?;
-            let keys = Value::Array(entries.iter().map(|entry| serde_json::json!({
-                "journal_writer_id": entry["journal_writer_id"], "writer_id": entry["writer_id"]
-            })).collect());
+            let keys = Value::Array(
+                entries
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "journal_writer_id": entry["journal_writer_id"]
+                        })
+                    })
+                    .collect(),
+            );
             definitions.reference(DefinitionKind::ClockKeys, &keys, out)?;
             for entry in entries {
                 write(Kind::Unsigned, &entry["sequence"], out, definitions)?;

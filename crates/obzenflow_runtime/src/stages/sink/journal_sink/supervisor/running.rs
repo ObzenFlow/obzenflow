@@ -754,7 +754,7 @@ async fn journal_fresh_error_route<
         OutputCommitter {
             data_journal: &ctx.data_journal,
             flow_context: None,
-            system_journal: None,
+
             instrumentation: Some(&ctx.instrumentation),
             heartbeat_state: None,
             output_contract: None,
@@ -805,7 +805,7 @@ async fn journal_policy_evidence<
                 .with_cycle_state_from(&parent.authored());
         event = event.try_with_composite_activations(parent.composite_activations().to_vec())?;
         event = ctx.instrumentation.capture_accounting().attach_to(event);
-        let written = crate::supervised_base::publication::append(
+        crate::supervised_base::publication::append(
             &ctx.data_journal,
             event,
             AppendOptions::from_record(Some(parent))?.with_capture(
@@ -814,11 +814,6 @@ async fn journal_policy_evidence<
             ),
         )
         .await?;
-        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-            &written,
-            &ctx.system_journal,
-        )
-        .await;
     }
     Ok(())
 }
@@ -838,11 +833,11 @@ async fn journal_poisoned_lifecycle<
         causal_event_id,
     );
     let written =
-        crate::supervised_base::publication::append(&ctx.system_journal, event, Default::default())
+        crate::supervised_base::publication::report(&ctx.report_journal, event, Default::default())
             .await?;
     ctx.failure_lifecycle_recorded = true;
     ctx.failure_causal_event_id = Some(causal_event_id);
-    Ok(written.envelope.provenance.event.id)
+    Ok(*written.id())
 }
 
 async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
@@ -871,7 +866,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             data_journal: ctx.data_journal.clone(),
             flow_context: None,
             observers: Some(ctx.observers.clone()),
-            system_journal: None,
+
             instrumentation: None,
             heartbeat_state: None,
             parent: envelope.clone(),
@@ -1279,7 +1274,6 @@ async fn journal_delivery_receipt<
         .try_with_composite_activations(parent_envelope.composite_activations().to_vec())?;
 
     let data_journal = ctx.data_journal.clone();
-    let system_journal = ctx.system_journal.clone();
     let instrumentation = ctx.instrumentation.clone();
     let parent = parent_envelope.clone();
     let mut settlement = subscription.take_receipt_settlement(&mut ctx.contract_state);
@@ -1296,11 +1290,6 @@ async fn journal_delivery_receipt<
         if let Some((seq, event_id, vector_clock)) = settlement.record(&written.authored()) {
             instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
         }
-        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-            &written,
-            &system_journal,
-        )
-        .await;
         Ok((written, settlement))
     })
     .await?;

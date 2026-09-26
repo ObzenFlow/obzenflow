@@ -22,7 +22,7 @@ use obzenflow_core::event::schema::EffectOutcomeFacts;
 pub use obzenflow_core::event::schema::{
     TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, FlowId, JournalRecord, StageId, WriterId};
 use ring::digest::{digest, SHA256};

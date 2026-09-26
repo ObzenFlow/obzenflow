@@ -34,6 +34,7 @@ pub(super) struct Context {
     causal_error: Option<String>,
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
+    journals: BTreeMap<obzenflow_core::JournalId, String>,
     references: BTreeMap<String, Reference>,
     insertion_order: VecDeque<String>,
 }
@@ -41,7 +42,17 @@ pub(super) struct Context {
 impl Context {
     pub fn new<'a>(journals: impl Iterator<Item = &'a RunJournal>) -> Self {
         let mut stages = BTreeMap::new();
+        let mut journal_names = BTreeMap::new();
         for journal in journals {
+            let name = match (&journal.stage, journal.kind) {
+                (Some(stage), RunJournalKind::Error) => format!("{}/error", stage.key),
+                (Some(stage), _) => stage.key.clone(),
+                (_, RunJournalKind::System) => "pipeline".into(),
+                (_, RunJournalKind::MetricsCoordination) => "metrics/coordination".into(),
+                (_, RunJournalKind::MetricsExport) => "metrics/export".into(),
+                _ => journal.id.to_string(),
+            };
+            journal_names.insert(journal.id, name);
             if let Some(stage) = &journal.stage {
                 stages.insert(stage.key.clone(), stage.clone());
             }
@@ -65,6 +76,7 @@ impl Context {
                     key: stage.key,
                 })
                 .collect(),
+            journals: journal_names,
             references: BTreeMap::new(),
             supervisors: BTreeMap::new(),
             insertion_order: VecDeque::new(),
@@ -141,20 +153,28 @@ impl Context {
     }
 
     pub fn register_supervisor(&mut self, record: &RunRecord) -> Result<(), super::Error> {
-        if let RunRecordData::System(row) = &record.record {
-            if let SystemPayload::SupervisorRegistered { descriptor } = &row.payload {
-                let writer = writer_id(record);
-                if self
-                    .supervisors
-                    .get(&writer)
-                    .is_some_and(|known| known != descriptor)
-                {
-                    return Err(
-                        format!("conflicting recorded supervisor identities for {writer}").into(),
-                    );
-                }
-                self.supervisors.insert(writer, descriptor.clone());
+        let descriptor = match &record.record {
+            RunRecordData::System(row) => match &row.payload {
+                SystemPayload::SupervisorRegistered { descriptor } => Some(descriptor),
+                _ => None,
+            },
+            RunRecordData::Chain(row) => match &row.payload {
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorRegistered { descriptor }) => Some(descriptor),
+                _ => None,
+            },
+        };
+        if let Some(descriptor) = descriptor {
+            let writer = writer_id(record);
+            if self
+                .supervisors
+                .get(&writer)
+                .is_some_and(|known| known != descriptor)
+            {
+                return Err(
+                    format!("conflicting recorded supervisor identities for {writer}").into(),
+                );
             }
+            self.supervisors.insert(writer, descriptor.clone());
         }
         Ok(())
     }
@@ -172,20 +192,19 @@ impl Context {
         &self,
         values: &BTreeMap<CausalCoordinate, u64>,
         _vector: bool,
-        run: &RunIdentity,
+        _run: &RunIdentity,
     ) -> Vec<ClockComponent> {
         values
             .iter()
             .map(|(coordinate, value)| {
-                let writer = coordinate.writer_id.to_string();
-                let name = if coordinate.writer_id == run.pipeline_writer_id {
-                    "pipeline"
-                } else {
-                    self.writer_name(&writer)
-                };
+                let name = self
+                    .journals
+                    .get(coordinate.journal_writer_id.as_journal_id())
+                    .cloned()
+                    .unwrap_or_else(|| coordinate.journal_writer_id.as_journal_id().to_string());
                 ClockComponent {
                     coordinate: *coordinate,
-                    name: format!("{}@{}", name, coordinate.journal_writer_id.as_journal_id()),
+                    name,
                     value: *value,
                 }
             })

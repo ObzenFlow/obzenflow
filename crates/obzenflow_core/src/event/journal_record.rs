@@ -24,10 +24,9 @@ impl<P: JournalPayload> JournalRecord<P> {
     pub fn new<E: JournalEvent<Payload = P>>(journal_writer_id: JournalWriterId, event: E) -> Self {
         let (authored, payload) = event.into_parts();
         let mut vector_clock = super::vector_clock::VectorClock::new();
-        vector_clock.clocks.insert(
-            super::CausalCoordinate::new(journal_writer_id, *authored.provenance.event.writer_id()),
-            1,
-        );
+        vector_clock
+            .clocks
+            .insert(super::CausalCoordinate::new(journal_writer_id), 1);
         Self {
             envelope: EventEnvelope {
                 provenance: Provenance {
@@ -58,10 +57,7 @@ impl<P: JournalPayload> JournalRecord<P> {
     }
 
     pub fn causal_coordinate(&self) -> super::CausalCoordinate {
-        super::CausalCoordinate::new(
-            self.envelope.provenance.journal.journal_writer_id,
-            *self.writer_id(),
-        )
+        super::CausalCoordinate::new(self.envelope.provenance.journal.journal_writer_id)
     }
 
     pub fn local_sequence(&self) -> u64 {

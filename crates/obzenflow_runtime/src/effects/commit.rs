@@ -34,7 +34,6 @@ struct EffectCommitHandleInner<T, S> {
     writer_id: WriterId,
     data_journal: Arc<dyn Journal<ChainEvent>>,
     flow_context: Option<FlowContext>,
-    system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     instrumentation: Option<Arc<StageInstrumentation>>,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     output_contract: StageOutputContract,
@@ -54,7 +53,6 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) writer_id: WriterId,
     pub(super) data_journal: Arc<dyn Journal<ChainEvent>>,
     pub(super) flow_context: Option<FlowContext>,
-    pub(super) system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub(super) instrumentation: Option<Arc<StageInstrumentation>>,
     pub(super) heartbeat_state: Option<Arc<HeartbeatState>>,
     pub(super) output_contract: StageOutputContract,
@@ -104,7 +102,6 @@ where
                 writer_id: params.writer_id,
                 data_journal: params.data_journal,
                 flow_context: params.flow_context,
-                system_journal: params.system_journal,
                 instrumentation: params.instrumentation,
                 heartbeat_state: params.heartbeat_state,
                 output_contract: params.output_contract,
@@ -202,7 +199,7 @@ where
             let committer = OutputCommitter {
                 data_journal: &self.inner.data_journal,
                 flow_context: self.inner.flow_context.as_ref(),
-                system_journal: self.inner.system_journal.as_ref(),
+
                 instrumentation: self.inner.instrumentation.as_ref(),
                 heartbeat_state: self.inner.heartbeat_state.as_ref(),
                 output_contract: Some(&self.inner.output_contract),
@@ -315,7 +312,7 @@ where
             let committer = OutputCommitter {
                 data_journal: &self.inner.data_journal,
                 flow_context: None,
-                system_journal: None,
+
                 instrumentation: None,
                 heartbeat_state: None,
                 output_contract: None,
@@ -570,7 +567,6 @@ pub(super) fn build_domain_effect_success_facts(
 pub(super) async fn append_domain_effect_success_facts(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     flow_context: Option<&FlowContext>,
-    system_journal: Option<&Arc<dyn Journal<SystemEvent>>>,
     instrumentation: Option<&Arc<StageInstrumentation>>,
     heartbeat_state: Option<&Arc<HeartbeatState>>,
     output_contract: Option<&StageOutputContract>,
@@ -599,7 +595,6 @@ pub(super) async fn append_domain_effect_success_facts(
     let committer = OutputCommitter {
         data_journal,
         flow_context,
-        system_journal,
         instrumentation,
         heartbeat_state,
         output_contract,
@@ -653,7 +648,7 @@ pub(super) async fn append_effect_record(
     let committer = OutputCommitter {
         data_journal,
         flow_context: None,
-        system_journal: None,
+
         instrumentation: None,
         heartbeat_state: None,
         output_contract: None,

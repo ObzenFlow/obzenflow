@@ -12,7 +12,7 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, StageFatalRecorded,
-    StageLifecycleEvent, SystemEvent, SystemPayload,
+    StageLifecycleEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME};
@@ -619,27 +619,6 @@ async fn read_chain_journal(path: &Path) -> Result<Vec<ChainEvent>, SinkConforma
     Ok(events)
 }
 
-async fn read_system_journal(path: &Path) -> Result<Vec<SystemEvent>, SinkConformanceFailure> {
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        path.to_path_buf(),
-        JournalOwner::system(obzenflow_core::SystemId::new()),
-    )
-    .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?;
-    let mut reader = journal
-        .reader()
-        .await
-        .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?;
-    let mut events = Vec::new();
-    while let Some(envelope) = reader
-        .next()
-        .await
-        .map_err(|error| failure("journal", path.display().to_string(), error.to_string()))?
-    {
-        events.push(envelope.into_authored());
-    }
-    Ok(events)
-}
-
 fn is_failed_receipt(event: &ChainEvent) -> bool {
     matches!(
         &event.payload,
@@ -991,7 +970,7 @@ fn parse_current_manifest(raw: &str) -> Result<RunManifest, SinkConformanceFailu
 
 fn validate_sink_lifecycle_projection(
     manifest: &RunManifest,
-    system_events: &[SystemEvent],
+    reports: &[(EventId, SystemPayload)],
 ) -> Result<(usize, usize), SinkConformanceFailure> {
     let mut completed_sink_count = 0;
     let mut failed_sink_count = 0;
@@ -1000,10 +979,10 @@ fn validate_sink_lifecycle_projection(
         .iter()
         .filter(|(_, stage)| stage.stage_type == obzenflow_core::event::context::StageType::Sink)
     {
-        let lifecycle = system_events
+        let lifecycle = reports
             .iter()
             .enumerate()
-            .filter_map(|(index, event)| match &event.payload {
+            .filter_map(|(index, (_, payload))| match payload {
                 SystemPayload::StageLifecycle {
                     stage_id,
                     event: lifecycle,
@@ -1185,9 +1164,19 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
             )?;
         }
     }
-    let system_events = read_system_journal(&run_dir.join(&manifest.system_journal_file)).await?;
+    // Protected lifecycle reports share their owner's data journal. Keep this
+    // authored projection separate from business/delivery fact validation.
+    let reports = chain_events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ChainPayload::Execution(payload) => payload
+                .supervision_report()
+                .map(|report| (event.id, report)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let (completed_sink_count, failed_sink_count) =
-        validate_sink_lifecycle_projection(&manifest, &system_events)?;
+        validate_sink_lifecycle_projection(&manifest, &reports)?;
 
     let journal_routes = projections
         .iter()
@@ -1200,9 +1189,9 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
         .collect::<HashMap<_, _>>();
     debug_assert_eq!(by_id.len(), chain_events.len());
 
-    let lifecycle_causes = system_events
+    let lifecycle_causes = reports
         .iter()
-        .filter_map(|event| match &event.payload {
+        .filter_map(|(id, payload)| match payload {
             SystemPayload::StageLifecycle {
                 stage_id,
                 event:
@@ -1210,7 +1199,7 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
                         causal_event_id: Some(cause),
                         ..
                     },
-            } => Some((event.id, *stage_id, *cause)),
+            } => Some((*id, *stage_id, *cause)),
             _ => None,
         })
         .collect::<Vec<_>>();

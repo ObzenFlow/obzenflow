@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Version of the consumer record projection, independent of the archive epoch.
-pub const RUN_RECORD_VERSION: u16 = 2;
+pub const RUN_RECORD_VERSION: u16 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunIdentity {
@@ -30,6 +30,8 @@ pub struct JournalPosition(pub u64);
 #[serde(rename_all = "snake_case")]
 pub enum RunJournalKind {
     System,
+    MetricsCoordination,
+    MetricsExport,
     Data,
     Error,
 }

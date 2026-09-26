@@ -89,14 +89,7 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
             causal: Default::default(),
             journal_writer_id,
             vector_clock: VectorClock {
-                clocks: [(
-                    crate::event::CausalCoordinate::new(
-                        journal_writer_id,
-                        WriterId::from(stage_id),
-                    ),
-                    1,
-                )]
-                .into(),
+                clocks: [(crate::event::CausalCoordinate::new(journal_writer_id), 1)].into(),
             },
             timestamp: Utc.timestamp_millis_opt(12).unwrap(),
             journal_group_id: Some("fixture-group".into()),
@@ -288,11 +281,7 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
             causal: Default::default(),
             journal_writer_id,
             vector_clock: VectorClock {
-                clocks: [(
-                    crate::event::CausalCoordinate::new(journal_writer_id, writer_id),
-                    1,
-                )]
-                .into(),
+                clocks: [(crate::event::CausalCoordinate::new(journal_writer_id), 1)].into(),
             },
             timestamp: Utc.timestamp_millis_opt(12).unwrap(),
             journal_group_id: None,

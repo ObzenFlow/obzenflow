@@ -161,14 +161,14 @@ pub(super) async fn dispatch_enriching<
 
                     match resolution {
                         ControlAction::Forward => {
-                            common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                            common::forward_control_to_journal(ctx, &envelope).await?;
                             if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
-                            common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                            common::forward_control_to_journal(ctx, &envelope).await?;
 
                             if envelope.is_eof() {
                                 if last_eof_outcome
@@ -541,7 +541,6 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
             ctx.stage_id,
             ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             pending_parent,
             &ctx.instrumentation,
             &ctx.backpressure_writer,

@@ -188,7 +188,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             reference_stage_id: self.config.reference_source_id,
             data_journal: self.resources.data_journal.clone(),
             error_journal: self.resources.error_journal.clone(),
-            system_journal: self.resources.system_journal.clone(),
+            report_journal: self.resources.report_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
             lineage_policy: self.resources.lineage_policy,
@@ -248,7 +248,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.system_journal.clone(),
+            self.resources.report_journal.clone(),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

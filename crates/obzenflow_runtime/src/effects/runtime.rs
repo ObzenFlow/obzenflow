@@ -474,7 +474,7 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
@@ -973,7 +973,6 @@ impl EffectsCore {
             let start_committed = start_committed.clone();
             let data_journal = self.ctx.data_journal.clone();
             let flow_context = self.ctx.flow_context.clone();
-            let system_journal = self.ctx.system_journal.clone();
             let instrumentation = self.ctx.instrumentation.clone();
             let heartbeat_state = self.ctx.heartbeat_state.clone();
             let backpressure_writer = self.ctx.backpressure_writer.clone();
@@ -989,7 +988,7 @@ impl EffectsCore {
                     let committer = OutputCommitter {
                         data_journal: &data_journal,
                         flow_context: flow_context.as_ref(),
-                        system_journal: system_journal.as_ref(),
+
                         instrumentation: instrumentation.as_ref(),
                         heartbeat_state: heartbeat_state.as_ref(),
                         output_contract: None,
@@ -1150,7 +1149,7 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,
@@ -1636,7 +1635,6 @@ impl EffectsCore {
                 writer_id: self.ctx.writer_id,
                 data_journal: self.ctx.data_journal.clone(),
                 flow_context: self.ctx.flow_context.clone(),
-                system_journal: self.ctx.system_journal.clone(),
                 instrumentation: self.ctx.instrumentation.clone(),
                 heartbeat_state: self.ctx.heartbeat_state.clone(),
                 output_contract: self.ctx.output_contract.clone(),
@@ -2221,7 +2219,6 @@ impl EffectsCore {
             append_domain_effect_success_facts(
                 &self.ctx.data_journal,
                 self.ctx.flow_context.as_ref(),
-                self.ctx.system_journal.as_ref(),
                 self.ctx.instrumentation.as_ref(),
                 self.ctx.heartbeat_state.as_ref(),
                 Some(&self.ctx.output_contract),
@@ -2311,7 +2308,7 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
@@ -2364,7 +2361,7 @@ impl EffectsCore {
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
-            system_journal: self.ctx.system_journal.as_ref(),
+
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: None,

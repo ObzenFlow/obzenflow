@@ -11,9 +11,7 @@ use obzenflow_core::event::payloads::supervisor_descriptor::{
     SupervisionMode, SupervisorDescriptor, SupervisorKind,
 };
 use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
-use obzenflow_core::journal::Journal;
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
-use std::sync::Arc;
 
 /// Directives that control a state's event loop
 #[derive(Debug, Clone)]
@@ -58,7 +56,7 @@ pub trait Supervisor {
 
     /// Existing journal owned by this run. Registration is ordinary journal
     /// evidence, published through the same supervised publication scope.
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>>;
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal;
 }
 
 pub(super) async fn register<S: Supervisor>(
@@ -75,8 +73,8 @@ pub(super) async fn register<S: Supervisor>(
     descriptor
         .validate(&writer)
         .map_err(std::io::Error::other)?;
-    super::publication::append(
-        &supervisor.system_journal(context),
+    super::publication::report(
+        &supervisor.report_journal(context),
         SystemEvent::new(writer, SystemPayload::SupervisorRegistered { descriptor }),
         Default::default(),
     )

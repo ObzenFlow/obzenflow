@@ -17,7 +17,6 @@ use crate::supervised_base::publication::{
     BoxError, PublicationScope, PublicationSettlement, SharedError,
 };
 use futures::stream::FuturesUnordered;
-use obzenflow_core::EventId;
 use std::sync::OnceLock;
 
 pub(crate) type OperationalFailure = Arc<OnceLock<SharedError>>;
@@ -27,9 +26,26 @@ type StageJoins = FuturesUnordered<BoxFuture<'static, Result<(), StageError>>>;
 pub(super) enum ProducerTail {
     #[default]
     Uncaptured,
-    Reading(Mutex<BoxFuture<'static, Result<Option<EventId>, BoxError>>>),
-    Through(EventId),
+    Reading(
+        Mutex<
+            BoxFuture<
+                'static,
+                Result<std::collections::HashMap<obzenflow_core::JournalId, u64>, BoxError>,
+            >,
+        >,
+    ),
+    Through(std::collections::HashMap<obzenflow_core::JournalId, u64>),
     Reached,
+}
+
+impl ProducerTail {
+    pub(super) fn covered(
+        &self,
+        positions: &std::collections::HashMap<obzenflow_core::JournalId, u64>,
+    ) -> bool {
+        matches!(self, Self::Reached)
+            || matches!(self, Self::Through(targets) if targets.iter().all(|(journal, through)| positions.get(journal).copied().unwrap_or(0) >= *through))
+    }
 }
 
 /// Observations of concrete owners. No task is spawned to perform a join.
@@ -44,6 +60,7 @@ pub(crate) struct PipelineResources {
     pub(super) metrics_join: Option<Mutex<BoxFuture<'static, Result<(), HandleError>>>>,
     pub(super) metrics_joined: bool,
     pub(super) producer_tail: ProducerTail,
+    pub(super) metrics_tail: ProducerTail,
     pub(super) terminal_ack: Arc<OnceLock<std::time::Instant>>,
     pub(crate) failure: OperationalFailure,
 }
@@ -61,6 +78,7 @@ impl Default for PipelineResources {
             metrics_join: None,
             metrics_joined: false,
             producer_tail: ProducerTail::Uncaptured,
+            metrics_tail: ProducerTail::Uncaptured,
             terminal_ack: Arc::new(OnceLock::new()),
             failure: Arc::new(OnceLock::new()),
         }

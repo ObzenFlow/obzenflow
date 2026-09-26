@@ -383,7 +383,7 @@ pub async fn finished_has_no_outgoing_inputs_including_controls_and_journal_rows
         E::OperationalFailure {
             message: "late".into(),
         },
-        E::Journal(Box::new(row)),
+        E::Journal(Box::new((row).into())),
     ] {
         assert!(
             machine.handle(event.clone(), &mut ctx).await.is_err(),
@@ -487,14 +487,16 @@ pub async fn unrelated_rows_only_advance_observation_in_every_live_phase(
             SystemEventFactory::new(SystemId::new()).pipeline_all_stages_completed(),
         ] {
             let id = event.id;
-            ctx.resources.producer_tail = ProducerTail::Through(id);
+
             let row = ctx
                 .system_journal
                 .append(event, Default::default())
                 .await
                 .unwrap();
+            ctx.resources.producer_tail =
+                ProducerTail::Through([(*ctx.system_journal.id(), row.local_sequence())].into());
             assert!(machine
-                .handle(E::Journal(Box::new(row)), &mut ctx)
+                .handle(E::Journal(Box::new((row).into())), &mut ctx)
                 .await
                 .unwrap()
                 .is_empty());
@@ -542,7 +544,7 @@ pub async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role
             .await
             .unwrap();
         assert!(machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap()
             .is_empty());
@@ -565,7 +567,7 @@ pub async fn declared_contract_feeds_do_not_fall_back_on_unknown_payload_or_role
         .await
         .unwrap();
     let actions = machine
-        .handle(E::Journal(Box::new(row)), &mut ctx)
+        .handle(E::Journal(Box::new((row).into())), &mut ctx)
         .await
         .unwrap();
     assert_eq!(machine.state(), &S::SettlingStages);
@@ -606,7 +608,7 @@ pub async fn empty_topology_cannot_announce_or_consume_all_stage_completion(
                 .await
                 .unwrap();
             assert!(machine
-                .handle(E::Journal(Box::new(row)), &mut ctx)
+                .handle(E::Journal(Box::new((row).into())), &mut ctx)
                 .await
                 .unwrap()
                 .is_empty());
@@ -640,7 +642,7 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
             .await
             .unwrap();
         assert!(machine
-            .handle(E::Journal(Box::new(upstream_row)), &mut ctx)
+            .handle(E::Journal(Box::new((upstream_row).into())), &mut ctx)
             .await
             .unwrap()
             .is_empty());
@@ -650,7 +652,7 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
             .await
             .unwrap();
         let actions = machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap();
         let [A::Publish { event, .. }] = actions.as_slice() else {
@@ -668,7 +670,7 @@ pub async fn genuine_early_stage_completion_can_settle_without_start_admission(
             .await
             .unwrap();
         let actions = machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap();
         assert_eq!(machine.state(), &S::SettlingStages);
@@ -726,7 +728,7 @@ pub async fn graceful_stop_during_startup_preserves_running_then_drain_authority
             .await
             .unwrap();
         let actions = machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap();
         assert_eq!(
@@ -739,7 +741,7 @@ pub async fn graceful_stop_during_startup_preserves_running_then_drain_authority
             .await
             .unwrap();
         let actions = machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap();
         assert_eq!(actions.iter().any(|a| matches!(a, A::StopSources)), !cancel);
@@ -765,7 +767,7 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
             .await
             .unwrap();
         assert!(machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap()
             .is_empty());
@@ -778,7 +780,7 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
         .unwrap();
     assert!(matches!(
         machine
-            .handle(E::Journal(Box::new(row)), &mut ctx)
+            .handle(E::Journal(Box::new((row).into())), &mut ctx)
             .await
             .unwrap()
             .as_slice(),
@@ -797,7 +799,7 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
         .await
         .unwrap();
     machine
-        .handle(E::Journal(Box::new(row)), &mut ctx)
+        .handle(E::Journal(Box::new((row).into())), &mut ctx)
         .await
         .unwrap();
     assert!(!ctx.progress.final_marker_seen);
@@ -811,7 +813,7 @@ pub async fn terminal_and_final_marker_require_the_authorised_writer_and_identit
         .await
         .unwrap();
     machine
-        .handle(E::Journal(Box::new(row)), &mut ctx)
+        .handle(E::Journal(Box::new((row).into())), &mut ctx)
         .await
         .unwrap();
     machine

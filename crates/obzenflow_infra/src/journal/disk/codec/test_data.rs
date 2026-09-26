@@ -74,14 +74,13 @@ impl Stage {
     }
 
     fn coordinate(self) -> obzenflow_core::event::CausalCoordinate {
-        obzenflow_core::event::CausalCoordinate::new(self.journal_writer(), self.id().into())
+        obzenflow_core::event::CausalCoordinate::new(self.journal_writer())
     }
 
     fn commitment(self, input: u64) -> obzenflow_core::event::CommittedCausalRef {
         obzenflow_core::event::CommittedCausalRef {
             run_id: FlowId::from(ulid(1)),
             journal_writer_id: self.journal_writer(),
-            writer_id: self.id().into(),
             sequence: self.clock(input).get(&self.coordinate()),
             event_id: self.event_id(input),
         }

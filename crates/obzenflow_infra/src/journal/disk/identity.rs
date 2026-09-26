@@ -81,6 +81,12 @@ pub(super) fn validate_archive_identities(
             ]
         }),
     );
+    let files = files.chain(manifest.metrics_journals.iter().flat_map(|metrics| {
+        [
+            metrics.coordination_journal_file.as_str(),
+            metrics.export_journal_file.as_str(),
+        ]
+    }));
     let mut identities = std::collections::HashSet::new();
     for file in files {
         let path = directory.join(file);
@@ -165,10 +171,7 @@ pub(super) fn open_identity(
 /// Sequential admission for scanners that interpret records before exposing a reader.
 pub(super) struct CommitmentAdmission {
     identity: JournalIdentity,
-    previous: std::collections::HashMap<
-        obzenflow_core::WriterId,
-        obzenflow_core::event::CommittedCausalRef,
-    >,
+    previous: Option<obzenflow_core::event::CommittedCausalRef>,
 }
 
 impl CommitmentAdmission {
@@ -187,25 +190,22 @@ impl CommitmentAdmission {
         let reference = commitment.reference;
         if reference.run_id != self.identity.run_id
             || reference.journal_writer_id.as_journal_id() != &self.identity.journal_id
-            || self
-                .previous
-                .get(&reference.writer_id)
-                .is_some_and(|previous| {
-                    reference.sequence <= previous.sequence
-                        || record
-                            .envelope
-                            .provenance
-                            .journal
-                            .causal
-                            .previous
-                            .is_some_and(|claimed| {
-                                claimed.sequence == previous.sequence && claimed != *previous
-                            })
-                })
+            || self.previous.as_ref().is_some_and(|previous| {
+                reference.sequence <= previous.sequence
+                    || record
+                        .envelope
+                        .provenance
+                        .journal
+                        .causal
+                        .previous
+                        .is_some_and(|claimed| {
+                            claimed.sequence == previous.sequence && claimed != *previous
+                        })
+            })
         {
             return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
         }
-        self.previous.insert(reference.writer_id, reference);
+        self.previous = Some(reference);
         Ok(())
     }
 }
@@ -227,18 +227,14 @@ pub(super) fn write_fixture_identity(path: &Path, identity: JournalIdentity) {
 pub(super) fn fixture_record<T: obzenflow_core::event::JournalEvent>(
     identity: JournalIdentity,
     event: T,
-    previous: &mut std::collections::HashMap<
-        obzenflow_core::WriterId,
-        obzenflow_core::event::CausalCommit,
-    >,
+    previous: &mut Option<obzenflow_core::event::CausalCommit>,
 ) -> obzenflow_core::JournalRecord<T::Payload> {
     use obzenflow_core::event::{CausalCommit, CausalCoordinate, CausalFrontier};
-    let writer = *event.writer_id();
     let (commitment, causal) = CausalCommit::prepare(
         identity.run_id,
-        CausalCoordinate::new(identity.journal_id.into(), writer),
+        CausalCoordinate::new(identity.journal_id.into()),
         *event.id(),
-        previous.get(&writer),
+        previous.as_ref(),
         &CausalFrontier::default(),
     )
     .unwrap();
@@ -255,6 +251,6 @@ pub(super) fn fixture_record<T: obzenflow_core::event::JournalEvent>(
         },
     )
     .unwrap();
-    previous.insert(writer, commitment);
+    *previous = Some(commitment);
     record
 }

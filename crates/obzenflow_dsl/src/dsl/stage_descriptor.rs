@@ -2214,7 +2214,7 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
                     phase: SinkOperationPhase::Open,
                     error: &error,
                     error_journal: &resources.error_journal,
-                    system_journal: &resources.system_journal,
+                    report_journal: &resources.report_journal,
                     instrumentation: &instrumentation,
                 })
                 .await
@@ -4047,7 +4047,7 @@ mod tests {
             heartbeat_interval: 1000,
             data_journal,
             error_journal,
-            system_journal,
+            report_journal: system_journal.into(),
             upstream_journals: Vec::new(),
             upstream_stage_names: std::collections::HashMap::new(),
             output_contract: Default::default(),

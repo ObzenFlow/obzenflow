@@ -9,7 +9,9 @@ use super::fsm::{
     MetricsAggregatorEvent as Event, MetricsAggregatorState as State,
 };
 use super::supervisor::MetricsAggregatorSupervisor;
-use crate::supervised_base::{ChannelBuilder, SelfSupervisedExt};
+use crate::supervised_base::{
+    ChannelBuilder, HandleBuilder, StandardHandle, SupervisorHandle, SupervisorTaskBuilder,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::ObservationSource;
@@ -221,9 +223,20 @@ async fn context(
     let ctx = Context::new(
         super::MetricsInputs::new(data, errors),
         system.clone(),
+        super::builder::MetricsJournals {
+            system_id,
+            coordination: factory
+                .create_system_journal(
+                    JournalName::MetricsCoordination,
+                    JournalOwner::system(system_id),
+                )
+                .unwrap(),
+            export: factory
+                .create_system_journal(JournalName::MetricsExport, JournalOwner::system(system_id))
+                .unwrap(),
+        },
         exports.clone(),
         Duration::from_millis(20),
-        system_id,
         HashMap::new(),
         vec![],
     )
@@ -255,24 +268,33 @@ async fn refresh(ctx: &mut Context) {
 fn run(
     ctx: Context,
 ) -> (
-    tokio::task::JoinHandle<()>,
+    StandardHandle<Event, State>,
     crate::supervised_base::builder::EventSender<Event>,
 ) {
     let (control, receiver, watcher) = ChannelBuilder::new().build(State::Initializing);
     let supervisor = MetricsAggregatorSupervisor {
         name: "metrics-test".into(),
-        system_journal: ctx.system_journal.clone(),
+        system_journal: ctx.journals.coordination.clone(),
         system_id: ctx.system_id,
         control: receiver,
         readers: None,
         final_refresh: None,
-        state_watcher: watcher,
+        state_watcher: watcher.clone(),
         last_state: None,
     };
     (
-        tokio::spawn(async move {
-            supervisor.run(State::Initializing, ctx).await.unwrap();
-        }),
+        HandleBuilder::new()
+            .with_event_sender(control.clone())
+            .with_state_watcher(watcher)
+            .with_supervisor_task(
+                SupervisorTaskBuilder::new("metrics-test").spawn_self_supervised(
+                    supervisor,
+                    State::Initializing,
+                    ctx,
+                ),
+            )
+            .build_standard()
+            .unwrap(),
         control,
     )
 }
@@ -394,6 +416,7 @@ pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journal
         vec![],
     )
     .await;
+    let owned = ctx.journals.clone();
     let (task, _control) = run(ctx);
     gate.entered.notified().await;
     until(|| exports.0.lock().unwrap().len() >= 4).await;
@@ -426,18 +449,25 @@ pub async fn metrics_pending_refresh_does_not_block_publication_or_other_journal
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), task)
+    tokio::time::timeout(Duration::from_secs(2), task.wait_for_completion())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(slow.probe.active.load(Ordering::SeqCst), 0);
-    let rows = system.read_all_unordered().await.unwrap();
+    let rows = owned.coordination.read_all_unordered().await.unwrap();
     let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
     let drained = names
         .iter()
         .position(|name| *name == "system.metrics.drained")
         .unwrap();
-    assert_eq!(names[drained - 1], "system.metrics.exported");
+    let exported = owned.export.read_last_n(1).await.unwrap().pop().unwrap();
+    assert_eq!(exported.event_type_name(), "system.metrics.exported");
+    assert!(
+        obzenflow_core::event::vector_clock::CausalOrderingService::happened_before(
+            &exported.envelope.provenance.journal.vector_clock,
+            &rows[drained].envelope.provenance.journal.vector_clock
+        )
+    );
     assert_eq!(names[drained + 1], "system.metrics.shutdown");
     assert_eq!(
         exports.0.lock().unwrap().last().unwrap().event_counts[&b],
@@ -452,13 +482,17 @@ pub async fn metrics_cancellation_stops_owned_readers_without_drained(
     let data = stage_journal(&mut *factory, stage, "cancel");
     let gate = Arc::new(Gate::default());
     *data.probe.gate.lock().unwrap() = Some(gate.clone());
-    let (ctx, system, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let (ctx, _, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let coordination = ctx.journals.coordination.clone();
     let (task, _control) = run(ctx);
     gate.entered.notified().await;
     task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(matches!(
+        task.wait_for_completion().await,
+        Err(crate::supervised_base::HandleError::SupervisorAborted)
+    ));
     until(|| data.probe.active.load(Ordering::SeqCst) == 0).await;
-    assert!(!system
+    assert!(!coordination
         .read_all_unordered()
         .await
         .unwrap()
@@ -507,7 +541,10 @@ pub async fn metrics_tail_identity_and_accounting_are_idempotent(
         ctx.metrics_store.stage_metrics[&stage].last_in_flight,
         Some(2)
     );
-    assert_eq!(ctx.metrics_store.stage_vector_clocks[&stage], 2);
+    assert_eq!(
+        ctx.metrics_store.stage_vector_clocks[&stage], 3,
+        "a forwarded author still advances the same physical journal clock"
+    );
     assert!(!ctx.metrics_store.stage_vector_clocks.contains_key(&foreign));
 }
 
@@ -569,7 +606,7 @@ pub async fn metrics_terminal_accounting_survives_without_optional_packets(
         .await
         .unwrap();
     let (task, _control) = run(ctx);
-    tokio::time::timeout(Duration::from_secs(2), task)
+    tokio::time::timeout(Duration::from_secs(2), task.wait_for_completion())
         .await
         .unwrap()
         .unwrap();
@@ -637,5 +674,119 @@ pub async fn metrics_manual_export_uses_the_live_control_receiver(
     control.send(Event::ExportMetrics).await.unwrap();
     until(|| exports.0.lock().unwrap().len() == 2).await;
     task.abort();
-    let _ = task.await;
+    let _ = task.wait_for_completion().await;
+}
+
+pub async fn metrics_export_power_law_does_not_expand_parent_coordination_work(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    use crate::supervised_base::report_reader::{ReportRead, ReportReaders};
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, StageLifecycleFact,
+    };
+    use obzenflow_core::event::ChainPayload;
+    let stage = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "quiet");
+    data.append(fact(stage, stage.into(), 1, 0), Default::default())
+        .await
+        .unwrap();
+    let (mut ctx, pipeline, exports) =
+        context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    ctx.export_interval = Duration::from_secs(60);
+    let journals = ctx.journals.clone();
+    let mut parent = ReportReaders::default();
+    parent.stage(data.inner.clone());
+    parent.system(journals.coordination.clone());
+    let (task, control) = run(ctx);
+    until(|| !exports.0.lock().unwrap().is_empty()).await;
+    let mut admitted = 0;
+    while admitted < 2 || !parent.initial_prefix_complete() {
+        if let ReportRead::Record(_) = std::future::poll_fn(|cx| parent.poll_next(cx))
+            .await
+            .unwrap()
+        {
+            admitted += 1;
+        }
+    }
+    for volume in [1, 100, 1000] {
+        let baseline = exports.0.lock().unwrap().len();
+        let quiet = data
+            .append(
+                ChainEventFactory::create_event(
+                    stage.into(),
+                    ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                        StageLifecycleFact::Running { stage_id: stage },
+                    )),
+                ),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let sender = control.clone();
+        let flood = tokio::spawn(async move {
+            for _ in 0..volume {
+                sender.send(Event::ExportMetrics).await.unwrap();
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let ReportRead::Record(row) = std::future::poll_fn(|cx| parent.poll_next(cx))
+                    .await
+                    .unwrap()
+                {
+                    admitted += 1;
+                    if row.id() == quiet.id() {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("quiet reports remain serviceable during export traffic");
+        let latency = started.elapsed();
+        flood.await.unwrap();
+        until(|| exports.0.lock().unwrap().len() == baseline + volume).await;
+        let coord = journals.coordination.committed_position().await.unwrap();
+        assert_eq!(
+            coord, 2,
+            "only registration and readiness; exports have a separate physical history"
+        );
+        let stats = parent.diagnostics();
+        assert_eq!(
+            stats
+                .iter()
+                .find(|row| row.journal == *journals.coordination.id())
+                .unwrap()
+                .scanned_records,
+            2,
+            "parent must not read/decode/filter export history"
+        );
+        assert!(stats.iter().all(|row| row.journal != *journals.export.id()));
+        eprintln!("exports_per_quiet_report={volume}, quiet_admission={latency:?}, parent_coordination_scans=2");
+    }
+    assert_eq!(
+        admitted, 5,
+        "two coordination facts and three quiet reports"
+    );
+    pipeline
+        .append(
+            SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), task.wait_for_completion())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(journals.coordination.committed_position().await.unwrap(), 4);
+    let end = journals
+        .coordination
+        .read_last_n(1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(end.event_type_name(), "system.metrics.shutdown");
 }

@@ -22,9 +22,7 @@ use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::payloads::execution_payload::{
     BackpressureFact, CircuitBreakerFact, ExecutionPayload,
 };
-use obzenflow_core::event::{
-    ChainEvent, ChainEventFactory, ChainPayload, JournalEvent, SystemEvent,
-};
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload, JournalEvent};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -835,7 +833,7 @@ async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_a
         let committer = OutputCommitter {
             data_journal: &journal,
             flow_context: None,
-            system_journal: None,
+
             instrumentation: Some(&instrumentation),
             heartbeat_state: None,
             output_contract: None,
@@ -911,8 +909,6 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     );
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(t)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(t)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
@@ -945,7 +941,6 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
             t,
             None,
             &data_journal,
-            &system_journal,
             None,
             &instrumentation,
             &writer,
@@ -993,7 +988,7 @@ fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
 }
 
 #[tokio::test]
-async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
+async fn atomic_group_accounts_every_member_in_its_owned_history() {
     use super::output_committer::{
         AtomicCommitEntry, CommitOptions, OutputCommitter, StageAppendIntent,
     };
@@ -1009,14 +1004,6 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
         0,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-    let gate = Arc::new(CommitGate {
-        entered: tokio::sync::Notify::new(),
-        release: tokio::sync::Notify::new(),
-        result: CommitResult::Committed,
-    });
-    let mut mirror = NoopJournal::new(JournalOwner::stage(stage));
-    mirror.append_gate = Some(gate.clone());
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(mirror);
     let instrumentation = Arc::new(StageInstrumentation::new());
     let execution = RuntimeExecution::new(RuntimeMode::Live, None);
     instrumentation.bind_observations(FlowId::new(), stage.into(), &execution);
@@ -1037,7 +1024,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
                 let committer = OutputCommitter {
                     data_journal: &data_journal,
                     flow_context: Some(&flow_context),
-                    system_journal: Some(&system_journal),
+
                     instrumentation: Some(&retained),
                     heartbeat_state: None,
                     output_contract: None,
@@ -1078,9 +1065,7 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
             })
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
-        .await
-        .unwrap();
+    caller.await.unwrap().unwrap();
     assert_eq!(journal.appended().len(), 4);
     let rows = journal.appended();
     let selected = crate::metrics::observations::LatestObservationMap::default();
@@ -1122,12 +1107,6 @@ async fn atomic_group_accounts_every_member_before_a_blocked_optional_mirror() {
     assert_eq!(instrumentation.data_writer_seq_by_event_type()["x"].0, 2);
     assert_eq!(writer.min_downstream_credit(), 0);
     scope.close();
-    caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
-    let mut abandoned = Box::pin(scope.join());
-    assert!(futures::poll!(abandoned.as_mut()).is_pending());
-    drop(abandoned);
-    gate.release.notify_one();
     scope.join().await.unwrap();
     assert_eq!(
         instrumentation.events_emitted_total.load(Ordering::Relaxed),
@@ -1157,8 +1136,6 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
         journal.gate = Some(gate.clone());
         let journal = Arc::new(journal);
         let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
         let scope = PublicationScope::new();
         let instrumentation = Arc::new(StageInstrumentation::new());
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
@@ -1190,7 +1167,6 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                         stage_id,
                         None,
                         &data_journal,
-                        &system_journal,
                         None,
                         &stage_instrumentation,
                         &stage_writer,
@@ -1278,8 +1254,6 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         writer.clone(),
         /* expected_credit_at_append */ 0,
     ));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1299,7 +1273,6 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1337,8 +1310,6 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         writer.clone(),
         /* expected_credit_at_append */ 0,
     ));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1359,7 +1330,6 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1394,8 +1364,6 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1416,7 +1384,6 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1458,8 +1425,6 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         writer.clone(),
         /* expected_credit_at_append */ 1,
     ));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1478,7 +1443,6 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1515,8 +1479,6 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         1,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
     let instrumentation = Arc::new(StageInstrumentation::new());
 
     let mut last_fact_id = None;
@@ -1547,7 +1509,6 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1604,8 +1565,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         1,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let fact =
         ChainEventFactory::data_event(WriterId::from(stage_id), "test.joined.v1", json!({"n": 1}));
@@ -1638,7 +1597,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1685,7 +1643,6 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1725,8 +1682,6 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
@@ -1746,7 +1701,6 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         stage_id,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1809,8 +1763,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
         /* expected_credit_at_append */ 0,
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = checking.clone();
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
@@ -1827,7 +1779,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
         s,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1893,7 +1844,6 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
         s,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,
@@ -1954,8 +1904,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     );
     let data_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(s)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
@@ -1975,7 +1923,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
             s,
             None,
             &data_journal,
-            &system_journal,
             None,
             &instrumentation,
             &writer,
@@ -2011,7 +1958,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         s,
         None,
         &data_journal,
-        &system_journal,
         None,
         &instrumentation,
         &writer,

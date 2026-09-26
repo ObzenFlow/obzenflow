@@ -58,6 +58,12 @@ impl JournalReader<SystemEvent> for PausedReader {
     fn position(&self) -> u64 {
         u64::from(self.row.is_none())
     }
+    fn initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        Ok(self.row.is_none())
+    }
+    fn is_at_end(&self) -> bool {
+        self.row.is_none()
+    }
 }
 
 #[test]
@@ -261,8 +267,9 @@ pub async fn ready_stage_joins_cannot_starve_other_resource_completions(
             .collect(),
     ));
     ctx.resources.refresh_publications();
-    ctx.resources.producer_tail =
-        ProducerTail::Reading(Mutex::new(futures::future::ready(Ok(None)).boxed()));
+    ctx.resources.producer_tail = ProducerTail::Reading(Mutex::new(
+        futures::future::ready(Ok(std::collections::HashMap::new())).boxed(),
+    ));
     ctx.resources.metrics_join = Some(Mutex::new(futures::future::ready(Ok(())).boxed()));
     let (_sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
     let mut supervisor = PipelineSupervisor::new(
@@ -395,6 +402,7 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
     }
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     release.notify_one();
+    tokio::task::yield_now().await;
     let mut delivered = false;
     for _ in 0..4 {
         if let EventLoopDirective::Transition(PipelineFsmEvent::Journal(envelope)) = supervisor
@@ -402,10 +410,7 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
             .await
             .unwrap()
         {
-            assert_eq!(
-                envelope.envelope.provenance.event.id,
-                row.envelope.provenance.event.id
-            );
+            assert_eq!(*envelope.id(), row.envelope.provenance.event.id);
             delivered = true;
             break;
         }
@@ -414,7 +419,10 @@ pub async fn pending_journal_read_survives_controls_and_gets_bounded_service(
         delivered,
         "ready journal input must be served despite the full control queue"
     );
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(
+        calls.load(Ordering::Relaxed) <= 2,
+        "only one pending read and its next bounded prefetch"
+    );
 }
 
 pub async fn producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer(
@@ -463,7 +471,7 @@ pub async fn producer_tail_capture_finishes_an_owned_read_before_waiting_behind_
     ctx.resources.producer_tail = ProducerTail::Reading(Mutex::new(
         async move {
             let _guard = lock.read().await;
-            Ok(Some(id))
+            Ok(std::collections::HashMap::new())
         }
         .boxed(),
     ));
@@ -486,22 +494,29 @@ pub async fn producer_tail_capture_finishes_an_owned_read_before_waiting_behind_
     let writer = tokio::time::timeout(Duration::from_secs(2), writer)
         .await
         .expect("delivering the owned read releases its journal lock");
-    let mut capture =
-        Box::pin(supervisor.dispatch_state(&PipelineFsmState::CatchingUpProducers, &mut ctx));
+    let mut capture = Box::pin(async {
+        // Applied-prefix coverage may be delivered while capture waits. That
+        // progress must not be confused with reaching the captured boundary.
+        loop {
+            let directive = supervisor
+                .dispatch_state(&PipelineFsmState::CatchingUpProducers, &mut ctx)
+                .await
+                .unwrap();
+            assert!(matches!(directive, EventLoopDirective::Continue));
+            if matches!(ctx.resources.producer_tail, ProducerTail::Reached) {
+                break;
+            }
+        }
+    });
     assert!(futures::poll!(&mut capture).is_pending());
     drop(writer);
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), capture)
-            .await
-            .expect("tail capture resumes after the writer")
-            .unwrap(),
-        EventLoopDirective::Continue
-    ));
+    tokio::time::timeout(Duration::from_secs(2), capture)
+        .await
+        .expect("tail capture resumes after the writer");
     assert!(matches!(ctx.resources.producer_tail, ProducerTail::Reached));
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        1,
-        "no new forward read during tail capture"
+    assert!(
+        (1..=2).contains(&calls.load(Ordering::Relaxed)),
+        "one retained read and at most one live-tail probe before the idle timer"
     );
 }
 
@@ -539,4 +554,89 @@ pub async fn expired_stop_is_dispatched_before_a_full_external_control_queue(
             PipelineFsmEvent::GracefulStopExpired
         )
     ));
+}
+
+pub async fn saturated_publications_stop_report_admission_but_not_controls_or_deadlines(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let mut ctx = make_fsm_context(make_journals);
+    let row = ctx
+        .system_journal
+        .append(
+            SystemEvent::stage_running(StageId::new()),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    ctx.completion_subscription = Some(
+        crate::supervised_base::report_reader::ReportReaders::from_system_reader(
+            *ctx.system_journal.id(),
+            ctx.system_journal.reader().await.unwrap(),
+        ),
+    );
+    let publications = ctx.resources.publications.clone();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    drop(
+        publications
+            .enqueue(async move {
+                gate.await?;
+                Ok(())
+            })
+            .unwrap(),
+    );
+    for _ in 1..64 {
+        drop(publications.enqueue(async { Ok(()) }).unwrap());
+    }
+    assert!(!publications.has_capacity(1));
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Running);
+    let mut supervisor = PipelineSupervisor::new(
+        ctx.system_id,
+        receiver,
+        watcher,
+        ctx.resources.failure.clone(),
+    );
+    for _ in 0..8 {
+        sender.send(PipelineFsmEvent::Start).await.unwrap();
+        assert!(matches!(
+            supervisor
+                .dispatch_state(&PipelineFsmState::Running, &mut ctx)
+                .await
+                .unwrap(),
+            EventLoopDirective::Transition(PipelineFsmEvent::Start)
+        ));
+    }
+    assert!(
+        ctx.report_coverage.is_empty(),
+        "prefetch must not become applied coverage while output is full"
+    );
+    assert!(
+        publications.capture().clock().clocks.is_empty(),
+        "prefetch must not admit causal inputs"
+    );
+    ctx.stop_intent.apply_request(
+        FlowStopMode::Graceful {
+            timeout: Duration::ZERO,
+        },
+        None,
+    );
+    assert!(matches!(
+        supervisor
+            .dispatch_state(&PipelineFsmState::Draining, &mut ctx)
+            .await
+            .unwrap(),
+        EventLoopDirective::Transition(PipelineFsmEvent::GracefulStopExpired)
+    ));
+    ctx.stop_intent = Default::default();
+    release.send(()).unwrap();
+    publications.observe_accepted().await.unwrap();
+    let EventLoopDirective::Transition(PipelineFsmEvent::Journal(report)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        supervisor.dispatch_state(&PipelineFsmState::Running, &mut ctx),
+    )
+    .await
+    .unwrap()
+    .unwrap() else {
+        panic!("report admission must resume when output capacity is released");
+    };
+    assert_eq!(report.id(), row.id());
 }

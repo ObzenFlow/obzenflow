@@ -112,6 +112,21 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
         RunJournalKind::System,
         None,
     )];
+    if let Some(metrics) = &manifest.metrics_journals {
+        if !metrics.writer_id.is_system() || metrics.writer_id == manifest.pipeline_writer_id {
+            return Err(JournalReadError::Invalid("invalid metrics owner".into()));
+        }
+        files.push((
+            metrics.coordination_journal_file.clone(),
+            RunJournalKind::MetricsCoordination,
+            None,
+        ));
+        files.push((
+            metrics.export_journal_file.clone(),
+            RunJournalKind::MetricsExport,
+            None,
+        ));
+    }
     let mut stages: Vec<_> = manifest.stages.iter().collect();
     stages.sort_by(|a, b| a.0.cmp(b.0));
     let mut stage_ids = HashSet::new();
@@ -170,7 +185,9 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
         }
         let id = descriptor.journal_id;
         let reader = match kind {
-            RunJournalKind::System => {
+            RunJournalKind::System
+            | RunJournalKind::MetricsCoordination
+            | RunJournalKind::MetricsExport => {
                 Reader::System(DiskJournalReader::open_observer(file, id).await?)
             }
             _ => Reader::Chain(DiskJournalReader::open_observer(file, id).await?),

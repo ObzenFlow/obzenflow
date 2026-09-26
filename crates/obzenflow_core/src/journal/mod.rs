@@ -16,6 +16,7 @@ pub mod journal_error;
 pub mod journal_name;
 pub mod journal_owner;
 pub mod journal_trait;
+pub mod limits;
 pub mod metrics_tail;
 pub mod read;
 pub mod reader;

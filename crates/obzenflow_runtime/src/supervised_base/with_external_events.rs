@@ -11,11 +11,9 @@ use super::handler_supervised::HandlerSupervised;
 use super::{publication, EventLoopDirective};
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, SystemPayload, WriterId};
-use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_fsm::{EventVariant, StateMachine, StateVariant};
 use std::error::Error;
-use std::sync::Arc;
 use tokio::sync::mpsc::error::TryRecvError;
 
 #[cfg(test)]
@@ -47,7 +45,7 @@ pub(crate) trait ExternalControlEvent: EventVariant {
 /// propagated and retained by the scope; a broken journal cannot certify disposal.
 pub(crate) async fn record_terminal_commands<E: ExternalControlEvent>(
     external_events: &mut EventReceiver<E>,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
+    report_journal: crate::supervised_base::SupervisorJournal,
     writer_id: WriterId,
     supervisor: &str,
     terminal_state: &str,
@@ -71,8 +69,8 @@ pub(crate) async fn record_terminal_commands<E: ExternalControlEvent>(
                     error,
                 },
             );
-            crate::supervised_base::publication::append_inline(
-                &system_journal,
+            crate::supervised_base::publication::report_inline(
+                &report_journal,
                 fact,
                 Default::default(),
             )
@@ -96,7 +94,7 @@ where
     external_events: EventReceiver<S::Event>,
     state_watcher: StateWatcher<S::State>,
     last_state: Option<S::State>,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
+    report_journal: crate::supervised_base::SupervisorJournal,
 }
 
 impl<S> HandlerSupervisedWithExternalEvents<S>
@@ -107,14 +105,14 @@ where
         inner: S,
         external_events: EventReceiver<S::Event>,
         state_watcher: StateWatcher<S::State>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
+        report_journal: crate::supervised_base::SupervisorJournal,
     ) -> Self {
         Self {
             inner,
             external_events,
             state_watcher,
             last_state: None,
-            system_journal,
+            report_journal,
         }
     }
 }
@@ -139,8 +137,11 @@ where
         self.inner.supervisor_kind()
     }
 
-    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        self.system_journal.clone()
+    fn report_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> crate::supervised_base::SupervisorJournal {
+        self.report_journal.clone()
     }
 
     fn name(&self) -> &str {
@@ -187,7 +188,7 @@ where
                 let writer_id = self.inner.writer_id();
                 record_terminal_commands(
                     &mut self.external_events,
-                    self.system_journal.clone(),
+                    self.report_journal.clone(),
                     writer_id,
                     self.inner.name(),
                     state.variant_name(),
@@ -248,7 +249,7 @@ where
     external_events: EventReceiver<S::Event>,
     state_watcher: StateWatcher<S::State>,
     last_state: Option<S::State>,
-    system_journal: Arc<dyn Journal<SystemEvent>>,
+    report_journal: crate::supervised_base::SupervisorJournal,
 }
 
 #[cfg(test)]
@@ -260,14 +261,14 @@ where
         inner: S,
         external_events: EventReceiver<S::Event>,
         state_watcher: StateWatcher<S::State>,
-        system_journal: Arc<dyn Journal<SystemEvent>>,
+        report_journal: crate::supervised_base::SupervisorJournal,
     ) -> Self {
         Self {
             inner,
             external_events,
             state_watcher,
             last_state: None,
-            system_journal,
+            report_journal,
         }
     }
 }
@@ -293,8 +294,11 @@ where
         self.inner.supervisor_kind()
     }
 
-    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        self.system_journal.clone()
+    fn report_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> crate::supervised_base::SupervisorJournal {
+        self.report_journal.clone()
     }
 
     fn name(&self) -> &str {
@@ -327,7 +331,7 @@ where
                 let writer_id = self.inner.writer_id();
                 record_terminal_commands(
                     &mut self.external_events,
-                    self.system_journal.clone(),
+                    self.report_journal.clone(),
                     writer_id,
                     self.inner.name(),
                     state.variant_name(),

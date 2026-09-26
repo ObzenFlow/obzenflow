@@ -13,7 +13,7 @@ use obzenflow_core::{
     event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
-    event::{ChainPayload, StageLifecycleEvent, SystemEvent, SystemPayload},
+    event::{ChainPayload, StageLifecycleEvent, SupervisorRecord, SystemPayload},
     id::StageId,
     BoundedBindingEvidence, StageOutputs, TypedPayload,
 };
@@ -1598,18 +1598,6 @@ async fn read_stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEv
         .collect()
 }
 
-async fn read_system_events(run_dir: &Path) -> Vec<SystemEvent> {
-    let manifest = archive_manifest(run_dir);
-    let system_journal = manifest["system_journal_file"]
-        .as_str()
-        .expect("manifest should contain system journal file");
-    replay_testkit::read_journal_envelopes::<SystemEvent>(&run_dir.join(system_journal))
-        .await
-        .into_iter()
-        .map(|envelope| envelope.authored())
-        .collect()
-}
-
 fn stage_id_from_manifest(run_dir: &Path, stage_key: &str) -> StageId {
     archive_manifest(run_dir)["stages"][stage_key]["stage_id"]
         .as_str()
@@ -1670,13 +1658,16 @@ async fn assert_replay_stateful_contract_failure_archive(
     );
 
     let stage_id = stage_id_from_manifest(run_dir, "effectful");
-    let system_events = read_system_events(run_dir).await;
+    let reports = replay_testkit::read_stage_envelopes_appended(run_dir, "effectful")
+        .await
+        .into_iter()
+        .filter_map(SupervisorRecord::from_chain);
     let mut failure_count = 0;
-    for system_event in system_events {
+    for report in reports {
         let SystemPayload::StageLifecycle {
             stage_id: lifecycle_stage_id,
             event,
-        } = system_event.payload
+        } = report.payload
         else {
             continue;
         };

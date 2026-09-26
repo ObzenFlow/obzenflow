@@ -138,7 +138,7 @@ async fn matched_representative_stream_append_read_and_reopen_costs() {
         run_id: obzenflow_core::FlowId::new(),
         journal_id: obzenflow_core::JournalId::new(),
     };
-    let mut previous = std::collections::HashMap::new();
+    let mut previous = None;
     let committed: Vec<_> = samples
         .iter()
         .cycle()

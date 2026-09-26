@@ -61,12 +61,11 @@ impl Supervisor for MetricsAggregatorSupervisor {
         obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::MetricsAggregator
     }
 
-    fn system_journal(
+    fn report_journal(
         &self,
         _context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
-        self.system_journal.clone()
+    ) -> crate::supervised_base::SupervisorJournal {
+        self.system_journal.clone().into()
     }
 
     fn name(&self) -> &str {
@@ -257,13 +256,15 @@ mod tests {
 
     struct FailAppendJournal<T> {
         id: JournalId,
+        owner: JournalOwner,
         _phantom: PhantomData<T>,
     }
 
     impl<T> FailAppendJournal<T> {
-        fn new() -> Self {
+        fn new(system: SystemId) -> Self {
             Self {
                 id: JournalId::new(),
+                owner: JournalOwner::system(system),
                 _phantom: PhantomData,
             }
         }
@@ -279,7 +280,7 @@ mod tests {
         }
 
         fn owner(&self) -> Option<&JournalOwner> {
-            None
+            Some(&self.owner)
         }
 
         async fn append(
@@ -328,9 +329,9 @@ mod tests {
 
     #[tokio::test]
     async fn state_watcher_reports_failed_on_dispatch_error() {
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(FailAppendJournal::<SystemEvent>::new());
         let system_id = SystemId::new();
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(FailAppendJournal::<SystemEvent>::new(system_id));
 
         let (_event_sender, _event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
@@ -349,6 +350,11 @@ mod tests {
         };
 
         let ctx = MetricsAggregatorContext {
+            journals: super::super::builder::MetricsJournals {
+                system_id,
+                coordination: system_journal.clone(),
+                export: system_journal.clone(),
+            },
             system_journal,
             stage_data_journals: HashMap::new(),
             stage_error_journals: HashMap::new(),

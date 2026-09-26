@@ -9,7 +9,7 @@ use crate::journal::causal::{CausalProof, CausalProofCache};
 fn root(run: FlowId) -> CausalCommit {
     CausalCommit::prepare(
         run,
-        CausalCoordinate::new(JournalWriterId::new(), crate::StageId::new().into()),
+        CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
         None,
         &CausalFrontier::default(),
@@ -24,7 +24,7 @@ fn frontier_merge_is_associative_commutative_and_idempotent_including_ties() {
     let a = root(run);
     let (b, _) = CausalCommit::prepare(
         run,
-        CausalCoordinate::new(JournalWriterId::new(), crate::StageId::new().into()),
+        CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
         None,
         &a.frontier(),
@@ -32,7 +32,7 @@ fn frontier_merge_is_associative_commutative_and_idempotent_including_ties() {
     .unwrap();
     let (c, _) = CausalCommit::prepare(
         run,
-        CausalCoordinate::new(JournalWriterId::new(), crate::StageId::new().into()),
+        CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
         None,
         &a.frontier(),
@@ -71,7 +71,7 @@ fn exact_proof_rejects_invented_components_and_conflicting_full_references() {
     input.merge(&b.frontier()).unwrap();
     let (mut child, witnesses) = CausalCommit::prepare(
         run,
-        CausalCoordinate::new(JournalWriterId::new(), crate::StageId::new().into()),
+        CausalCoordinate::new(JournalWriterId::new()),
         EventId::new(),
         None,
         &input,
@@ -195,8 +195,7 @@ fn witnesses_stay_linear_in_coordinates_independent_of_history_length() {
         for _ in 0..participants {
             frontier.merge(&root(run).frontier()).unwrap();
         }
-        let coordinate =
-            CausalCoordinate::new(JournalWriterId::new(), crate::StageId::new().into());
+        let coordinate = CausalCoordinate::new(JournalWriterId::new());
         let mut previous = None;
         let mut total_bytes = 0;
         for _ in 0..512 {

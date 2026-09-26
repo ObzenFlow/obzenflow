@@ -55,7 +55,7 @@ where
 /// Use CausalOrderingService for vector clock operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorClock {
-    /// Sequence numbers keyed by journal incarnation and immutable author.
+    /// Sequence numbers keyed by physical journal incarnation.
     ///
     /// `BTreeMap` provides deterministic iteration order, which helps keep JSON
     /// encodings stable for hashing/replay tooling.
@@ -67,7 +67,6 @@ pub struct VectorClock {
 #[serde(deny_unknown_fields)]
 struct ClockEntry {
     journal_writer_id: super::JournalWriterId,
-    writer_id: super::WriterId,
     sequence: u64,
 }
 
@@ -86,7 +85,6 @@ impl Serialize for VectorClock {
             .iter()
             .map(|(coordinate, sequence)| ClockEntry {
                 journal_writer_id: coordinate.journal_writer_id,
-                writer_id: coordinate.writer_id,
                 sequence: *sequence,
             })
             .collect();
@@ -110,7 +108,7 @@ impl<'de> Deserialize<'de> for VectorClock {
             if entry.sequence == 0
                 || clocks
                     .insert(
-                        CausalCoordinate::new(entry.journal_writer_id, entry.writer_id),
+                        CausalCoordinate::new(entry.journal_writer_id),
                         entry.sequence,
                     )
                     .is_some()
@@ -324,7 +322,7 @@ mod tests {
         vector_clock: VectorClock,
     ) -> JournalRecord<ChainPayload> {
         let coordinate = *vector_clock.clocks.keys().next().unwrap();
-        let writer_id = coordinate.writer_id;
+        let writer_id = WriterId::from(StageId::new());
         let mut event =
             ChainEventFactory::data_event(writer_id, "test.vector_clock", json!({ "ok": true }));
         event.id = event_id;
@@ -346,9 +344,9 @@ mod tests {
 
     #[test]
     fn transitivity_violation_regression_orders_deterministically() {
-        let w1 = CausalCoordinate::new(JournalWriterId::new(), WriterId::from(StageId::new()));
-        let w2 = CausalCoordinate::new(JournalWriterId::new(), WriterId::from(StageId::new()));
-        let w3 = CausalCoordinate::new(JournalWriterId::new(), WriterId::from(StageId::new()));
+        let w1 = CausalCoordinate::new(JournalWriterId::new());
+        let w2 = CausalCoordinate::new(JournalWriterId::new());
+        let w3 = CausalCoordinate::new(JournalWriterId::new());
 
         let mut clock_a = VectorClock::new();
         clock_a.clocks.insert(w1, 1);
@@ -396,9 +394,9 @@ mod tests {
 
     #[test]
     fn order_is_stable_under_permutation() {
-        let w1 = CausalCoordinate::new(JournalWriterId::new(), WriterId::from(StageId::new()));
-        let w2 = CausalCoordinate::new(JournalWriterId::new(), WriterId::from(StageId::new()));
-        let w3 = CausalCoordinate::new(JournalWriterId::new(), WriterId::from(StageId::new()));
+        let w1 = CausalCoordinate::new(JournalWriterId::new());
+        let w2 = CausalCoordinate::new(JournalWriterId::new());
+        let w3 = CausalCoordinate::new(JournalWriterId::new());
 
         let mut clock_a = VectorClock::new();
         clock_a.clocks.insert(w1, 1);
@@ -441,8 +439,8 @@ mod tests {
 
     #[test]
     fn causal_rank_sums_components_and_respects_happened_before() {
-        let w1 = CausalCoordinate::new(JournalWriterId::new(), StageId::new().into());
-        let w2 = CausalCoordinate::new(JournalWriterId::new(), StageId::new().into());
+        let w1 = CausalCoordinate::new(JournalWriterId::new());
+        let w2 = CausalCoordinate::new(JournalWriterId::new());
         let empty = VectorClock::new();
         assert_eq!(CausalOrderingService::causal_rank(&empty), 0);
 

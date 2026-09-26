@@ -141,16 +141,33 @@ impl Renderer {
             MUTED,
             &format!(
                 "  {:<name_width$}  {:>data_width$}",
-                "System", "Data journal"
+                "Supervisor", "Journal"
             ),
         )?;
         let system_file = fit(&safe_text(&manifest.system_journal_file), name_width);
-        let count = self.observed("system/system");
+        let count = self.observed("system/pipeline");
         self.summary_write(
             output,
             BODY,
             &format!("  {system_file:<name_width$}  {count:>data_width$}"),
         )?;
+        if let Some(metrics) = &manifest.metrics_journals {
+            for (file, key) in [
+                (
+                    &metrics.coordination_journal_file,
+                    "system/metrics/coordination",
+                ),
+                (&metrics.export_journal_file, "system/metrics/export"),
+            ] {
+                let name = fit(&safe_text(file), name_width);
+                let count = self.observed(key);
+                self.summary_write(
+                    output,
+                    BODY,
+                    &format!("  {name:<name_width$}  {count:>data_width$}"),
+                )?;
+            }
+        }
 
         if stages > 0 {
             writeln!(output)?;
@@ -344,6 +361,20 @@ impl Renderer {
     ) -> Result<(), Error> {
         if journal.kind == RunJournalKind::System {
             return self.summary_line(output, HEADING, &manifest.system_journal_file);
+        }
+        if matches!(
+            journal.kind,
+            RunJournalKind::MetricsCoordination | RunJournalKind::MetricsExport
+        ) {
+            let metrics = manifest
+                .metrics_journals
+                .as_ref()
+                .ok_or("metrics journal is missing its manifest entry")?;
+            let file = match journal.kind {
+                RunJournalKind::MetricsCoordination => &metrics.coordination_journal_file,
+                _ => &metrics.export_journal_file,
+            };
+            return self.summary_line(output, HEADING, file);
         }
         let owner = journal
             .stage

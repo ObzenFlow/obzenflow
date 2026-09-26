@@ -6,15 +6,12 @@
 //! `FlowApplication` but do not participate in pipeline topology.
 
 use async_trait::async_trait;
-use obzenflow_core::event::SystemEvent;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
     EndpointError, EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request,
     WebSurface,
 };
 use obzenflow_runtime::pipeline::PipelineState;
-use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -41,7 +38,7 @@ pub struct WebSurfaceWiringContext {
     /// install its refusal-fact writer. `None` when the flow has no system
     /// journal, in which case a surface with refusal recording enabled fails
     /// startup.
-    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub pipeline_reports: Option<obzenflow_runtime::pipeline::reports::PipelineReports>,
 }
 
 #[derive(Default)]
@@ -208,7 +205,7 @@ mod tests {
 
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: rx,
-            system_journal: None,
+            pipeline_reports: None,
         })
         .unwrap();
         assert_eq!(wired.tasks.len(), 1);

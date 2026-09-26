@@ -14,7 +14,9 @@ pub mod envelope;
 pub mod journal_event;
 pub mod journal_record;
 pub mod observability;
+pub mod supervisor_record;
 pub mod system_event;
+pub use supervisor_record::SupervisorRecord;
 pub mod types;
 pub mod vector_clock;
 

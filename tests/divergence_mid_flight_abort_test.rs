@@ -9,9 +9,8 @@
 //! violations abort the pipeline via the standard gating edge contract pathway.
 //!
 //! FLOWIP-114n migrated this test away from wall-clock sleeps and disk-backed
-//! `system.log` reads. The assertions are now based on the system journal
-//! (`JournalSnapshot<SystemEvent>`) captured from in-memory journals under paused
-//! Tokio time.
+//! `system.log` reads. Assertions now inspect each owner's committed reports
+//! in memory under paused Tokio time; cross-journal ordering uses vector clocks.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -26,7 +25,8 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
-use obzenflow_core::event::{ChainPayload, SystemPayload};
+use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::event::{ChainPayload, SupervisorRecord, SystemPayload};
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunSubstrateState};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
@@ -47,7 +47,8 @@ use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::testing::{EventShape, JournalOrder, JournalSnapshot, TestClock};
+use obzenflow_runtime::supervised_base::SupervisorJournal;
+use obzenflow_runtime::testing::TestClock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -431,6 +432,34 @@ impl InlineSink for CountingSink {
     }
 }
 
+async fn committed_reports(journals: &[SupervisorJournal]) -> Result<Vec<SupervisorRecord>> {
+    let mut reports = Vec::new();
+    for journal in journals {
+        match journal {
+            SupervisorJournal::System(journal) => {
+                reports.extend(
+                    journal
+                        .read_all_unordered()
+                        .await?
+                        .into_iter()
+                        .map(SupervisorRecord::from),
+                );
+            }
+            SupervisorJournal::Stage { journal, context } => {
+                reports.extend(
+                    journal
+                        .read_all_unordered()
+                        .await?
+                        .into_iter()
+                        .filter(|row| row.writer_id().as_stage() == Some(&context.stage_id))
+                        .filter_map(SupervisorRecord::from_chain),
+                );
+            }
+        }
+    }
+    Ok(reports)
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let clock = TestClock::new().await.expect("paused runtime");
@@ -467,8 +496,8 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    let system_journal = harness.system_journal().expect("system journal");
     let handle = harness.into_inner();
+    let journals = handle.report_journals();
     let run = tokio::spawn(handle.run());
 
     // Drive paused time until the flow terminates (expected abort).
@@ -489,79 +518,40 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         anyhow::bail!("expected flow to abort due to divergence contract violation");
     }
 
-    // Ensure the system journal is stable before snapshot capture.
-    let _stable_len = TestClock::settle_scheduler(|| async {
-        let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-        Ok::<usize, obzenflow_runtime::testing::JournalProbeError>(
-            snapshot.events(JournalOrder::Append).len(),
-        )
-    })
-    .await?;
+    // Completion has joined the owners and settled their publications.
+    let snapshot = committed_reports(&journals).await?;
 
-    let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
+    assert!(snapshot.iter().any(|row| matches!(
+        &row.payload,
+        SystemPayload::ContractResult { contract_name, status: ContractResultStatusLabel::Failed, cause, .. }
+            if contract_name.as_str() == DivergenceContract::NAME && cause.as_deref() == Some("divergence")
+    )), "expected a failed DivergenceContract ContractResult with cause=divergence");
 
-    let divergence_contract_result = EventShape::<SystemEvent>::system_event_predicate(
-        "DivergenceContract failed ContractResult",
-        |ev| match ev {
-            SystemPayload::ContractResult {
-                contract_name,
-                status,
-                cause,
-                ..
-            } => {
-                contract_name.as_str() == DivergenceContract::NAME
-                    && *status == ContractResultStatusLabel::Failed
-                    && cause.as_deref() == Some("divergence")
-            }
-            _ => false,
-        },
-    );
+    let failed = snapshot
+        .iter()
+        .find(|row| {
+            matches!(
+                row.payload,
+                SystemPayload::PipelineLifecycle(
+                    obzenflow_core::event::PipelineLifecycleEvent::Failed { .. }
+                )
+            )
+        })
+        .expect("pipeline failure is committed");
+    let failed_clock = failed.commitment().unwrap().clock;
     assert!(
-        snapshot
-            .find(JournalOrder::Causal, &divergence_contract_result, 1)
-            .is_some(),
-        "expected a failed DivergenceContract ContractResult with cause=divergence"
-    );
-
-    let divergence_contract_status = EventShape::<SystemEvent>::system_event_predicate(
-        "ContractStatus divergence predicate=signal_to_data_ratio",
-        |ev| match ev {
+        snapshot.iter().any(|row| matches!(
+            &row.payload,
             SystemPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { predicate, .. }),
                 ..
-            } => predicate == "signal_to_data_ratio",
-            _ => false,
-        },
-    );
-
-    let pipeline_failed = EventShape::<SystemEvent>::system_event_predicate(
-        "PipelineLifecycle::Failed",
-        |ev| {
-            matches!(
-                ev,
-                SystemPayload::PipelineLifecycle(
-                    obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent::Failed { .. }
-                )
-            )
-        },
-    );
-
-    // System events are appended without explicit parent chaining, so their vector clocks
-    // do not necessarily encode strict happened-before across different system writers.
-    // We assert the ordering in append order instead.
-    let append = snapshot.events(JournalOrder::Append);
-    let status_idx = append
-        .iter()
-        .position(|env| divergence_contract_status.matches(env))
-        .expect("expected a failing ContractStatus with ViolationCause::Divergence");
-    let failed_idx = append
-        .iter()
-        .position(|env| pipeline_failed.matches(env))
-        .expect("expected pipeline to emit PipelineLifecycle::Failed");
-    assert!(
-        status_idx < failed_idx,
-        "expected divergence evidence to be appended before PipelineLifecycle::Failed (status_idx={status_idx}, failed_idx={failed_idx})"
+            } if predicate == "signal_to_data_ratio"
+        ) && CausalOrderingService::happened_before(
+            &row.commitment().unwrap().clock,
+            &failed_clock
+        )),
+        "the pipeline failure must causally include the admitted divergence evidence"
     );
 
     Ok(())
@@ -595,8 +585,8 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    let system_journal = harness.system_journal().expect("system journal");
     let handle = harness.into_inner();
+    let journals = handle.report_journals();
     let run = tokio::spawn(handle.run());
 
     for _ in 0..200 {
@@ -613,19 +603,11 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 
     run.await.expect("join handle")?;
 
-    let _stable_len = TestClock::settle_scheduler(|| async {
-        let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-        Ok::<usize, obzenflow_runtime::testing::JournalProbeError>(
-            snapshot.events(JournalOrder::Append).len(),
-        )
-    })
-    .await?;
-
     let mut seen_transport_healthy_pre_eof = false;
 
-    let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
+    let snapshot = committed_reports(&journals).await?;
 
-    for env in snapshot.events(JournalOrder::Append) {
+    for env in &snapshot {
         match &env.payload {
             SystemPayload::ContractResult {
                 contract_name,
@@ -689,8 +671,8 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    let system_journal = harness.system_journal().expect("system journal");
     let handle = harness.into_inner();
+    let journals = handle.report_journals();
     let run = tokio::spawn(handle.run());
 
     for _ in 0..200 {
@@ -706,20 +688,12 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     );
     run.await.expect("join handle")?;
 
-    let _stable_len = TestClock::settle_scheduler(|| async {
-        let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-        Ok::<usize, obzenflow_runtime::testing::JournalProbeError>(
-            snapshot.events(JournalOrder::Append).len(),
-        )
-    })
-    .await?;
-
-    let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
+    let snapshot = committed_reports(&journals).await?;
 
     let mut seen_divergence_healthy = false;
     let mut seen_divergence_violation = false;
 
-    for env in snapshot.events(JournalOrder::Append) {
+    for env in &snapshot {
         match &env.payload {
             SystemPayload::ContractResult {
                 contract_name,
@@ -753,7 +727,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     );
     assert!(
         !seen_divergence_violation,
-        "did not expect any divergence violations in system.log for SCC-internal fan-in topology"
+        "did not expect any divergence violations in the owning stage journal for SCC-internal fan-in topology"
     );
 
     Ok(())
@@ -795,8 +769,8 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    let system_journal = harness.system_journal().expect("system journal");
     let handle = harness.into_inner();
+    let journals = handle.report_journals();
     let run = tokio::spawn(handle.run());
 
     use std::convert::Infallible;
@@ -818,19 +792,11 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
         anyhow::bail!("expected flow to abort due to cycle_depth divergence violation");
     }
 
-    let _stable_len = TestClock::settle_scheduler(|| async {
-        let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
-        Ok::<usize, obzenflow_runtime::testing::JournalProbeError>(
-            snapshot.events(JournalOrder::Append).len(),
-        )
-    })
-    .await?;
-
-    let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
+    let snapshot = committed_reports(&journals).await?;
     let mut seen_divergence_contract_result = false;
     let mut seen_cycle_depth_contract_status = false;
 
-    for env in snapshot.events(JournalOrder::Append) {
+    for env in &snapshot {
         match &env.payload {
             SystemPayload::ContractResult {
                 contract_name,
@@ -857,11 +823,11 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
 
     assert!(
         seen_divergence_contract_result,
-        "expected a failed DivergenceContract ContractResult with cause=divergence in system.log"
+        "expected a failed DivergenceContract ContractResult with cause=divergence in the owning stage journal"
     );
     assert!(
         seen_cycle_depth_contract_status,
-        "expected a failing ContractStatus with predicate=cycle_depth in system.log"
+        "expected a failing ContractStatus with predicate=cycle_depth in the owning stage journal"
     );
 
     Ok(())

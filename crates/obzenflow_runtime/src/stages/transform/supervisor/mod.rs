@@ -29,7 +29,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::{ChainPayload, SystemEvent};
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::{AppendOptions, Journal};
 use obzenflow_core::{ChainEvent, JournalRecord, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
@@ -334,8 +334,8 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
         SupervisorKind::Transform
     }
 
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.report_journal.clone()
     }
 
     fn name(&self) -> &str {

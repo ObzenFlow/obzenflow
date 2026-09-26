@@ -322,7 +322,7 @@ fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_history() {
             .map(|_| {
                 CausalCommit::prepare(
                     run,
-                    CausalCoordinate::new(JournalWriterId::new(), StageId::new().into()),
+                    CausalCoordinate::new(JournalWriterId::new()),
                     EventId::new(),
                     None,
                     &CausalFrontier::default(),
@@ -508,7 +508,7 @@ fn complete_observation_record() -> JournalRecord<ChainPayload> {
     snapshot_capture["observer"] = author.clone();
     let mut clock = value["envelope"]["provenance"]["journal"]["vector_clock"].clone();
     clock["entries"].as_array_mut().unwrap().push(json!({
-        "journal_writer_id": JournalWriterId::new(), "writer_id": observer, "sequence": u64::MAX
+        "journal_writer_id": JournalWriterId::new(), "sequence": u64::MAX
     }));
     value["envelope"]["provenance"]["journal"]["vector_clock"] = clock.clone();
     let mut different_clock = clock.clone();
@@ -760,6 +760,14 @@ fn current_schema_fixtures_preserve_bytes_and_logical_records() {
             DefinitionStore::default(),
         )
         .unwrap();
+        if std::env::var("OBZENFLOW_UPDATE_CODEC_FIXTURES").as_deref() == Ok("1") {
+            std::fs::write(
+                fixtures.join(format!("{name}.json")),
+                serde_json::to_string_pretty(&record).unwrap() + "\n",
+            )
+            .unwrap();
+            std::fs::write(fixtures.join(format!("{name}.frame")), &prepared.bytes).unwrap();
+        }
         let bytes = std::fs::read(fixtures.join(format!("{name}.frame"))).unwrap();
         assert_eq!(
             prepared.bytes, bytes,

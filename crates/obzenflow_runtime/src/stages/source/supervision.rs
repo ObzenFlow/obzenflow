@@ -117,7 +117,7 @@ pub(crate) async fn record_source_cleanup_failed(
     stage_id: StageId,
     stage_name: &str,
     error: &SourceError,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    report_journal: &crate::supervised_base::SupervisorJournal,
 ) -> Result<(), BoxError> {
     let event = SystemEvent::new(
         WriterId::from(stage_id),
@@ -127,7 +127,7 @@ pub(crate) async fn record_source_cleanup_failed(
             error: error.safe_summary().to_string(),
         },
     );
-    crate::supervised_base::publication::append(system_journal, event, Default::default()).await?;
+    crate::supervised_base::publication::report(report_journal, event, Default::default()).await?;
     Ok(())
 }
 
@@ -323,7 +323,6 @@ pub(crate) async fn drain_pending_outputs_sync(
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -356,7 +355,6 @@ pub(crate) async fn drain_pending_outputs_sync(
             stage_id,
             heartbeat_state.clone(),
             data_journal,
-            system_journal,
             None,
             instrumentation,
             backpressure_writer,
@@ -385,7 +383,6 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -425,7 +422,6 @@ where
             stage_id,
             heartbeat_state.clone(),
             data_journal,
-            system_journal,
             None,
             instrumentation,
             backpressure_writer,
@@ -811,7 +807,6 @@ mod tests {
 
         let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
-        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
 
         let stage_flow_context = FlowContext {
@@ -851,7 +846,6 @@ mod tests {
                 None,
                 &data_journal,
                 &error_journal,
-                &system_journal,
                 &instrumentation,
                 &writer,
                 &mut backpressure_pulse,
@@ -908,7 +902,6 @@ mod tests {
 
         let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(RecordingJournal::new());
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
-        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
         let execution = RuntimeExecution::new(RuntimeMode::Live, None);
         instrumentation.bind_observations(FlowId::new(), s.into(), &execution);
@@ -953,7 +946,6 @@ mod tests {
                 None,
                 &data_journal,
                 &error_journal,
-                &system_journal,
                 &instrumentation,
                 &writer,
                 &mut backpressure_pulse,

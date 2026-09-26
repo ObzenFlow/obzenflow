@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::source_poll_observer;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::SystemPayload;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
@@ -17,6 +18,7 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorJournal;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the async-finite source stage test. The JSON
@@ -293,9 +295,16 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
-    let system_journal = handle
-        .system_journal()
-        .expect("cleanup evidence requires the system journal");
+    let source_journal = handle
+        .report_journals()
+        .into_iter()
+        .find_map(|journal| match journal {
+            SupervisorJournal::Stage { journal, context } if context.stage_name == "source" => {
+                Some(journal)
+            }
+            _ => None,
+        })
+        .expect("source owns its cleanup report journal");
 
     handle.run().await?;
 
@@ -305,14 +314,16 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
         .expect("sink events lock")
         .iter()
         .all(|event| !event.consumes_data_credit()));
-    let cleanup_failures = system_journal
+    let cleanup_failures = source_journal
         .read_causally_ordered()
         .await?
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
-            SystemPayload::SourceCleanupFailed {
-                stage_name, error, ..
-            } => Some((stage_name, error)),
+            ChainPayload::Execution(ExecutionPayload::SourceCleanupFailed {
+                stage_name,
+                error,
+                ..
+            }) => Some((stage_name, error)),
             _ => None,
         })
         .collect::<Vec<_>>();

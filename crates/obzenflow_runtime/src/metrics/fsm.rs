@@ -120,8 +120,8 @@ pub enum MetricsAggregatorAction {
     },
 
     /// Process system events from the system journal (FLOWIP-059b)
-    ProcessSystemEvent {
-        envelope: Box<JournalRecord<SystemPayload>>,
+    ProcessReport {
+        envelope: Box<obzenflow_core::event::SupervisorRecord>,
     },
 
     /// Export metrics snapshot
@@ -135,6 +135,7 @@ pub enum MetricsAggregatorAction {
 pub struct MetricsAggregatorContext {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
+    pub journals: super::builder::MetricsJournals,
 
     /// Stage data journals for committed-observation lookup.
     pub stage_data_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
@@ -420,12 +421,13 @@ impl MetricsAggregatorContext {
     pub(crate) async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
+        journals: super::builder::MetricsJournals,
         metrics_exporter: Arc<dyn obzenflow_core::metrics::MetricsSnapshotExporter>,
         export_interval: std::time::Duration,
-        system_id: SystemId,
         stage_metadata: HashMap<StageId, StageMetadata>,
         composite_boundaries: Vec<obzenflow_core::metrics::CompositeBoundary>,
     ) -> Result<Self, String> {
+        let system_id = journals.system_id;
         let metrics_store = MetricsStore {
             observations: inputs.observations.clone(),
             throughput: super::throughput::ThroughputSampler::new(inputs.execution.as_ref().map(
@@ -453,6 +455,7 @@ impl MetricsAggregatorContext {
 
         let context = Self {
             system_journal,
+            journals,
             stage_data_journals,
             stage_error_journals,
             backpressure_registry: inputs.backpressure_registry.clone(),
@@ -1111,29 +1114,35 @@ impl FsmAction for MetricsAggregatorAction {
                 Ok(())
             }
 
-            MetricsAggregatorAction::ProcessSystemEvent { envelope } => {
-                crate::supervised_base::publication::observe_record(envelope)
+            MetricsAggregatorAction::ProcessReport { envelope } => {
+                envelope
+                    .frontier()
+                    .and_then(|frontier| {
+                        crate::supervised_base::publication::incorporate(&frontier)
+                    })
                     .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
                 tracing::trace!(
                     event_id = %envelope.id(),
-                    event_type = envelope.event_type_name(),
-                    "Metrics aggregator ProcessSystemEvent action"
+                    event_type = envelope.payload.event_type(),
+                    "Metrics aggregator ProcessReport action"
                 );
                 let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
-                if let Some(observation) = &envelope.envelope.observability {
+                if let Some(observation) = envelope.observability() {
                     store.observations.latest().offer_recorded(observation);
                 }
 
                 // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
                 // system-originated metrics (pipeline + metrics writers) in addition to stage journals.
-                if let Some(system_id) = envelope.envelope.provenance.event.writer_id.as_system() {
-                    let seq = envelope.local_sequence();
-                    store
-                        .causal_watermark
-                        .clocks
-                        .insert(envelope.causal_coordinate(), seq);
+                if let Some(system_id) = envelope.writer_id().as_system() {
+                    let seq = envelope.position();
+                    store.causal_watermark.clocks.insert(
+                        obzenflow_core::event::CausalCoordinate::new(
+                            envelope.journal().journal_writer_id,
+                        ),
+                        seq,
+                    );
                     let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
                     *entry = (*entry).max(seq);
                 }
@@ -1169,9 +1178,9 @@ impl FsmAction for MetricsAggregatorAction {
                             .insert((*stage_id, state.into()), true);
                     }
                     SystemPayload::PipelineLifecycle(event)
-                        if ctx.pipeline_writer.is_none_or(|writer| {
-                            writer == envelope.envelope.provenance.event.writer_id
-                        }) =>
+                        if ctx
+                            .pipeline_writer
+                            .is_none_or(|writer| writer == *envelope.writer_id()) =>
                     {
                         // Track only essential pipeline events, with monotonic semantics:
                         // - "failed" is sticky and never regresses.
@@ -1395,6 +1404,17 @@ impl FsmAction for MetricsAggregatorAction {
                 );
                 let buffer_snapshot = ctx.metrics_store.buffer.snapshot();
                 for ((stage, kind), records) in buffer_snapshot.stage_records {
+                    for record in records.iter().rev() {
+                        if let Some(report) =
+                            obzenflow_core::event::SupervisorRecord::from_chain(record.clone())
+                        {
+                            MetricsAggregatorAction::ProcessReport {
+                                envelope: Box::new(report),
+                            }
+                            .execute(ctx)
+                            .await?;
+                        }
+                    }
                     MetricsAggregatorAction::UpdateMetrics {
                         events: records,
                         journal_kind: kind,
@@ -1406,8 +1426,8 @@ impl FsmAction for MetricsAggregatorAction {
                 // Older accounting carriers may precede a newer lifecycle value.
                 // Applying oldest first leaves each lifecycle at its newest state.
                 for record in buffer_snapshot.system_records.iter().rev() {
-                    MetricsAggregatorAction::ProcessSystemEvent {
-                        envelope: Box::new(record.clone()),
+                    MetricsAggregatorAction::ProcessReport {
+                        envelope: Box::new(record.clone().into()),
                     }
                     .execute(ctx)
                     .await?;
@@ -1428,7 +1448,7 @@ impl FsmAction for MetricsAggregatorAction {
                 );
 
                 crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                    &ctx.journals.export,
                     export_event,
                     Default::default(),
                 )
@@ -1473,7 +1493,7 @@ impl FsmAction for MetricsAggregatorAction {
 
                 // Publish to system journal
                 crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                    &ctx.journals.coordination,
                     drain_event,
                     Default::default(),
                 )
@@ -1952,6 +1972,15 @@ mod tests {
         // Build a context with only the fields required by build_app_metrics_snapshot.
         let downstream = StageId::new();
         let ctx = MetricsAggregatorContext {
+            journals: super::super::builder::MetricsJournals {
+                system_id: obzenflow_core::SystemId::new(),
+                coordination: Arc::new(NoopJournal::<obzenflow_core::event::SystemEvent>::new(
+                    JournalOwner::system(obzenflow_core::SystemId::new()),
+                )),
+                export: Arc::new(NoopJournal::<obzenflow_core::event::SystemEvent>::new(
+                    JournalOwner::system(obzenflow_core::SystemId::new()),
+                )),
+            },
             system_journal: Arc::new(NoopJournal::<obzenflow_core::event::SystemEvent>::new(
                 JournalOwner::system(obzenflow_core::SystemId::new()),
             )),

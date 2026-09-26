@@ -92,10 +92,20 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
             )
             .await
             .unwrap();
-        assert!(CausalOrderingService::are_concurrent(
+        assert!(CausalOrderingService::happened_before(
             &lifecycle.envelope.provenance.journal.vector_clock,
             &unrelated.envelope.provenance.journal.vector_clock
         ));
+        assert_eq!(unrelated.causal_coordinate(), lifecycle.causal_coordinate());
+        assert_eq!(unrelated.local_sequence(), 2);
+        assert_ne!(unrelated.writer_id(), lifecycle.writer_id());
+        let encoded_clock =
+            serde_json::to_value(&unrelated.envelope.provenance.journal.vector_clock).unwrap();
+        assert!(encoded_clock["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.get("writer_id").is_none()));
         let authorised = chains[3]
             .append(
                 event(),

@@ -294,7 +294,7 @@ pub struct FiniteSourceContext<H> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: crate::execution::RuntimeExecution,
@@ -346,7 +346,7 @@ pub struct FiniteSourceContextInit {
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
     pub runtime_execution: crate::execution::RuntimeExecution,
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     pub instrumentation: Arc<StageInstrumentation>,
@@ -365,7 +365,7 @@ impl<H> FiniteSourceContext<H> {
             flow_id: init.flow_id,
             data_journal: init.data_journal,
             error_journal: init.error_journal,
-            system_journal: init.system_journal,
+            report_journal: init.report_journal,
             runtime_execution: init.runtime_execution,
             bus: init.bus,
             writer_id: None,
@@ -589,8 +589,8 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 // Best-effort: log journal failures but don't fail the FSM
-                match crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                match crate::supervised_base::publication::report(
+                    &ctx.report_journal,
                     system_event,
                     Default::default(),
                 )
@@ -653,8 +653,8 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 // Write running event to system journal
                 let running_event = SystemEvent::stage_running(ctx.stage_id);
 
-                if let Err(e) = crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    &ctx.report_journal,
                     running_event,
                     Default::default(),
                 )
@@ -733,8 +733,8 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 let completion_event =
                     SystemEvent::stage_completed_with_accounting(ctx.stage_id, metrics);
 
-                if let Err(e) = crate::supervised_base::publication::append(
-                    &ctx.system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    &ctx.report_journal,
                     completion_event,
                     Default::default(),
                 )
@@ -1006,7 +1006,7 @@ pub(crate) mod tests {
                     let build_async = |external_events, state_watcher| $async {
                         name: "source_projection".into(),
                         handler: DummySource,
-                        system_journal: system_journal.clone(),
+                        report_journal: system_journal.clone().into(),
                         stage_id,
                         idle_backoff: IdleBackoff::exponential_with_cap(
                             Duration::from_millis(1), Duration::from_millis(10)),
@@ -1026,7 +1026,7 @@ pub(crate) mod tests {
                     let build_sync = || $sync {
                         name: "source_projection".into(),
                         handler: DummySource,
-                        system_journal: system_journal.clone(),
+                        report_journal: system_journal.clone().into(),
                         stage_id,
                         idle_backoff: IdleBackoff::exponential_with_cap(
                             Duration::from_millis(1), Duration::from_millis(10)),
@@ -1055,7 +1055,7 @@ pub(crate) mod tests {
                         flow_id: FlowId::new(),
                         data_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
                         error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
-                        system_journal: system_journal.clone(),
+                        report_journal: system_journal.clone().into(),
                         runtime_execution: crate::execution::RuntimeExecution::new(
                             crate::execution::RuntimeMode::Live, None),
                         bus: Arc::new(FsmMessageBus::new()),
@@ -1130,7 +1130,7 @@ pub(crate) mod tests {
                             assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
                             assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
                         } else {
-                            let mut supervisor = HandlerSupervisedWithExternalEvents::new(build_sync(), receiver, watcher, system_journal.clone());
+                            let mut supervisor = HandlerSupervisedWithExternalEvents::new(build_sync(), receiver, watcher, (system_journal.clone()).into());
                             assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
                             assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
                         }
@@ -1207,7 +1207,7 @@ pub(crate) mod tests {
                 flow_id,
                 data_journal: data_journal.clone(),
                 error_journal: error_journal.clone(),
-                system_journal: system_journal.clone(),
+                report_journal: (system_journal.clone()).into(),
                 runtime_execution: crate::execution::RuntimeExecution::new(
                     crate::execution::RuntimeMode::Live,
                     None,
@@ -1345,7 +1345,7 @@ pub(crate) mod tests {
                 flow_id: FlowId::new(),
                 data_journal: data_journal.clone(),
                 error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
-                system_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                report_journal: (Arc::new(TestJournal::new(JournalOwner::stage(stage_id)))).into(),
                 runtime_execution: crate::execution::RuntimeExecution::new(
                     crate::execution::RuntimeMode::Live,
                     None,

@@ -40,6 +40,11 @@ where
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn into_reader(self) -> Box<dyn JournalReader<T>> {
+        self.reader
+    }
+
     /// Check if an event represents EOF (only ChainEvent EOF is treated as terminal)
     fn is_eof_event(&self, envelope: &JournalRecord<T::Payload>) -> bool {
         // For ChainEvent, check for explicit EOF flow control

@@ -130,11 +130,11 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
     }
 }
 
-pub(super) async fn forward_control_event_and_mirror<H: UnifiedJoinHandler>(
+pub(super) async fn forward_control_to_journal<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
     envelope: &JournalRecord<ChainPayload>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let written = forward_control_event(
+    forward_control_event(
         envelope,
         ctx.stage_id,
         &ctx.stage_name,
@@ -142,11 +142,6 @@ pub(super) async fn forward_control_event_and_mirror<H: UnifiedJoinHandler>(
         &ctx.data_journal,
     )
     .await?;
-    crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-        &written,
-        &ctx.system_journal,
-    )
-    .await;
     Ok(())
 }
 
@@ -197,7 +192,6 @@ pub(super) async fn flush_pending_outputs<
             ctx.stage_id,
             ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             ctx.pending_parent.as_ref(),
             &ctx.instrumentation,
             &ctx.backpressure_writer,

@@ -122,7 +122,6 @@ impl JournalProbeEvent {
             .clocks
             .get(&obzenflow_core::event::CausalCoordinate::new(
                 self.envelope.envelope.provenance.journal.journal_writer_id,
-                WriterId::from(self.stage_id),
             ))
             .copied()
             .ok_or_else(|| JournalProbeError::MissingStageWriterSeq {
@@ -219,7 +218,7 @@ impl JournalProbe {
     /// direct lineage.
     pub async fn expect_event_observing_clock_component(
         &self,
-        writer_id: WriterId,
+        journal_id: obzenflow_core::JournalId,
         n: u64,
     ) -> Result<JournalProbeEvent, JournalProbeError> {
         assert!(
@@ -241,7 +240,8 @@ impl JournalProbe {
                     .clocks
                     .iter()
                     .all(|(coordinate, sequence)| {
-                        coordinate.writer_id != writer_id || *sequence == 0
+                        *coordinate.journal_writer_id.as_journal_id() != journal_id
+                            || *sequence == 0
                     })
                 {
                     continue;
@@ -262,7 +262,7 @@ impl JournalProbe {
     /// observe the given writer component (non-zero seq).
     pub async fn events_observing_clock_component_so_far(
         &self,
-        writer_id: WriterId,
+        journal_id: obzenflow_core::JournalId,
     ) -> Result<u64, JournalProbeError> {
         let envelopes = self.read_all_envelopes().await?;
         Ok(envelopes
@@ -277,7 +277,8 @@ impl JournalProbe {
                         .clocks
                         .iter()
                         .any(|(coordinate, sequence)| {
-                            coordinate.writer_id == writer_id && *sequence > 0
+                            *coordinate.journal_writer_id.as_journal_id() == journal_id
+                                && *sequence > 0
                         })
             })
             .count() as u64)
@@ -649,6 +650,9 @@ mod tests {
             .expect("dummy handle should build");
 
         let extras = FlowHandleExtras {
+            metrics_journals: None,
+            report_journals: vec![],
+            pipeline_reports: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 
@@ -860,8 +864,8 @@ mod tests {
         let stage_id = StageId::from_topology_id(stage_topo_id);
         let stage_writer_id = WriterId::from(stage_id);
 
-        let upstream_a = WriterId::from(StageId::new());
-        let upstream_b = WriterId::from(StageId::new());
+        let upstream_a = obzenflow_core::JournalId::new();
+        let upstream_b = obzenflow_core::JournalId::new();
 
         let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
         let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
@@ -876,14 +880,10 @@ mod tests {
             .expect("append eof");
 
         let mut clock_a = VectorClock::new();
-        let coordinate_a =
-            obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new(), upstream_a);
+        let coordinate_a = obzenflow_core::event::CausalCoordinate::new(upstream_a.into());
         clock_a.clocks.insert(coordinate_a, 1);
         clock_a.clocks.insert(
-            obzenflow_core::event::CausalCoordinate::new(
-                stage_journal_impl.id.into(),
-                stage_writer_id,
-            ),
+            obzenflow_core::event::CausalCoordinate::new(stage_journal_impl.id.into()),
             1,
         );
         let env_a = JournalRecord::commit_event(
@@ -902,14 +902,10 @@ mod tests {
         stage_journal_impl.push_envelope(env_a);
 
         let mut clock_b = VectorClock::new();
-        let coordinate_b =
-            obzenflow_core::event::CausalCoordinate::new(JournalWriterId::new(), upstream_b);
+        let coordinate_b = obzenflow_core::event::CausalCoordinate::new(upstream_b.into());
         clock_b.clocks.insert(coordinate_b, 1);
         clock_b.clocks.insert(
-            obzenflow_core::event::CausalCoordinate::new(
-                stage_journal_impl.id.into(),
-                stage_writer_id,
-            ),
+            obzenflow_core::event::CausalCoordinate::new(stage_journal_impl.id.into()),
             1,
         );
         let env_b = JournalRecord::commit_event(

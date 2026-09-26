@@ -17,7 +17,7 @@ use super::scanner::{
 use crate::journal::observability::JournalObservability;
 use async_trait::async_trait;
 use chrono::Utc;
-use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
+use obzenflow_core::event::identity::{EventId, JournalWriterId};
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
 use obzenflow_core::event::JournalEvent;
@@ -28,6 +28,8 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::reader::JournalReader;
 use obzenflow_core::journal::{AppendOptions, Journal, JournalConfig};
 use obzenflow_core::FlowId;
+#[cfg(test)]
+use obzenflow_core::WriterId;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
 use std::io::{BufReader, Read, SeekFrom};
@@ -82,8 +84,8 @@ pub struct DiskJournal<T: JournalEvent> {
     ///
     /// Writers take a write lock; readers take a read lock to avoid torn lines.
     read_write_lock: Arc<RwLock<()>>,
-    /// Track vector clocks for each writer
-    writer_clocks: Arc<RwLock<HashMap<WriterId, CausalCommit>>>,
+    /// Last committed record of this physical journal, independent of authorship
+    last_commit: Arc<RwLock<Option<CausalCommit>>>,
     /// Set when a failed append could not be rolled back, leaving the file in an
     /// unknown state. Further appends are rejected until the journal is reopened.
     poisoned: Arc<AtomicBool>,
@@ -227,11 +229,11 @@ impl<T: JournalEvent> DiskJournal<T> {
             })?;
         }
         let (identity, writer_lease) = super::identity::open_identity(&log_path, run_id)?;
-        let (observations, (write_file, index, writer_clocks)) =
+        let (observations, (write_file, index, last_commit)) =
             super::observations::DiskObservationReader::open_writer(log_path.clone(), |end| {
-                let (index, writer_clocks, committed_end) =
+                let (index, last_commit, committed_end) =
                     rebuild_index_from_path::<T>(&log_path, end)?;
-                for commitment in writer_clocks.values() {
+                for commitment in last_commit.iter() {
                     if commitment.reference.run_id != identity.run_id
                         || commitment.reference.journal_writer_id.as_journal_id()
                             != &identity.journal_id
@@ -244,7 +246,7 @@ impl<T: JournalEvent> DiskJournal<T> {
                 // Recovery may truncate a torn suffix. Keep the locked original
                 // descriptor as the one append FD shared by every journal clone.
                 drop(open_append_file(&log_path, end, committed_end)?);
-                Ok(((writer_lease, index, writer_clocks), committed_end))
+                Ok(((writer_lease, index, last_commit), committed_end))
             })?;
         Ok(Self {
             owner,
@@ -258,7 +260,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_state_for_path(&log_path).0,
             observability: shared_state_for_path(&log_path).1,
-            writer_clocks: Arc::new(RwLock::new(writer_clocks)),
+            last_commit: Arc::new(RwLock::new(last_commit)),
             poisoned: Arc::new(AtomicBool::new(false)),
             admission_sequencer: None,
             _phantom: std::marker::PhantomData,
@@ -272,9 +274,9 @@ impl<T: JournalEvent> DiskJournal<T> {
     }
 }
 
-/// In-memory index (`event_id -> byte offset`) plus per-writer vector clocks
+/// In-memory index (`event_id -> byte offset`) plus the last physical journal commitment
 /// rebuilt from a journal file.
-type RebuiltIndex = (HashMap<Ulid, u64>, HashMap<WriterId, CausalCommit>, u64);
+type RebuiltIndex = (HashMap<Ulid, u64>, Option<CausalCommit>, u64);
 
 fn open_append_file(
     path: &Path,
@@ -336,10 +338,10 @@ fn rebuild_index_from_path<T: JournalEvent>(
 ) -> Result<RebuiltIndex, JournalError> {
     let identity = super::identity::read_identity(log_path)?;
     let mut index = HashMap::with_capacity(10000);
-    let mut writer_clocks = HashMap::new();
+    let mut last_commit: Option<CausalCommit> = None;
 
     if !log_path.exists() {
-        return Ok((index, writer_clocks, 0));
+        return Ok((index, last_commit, 0));
     }
 
     let file = StdFile::open(log_path).map_err(|e| JournalError::Implementation {
@@ -370,9 +372,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
             Disposition::Yield(frame) => {
                 for record in frame.into_records() {
                     let commitment = CausalCommit::from_record(&record)?;
-                    let previous = writer_clocks
-                        .get(record.writer_id())
-                        .map(|previous: &CausalCommit| previous.reference);
+                    let previous = last_commit.as_ref().map(|previous| previous.reference);
                     if record.envelope.provenance.journal.causal.previous != previous {
                         return Err(
                             obzenflow_core::event::CausalError::ConflictingCommitment.into()
@@ -387,7 +387,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
                         );
                     }
                     index.insert(record.id().as_ulid(), record_offset);
-                    writer_clocks.insert(*record.writer_id(), commitment);
+                    last_commit = Some(commitment);
                 }
                 committed_end = offset;
             }
@@ -414,7 +414,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
             source: "missing committed records".into(),
         });
     }
-    Ok((index, writer_clocks, committed_end))
+    Ok((index, last_commit, committed_end))
 }
 
 impl<T: JournalEvent> Clone for DiskJournal<T> {
@@ -428,7 +428,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             index: self.index.clone(),
             last_frame: self.last_frame.clone(),
             read_write_lock: self.read_write_lock.clone(),
-            writer_clocks: self.writer_clocks.clone(),
+            last_commit: self.last_commit.clone(),
             poisoned: self.poisoned.clone(),
             admission_sequencer: self.admission_sequencer.clone(),
             definitions: self.definitions.clone(),
@@ -479,10 +479,8 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                 source: "poisoned journal".into(),
             });
         }
-        // Get writer_id from the event
-        let writer_id = *event.writer_id();
 
-        // Acquire the journal write lock before advancing writer clocks.
+        // Acquire the journal write lock before advancing the journal clock.
         //
         // This serialises append operations and ensures concurrent appends
         // cannot compute the same `writer_seq` from a stale snapshot.
@@ -504,16 +502,16 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             }
         }
 
-        // Compute this writer's next clock under the write lock. The helper is
-        // store-free, so the writer clock is committed only after the file write
+        // Compute the journal's next clock under the write lock. The helper is
+        // store-free, so the journal clock is committed only after the file write
         // and flush succeed below.
         let (commitment, causal) = {
-            let writer_clocks = self.writer_clocks.read().await;
+            let last_commit = self.last_commit.read().await;
             CausalCommit::prepare(
                 self.run_id,
-                CausalCoordinate::new(self.journal_id.into(), writer_id),
+                CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
-                writer_clocks.get(&writer_id),
+                last_commit.as_ref(),
                 frontier,
             )?
         };
@@ -555,7 +553,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         })?;
 
         // Write the framed record on a blocking thread. The commit point is the
-        // successful write+flush: only then do the index and the writer clock
+        // successful write+flush: only then do the index and the journal clock
         // advance. On write failure the file rolls back to the pre-append EOF;
         // if rollback fails the journal is poisoned.
         let path = self.path.clone();
@@ -629,10 +627,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             .write()
             .await
             .insert(record.id().as_ulid(), committed.offset);
-        self.writer_clocks
-            .write()
-            .await
-            .insert(writer_id, commitment);
+        *self.last_commit.write().await = Some(commitment);
         self.observations.committed(
             std::slice::from_ref(&envelope),
             committed.offset,
@@ -650,6 +645,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         frontier: &CausalFrontier,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
+        obzenflow_core::journal::limits::validate_group_size(events.len())?;
         if events.is_empty() {
             return Ok(Vec::new());
         }
@@ -692,24 +688,23 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             message: format!("Atomic journal group '{group_id}' exceeds u32 member capacity"),
             source: "atomic journal group is too large".into(),
         })?;
-        let mut next_writer_clocks = self.writer_clocks.read().await.clone();
+        let mut next_last_commit = self.last_commit.read().await.clone();
         let mut envelopes = Vec::with_capacity(events.len());
-        let mut records = Vec::with_capacity(events.len());
+        let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
         let mut group_frontier = frontier.clone();
         for (index, event) in events.into_iter().enumerate() {
-            let writer_id = *event.writer_id();
             let (commitment, causal) = CausalCommit::prepare(
                 self.run_id,
-                CausalCoordinate::new(self.journal_id.into(), writer_id),
+                CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
-                next_writer_clocks.get(&writer_id),
+                next_last_commit.as_ref(),
                 &group_frontier,
             )?;
             group_frontier.merge(&commitment.frontier())?;
-            next_writer_clocks.insert(writer_id, commitment.clone());
+            next_last_commit = Some(commitment.clone());
             let timestamp = Utc::now();
             envelopes.push({
-                let (authored, payload) = event.clone().into_parts();
+                let (authored, payload) = event.into_parts();
                 JournalRecord::commit(
                     authored,
                     payload,
@@ -732,11 +727,11 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                     source: Box::new(error),
                 })?
             });
-            records.push(envelopes.last().expect("record was just authored").clone());
+            budget.admit(envelopes.last().expect("prepared record"))?;
         }
 
         let mut prepared = codec::prepare(
-            &records,
+            &envelopes,
             Some(group_id),
             &self.path,
             self.definitions.clone(),
@@ -794,7 +789,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         tracing::debug!(
             path = %self.path.display(),
             group_id,
-            members = records.len(),
+            members = envelopes.len(),
             offset = committed.offset,
             bytes = committed.next_offset - committed.offset,
             "DiskJournal appended atomic group frame"
@@ -802,11 +797,11 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
 
         {
             let mut index = self.index.write().await;
-            for record in &records {
+            for record in &envelopes {
                 index.insert(record.id().as_ulid(), committed.offset);
             }
         }
-        *self.writer_clocks.write().await = next_writer_clocks;
+        *self.last_commit.write().await = next_last_commit;
         self.observations.committed(
             &envelopes,
             committed.offset,
@@ -1016,6 +1011,16 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             },
             None => Ok(None),
         }
+    }
+
+    async fn committed_position(&self) -> Result<u64, JournalError> {
+        let _guard = self.read_write_lock.read().await;
+        Ok(self
+            .last_commit
+            .read()
+            .await
+            .as_ref()
+            .map_or(0, |commit| commit.reference.sequence))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -1380,7 +1385,7 @@ mod tests {
             super::super::observations::DiskObservationReader::<ChainEvent>::open(path.clone())
                 .unwrap();
         let identity = super::super::identity::read_identity(&path).unwrap();
-        let mut previous = [(stage.into(), CausalCommit::from_record(&committed).unwrap())].into();
+        let mut previous = Some(CausalCommit::from_record(&committed).unwrap());
         let uncertain = super::super::identity::fixture_record(
             identity,
             crate::journal::observability::tests::event(stage, 2),
@@ -1545,7 +1550,7 @@ mod tests {
             run_id: FlowId::new(),
             journal_id,
         };
-        let mut previous = HashMap::new();
+        let mut previous = None;
         super::super::identity::write_fixture_identity(&log_path, identity);
         let writer_id = WriterId::from(StageId::new());
         let records: Vec<_> = (0..3)
@@ -1738,7 +1743,6 @@ mod tests {
                     .vector_clock
                     .get(&CausalCoordinate::new(
                         e.envelope.provenance.journal.journal_writer_id,
-                        writer_id,
                     ))
             })
             .collect();
@@ -1750,9 +1754,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_owner_reopen_rebuilds_index_and_writer_clocks() {
+    async fn with_owner_reopen_rebuilds_index_and_last_commit() {
         // FLOWIP-120q P3: reopening an owned framed journal must rebuild the
-        // index (so read_event by id works) and the writer clocks (so a new
+        // index (so read_event by id works) and the journal clocks (so a new
         // append continues the sequence) via the framed parser.
         let test_id = Uuid::new_v4();
         let test_dir =
@@ -1796,7 +1800,7 @@ mod tests {
                 .provenance
                 .journal
                 .vector_clock
-                .get(&CausalCoordinate::new((*reopened.id()).into(), writer_id))
+                .get(&CausalCoordinate::new((*reopened.id()).into()))
                 >= 3,
             "writer clock must continue after reopen, not reset"
         );
@@ -2166,7 +2170,7 @@ mod tests {
             run_id: FlowId::new(),
             journal_id,
         };
-        let mut previous = HashMap::new();
+        let mut previous = None;
         let writer_id = WriterId::from(StageId::new());
         let records: Vec<_> = (0..3)
             .map(|index| {

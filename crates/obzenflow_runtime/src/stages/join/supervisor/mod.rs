@@ -20,15 +20,12 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 /// Supervisor for join stages.
 pub(crate) struct JoinSupervisor<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> {
@@ -418,8 +415,8 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> Supervisor
         SupervisorKind::Join
     }
 
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.report_journal.clone()
     }
 
     fn name(&self) -> &str {

@@ -1,3 +1,4 @@
+use obzenflow_core::event::journal_record::SystemJournalRecord;
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
@@ -159,8 +160,8 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
     });
     let mut rebuilt = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let mut live = rebuilt.clone();
-    rebuilt.rebuild(&envelope);
-    let frames = live.project(&envelope, 123);
+    rebuilt.rebuild(&envelope.clone().into());
+    let frames = live.project(&envelope.clone().into(), 123);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].event.as_deref(), Some("middleware_lifecycle"));
     assert_eq!(
@@ -182,7 +183,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
             stage_count: Some(1),
         },
     ));
-    let frames = live.project(&running, 789);
+    let frames = live.project(&running.clone().into(), 789);
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].event.as_deref(), Some("flow_lifecycle"));
     assert_eq!(
@@ -217,8 +218,8 @@ fn stage_bootstrap_retains_terminal_accounting_after_an_empty_duplicate() {
         event: StageLifecycleEvent::Completed { accounting: None },
     });
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-    projection.rebuild(&enriched);
-    projection.rebuild(&duplicate);
+    projection.rebuild(&enriched.clone().into());
+    projection.rebuild(&duplicate.clone().into());
     let snapshots = projection.snapshots();
     assert_eq!(snapshots.len(), 1);
     assert!(snapshots[0].id.is_none());
@@ -278,7 +279,7 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
         });
         let mut projection =
             StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-        let live = projection.project(&envelope, 123).remove(0);
+        let live = projection.project(&envelope.clone().into(), 123).remove(0);
         expected["system_event_type"] = json!("stage_lifecycle");
         expected["stage_id"] = json!(stage.to_string());
         expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
@@ -297,7 +298,7 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
 
         let mut rebuilt =
             StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-        rebuilt.rebuild(&envelope);
+        rebuilt.rebuild(&envelope.clone().into());
         let snapshot = rebuilt.snapshots().remove(0);
         assert_eq!(payload(&snapshot), expected);
         assert_eq!(snapshot.event, live.event);
@@ -448,7 +449,7 @@ fn assert_fact_payload(
             .reference
     );
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-    let frames = projection.project(&envelope, 123);
+    let frames = projection.project(&envelope.clone().into(), 123);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].event.as_deref(), Some(name));
     assert_eq!(
@@ -651,7 +652,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     ];
     let empty = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let apply = |view: &mut StudioProjection, input: &Input| match input {
-        Input::Fact(record) => view.project(record, 123),
+        Input::Fact(record) => view.project(&(**record).clone().into(), 123),
         Input::Measurement(packet) => view.project_measurements((**packet).clone()),
     };
     let mut live = empty.clone();
@@ -698,7 +699,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         for (index, input) in tape.iter().enumerate() {
             if index < boundary {
                 match input {
-                    Input::Fact(record) => resumed.rebuild(record),
+                    Input::Fact(record) => resumed.rebuild(&(**record).clone().into()),
                     Input::Measurement(packet) => {
                         resumed.project_measurements((**packet).clone());
                     }
@@ -734,7 +735,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         unreachable!()
     };
     carrier.envelope.observability = Some(*stale);
-    let frames = live.project(&carrier, 789);
+    let frames = live.project(&(*carrier).clone().into(), 789);
     assert_eq!(
         frames.len(),
         1,

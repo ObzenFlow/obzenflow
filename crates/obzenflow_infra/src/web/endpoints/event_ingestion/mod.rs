@@ -115,7 +115,7 @@ where
         }
 
         if self.state.refusal_recording_enabled() {
-            match flow_handle.system_journal() {
+            match flow_handle.pipeline_reports() {
                 Some(journal) => self.state.install_refusal_writer(journal),
                 None => {
                     return Err(ApplicationError::FlowBuildFailed(format!(
@@ -351,7 +351,7 @@ fn create_ingestion_surface_from_state(state: IngestionState) -> WebSurfaceAttac
             // has no system journal fails startup rather than silently dropping
             // replayable refusal evidence.
             if state_for_wiring.refusal_recording_enabled() {
-                match ctx.system_journal {
+                match ctx.pipeline_reports {
                     Some(journal) => state_for_wiring.install_refusal_writer(journal),
                     None => {
                         return Err(ApplicationError::FlowBuildFailed(format!(
@@ -620,7 +620,9 @@ mod tests {
         let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
             SystemId::new(),
         )));
-        state.install_refusal_writer(journal.clone());
+        state.install_refusal_writer(
+            obzenflow_runtime::pipeline::reports::PipelineReports::for_test(journal.clone()),
+        );
         (state, rx, journal)
     }
 
@@ -697,9 +699,11 @@ mod tests {
                 boundary,
             })
             .expect("slot fill succeeds once");
-        state.install_refusal_writer(Arc::new(FailingAppendJournal::with_owner(
-            JournalOwner::system(SystemId::new()),
-        )));
+        state.install_refusal_writer(
+            obzenflow_runtime::pipeline::reports::PipelineReports::for_test(Arc::new(
+                FailingAppendJournal::with_owner(JournalOwner::system(SystemId::new())),
+            )),
+        );
         (state, rx)
     }
 
@@ -768,7 +772,9 @@ mod tests {
         let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
             SystemId::new(),
         )));
-        state.install_refusal_writer(journal.clone());
+        state.install_refusal_writer(
+            obzenflow_runtime::pipeline::reports::PipelineReports::for_test(journal.clone()),
+        );
 
         let accepted = cloned_handle
             .submit(HandlePayload {
@@ -1780,7 +1786,7 @@ mod tests {
         let (_tx, pipeline_state) = tokio::sync::watch::channel(PipelineState::Running);
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state,
-            system_journal: None,
+            pipeline_reports: None,
         })
         .unwrap();
         tokio::task::yield_now().await;
@@ -1907,7 +1913,7 @@ mod tests {
 
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: handle.state_receiver(),
-            system_journal: None,
+            pipeline_reports: None,
         })
         .expect("wire ingress surface");
 
@@ -2029,7 +2035,7 @@ mod tests {
         let system_journal = handle.system_journal().expect("flow has a system journal");
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: handle.state_receiver(),
-            system_journal: Some(system_journal.clone()),
+            pipeline_reports: handle.pipeline_reports(),
         })
         .expect("wire ingress surface");
 
