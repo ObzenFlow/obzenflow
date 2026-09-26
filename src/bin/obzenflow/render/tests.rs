@@ -105,6 +105,114 @@ fn event_counts_keep_physical_journals_separate_for_the_same_event_type() {
     }
 }
 
+#[test]
+fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
+    let source = fact(1, 100, &[], json!({}));
+    let mut forwarded = source.clone();
+    forwarded.journal = fact(2, 101, &[100], json!({})).journal;
+    let mut error = forwarded.clone();
+    error.journal.id = serde_json::from_value(json!(id(3))).unwrap();
+    error.journal.kind = RunJournalKind::Error;
+    let stages: serde_json::Map<String, Value> = [&source, &forwarded]
+        .into_iter()
+        .map(|record| {
+            let stage = record.journal.stage.as_ref().unwrap();
+            (
+                stage.key.clone(),
+                json!({
+                    "dsl_var": stage.key,
+                    "stage_type": stage.stage_type,
+                    "is_effectful": false,
+                    "stage_id": stage.id.to_string(),
+                    "stage_logic_version": "1",
+                    "data_journal_file": format!("{}.log", stage.key),
+                    "error_journal_file": format!("{}.errors.log", stage.key),
+                    "inbound": if stage.key == "classify" { vec!["thermometer"] } else { vec![] },
+                    "ordered_delivery": true
+                }),
+            )
+        })
+        .collect();
+    let manifest: RunManifest = serde_json::from_value(json!({
+        "journal_schema_version": "9.0",
+        "obzenflow_version": "test",
+        "flow_id": id(10),
+        "pipeline_writer_id": source.run.pipeline_writer_id,
+        "flow_name": "sensors",
+        "created_at": "2026-09-23T00:00:00Z",
+        "stages": stages,
+        "system_journal_file": "system.log",
+        "metrics_journals": null
+    }))
+    .unwrap();
+    for width in [40, 90] {
+        let records = [&source, &forwarded, &error];
+        let mut renderer = Renderer::new(
+            &ViewArgs::default(),
+            false,
+            false,
+            records.iter().map(|record| &record.journal),
+        );
+        renderer.width = width;
+        // Count the forwarded evidence in each physical history. Its source
+        // author must not move either journal beneath the source stage.
+        for record in records {
+            renderer.event_counts.record(record);
+        }
+        let mut output = Vec::new();
+        renderer
+            .finish(
+                &mut output,
+                &mut Vec::new(),
+                &source.run,
+                &manifest,
+                ObservationEnd::Snapshot,
+                &RunReadProgress::default(),
+            )
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.lines().all(|line| line.chars().count() <= width),
+            "{text}"
+        );
+        let groups = text.split_once("\nAPPLICATION STAGES\n").unwrap().1;
+        let (source_group, transform_group) = groups.split_once("\nTRANSFORM: classify\n").unwrap();
+        assert_eq!(groups.matches("\nSOURCE: thermometer\n").count(), 1);
+        assert_eq!(groups.matches("\nTRANSFORM: classify\n").count(), 1);
+        assert_eq!(groups.matches("  Owns:\n").count(), 2);
+        assert!(source_group.contains("\n    thermometer.log\n"));
+        assert!(!source_group.contains("classify.log"));
+        assert!(transform_group.contains("\n    classify.log\n"));
+        assert!(transform_group.contains("\n    classify.errors.log\n"));
+        assert_eq!(
+            transform_group
+                .lines()
+                .filter(|line| line.trim_start().starts_with("Count "))
+                .count(),
+            2
+        );
+        let error_table = transform_group
+            .split_once("\n    classify.errors.log\n")
+            .unwrap()
+            .1;
+        assert!(
+            error_table.contains("Runtime readers: —"),
+            "pipeline does not consume error journals"
+        );
+        if width == 90 {
+            assert_eq!(
+                transform_group
+                    .lines()
+                    .filter(
+                        |line| line.contains("sensor.reading.v1") && line.contains("thermometer")
+                    )
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
 fn matrix_text(renderer: &Renderer, progress: &RunReadProgress) -> String {
     let mut output = Vec::new();
     renderer.clock_summary(&mut output, progress).unwrap();
@@ -442,13 +550,13 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
         }
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("\x1b[38;5;217mEFFECT (stage: classify)\x1b[0m\n\x1b[1;38;5;224mobzenflow.effect_record.v1\x1b[0m\x1b[38;5;217m ← classify(sensor.reading.v1)\x1b[0m"));
+        assert!(text.contains("\x1b[38;5;217mEFFECT (stage: \x1b[0m\x1b[1;38;5;231mclassify\x1b[0m\x1b[38;5;217m)\x1b[0m\n\x1b[1;38;5;224mobzenflow.effect_record.v1\x1b[0m\x1b[38;5;217m ← classify(sensor.reading.v1)\x1b[0m"));
         assert!(
             text.contains("\"outcome\": \"failed\"")
                 && text.contains("\"effect_type\": \"sensor.calibrate\"")
         );
         assert!(text.contains("\"error_message\": \"calibration unavailable\""));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: classify)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m"));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mclassify\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m"));
         assert_eq!(text.contains("RUNTIME"), verbose);
         if verbose {
             let runtime = text
@@ -459,6 +567,13 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
                 .next()
                 .unwrap();
             assert!(runtime.contains("\x1b[38;5;245m  \"execution_type\":"));
+            assert!(
+                runtime.contains("(stage: \x1b[0m\x1b[1;38;5;255mclassify\x1b[0m\x1b[38;5;245m)")
+            );
+            assert!(runtime.contains(&format!("\x1b[1;38;5;250m{}\x1b[0m", event_type(&progress))));
+            assert!(runtime.contains(
+                "\x1b[1;38;5;255mclassify\x1b[0m\x1b[38;5;245m:\x1b[0m\x1b[1;4;38;5;250m102\x1b[0m"
+            ));
             assert!(!runtime.contains("38;5;208m") && !runtime.contains("38;5;217m"));
         }
     }
@@ -466,9 +581,9 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
 
 #[test]
 fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
-    for (stage_type, heading, color, output_color) in [
-        (StageType::Transform, "EFFECTFUL TRANSFORM", 208, 215),
-        (StageType::Stateful, "EFFECTFUL STATEFUL", 114, 157),
+    for (stage_type, heading, color, output_color, reporter_color) in [
+        (StageType::Transform, "EFFECTFUL TRANSFORM", 208, 215, 223),
+        (StageType::Stateful, "EFFECTFUL STATEFUL", 114, 157, 194),
     ] {
         let mut renderer = renderer();
         renderer.color = true;
@@ -484,7 +599,7 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
-            "\x1b[1;38;5;{color}m{heading} (stage: classify)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified.v1\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading.v1)\x1b[0m"
+            "\x1b[1;38;5;{color}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter_color}mclassify\x1b[0m\x1b[1;38;5;{color}m)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified.v1\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading.v1)\x1b[0m"
         )), "{text}");
         assert!(
             !text.contains("mEFFECT (stage:"),
@@ -585,6 +700,59 @@ fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_
             text.lines().all(|line| line.chars().count() <= width),
             "{text}"
         );
+    }
+}
+
+#[test]
+fn emphasis_preserves_wrapped_unicode_stage_and_event_names() {
+    let stage_name = "étape_paiement_".repeat(5);
+    let output_type = format!("{}v1", "paiement.autorisé.".repeat(5));
+    let mut record = fact(2, 101, &[], json!({"amount": 42}));
+    record.journal.stage.as_mut().unwrap().key = stage_name.clone();
+    if let RunRecordData::Chain(row) = &mut record.record {
+        row.envelope.provenance.event.event_type = output_type.clone();
+    }
+    for width in [40, 90] {
+        let mut renderer = Renderer::new(
+            &ViewArgs::default(),
+            false,
+            false,
+            [&record.journal].into_iter(),
+        );
+        renderer.width = width;
+        let mut plain = Vec::new();
+        renderer
+            .render_group(&mut plain, std::slice::from_ref(&record))
+            .unwrap();
+        renderer.color = true;
+        let mut colored = Vec::new();
+        renderer
+            .render_group(&mut colored, std::slice::from_ref(&record))
+            .unwrap();
+        let colored = String::from_utf8(colored).unwrap();
+        let mut pieces = colored.split("\x1b[");
+        let mut stripped = pieces.next().unwrap().to_owned();
+        for piece in pieces {
+            stripped.push_str(piece.split_once('m').unwrap().1);
+        }
+        assert_eq!(stripped, String::from_utf8(plain).unwrap());
+        assert!(stripped
+            .lines()
+            .filter(|line| !line.starts_with('⟨'))
+            .all(|line| line.chars().count() <= width));
+        let (heading, _) = colored.split_once("\x1b[1;38;5;215m").unwrap();
+        let highlighted_stage = heading
+            .split("\x1b[1;38;5;223m")
+            .skip(1)
+            .map(|piece| piece.split_once("\x1b[0m").unwrap().0)
+            .collect::<String>();
+        assert_eq!(highlighted_stage, stage_name);
+        let highlighted_event = colored
+            .split("\x1b[1;38;5;215m")
+            .skip(1)
+            .map(|piece| piece.split_once("\x1b[0m").unwrap().0)
+            .collect::<String>();
+        assert_eq!(highlighted_event, output_type);
     }
 }
 
@@ -847,7 +1015,7 @@ fn compact_clock_rows_follow_output_equations_without_truncating_counts() {
 }
 
 #[test]
-fn writer_highlight_uses_recorded_identity_and_row_color_instead_of_counter_size() {
+fn reporting_journal_highlight_uses_identity_and_row_color_instead_of_counter_size() {
     let mut renderer = renderer();
     renderer.color = true;
     let mut source = fact(1, 9, &[], json!({"celsius":38}));
@@ -874,31 +1042,47 @@ fn writer_highlight_uses_recorded_identity_and_row_color_instead_of_counter_size
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(
-        text.contains("\x1b[1;4;38;5;208m9\x1b[0m"),
-        "source writer matches the fact color"
+        text.contains("\x1b[1;4;38;5;215m9\x1b[0m"),
+        "source counter matches the emphasized event color"
     );
     assert!(
-        text.contains("\x1b[1;4;38;5;208m10\x1b[0m"),
-        "transform writer matches the fact color"
+        text.contains("\x1b[1;4;38;5;215m10\x1b[0m"),
+        "transform counter matches the emphasized event color"
     );
     assert!(
         text.contains("\x1b[38;5;245m999\x1b[0m"),
-        "another writer's larger history stays gray"
+        "another journal's larger history stays gray"
     );
     assert!(
         text.contains("\x1b[38;5;245m100\x1b[0m"),
         "merged history stays gray"
     );
+    for (stage, counter) in [("thermometer", 9), ("classify", 10)] {
+        assert_eq!(
+            text.matches(&format!("\x1b[1;38;5;223m{stage}\x1b[0m"))
+                .count(),
+            2,
+            "the heading and reporting clock name share the brightest shade"
+        );
+        assert!(text.contains(&format!("\x1b[1;38;5;223m{stage}\x1b[0m\x1b[38;5;245m:\x1b[0m\x1b[1;4;38;5;215m{counter}\x1b[0m")));
+    }
     assert!(text.contains(
-        "\x1b[1;38;5;208mSOURCE (stage: thermometer)\x1b[0m\n\x1b[1;38;5;215msensor.reading.v1\x1b[0m\x1b[1;38;5;208m ← thermometer()\x1b[0m"
+        "\x1b[1;38;5;208mSOURCE (stage: \x1b[0m\x1b[1;38;5;223mthermometer\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215msensor.reading.v1\x1b[0m\x1b[1;38;5;208m ← thermometer()\x1b[0m"
     ));
     assert!(
-        text.contains("\x1b[1;38;5;208mTRANSFORM (stage: classify)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m")
+        text.contains("\x1b[1;38;5;208mTRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mclassify\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m")
     );
     for line in text.lines().filter(|line| !line.contains('⟨')) {
         assert!(
-            line.matches('\x1b').count() <= if line.contains('←') { 4 } else { 2 },
-            "output equations may emphasize the event name; other lines keep one style: {line}"
+            line.matches('\x1b').count()
+                <= if line.contains("(stage:") {
+                    6
+                } else if line.contains('←') {
+                    4
+                } else {
+                    2
+                },
+            "headings emphasize the stage and equations emphasize the event: {line}"
         );
     }
     for underlined in text.split("\x1b[1;4;38;5;").skip(1) {
@@ -937,9 +1121,9 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
-            "\x1b[1;38;5;114m{heading} (stage: classify)\x1b[0m\n\x1b[1;38;5;157msensor.classified.v1\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration.v1, sensor.reading.v1)\x1b[0m"
+            "\x1b[1;38;5;114m{heading} (stage: \x1b[0m\x1b[1;38;5;194mclassify\x1b[0m\x1b[1;38;5;114m)\x1b[0m\n\x1b[1;38;5;157msensor.classified.v1\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration.v1, sensor.reading.v1)\x1b[0m"
         )), "{text}");
-        assert!(text.contains("\x1b[1;4;38;5;114m101\x1b[0m"));
+        assert!(text.contains("\x1b[1;4;38;5;157m101\x1b[0m"));
         assert!(text.contains("  \"celsius\": 40"));
         assert!(!text.contains("state =") && !text.contains("state'"));
     }

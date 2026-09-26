@@ -206,14 +206,43 @@ async fn runtime_writer_columns_use_journaled_registration() {
                 "summary exceeds {width} columns: {line}"
             );
         }
-        let table = text.split_once("\nsystem.log\n").unwrap().1;
+        let table = text.split_once("\nSYSTEM SUPERVISORS\n").unwrap().1;
+        let (system, application) = table.split_once("\nAPPLICATION STAGES\n").unwrap();
+        assert_eq!(
+            system.matches("Supervisor: pipeline_supervisor\n").count(),
+            1
+        );
+        assert_eq!(
+            system.matches("Supervisor: metrics_aggregator\n").count(),
+            1
+        );
+        assert!(!application.contains("Supervisor:"));
+        let (pipeline, metrics) = system
+            .split_once("Supervisor: metrics_aggregator\n")
+            .unwrap();
+        assert!(pipeline.contains("\n    system.log\n"));
+        assert!(!pipeline.contains("system.metrics.exported"));
+        assert!(metrics.contains("\n    metrics-coordination.log\n"));
+        assert!(metrics.contains("\n    metrics-export.log\n"));
+        assert_eq!(
+            metrics
+                .lines()
+                .filter(|line| line.trim_start().starts_with("Count "))
+                .count(),
+            2
+        );
+        assert!(summary
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("across 7 journals."));
         if width == 90 {
-            assert!(table
+            assert!(metrics
                 .lines()
                 .any(|line| line.contains("system.metrics.exported")
                     && line.contains("metrics_aggregator")
                     && line.contains("MetricsAggregator")));
-            assert!(table
+            assert!(pipeline
                 .lines()
                 .any(|line| line.contains("system.metrics.drain_requested")
                     && line.contains("pipeline_supervisor")
@@ -536,19 +565,26 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         }
         for line in events.lines().filter(|line| !line.contains('⟨')) {
             assert!(
-                line.matches('\x1b').count() <= if line.contains('←') { 4 } else { 2 },
-                "output equations may emphasize the event name; other lines keep one style: {line}"
+                line.matches('\x1b').count()
+                    <= if line.contains("(stage:") {
+                        6
+                    } else if line.contains('←') {
+                        4
+                    } else {
+                        2
+                    },
+                "headings emphasize the stage and equations emphasize the event: {line}"
             );
         }
         assert!(
-            text.contains("\x1b[1;38;5;208mSOURCE (stage: web_orders)\x1b[0m\n\x1b[1;38;5;215mcommerce.customer_order_placed.v1\x1b[0m\x1b[1;38;5;208m ← web_orders()")
+            text.contains("\x1b[1;38;5;208mSOURCE (stage: \x1b[0m\x1b[1;38;5;223mweb_orders\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215mcommerce.customer_order_placed.v1\x1b[0m\x1b[1;38;5;208m ← web_orders()")
         );
-        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM (stage: validate_order)\x1b[0m\n\x1b[1;38;5;215mpayment.order_validated.v1\x1b[0m\x1b[1;38;5;208m ← validate_order(commerce.customer_order_placed.v1)"));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: authorize_payment)\x1b[0m\n\x1b[1;38;5;215mpayment.authorized.v1\x1b[0m\x1b[1;38;5;208m ← authorize_payment(payment.order_validated.v1)"));
+        assert!(text.contains("\x1b[1;38;5;208mTRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mvalidate_order\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215mpayment.order_validated.v1\x1b[0m\x1b[1;38;5;208m ← validate_order(commerce.customer_order_placed.v1)"));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mauthorize_payment\x1b[0m\x1b[1;38;5;208m)\x1b[0m\n\x1b[1;38;5;215mpayment.authorized.v1\x1b[0m\x1b[1;38;5;208m ← authorize_payment(payment.order_validated.v1)"));
         assert!(text
-            .contains("\x1b[38;5;217mDELIVERY (stage: paid_orders)\x1b[0m\n\x1b[1;38;5;224msink.delivery\x1b[0m\x1b[38;5;217m ← paid_orders(payment.authorized.v1)\x1b[0m"));
+            .contains("\x1b[38;5;217mDELIVERY (stage: \x1b[0m\x1b[1;38;5;231mpaid_orders\x1b[0m\x1b[38;5;217m)\x1b[0m\n\x1b[1;38;5;224msink.delivery\x1b[0m\x1b[38;5;217m ← paid_orders(payment.authorized.v1)\x1b[0m"));
         assert!(
-            text.contains("\x1b[1;4;38;5;208m") && text.contains("\x1b[1;4;38;5;217m"),
+            text.contains("\x1b[1;4;38;5;215m") && text.contains("\x1b[1;4;38;5;224m"),
             "{text}"
         );
         for underlined in text.split("\x1b[1;4;38;5;").skip(1) {
@@ -704,11 +740,15 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         "MANIFEST     run_manifest.json",
         "\nJOURNALS\n",
         "Each stage has separate data and error journal files.",
-        "\nStage: web_orders\n  Subscribes to: —\n",
-        "\nStage: validate_order\n  Subscribes to: store_orders, web_orders\n",
-        "\nStage: authorize_payment\n  Subscribes to: validate_order\n",
-        "  Subscribers: cancelled_orders, manual_review, paid_orders\n",
-        "  Subscribers: —\n",
+        "\nAPPLICATION STAGES\n",
+        "\nSOURCE: web_orders\n  Reads from: —\n",
+        "\nTRANSFORM: validate_order\n  Reads from: store_orders, web_orders\n",
+        "\nEFFECTFUL TRANSFORM: authorize_payment\n  Reads from: validate_order\n",
+        "\nSINK: paid_orders\n  Reads from: authorize_payment\n",
+        "  Data subscribers: cancelled_orders, manual_review, paid_orders\n",
+        "  Data subscribers: —\n",
+        "  Owns:\n    ",
+        "      Runtime readers: pipeline_supervisor\n",
         "Each stage writes business outputs to its own data journal for subscribers to read.",
         "- Forwarded control signals keep their original Author.",
         "- EOF from all required upstreams lets a supervisor drain and complete.",
@@ -762,7 +802,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
     assert!(settled.contains("\nFINAL JOURNAL CLOCKS\n"));
     assert_eq!(matrix, clock_matrix(&settled));
     assert!(human.find("\nJOURNALS\n").unwrap() < human.find(matrix).unwrap());
-    assert!(human.find(matrix).unwrap() < human.find("\nStage: web_orders\n").unwrap());
+    assert!(human.find(matrix).unwrap() < human.find("\nSOURCE: web_orders\n").unwrap());
     let mut last_clocks = std::collections::BTreeMap::new();
     for row in &rows {
         let name = match (&row.journal.stage, row.journal.kind) {
@@ -880,11 +920,7 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         text: &str,
         heading: &str,
     ) -> std::collections::BTreeMap<(String, String, String), usize> {
-        let body = text
-            .split_once(&format!("\n{heading}\n"))
-            .or_else(|| text.split_once(&format!("\n  Writes to: {heading}\n")))
-            .unwrap()
-            .1;
+        let body = text.split_once(&format!("\n    {heading}\n")).unwrap().1;
         body.lines()
             .skip_while(|line| !line.trim_start().starts_with("Count "))
             .skip(1)
@@ -1020,13 +1056,13 @@ async fn teaching_view_distinguishes_effects_replay_causes_and_compact_output() 
         selected
     );
     assert!(
-        !human.contains("\nsystem.log\n"),
+        !human.contains("\nSYSTEM SUPERVISORS\n"),
         "hidden journals need no event table"
     );
     for stage in manifest["stages"].as_object().unwrap().values() {
         let error_file = stage["error_journal_file"].as_str().unwrap();
         assert!(
-            !verbose.contains(&format!("\n{error_file}\n")),
+            !verbose.contains(&format!("\n    {error_file}\n")),
             "empty journals stay in the inventory only"
         );
     }

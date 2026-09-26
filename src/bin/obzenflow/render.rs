@@ -36,6 +36,7 @@ enum Category {
 #[derive(Clone, Copy)]
 enum TextEmphasis {
     Normal,
+    Reporter,
     Output,
     JournalCounter,
 }
@@ -70,16 +71,21 @@ impl Category {
         if self != Self::Fact {
             return self.label();
         }
-        match record.journal.stage.as_ref().map(|stage| stage.stage_type) {
-            Some(StageType::FiniteSource | StageType::InfiniteSource) => "SOURCE",
-            Some(StageType::Transform) if context.is_effectful(record) => "EFFECTFUL TRANSFORM",
-            Some(StageType::Transform) => "TRANSFORM",
-            Some(StageType::Stateful) if context.is_effectful(record) => "EFFECTFUL STATEFUL",
-            Some(StageType::Stateful) => "STATEFUL",
-            Some(StageType::Join) => "JOIN",
-            Some(StageType::Sink) => "SINK",
-            None => "FACT",
-        }
+        record.journal.stage.as_ref().map_or("FACT", |stage| {
+            stage_heading(stage.stage_type, context.is_effectful(record))
+        })
+    }
+}
+
+fn stage_heading(stage_type: StageType, is_effectful: bool) -> &'static str {
+    match stage_type {
+        StageType::FiniteSource | StageType::InfiniteSource => "SOURCE",
+        StageType::Transform if is_effectful => "EFFECTFUL TRANSFORM",
+        StageType::Transform => "TRANSFORM",
+        StageType::Stateful if is_effectful => "EFFECTFUL STATEFUL",
+        StageType::Stateful => "STATEFUL",
+        StageType::Join => "JOIN",
+        StageType::Sink => "SINK",
     }
 }
 
@@ -367,37 +373,23 @@ impl Renderer {
                 )?;
                 continue;
             }
-            let heading = if record.journal.stage.is_some() {
-                format!("{heading} (stage: {stage})")
-            } else {
-                heading.into()
-            };
-            for line in wrap_fields(&[heading], self.width) {
-                writeln!(
-                    output,
-                    "{}",
-                    self.record_text(record, &line, TextEmphasis::Normal)
-                )?;
-            }
-            // Wrap plain text before styling, including event names that span
-            // lines. Only the recorded output gets the brighter shade.
-            let mut remaining_output = output_type.as_str();
-            for (index, line) in wrap_fields(&[relation], self.width).iter().enumerate() {
-                let (indent, text) = if index == 0 {
-                    ("", line.as_str())
-                } else {
-                    ("  ", &line[2..])
-                };
-                let highlighted = remaining_output.len().min(text.len());
-                let (event, rest) = text.split_at(highlighted);
-                remaining_output = remaining_output[highlighted..].trim_start();
-                writeln!(
-                    output,
-                    "{indent}{}{}",
-                    self.record_text(record, event, TextEmphasis::Output),
-                    self.record_text(record, rest, TextEmphasis::Normal),
-                )?;
-            }
+            let prefix = format!("{heading} (stage: ");
+            let stage_range = prefix.len()..prefix.len() + stage.len();
+            let heading = format!("{prefix}{stage})");
+            self.record_emphasized_lines(
+                output,
+                record,
+                &heading,
+                stage_range,
+                TextEmphasis::Reporter,
+            )?;
+            self.record_emphasized_lines(
+                output,
+                record,
+                &relation,
+                0..output_type.len(),
+                TextEmphasis::Output,
+            )?;
             writeln!(output, "{}", self.record_clock(record))?;
             if self.explain || self.full {
                 writeln!(
@@ -431,6 +423,43 @@ impl Renderer {
                 writeln!(output)?;
             }
             writeln!(output)?;
+        }
+        Ok(())
+    }
+
+    fn record_emphasized_lines(
+        &self,
+        output: &mut impl Write,
+        record: &RunRecord,
+        text: &str,
+        highlighted: std::ops::Range<usize>,
+        emphasis: TextEmphasis,
+    ) -> Result<(), Error> {
+        // Wrap escaped plain text before inserting ANSI codes. Track the
+        // original byte range through discarded spaces and continuation
+        // indentation, including names that cross a line or contain Unicode.
+        let mut remaining = text;
+        for (index, line) in wrap_fields(&[text.to_owned()], self.width)
+            .iter()
+            .enumerate()
+        {
+            let (indent, line) = if index == 0 {
+                ("", line.as_str())
+            } else {
+                remaining = remaining.trim_start();
+                ("  ", &line[2..])
+            };
+            let offset = text.len() - remaining.len();
+            let start = highlighted.start.saturating_sub(offset).min(line.len());
+            let end = highlighted.end.saturating_sub(offset).min(line.len());
+            writeln!(
+                output,
+                "{indent}{}{}{}",
+                self.record_text(record, &line[..start], TextEmphasis::Normal),
+                self.record_text(record, &line[start..end], emphasis),
+                self.record_text(record, &line[end..], TextEmphasis::Normal),
+            )?;
+            remaining = &remaining[line.len()..];
         }
         Ok(())
     }
@@ -505,18 +534,24 @@ impl Renderer {
         let components = components
             .into_iter()
             .map(|component| {
+                let reporting =
+                    component.coordinate.journal_writer_id.as_journal_id() == &record.journal.id;
+                let name = if reporting {
+                    format!(
+                        "{}{}",
+                        self.record_text(record, &component.name, TextEmphasis::Reporter),
+                        self.dim(":")
+                    )
+                } else {
+                    self.dim(&format!("{}:", safe_text(&component.name)))
+                };
                 let digits = component.value.to_string();
-                let digits = if component.coordinate.journal_writer_id.as_journal_id()
-                    == &record.journal.id
-                {
+                let digits = if reporting {
                     self.record_text(record, &digits, TextEmphasis::JournalCounter)
                 } else {
                     self.dim(&digits)
                 };
-                format!(
-                    "{}{digits}",
-                    self.dim(&format!("{}:", safe_text(&component.name)))
-                )
+                format!("{name}{digits}")
             })
             .collect::<Vec<_>>();
         format!(
@@ -533,24 +568,24 @@ impl Renderer {
             return text;
         }
         let category = Category::of(record);
-        let (color, output_color) = match category {
+        let (normal_color, output_color, reporter_color) = match category {
             Category::Fact => match record.journal.stage.as_ref().map(|stage| stage.stage_type) {
                 // Read-model styling is a stage-role cue. These remain facts
                 // in the journal; no mutable state snapshot is inferred.
-                Some(StageType::Stateful | StageType::Join) => (114, 157), // green
-                _ => (208, 215),                                           // orange
+                Some(StageType::Stateful | StageType::Join) => (114, 157, 194), // green
+                _ => (208, 215, 223),                                           // orange
             },
-            Category::Effect | Category::Delivery => (217, 224), // light pink
-            Category::Runtime => (245, 250),                     // gray
+            Category::Effect | Category::Delivery => (217, 224, 231), // light pink
+            Category::Runtime => (245, 250, 255),                     // gray
         };
-        let color = if matches!(emphasis, TextEmphasis::Output) {
-            output_color
-        } else {
-            color
+        let color = match emphasis {
+            TextEmphasis::Reporter => reporter_color,
+            TextEmphasis::Output | TextEmphasis::JournalCounter => output_color,
+            TextEmphasis::Normal => normal_color,
         };
         let emphasis = match emphasis {
             TextEmphasis::JournalCounter => "1;4;",
-            TextEmphasis::Output => "1;",
+            TextEmphasis::Reporter | TextEmphasis::Output => "1;",
             TextEmphasis::Normal if category == Category::Fact => "1;",
             TextEmphasis::Normal => "",
         };

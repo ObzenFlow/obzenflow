@@ -9,6 +9,8 @@ use super::*;
 
 #[path = "summary/clocks.rs"]
 mod clocks;
+#[path = "summary/events.rs"]
+mod events;
 
 const HEADING: &str = "1;38;5;255";
 const BODY: &str = "38;5;252";
@@ -61,7 +63,8 @@ impl Renderer {
                     } else {
                         "entries"
                     },
-                    1 + manifest.stages.len() * 2,
+                    1 + manifest.stages.len() * 2
+                        + usize::from(manifest.metrics_journals.is_some()) * 2,
                 ),
             )?;
             let outcome = match progress.outcome.as_ref().map(|recorded| &recorded.outcome) {
@@ -140,20 +143,35 @@ impl Renderer {
             .unwrap_or(5)
             .max(20)
             .min(self.width.saturating_sub(data_width + error_width + 6));
+        let system_width = manifest
+            .metrics_journals
+            .iter()
+            .flat_map(|metrics| {
+                [
+                    &metrics.coordination_journal_file,
+                    &metrics.export_journal_file,
+                ]
+            })
+            .chain([&manifest.system_journal_file])
+            .map(|file| safe_text(file).chars().count())
+            .max()
+            .unwrap_or(14)
+            .max(14)
+            .min(self.width.saturating_sub(data_width + 4));
         self.summary_write(
             output,
             MUTED,
             &format!(
-                "  {:<name_width$}  {:>data_width$}",
-                "Supervisor", "Journal"
+                "  {:<system_width$}  {:>data_width$}",
+                "System journal", "Entries"
             ),
         )?;
-        let system_file = fit(&safe_text(&manifest.system_journal_file), name_width);
+        let system_file = fit(&safe_text(&manifest.system_journal_file), system_width);
         let count = self.observed("system/pipeline");
         self.summary_write(
             output,
             BODY,
-            &format!("  {system_file:<name_width$}  {count:>data_width$}"),
+            &format!("  {system_file:<system_width$}  {count:>data_width$}"),
         )?;
         if let Some(metrics) = &manifest.metrics_journals {
             for (file, key) in [
@@ -163,12 +181,12 @@ impl Renderer {
                 ),
                 (&metrics.export_journal_file, "system/metrics/export"),
             ] {
-                let name = fit(&safe_text(file), name_width);
+                let name = fit(&safe_text(file), system_width);
                 let count = self.observed(key);
                 self.summary_write(
                     output,
                     BODY,
-                    &format!("  {name:<name_width$}  {count:>data_width$}"),
+                    &format!("  {name:<system_width$}  {count:>data_width$}"),
                 )?;
             }
         }
@@ -224,199 +242,20 @@ impl Renderer {
         self.journals.get(journal).copied().unwrap_or(0)
     }
 
-    fn event_summary(&self, output: &mut impl Write, manifest: &RunManifest) -> Result<(), Error> {
-        let mut journals: Vec<_> = self.event_counts.journals().collect();
-        // Follow the inventory order: system first, then each stage's data and
-        // error journals. Only journals with displayed entries need a table.
-        journals.sort_by_key(|counts| {
-            let stage_order = counts.journal.stage.as_ref().map_or(0, |owner| {
-                self.context
-                    .stages
-                    .iter()
-                    .position(|stage| stage.key == owner.key)
-                    .unwrap_or(self.context.stages.len())
-                    + 1
-            });
-            (
-                stage_order,
-                counts.journal.kind == RunJournalKind::Error,
-                counts.journal.id,
-            )
-        });
-        if journals.is_empty() {
-            return Ok(());
-        }
-        writeln!(output)?;
-        self.summary_line(
-            output,
-            MUTED,
-            "Event counts cover displayed entries in each journal, including replayed evidence.",
-        )?;
-        for counts in journals {
-            // Size each journal's columns to its own contents, leaving only
-            // the two-space gutters needed to distinguish adjacent columns.
-            let count_width = counts
-                .event_types
-                .values()
-                .map(|count| count.to_string().len())
-                .max()
-                .unwrap_or(0)
-                .max(5);
-            let minimums = [10, 6, 11]; // Event type, Author, Author type.
-            let mut widths = minimums;
-            for (event_type, writer) in counts.event_types.keys() {
-                let kind = self
-                    .context
-                    .supervisors
-                    .get(writer)
-                    .map_or("Not recorded", |descriptor| descriptor.kind.label());
-                for (width, text) in widths.iter_mut().zip([
-                    event_type.as_str(),
-                    self.context.writer_name(writer),
-                    kind,
-                ]) {
-                    *width = (*width).max(safe_text(text).chars().count());
-                }
-            }
-            let available = self.width.saturating_sub(count_width + 8);
-            while widths.iter().sum::<usize>() > available {
-                let column = (0..3)
-                    .max_by_key(|&index| widths[index] - minimums[index])
-                    .unwrap();
-                if widths[column] == minimums[column] {
-                    break;
-                }
-                widths[column] -= 1;
-            }
-            let [type_width, writer_width, kind_width] = widths;
-            writeln!(output)?;
-            self.event_journal_heading(output, &counts.journal, manifest)?;
-            self.summary_write(
-                output,
-                MUTED,
-                &format!(
-                    "  {:>count_width$}  {:<type_width$}  {:<writer_width$}  Author type",
-                    "Count", "Event type", "Author"
-                ),
-            )?;
-            let mut rows: Vec<_> = counts.event_types.iter().collect();
-            rows.sort_by_key(|((event_type, writer), _)| {
-                (
-                    event_type.as_str(),
-                    self.context.writer_name(writer),
-                    writer.as_str(),
-                )
-            });
-            for ((event_type, writer), count) in rows {
-                let kind = self
-                    .context
-                    .supervisors
-                    .get(writer)
-                    .map_or("Not recorded", |descriptor| descriptor.kind.label());
-                let types = cell_lines(&safe_text(event_type), type_width);
-                let writers =
-                    cell_lines(&safe_text(self.context.writer_name(writer)), writer_width);
-                let kinds = cell_lines(kind, kind_width);
-                for index in 0..types.len().max(writers.len()).max(kinds.len()) {
-                    let count = if index == 0 {
-                        count.to_string()
-                    } else {
-                        String::new()
-                    };
-                    let event_type = types.get(index).map_or("", String::as_str);
-                    let writer = writers.get(index).map_or("", String::as_str);
-                    let kind = kinds.get(index).map_or("", String::as_str);
-                    let line = format!("  {count:>count_width$}  {event_type:<type_width$}  {writer:<writer_width$}  {kind}");
-                    self.summary_write(output, BODY, line.trim_end())?;
-                }
-            }
-            if counts.omitted > 0 {
-                self.summary_line(
-                    output,
-                    MUTED,
-                    &format!(
-                        "  {} additional entries omitted (event summary limit reached).",
-                        counts.omitted,
-                    ),
-                )?;
-            }
-        }
-        writeln!(output)?;
-        self.summary_line(
-            output,
-            MUTED,
-            "Each stage writes business outputs to its own data journal for subscribers to read.",
-        )?;
-        writeln!(output)?;
-        for line in [
-            "- Forwarded control signals keep their original Author.",
-            "- EOF from all required upstreams lets a supervisor drain and complete.",
-        ] {
-            self.summary_line(output, MUTED, line)?;
-        }
-        Ok(())
+    fn summary_line(&self, output: &mut impl Write, shade: &str, text: &str) -> Result<(), Error> {
+        self.summary_indented(output, shade, 0, text)
     }
 
-    fn event_journal_heading(
+    fn summary_indented(
         &self,
         output: &mut impl Write,
-        journal: &RunJournal,
-        manifest: &RunManifest,
+        shade: &str,
+        indent: usize,
+        text: &str,
     ) -> Result<(), Error> {
-        if journal.kind == RunJournalKind::System {
-            return self.summary_line(output, HEADING, &manifest.system_journal_file);
-        }
-        if matches!(
-            journal.kind,
-            RunJournalKind::MetricsCoordination | RunJournalKind::MetricsExport
-        ) {
-            let metrics = manifest
-                .metrics_journals
-                .as_ref()
-                .ok_or("metrics journal is missing its manifest entry")?;
-            let file = match journal.kind {
-                RunJournalKind::MetricsCoordination => &metrics.coordination_journal_file,
-                _ => &metrics.export_journal_file,
-            };
-            return self.summary_line(output, HEADING, file);
-        }
-        let owner = journal
-            .stage
-            .as_ref()
-            .ok_or("stage journal is missing its recorded stage identity")?;
-        let stage = manifest
-            .stages
-            .get(&owner.key)
-            .ok_or("stage journal is missing its manifest entry")?;
-        if journal.kind == RunJournalKind::Error {
-            self.summary_line(output, HEADING, &stage.error_journal_file)?;
-            return self.summary_line(output, BODY, &format!("  Stage: {}", owner.key));
-        }
-
-        let mut inputs: Vec<_> = stage.inbound.iter().map(String::as_str).collect();
-        inputs.sort_unstable();
-        inputs.dedup();
-        let mut subscribers: Vec<_> = manifest
-            .stages
-            .iter()
-            .filter(|(_, candidate)| candidate.inbound.contains(&owner.key))
-            .map(|(key, _)| key.as_str())
-            .collect();
-        subscribers.sort_unstable();
-        self.summary_line(output, HEADING, &format!("Stage: {}", owner.key))?;
-        for (label, value) in [
-            ("Subscribes to", stage_list(&inputs)),
-            ("Writes to", stage.data_journal_file.clone()),
-            ("Subscribers", stage_list(&subscribers)),
-        ] {
-            self.summary_line(output, BODY, &format!("  {label}: {value}"))?;
-        }
-        Ok(())
-    }
-
-    fn summary_line(&self, output: &mut impl Write, shade: &str, text: &str) -> Result<(), Error> {
-        for line in wrap_fields(&[safe_text(text)], self.width) {
-            self.summary_write(output, shade, &line)?;
+        let padding = " ".repeat(indent);
+        for line in wrap_fields(&[safe_text(text)], self.width.saturating_sub(indent)) {
+            self.summary_write(output, shade, &format!("{padding}{line}"))?;
         }
         Ok(())
     }
@@ -428,14 +267,6 @@ impl Renderer {
             writeln!(output, "{text}")?;
         }
         Ok(())
-    }
-}
-
-fn stage_list(stages: &[&str]) -> String {
-    if stages.is_empty() {
-        "—".into()
-    } else {
-        stages.join(", ")
     }
 }
 
