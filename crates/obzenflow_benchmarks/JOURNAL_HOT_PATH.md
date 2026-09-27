@@ -13,6 +13,9 @@ The subsequent [report-reader locking comparison](../../../obzenflow-improvement
 preserves a fresh 37-case before/after reference and eight completed live cases
 with two blocking workers. It records the liveness fix, its allocation cost and
 the observed live-workload regression separately from sparse-scan improvements.
+The separate [supervision delivery contract](SUPERVISION_DELIVERY.md) adds repeated
+first-report measurements and live 50/75-child cases while keeping total report
+volume fixed. It does not change this suite's 138-case inventory.
 
 ## Measurement contract: journal-hot-path-v2
 

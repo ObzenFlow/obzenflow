@@ -2,26 +2,26 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Component baselines for the remaining journal and parent hot paths.
-mod append;
-mod dispatch;
+//! First-report delivery and fixed-report-count business-traffic sensitivity.
+// Shared fixtures retain their other cases for the original hot-path executable.
+#[allow(dead_code)]
+#[path = "../journal_hot_path/fan_in.rs"]
 mod fan_in;
+#[allow(dead_code)]
+#[path = "../journal_hot_path/fixtures.rs"]
 mod fixtures;
-mod record;
+#[allow(dead_code)]
+#[path = "../journal_hot_path/support.rs"]
+mod support;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::Duration;
-
-mod support;
-pub(crate) use support::{measure, timed, Census, Meter, Sample};
+pub(crate) use support::{measure, Census, Meter, Sample};
 
 fn bench(c: &mut Criterion) {
     let runtime = fixtures::runtime();
     let mut censuses = Vec::new();
-    record::bench(c, &runtime, &mut censuses);
-    dispatch::bench(c, &runtime, &mut censuses);
-    fan_in::bench(c, &runtime, &mut censuses);
-    append::bench(c, &runtime, &mut censuses);
+    fan_in::bench_delivery(c, &runtime, &mut censuses);
     if let Ok(path) = std::env::var("OBZENFLOW_WORK_CENSUS") {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")

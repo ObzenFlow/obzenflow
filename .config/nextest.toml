@@ -13,9 +13,23 @@ retries = 2
 
 # The 5k proofs include rate-limited execution and full journal verification.
 # Use the main-branch time budget when running them before merge.
+# Include the typed 5k case explicitly; its name does not share the other prefix.
 [[profile.ci-fast.overrides]]
-filter = "binary(=prometheus_example_test) & test(prometheus_example_5k_completes_)"
+filter = "binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only))"
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+# Temporary 145h merge budgets, authorised 2026-09-27. Reassess these exact
+# exceptions in FLOWIP-145i; performance acceptance remains in 145h-part-2.
+# Replay's outer limit covers live execution, replay preparation/execution and
+# comparison. Its separate 60s comparison assertion is unchanged.
+[[profile.ci-fast.overrides]]
+filter = "binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# The composed test keeps all four cases and every journal/Studio assertion.
+[[profile.ci-fast.overrides]]
+filter = "binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream::many_stage_pipeline_metrics_and_studio_settle_owned_journals)"
+slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
 filter = "binary(/metrics/)"

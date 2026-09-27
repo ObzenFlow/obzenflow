@@ -1605,7 +1605,6 @@ mod hosted {
     use super::*;
     use obzenflow::application::control::{CurrentRunDiscovery, RunArchive, RUN_DISCOVERY_PATH};
     use obzenflow::journal::read::{open_disk_run, RunOutcome, RunRecord, RunRecordKind, TailRead};
-    use std::process::Stdio;
     use std::time::Duration;
     use sysinfo::{Pid, PidExt, ProcessExt, Signal, System, SystemExt};
 
@@ -1714,12 +1713,14 @@ mod hosted {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn independent_lifetimes_cover_detach_sigint_sigterm_and_sigkill() {
         for mode in ["detach", "reader_error", "sigint", "sigterm", "sigkill"] {
+            eprintln!("hosted lifetime: mode={mode}");
             let dir = tempfile::tempdir().unwrap();
             let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = reservation.local_addr().unwrap().port();
             drop(reservation);
             let url = format!("http://127.0.0.1:{port}");
             let host_log = dir.path().join("host.log");
+            let host_output = std::fs::File::create(&host_log).unwrap();
             let mut application = tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--ignored",
@@ -1730,8 +1731,8 @@ mod hosted {
                 ])
                 .env(HOST_ROOT, dir.path().join("journals"))
                 .env(HOST_PORT, port.to_string())
-                .stdout(Stdio::null())
-                .stderr(std::fs::File::create(&host_log).unwrap())
+                .stdout(host_output.try_clone().unwrap())
+                .stderr(host_output)
                 .kill_on_drop(true)
                 .spawn()
                 .unwrap();
@@ -1777,20 +1778,50 @@ mod hosted {
             );
             let rows = dir.path().join("viewer.jsonl");
             let diagnostics = dir.path().join("viewer.stderr");
-            let mut viewer = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
-                .args([
-                    "start",
-                    "--server",
-                    &url,
-                    "--follow",
-                    "--jsonl",
-                    "--include-runtime",
-                ])
+            let observer_path = if mode == "reader_error" {
+                // Share the live inodes through separate observer-only names.
+                // Replacing one of these names must not replace a required
+                // application journal, which correctly fails its own readers.
+                let observer = dir.path().join("observer");
+                std::fs::create_dir(&observer).unwrap();
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry.file_type().unwrap().is_file() {
+                        std::fs::hard_link(entry.path(), observer.join(entry.file_name())).unwrap();
+                    }
+                }
+                observer
+            } else {
+                path.clone()
+            };
+            let mut view_command = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"));
+            if mode == "reader_error" {
+                view_command.arg("show").arg(&observer_path);
+            } else {
+                view_command.args(["start", "--server", &url]);
+            }
+            let mut viewer = view_command
+                .args(["--follow", "--jsonl", "--include-runtime"])
                 .stdout(std::fs::File::create(&rows).unwrap())
                 .stderr(std::fs::File::create(&diagnostics).unwrap())
                 .kill_on_drop(true)
                 .spawn()
                 .unwrap();
+            if mode == "reader_error" {
+                // Control still targets the real host; only this viewer's
+                // filesystem namespace is used for fault injection.
+                let started = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+                    .args(["start", "--server", &url])
+                    .output()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    started.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&started.stderr)
+                );
+            }
             first_fact(&rows, &mut viewer).await;
             assert_eq!(
                 client
@@ -1825,20 +1856,28 @@ mod hosted {
                 }
                 "sigint" => signal(&application, Signal::Interrupt),
                 "reader_error" => {
-                    let system = path.join("system.log");
-                    let hidden = path.join("system.temporarily-unavailable");
-                    let replacement = path.join("system.observer-copy");
-                    // Replace the observer's admitted inode atomically while
-                    // keeping the application's writer and live reads available.
-                    // Removing its required journal also fails the application.
+                    use std::os::unix::fs::MetadataExt;
+                    let live_system = path.join("system.log");
+                    let original_inode = std::fs::metadata(&live_system).unwrap().ino();
+                    let system = observer_path.join("system.log");
+                    assert_eq!(std::fs::metadata(&system).unwrap().ino(), original_inode);
+                    let replacement = observer_path.join("system.observer-copy");
                     std::fs::copy(&system, &replacement).unwrap();
-                    std::fs::hard_link(&system, &hidden).unwrap();
                     std::fs::rename(&replacement, &system).unwrap();
+                    assert_eq!(
+                        std::fs::metadata(&live_system).unwrap().ino(),
+                        original_inode
+                    );
                     assert_eq!(wait(&mut viewer).await.code(), Some(4));
                     assert!(std::fs::read_to_string(&diagnostics)
                         .unwrap()
                         .contains("run_observation_failed"));
-                    assert!(application.try_wait().unwrap().is_none());
+                    let status = application.try_wait().unwrap();
+                    assert!(
+                        status.is_none(),
+                        "observer-only failure stopped application: {status:?}\n{}",
+                        std::fs::read_to_string(&host_log).unwrap()
+                    );
                     assert_eq!(
                         client
                             .get(format!("{url}/ready"))
@@ -1848,7 +1887,6 @@ mod hosted {
                             .status(),
                         200
                     );
-                    std::fs::rename(&hidden, &system).unwrap();
                     signal(&application, Signal::Term);
                 }
                 "sigterm" => signal(&application, Signal::Term),

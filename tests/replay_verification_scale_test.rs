@@ -104,14 +104,24 @@ fn latest_run_dir(base: &Path) -> PathBuf {
 async fn five_figure_run_verifies_with_streaming_comparison() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
+    let total_started = std::time::Instant::now();
 
+    eprintln!("replay scale: phase=live, records={EVENTS}");
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_flow(journal_base.clone()))
         .await
         .expect("live flow should complete");
+    eprintln!(
+        "replay scale: live complete, elapsed={:?}",
+        total_started.elapsed()
+    );
     let baseline = latest_run_dir(&journal_base);
 
+    eprintln!(
+        "replay scale: phase=replay, elapsed={:?}",
+        total_started.elapsed()
+    );
     FlowApplication::builder()
         .with_cli_args(vec![
             OsString::from("obzenflow"),
@@ -121,12 +131,24 @@ async fn five_figure_run_verifies_with_streaming_comparison() {
         .run_async(build_flow(journal_base.clone()))
         .await
         .expect("replay flow should complete");
+    eprintln!(
+        "replay scale: replay complete, elapsed={:?}",
+        total_started.elapsed()
+    );
     let candidate = latest_run_dir(&journal_base);
 
+    eprintln!(
+        "replay scale: phase=comparison, elapsed={:?}",
+        total_started.elapsed()
+    );
     let started = std::time::Instant::now();
     let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
         .expect("verification should run");
     let elapsed = started.elapsed();
+    eprintln!(
+        "replay scale: comparison={elapsed:?}, total={:?}",
+        total_started.elapsed()
+    );
 
     assert_eq!(
         outcome.exit_code(),

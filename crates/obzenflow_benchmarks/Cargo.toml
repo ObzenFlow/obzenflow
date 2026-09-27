@@ -133,3 +133,9 @@ name = "journal_hot_path"
 path = "benches/journal_hot_path/main.rs"
 harness = false
 required-features = ["supervision-benchmarks"]
+
+[[bench]]
+name = "supervision_delivery"
+path = "benches/supervision_delivery/main.rs"
+harness = false
+required-features = ["supervision-benchmarks"]

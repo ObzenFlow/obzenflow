@@ -33,11 +33,24 @@ struct History {
 }
 impl History {
     async fn build(journals: usize, reports: usize, business_between: usize, live: bool) -> Self {
+        Self::build_distribution(journals, reports * journals, business_between, 0, 256, live).await
+    }
+
+    async fn build_distribution(
+        journals: usize,
+        total_reports: usize,
+        business_between: usize,
+        business_after_first: usize,
+        payload_bytes: usize,
+        live: bool,
+    ) -> Self {
+        assert!(total_reports >= journals);
         let (topology, stages) = ParentAdmission::topology(journals);
         let directory = tempfile::tempdir().unwrap();
         let run = FlowId::new();
         let mut children = Vec::new();
         for (index, stage) in stages.iter().enumerate() {
+            let reports = total_reports / journals + usize::from(index < total_reports % journals);
             let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
                 DiskJournal::with_owner_in_run(
                     directory.path().join(format!("child-{index}.log")),
@@ -49,7 +62,9 @@ impl History {
             let mut events = Vec::new();
             let mut expected = Vec::new();
             for report in 0..reports {
-                events.extend((0..business_between).map(|_| fixtures::business(*stage, 256)));
+                events.extend(
+                    (0..business_between).map(|_| fixtures::business(*stage, payload_bytes)),
+                );
                 let event = if report + 1 == reports {
                     fixtures::running(*stage)
                 } else {
@@ -69,6 +84,12 @@ impl History {
                 };
                 expected.push((events.len() as u64 + 1, event.id));
                 events.push(event);
+                if report == 0 {
+                    events.extend(
+                        (0..business_after_first)
+                            .map(|_| fixtures::business(*stage, payload_bytes)),
+                    );
+                }
             }
             if !live {
                 fixtures::append_events(&journal, events.clone(), 1).await;
@@ -87,6 +108,114 @@ impl History {
             _directory: directory,
         }
     }
+}
+
+/// New measurement contract, separate from the unchanged hot-path inventory.
+/// Both metrics finish and validate the entire operation before returning a
+/// sample. First delivery measures only the first child report reaching the
+/// parent, before that report's FSM application or resulting publication.
+#[allow(dead_code)] // Used by the separate supervision_delivery executable.
+pub fn bench_delivery(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
+    struct Input {
+        name: String,
+        journals: usize,
+        reports: usize,
+        between: usize,
+        after_first: usize,
+        payload: usize,
+        live: bool,
+    }
+    let mut inputs = Vec::new();
+    for (after_first, payload) in [(0, 256), (63, 256), (63, 8192), (1024, 256), (1024, 8192)] {
+        inputs.push(Input {
+            name: format!("prepared_suffix/business_after_first_{after_first}/payload_{payload}"),
+            journals: 1,
+            reports: 2,
+            between: 0,
+            after_first,
+            payload,
+            live: false,
+        });
+    }
+    for journals in [8, 32, 50, 75, 100] {
+        for between in [0, 7] {
+            inputs.push(Input {
+                name: format!(
+                    "live_fixed_reports_600/journals_{journals}/business_between_{between}"
+                ),
+                journals,
+                reports: 600,
+                between,
+                after_first: 0,
+                payload: 256,
+                live: true,
+            });
+        }
+    }
+    let mut group = c.benchmark_group("supervision_delivery");
+    // Short first-delivery values can accompany much longer complete operations.
+    // Flat sampling avoids steep iteration ramps while every operation still
+    // completes and tears down its readers before the next one starts.
+    group.sampling_mode(criterion::SamplingMode::Flat);
+    for input in inputs {
+        let history = LazyCell::new(|| {
+            runtime.block_on(History::build_distribution(
+                input.journals,
+                input.reports,
+                input.between,
+                input.after_first,
+                input.payload,
+                false,
+            ))
+        });
+        for metric in ["first_report_delivery", "completion"] {
+            let case = format!("{metric}/{}", input.name);
+            let dimensions = serde_json::json!({
+                "journals": input.journals, "reports": input.reports,
+                "business_between_reports": input.between,
+                "business_after_first_report_per_journal": input.after_first,
+                "business_records": input.reports * input.between + input.journals * input.after_first,
+                "payload_string_bytes": input.payload,
+                "concurrent_appends": input.live,
+                "async_workers": 2, "blocking_workers": 2,
+                "metric": metric,
+            });
+            let mut taken = false;
+            group.bench_function(&case, |b| {
+                measure(
+                    b,
+                    censuses,
+                    &mut taken,
+                    &format!("supervision_delivery/{case}"),
+                    &dimensions,
+                    || {
+                        let mut sample = if input.live {
+                            let fresh = runtime.block_on(History::build_distribution(
+                                input.journals,
+                                input.reports,
+                                input.between,
+                                input.after_first,
+                                input.payload,
+                                true,
+                            ));
+                            consume(runtime, &fresh, true)
+                        } else {
+                            consume(runtime, &history, false)
+                        };
+                        sample.observations["completed_elapsed_ns"] =
+                            (sample.elapsed.as_nanos() as u64).into();
+                        if metric == "first_report_delivery" {
+                            sample.elapsed = Duration::from_nanos(
+                                sample.observations["first_report_ns"].as_u64().unwrap(),
+                            );
+                        }
+                        sample
+                    },
+                );
+            });
+        }
+    }
+    group.finish();
 }
 
 fn consume(runtime: &Runtime, history: &History, live: bool) -> Sample {

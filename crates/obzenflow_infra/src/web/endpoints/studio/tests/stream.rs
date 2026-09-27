@@ -1670,6 +1670,7 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
     // fan-in. Disk's large-reader fairness is separately tested in
     // supervision_journals; this composition also runs its real 10-stage path.
     for (disk, stages) in [(false, 2), (false, 10), (false, 100), (true, 10)] {
+        eprintln!("composed backend={disk}, stages={stages}, phase=build");
         let directory = tempfile::tempdir().unwrap();
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let mut members = HashMap::new();
@@ -1728,12 +1729,22 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
         let started = std::time::Instant::now();
         let delivery = tokio::spawn(async move { stream.collect::<Vec<_>>().await });
         gate.add_permits(stages - 1);
-        tokio::time::timeout(Duration::from_secs(15), handle.run())
+        // Temporary merge accommodation for the 100-stage case. FLOWIP-145i
+        // restores local failure attribution; 145h-part-2 owns capacity evidence.
+        let run_budget = Duration::from_secs(if stages == 100 { 60 } else { 15 });
+        eprintln!("composed backend={disk}, stages={stages}, phase=run, budget={run_budget:?}");
+        tokio::time::timeout(run_budget, handle.run())
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "composed backend={disk}, stages={stages}, phase=run exceeded {run_budget:?}; elapsed={:?}",
+                    started.elapsed()
+                )
+            })
             .unwrap();
         let settled = started.elapsed();
         closing.send(true).unwrap();
+        eprintln!("composed backend={disk}, stages={stages}, phase=studio, settlement={settled:?}");
         let frames = tokio::time::timeout(Duration::from_secs(5), delivery)
             .await
             .unwrap()
