@@ -177,6 +177,28 @@ pub(crate) struct CommitmentAdmission {
 }
 
 impl CommitmentAdmission {
+    /// Payload-blind continuity admission. This advances storage traversal only;
+    /// it does not admit a skipped record as causal evidence.
+    pub(crate) fn admit_range(
+        &mut self,
+        first: obzenflow_core::event::CommittedCausalRef,
+        previous: Option<obzenflow_core::event::CommittedCausalRef>,
+        last: obzenflow_core::event::CommittedCausalRef,
+    ) -> Result<(), JournalError> {
+        if first.run_id != self.identity.run_id
+            || first.journal_writer_id.as_journal_id() != &self.identity.journal_id
+            || previous != self.previous
+            || Some(first.sequence) != self.previous.map_or(Some(1), |p| p.sequence.checked_add(1))
+            || last.run_id != first.run_id
+            || last.journal_writer_id != first.journal_writer_id
+            || last.sequence < first.sequence
+        {
+            return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
+        }
+        self.previous = Some(last);
+        Ok(())
+    }
+
     pub(super) fn new(identity: JournalIdentity) -> Self {
         Self {
             identity,

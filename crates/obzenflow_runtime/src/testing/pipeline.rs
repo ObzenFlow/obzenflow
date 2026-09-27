@@ -6,6 +6,10 @@
 //! Each factory call creates an isolated flow for a scenario or parameterised case.
 //! Only the test entry points are public; lifecycle types remain crate-private.
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use crate::pipeline::benchmarks::ParentAdmission;
+
 pub use crate::pipeline::builder::tests::subscription_preparation_failure_joins_every_supplied_stage;
 pub use crate::pipeline::tests::admission::{
     controlled_journal_preserves_causality_groups_and_live_readers,

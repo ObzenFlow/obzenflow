@@ -221,6 +221,8 @@ impl PreparedCausalCommit {
     pub(crate) fn validate_record<P: JournalPayload>(
         record: &JournalRecord<P>,
     ) -> Result<CommittedCausalRef, CausalError> {
+        #[cfg(feature = "bench-instrumentation")]
+        crate::benchmark::add(crate::benchmark::Counter::StructuralValidations, 1);
         let journal = &record.envelope.provenance.journal;
         if journal.vector_clock.clocks.len() > super::vector_clock::MAX_CAUSAL_COORDINATES {
             return Err(CausalError::CoordinateBudget);

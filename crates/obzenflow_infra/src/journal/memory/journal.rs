@@ -326,6 +326,17 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for M
         )))
     }
 
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
+    {
+        Ok(Box::new(MemoryJournalReader::new(
+            self.state.clone(),
+            position,
+        )))
+    }
+
     async fn storage_read_metrics_tail(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

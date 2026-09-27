@@ -121,6 +121,11 @@ impl Cache {
 pub(crate) struct DefinitionStore(Arc<Mutex<Cache>>);
 
 impl DefinitionStore {
+    /// Only for isolated benchmark fixtures with no outstanding readers/writers.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn clear_for_benchmark(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Cache::default();
+    }
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn stats(&self) -> StoreStats {
         self.0
@@ -440,14 +445,22 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         let mut bytes = header.to_vec();
         file.take((length - frame::HEADER_LEN) as u64)
             .read_to_end(&mut bytes)?;
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            use obzenflow_core::benchmark::{add, Counter};
+            add(Counter::DefinitionCarrierReads, 1);
+            add(Counter::DefinitionCarrierBytes, bytes.len() as u64);
+        }
         {
             let mut cache = self.store.0.lock().unwrap_or_else(|e| e.into_inner());
             cache.stats.carrier_frames += 1;
             cache.stats.carrier_bytes += bytes.len() as u64;
         }
         let body = frame::validate(&bytes).map_err(frame::io_error)?;
-        let mut cursor = Cursor::new(body);
+        let envelope = super::routing::Envelope::parse(body)?;
+        let mut cursor = Cursor::new(envelope.definitions);
         let entries = read_entries(&mut cursor, &canonical, None)?;
+        cursor.finish()?;
         let definition = match entries.get(locator.slot) {
             Some(Entry::Local(definition)) if definition.kind == kind => definition.clone(),
             Some(Entry::Local(_)) => return Err(invalid("definition kind mismatch")),
@@ -456,7 +469,6 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
             }
             None => return Err(invalid("missing definition slot")),
         };
-        super::validate_carrier(&mut cursor)?;
         // Several requested definitions usually share one carrier. Validate
         // and cache its complete local bodies together, without following any
         // of that carrier's references or materialising its event history.
@@ -706,7 +718,23 @@ mod tests {
             capture: None,
         };
         table.encode(&mut body);
-        std::fs::write(&path, frame::encode(&body)).unwrap();
+        // A definition carrier must have the current routing/member envelope,
+        // even though resolving its definitions never decodes that member.
+        let event = obzenflow_core::event::ChainEventFactory::data_event(
+            obzenflow_core::StageId::new().into(),
+            "carrier",
+            serde_json::json!({}),
+        );
+        let record =
+            obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event);
+        let mut member = Vec::new();
+        bytes(&[0], &mut member);
+        member.push(0);
+        bytes(b"{}", &mut member);
+        let mut carrier = super::super::routing::encode(&[record], None, &[member.len()]).unwrap();
+        bytes(&body, &mut carrier);
+        carrier.extend_from_slice(&member);
+        std::fs::write(&path, frame::encode(&carrier)).unwrap();
         let encoded = {
             let mut out = Vec::new();
             let table = WriteTable {

@@ -1038,6 +1038,24 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         ))
     }
 
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
+    {
+        let initial_position = self.storage_committed_position().await?;
+        Ok(Box::new(
+            super::report_reader::DiskReportReader::<T>::new(
+                self.path.clone(),
+                self.journal_id,
+                self.read_write_lock.clone(),
+                initial_position,
+                position,
+            )
+            .await?,
+        ))
+    }
+
     async fn storage_read_metrics_tail(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

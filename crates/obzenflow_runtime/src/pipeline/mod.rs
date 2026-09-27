@@ -19,6 +19,9 @@ mod termination;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod tests;
 
+#[cfg(feature = "test-support")]
+pub(crate) mod benchmarks;
+
 pub use builder::PipelineBuilder;
 pub use config::{
     MiddlewareStackConfig, ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType,

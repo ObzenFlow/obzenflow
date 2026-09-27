@@ -122,6 +122,8 @@ pub(crate) fn read_frame_sync<B: std::io::BufRead>(
         reader
             .take((length - frame::HEADER_LEN) as u64)
             .read_to_end(buf)?;
+        #[cfg(feature = "bench-instrumentation")]
+        count_read(buf.len());
         return Ok(Some((
             buf.len(),
             if buf.len() == length {
@@ -152,6 +154,8 @@ pub(crate) async fn read_frame_async<B: tokio::io::AsyncBufRead + Unpin>(
             .take((length - frame::HEADER_LEN) as u64)
             .read_to_end(buf)
             .await?;
+        #[cfg(feature = "bench-instrumentation")]
+        count_read(buf.len());
         return Ok(Some((
             buf.len(),
             if buf.len() == length {
@@ -162,6 +166,13 @@ pub(crate) async fn read_frame_async<B: tokio::io::AsyncBufRead + Unpin>(
         )));
     }
     Ok(Some((buf.len(), FrameTermination::Incomplete)))
+}
+
+#[cfg(feature = "bench-instrumentation")]
+fn count_read(bytes: usize) {
+    use obzenflow_core::benchmark::{add, Counter};
+    add(Counter::PrimaryFrameReads, 1);
+    add(Counter::PrimaryFrameBytes, bytes as u64);
 }
 
 #[cfg(test)]

@@ -353,6 +353,16 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for CycleDepthFaultJour
         self.inner.reader_from(position).await
     }
 
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<
+        Box<dyn obzenflow_core::journal::reader::JournalReportReader<ChainEvent>>,
+        JournalError,
+    > {
+        self.inner.report_reader_from(position).await
+    }
+
     async fn storage_read_last_n(
         &self,
         count: usize,

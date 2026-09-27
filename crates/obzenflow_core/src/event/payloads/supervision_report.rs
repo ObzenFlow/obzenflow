@@ -8,7 +8,53 @@
 use super::execution_payload::{ExecutionPayload, StageLifecycleFact as Fact};
 use super::system_payload::{StageLifecycleEvent as Lifecycle, SystemPayload};
 
+#[cfg(test)]
+mod selection_tests;
+
 impl ExecutionPayload {
+    /// Keep classification independent of allocation/projection. Parity with
+    /// SupervisorRecord::from_chain is verified for the closed payload family.
+    pub fn is_supervision_candidate(&self) -> bool {
+        use super::execution_payload::{CircuitBreakerFact as C, RateLimiterFact as R};
+        match self {
+            Self::ReplayLifecycle(_)
+            | Self::SupervisorRegistered { .. }
+            | Self::SupervisorCommandDiscarded { .. }
+            | Self::SourceCleanupFailed { .. }
+            | Self::ContractStatus { .. }
+            | Self::ContractResult { .. }
+            | Self::IngressRefusal { .. }
+            | Self::StageLifecycle(_) => true,
+            Self::CircuitBreaker(fact) => match fact {
+                C::Opened { .. }
+                | C::Closed { .. }
+                | C::HalfOpen { .. }
+                | C::StateChanged { .. } => true,
+                C::Rejected { .. }
+                | C::AttemptSettled { .. }
+                | C::RetryScheduled { .. }
+                | C::RetrySucceeded { .. }
+                | C::RetryExhausted { .. }
+                | C::RetryStoppedNonRetryable { .. }
+                | C::RecoveryCompleted { .. } => false,
+            },
+            Self::RateLimiter(fact) => match fact {
+                R::ModeChange { .. } | R::ConfigChanged { .. } => true,
+                R::Delayed { .. } => false,
+            },
+            Self::MetricsCoordination(_)
+            | Self::Backpressure(_)
+            | Self::SourcePollError(_)
+            | Self::HttpPullState(_)
+            | Self::AiChunkingPlanned(_)
+            | Self::AccumulatorProgress { .. }
+            | Self::JoinReferenceProgress { .. }
+            | Self::EffectRecord(_)
+            | Self::EffectAttemptStarted(_)
+            | Self::EffectRecoveryAbandoned(_) => false,
+        }
+    }
+
     pub fn from_supervision_report(report: SystemPayload) -> Result<Self, &'static str> {
         Ok(match report {
             SystemPayload::ReplayLifecycle(event) => Self::ReplayLifecycle(event),

@@ -173,6 +173,18 @@ where
     /// resuming from a checkpoint.
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError>;
 
+    /// Select protected supervision candidates before reconstructing other records.
+    /// Positions are append counts within this journal incarnation, as for reader_from.
+    async fn report_reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn super::reader::JournalReportReader<T>>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "Journal does not support selective supervision reads".into(),
+            source: "unsupported report reader".into(),
+        })
+    }
+
     /// Read the last N events from the journal by scanning backwards from EOF.
     ///
     /// This is useful for efficiently getting recent events without loading the entire journal.

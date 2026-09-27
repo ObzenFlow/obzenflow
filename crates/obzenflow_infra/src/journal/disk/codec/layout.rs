@@ -101,9 +101,8 @@ const fn field(name: &'static str, kind: Kind) -> Field {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Layout {
-    Provenance,
+    RecordBody,
     Event,
-    Journal,
     Coordinate,
     Commitment,
     Witnesses,
@@ -131,7 +130,6 @@ pub(super) enum Layout {
     EffectRateLimiter,
     Metrics,
     Sli,
-    GroupMember,
 }
 
 const EVENT_KINDS: &[&str] = &[
@@ -152,11 +150,13 @@ impl Layout {
         use Kind as K;
         use Layout as S;
         match self {
-            S::Provenance => {
+            S::RecordBody => {
                 const {
                     &[
                         field("event", K::Struct(S::Event)),
-                        field("journal", K::Struct(S::Journal)),
+                        field("vector_clock", K::Clock),
+                        field("causal", K::Struct(S::Witnesses)),
+                        field("timestamp", K::Timestamp),
                     ]
                 }
             }
@@ -180,19 +180,6 @@ impl Layout {
                         field("runtime", K::Struct(S::Runtime)),
                         field("composite_activations", K::List(&K::Value)),
                         field("timestamp", K::Unsigned),
-                    ]
-                }
-            }
-            S::Journal => {
-                const {
-                    &[
-                        field("run_id", K::FlowId),
-                        field("journal_writer_id", K::Definition(D::JournalWriter)),
-                        field("causal", K::Struct(S::Witnesses)),
-                        field("vector_clock", K::Clock),
-                        field("timestamp", K::Timestamp),
-                        field("journal_group_id", K::Text),
-                        field("journal_group_member", K::Struct(S::GroupMember)),
                     ]
                 }
             }
@@ -477,7 +464,6 @@ impl Layout {
                     ]
                 }
             }
-            S::GroupMember => const { &[field("index", K::Unsigned), field("size", K::Unsigned)] },
         }
     }
 }

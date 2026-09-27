@@ -31,7 +31,7 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 /// Live-tail polls allowed at the same unterminated record before a stuck or
 /// crashed writer is treated as a hard error rather than an endless retry
 /// (FLOWIP-120q). Sealed readers never reach this path.
-const MAX_STALL_POLLS: u32 = 5;
+pub(super) const MAX_STALL_POLLS: u32 = 5;
 
 // Amortise open/seek/read costs across ordinary wide-event frames. Only fully
 // buffered, terminated frames are reused; a partial tail is always reread.
@@ -412,6 +412,11 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             // a fresh decoder here would canonicalize the archive directory
             // and lock the global registry for every physical frame.
             let mut decoder = self.decoder.clone();
+            #[cfg(feature = "bench-instrumentation")]
+            obzenflow_core::benchmark::add(
+                obzenflow_core::benchmark::Counter::DecodeBlockingJobs,
+                1,
+            );
             let (classification, decoder, bytes) = tokio::task::spawn_blocking(move || {
                 let classification = classify_frame::<T>(&bytes, &mut decoder, frame_start);
                 (classification, decoder, bytes)
@@ -669,11 +674,24 @@ mod tests {
                 .unwrap();
         let event = || ChainEventFactory::data_event(stage.into(), "group", serde_json::json!({}));
         let first = journal.append(event(), Default::default()).await.unwrap();
-        let mut group = journal
+        let original_group = journal
             .append_group("gap", vec![event(), event(), event()], Default::default())
             .await
             .unwrap();
+        let mut group = original_group.clone();
         group.remove(1);
+        for (index, record) in group.iter_mut().enumerate() {
+            record.envelope.provenance.journal.journal_group_member = Some(JournalGroupMember {
+                index: index as u32,
+                size: 2,
+            });
+        }
+        // The current encoder cannot represent an interior sequence hole: its
+        // routing range is consecutive. Removing a middle member fails at write.
+        assert!(serialize_atomic_group("gap", &group).is_err());
+        // A contiguous suffix is encodable in isolation, but cannot pass the
+        // reader's prefix admission while its first predecessor is missing.
+        let mut group = original_group[1..].to_vec();
         for (index, record) in group.iter_mut().enumerate() {
             record.envelope.provenance.journal.journal_group_member = Some(JournalGroupMember {
                 index: index as u32,

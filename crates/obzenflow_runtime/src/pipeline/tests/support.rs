@@ -133,6 +133,17 @@ where
         self.inner.reader_from(position).await
     }
 
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
+    {
+        if self.fail_reader == Some(self.reader_calls.fetch_add(1, Ordering::Relaxed) + 1) {
+            return Err(JournalError::Full);
+        }
+        self.inner.report_reader_from(position).await
+    }
+
     async fn storage_read_metrics_tail(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {

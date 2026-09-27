@@ -7,6 +7,7 @@
 
 use super::SupervisorRecord;
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
+use obzenflow_core::journal::reader::{JournalReportReader, ReportScanBudget, ReportScanItem};
 use obzenflow_core::{Journal, JournalId, JournalRecord};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -48,8 +49,9 @@ struct Counters {
 }
 
 /// Optional scheduling diagnostics; these values never authorize coverage or
-/// causality. Byte counts are canonical record bytes, excluding provider buffers
-/// and allocator overhead. A partially consumed batch stays fully charged.
+/// causality. Scanned bytes are encoded primary bytes (zero for memory); retained
+/// bytes are canonical selected-record bytes, excluding provider buffers and
+/// allocator overhead. A partially consumed batch stays fully charged.
 #[derive(Debug)]
 pub struct ReaderDiagnostics {
     pub journal: JournalId,
@@ -132,6 +134,13 @@ pub struct ReportReaders {
 }
 
 impl ReportReaders {
+    /// Development harness teardown: join cancelled tasks outside measured work.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn shutdown_for_benchmark(mut self) {
+        self.tasks.shutdown().await;
+    }
+
     pub fn diagnostics(&self) -> Vec<ReaderDiagnostics> {
         self.slots
             .iter()
@@ -198,7 +207,11 @@ impl ReportReaders {
         select: impl Fn(JournalRecord<T::Payload>) -> Option<SupervisorRecord> + Send + 'static,
     ) {
         let id = *journal.id();
-        self.spawn_reader(id, Box::pin(async move { journal.reader().await }), select);
+        self.spawn_reader(
+            id,
+            Box::pin(async move { journal.report_reader_from(0).await }),
+            select,
+        );
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -207,9 +220,14 @@ impl ReportReaders {
         reader: Box<dyn obzenflow_core::journal::JournalReader<SystemEvent>>,
     ) -> Self {
         let mut readers = Self::default();
-        readers.spawn_reader(id, Box::pin(async { Ok(reader) }), |record| {
-            Some(record.into())
-        });
+        readers.spawn_reader(
+            id,
+            Box::pin(async {
+                Ok(Box::new(CompleteReaderFixture(reader))
+                    as Box<dyn JournalReportReader<SystemEvent>>)
+            }),
+            |record| Some(record.into()),
+        );
         readers
     }
 
@@ -218,10 +236,7 @@ impl ReportReaders {
         id: JournalId,
         opened: futures::future::BoxFuture<
             'static,
-            Result<
-                Box<dyn obzenflow_core::journal::JournalReader<T>>,
-                obzenflow_core::journal::JournalError,
-            >,
+            Result<Box<dyn JournalReportReader<T>>, obzenflow_core::journal::JournalError>,
         >,
         select: impl Fn(JournalRecord<T::Payload>) -> Option<SupervisorRecord> + Send + 'static,
     ) {
@@ -275,37 +290,46 @@ impl ReportReaders {
                 let mut scanned = 0;
                 let mut bytes = 0;
                 let mut at_tail = false;
-                while scanned < SCAN_RECORDS && bytes < SCAN_BYTES {
+                while scanned < SCAN_RECORDS && bytes < SCAN_BYTES && retained.bytes < SCAN_BYTES {
                     counters.pending.store(true, Ordering::Relaxed);
                     let pending = PendingRead(&counters.pending);
-                    let Some(record) =
-                        reader
-                            .next()
-                            .await
-                            .map_err(|source| ReportReaderError::Read {
-                                journal: id,
-                                source,
-                            })?
-                    else {
-                        at_tail = true;
-                        break;
-                    };
+                    let before = reader.position();
+                    let scan = reader
+                        .next_report(ReportScanBudget {
+                            records: SCAN_RECORDS - scanned,
+                            bytes: SCAN_BYTES - bytes,
+                        })
+                        .await
+                        .map_err(|source| ReportReaderError::Read {
+                            journal: id,
+                            source,
+                        })?;
                     drop(pending);
-                    // Count discarded business records too. The providers bound
-                    // individual records and decoder/group materialisation.
-                    let mut counter = ByteCount(0);
-                    serde_json::to_writer(&mut counter, &record)?;
-                    bytes += counter.0;
-                    scanned += 1;
-                    counters.scanned.fetch_add(1, Ordering::Relaxed);
+                    let traversed = reader.position() - before;
+                    bytes += scan.scanned_bytes;
+                    scanned += traversed as usize;
+                    counters.scanned.fetch_add(traversed, Ordering::Relaxed);
                     counters
                         .scanned_bytes
-                        .fetch_add(counter.0 as u64, Ordering::Relaxed);
+                        .fetch_add(scan.scanned_bytes as u64, Ordering::Relaxed);
                     counters.through.store(reader.position(), Ordering::Relaxed);
-                    if let Some(report) = select(record) {
-                        counters.selected.fetch_add(1, Ordering::Relaxed);
-                        retained.add(counter.0);
-                        records.push_back(Box::new(report));
+                    match scan.item {
+                        ReportScanItem::Record(record) => {
+                            // Retention has a separate reconstructed-record bound.
+                            // Discarded business records never reach this accounting.
+                            let mut counter = ByteCount(0);
+                            serde_json::to_writer(&mut counter, &record)?;
+                            if let Some(report) = select(*record) {
+                                counters.selected.fetch_add(1, Ordering::Relaxed);
+                                retained.add(counter.0);
+                                records.push_back(Box::new(report));
+                            }
+                        }
+                        ReportScanItem::Progress => {}
+                        ReportScanItem::Tail { .. } => {
+                            at_tail = true;
+                            break;
+                        }
                     }
                     if !announced_initial && reader.initial_prefix_complete()? {
                         break;
@@ -399,6 +423,46 @@ impl ReportReaders {
     }
 }
 
+// Controlled complete-record readers remain useful to test handoff scheduling.
+// Production journals must implement the selective capability explicitly.
+#[cfg(any(test, feature = "test-support"))]
+struct CompleteReaderFixture<T: JournalEvent>(Box<dyn obzenflow_core::journal::JournalReader<T>>);
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait::async_trait]
+impl<T: JournalEvent> obzenflow_core::journal::reader::JournalReportStorageReader<T>
+    for CompleteReaderFixture<T>
+{
+    async fn storage_next_report(
+        &mut self,
+        _: ReportScanBudget,
+    ) -> Result<
+        obzenflow_core::journal::reader::ReportScan<T::Payload>,
+        obzenflow_core::journal::JournalError,
+    > {
+        Ok(obzenflow_core::journal::reader::ReportScan {
+            item: match self.0.next().await? {
+                Some(row) => ReportScanItem::Record(Box::new(row)),
+                None => ReportScanItem::Tail {
+                    committed_end: self.0.is_at_end(),
+                },
+            },
+            scanned_bytes: 0,
+        })
+    }
+    fn storage_position(&self) -> u64 {
+        self.0.position()
+    }
+    fn storage_initial_prefix_complete(
+        &self,
+    ) -> Result<bool, obzenflow_core::journal::JournalError> {
+        self.0.initial_prefix_complete()
+    }
+    fn storage_is_at_end(&self) -> bool {
+        self.0.is_at_end()
+    }
+}
+
 struct ByteCount(usize);
 impl std::io::Write for ByteCount {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -414,7 +478,7 @@ impl std::io::Write for ByteCount {
 mod tests {
     use super::*;
     use obzenflow_core::event::journal_record::SystemJournalRecord;
-    use obzenflow_core::journal::{JournalError, JournalReader};
+    use obzenflow_core::journal::JournalError;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
@@ -490,7 +554,8 @@ mod tests {
         readers.spawn_reader(
             ready,
             Box::pin(async move {
-                Ok(Box::new(reader(ready, 3)) as Box<dyn JournalReader<SystemEvent>>)
+                Ok(Box::new(CompleteReaderFixture(Box::new(reader(ready, 3))))
+                    as Box<dyn JournalReportReader<SystemEvent>>)
             }),
             |row| Some(row.into()),
         );

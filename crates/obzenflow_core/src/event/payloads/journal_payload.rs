@@ -31,6 +31,8 @@ pub trait JournalPayload:
         + Sync;
     fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error>;
     fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error>;
+    /// Protected, borrowing classification. Owner authority is checked by the consumer.
+    fn is_supervision_candidate(&self) -> bool;
     fn visit_metrics_keys(
         &self,
         provenance: &Self::Provenance,
@@ -42,6 +44,15 @@ impl sealed::Sealed for ChainPayload {}
 impl JournalPayload for ChainPayload {
     type Event = crate::event::ChainEvent;
     type Provenance = ChainEventProvenance;
+
+    fn is_supervision_candidate(&self) -> bool {
+        match self {
+            Self::Execution(execution) => execution.is_supervision_candidate(),
+            Self::Fact(_) | Self::CompositeData(_) | Self::FlowControl(_) | Self::Delivery(_) => {
+                false
+            }
+        }
+    }
 
     fn visit_metrics_keys(
         &self,
@@ -153,6 +164,10 @@ impl sealed::Sealed for SystemPayload {}
 impl JournalPayload for SystemPayload {
     type Event = crate::event::SystemEvent;
     type Provenance = SystemEventProvenance;
+
+    fn is_supervision_candidate(&self) -> bool {
+        true
+    }
 
     fn visit_metrics_keys(
         &self,

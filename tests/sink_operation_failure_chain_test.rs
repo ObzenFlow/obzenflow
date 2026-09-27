@@ -132,6 +132,14 @@ impl<T: obzenflow_core::event::JournalEvent> obzenflow_core::journal::JournalSto
         self.inner.reader_from(position).await
     }
 
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
+    {
+        self.inner.report_reader_from(position).await
+    }
+
     async fn storage_read_last_n(
         &self,
         count: usize,

@@ -11,6 +11,10 @@ use obzenflow_core::journal::journal_error::JournalError;
 use std::sync::{Arc, Mutex};
 
 use super::journal::MemoryJournalState;
+use obzenflow_core::journal::reader::{
+    JournalReportStorageReader, ReportScan, ReportScanBudget, ReportScanItem,
+};
+use obzenflow_core::JournalPayload;
 
 /// Reader for `MemoryJournal`.
 ///
@@ -32,6 +36,59 @@ impl<T: JournalEvent> MemoryJournalReader<T> {
             position: clamped,
             initial_len: len,
         }
+    }
+}
+
+#[async_trait]
+impl<T: JournalEvent> JournalReportStorageReader<T> for MemoryJournalReader<T> {
+    async fn storage_next_report(
+        &mut self,
+        budget: ReportScanBudget,
+    ) -> Result<ReportScan<T::Payload>, JournalError> {
+        // Yield before cursor mutation, so cancellation cannot lose a report.
+        tokio::task::yield_now().await;
+        let item = {
+            let state = self.state.lock().unwrap();
+            let end = (state.events.len() as u64)
+                .min(self.position.saturating_add(budget.records.max(1) as u64));
+            let end = if self.position < self.initial_len {
+                end.min(self.initial_len)
+            } else {
+                end
+            };
+            let from = self.position;
+            let mut selected = None;
+            while self.position < end {
+                let row = &state.events[self.position as usize];
+                self.position += 1;
+                if row.payload.is_supervision_candidate() {
+                    // The stored group was validated atomically at append. Skip
+                    // unselected records without cloning payloads or provenance.
+                    selected = Some(row.clone());
+                    break;
+                }
+            }
+            match selected {
+                Some(row) => ReportScanItem::Record(Box::new(row)),
+                None if self.position > from => ReportScanItem::Progress,
+                None => ReportScanItem::Tail {
+                    committed_end: true,
+                },
+            }
+        };
+        Ok(ReportScan {
+            item,
+            scanned_bytes: 0,
+        })
+    }
+    fn storage_position(&self) -> u64 {
+        self.position
+    }
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        Ok(self.position >= self.initial_len)
+    }
+    fn storage_is_at_end(&self) -> bool {
+        self.position >= self.state.lock().unwrap().events.len() as u64
     }
 }
 

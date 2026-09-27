@@ -6,4 +6,6 @@
 
 pub mod causal;
 pub mod journal;
+#[doc(hidden)]
+pub mod journal_bench;
 pub mod sink;

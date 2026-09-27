@@ -5,6 +5,9 @@
 #![doc = include_str!("../README.md")]
 
 pub mod ai;
+#[cfg(feature = "bench-instrumentation")]
+#[doc(hidden)]
+pub mod benchmark;
 pub mod build_info;
 pub mod composite;
 pub mod config;

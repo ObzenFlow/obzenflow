@@ -47,10 +47,13 @@ impl<P: JournalPayload> DerefMut for JournalRecord<P> {
 
 impl<P: JournalPayload> JournalRecord<P> {
     pub fn from_parts(envelope: EventEnvelope<P::Provenance>, payload: P) -> Self {
-        Self {
+        let record = Self {
             data: JournalRecordData { envelope, payload },
             admitted: false,
-        }
+        };
+        #[cfg(feature = "bench-instrumentation")]
+        crate::benchmark::record_constructed(&record);
+        record
     }
 
     pub fn into_parts(self) -> (EventEnvelope<P::Provenance>, P) {
@@ -62,9 +65,14 @@ impl<P: JournalPayload> JournalRecord<P> {
     }
 
     pub(crate) fn admit(mut self) -> Result<Self, super::CausalError> {
-        super::PreparedCausalCommit::validate_record(&self)?;
-        self.admitted = true;
+        self.admit_in_place()?;
         Ok(self)
+    }
+
+    pub(crate) fn admit_in_place(&mut self) -> Result<(), super::CausalError> {
+        super::PreparedCausalCommit::validate_record(self)?;
+        self.admitted = true;
+        Ok(())
     }
 
     pub fn new<E: JournalEvent<Payload = P>>(journal_writer_id: JournalWriterId, event: E) -> Self {
@@ -175,6 +183,8 @@ impl<P: JournalPayload> JournalRecord<P> {
 
 impl<P: JournalPayload> Serialize for JournalRecord<P> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[cfg(feature = "bench-instrumentation")]
+        crate::benchmark::record_serialized(&self.payload);
         use serde::ser::{Error, SerializeStruct};
         self.payload
             .validate(&self.envelope.provenance.event)
