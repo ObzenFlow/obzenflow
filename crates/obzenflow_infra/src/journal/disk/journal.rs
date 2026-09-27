@@ -1190,6 +1190,117 @@ mod tests {
 
     use uuid::Uuid;
 
+    #[test]
+    fn selective_lock_wait_leaves_blocking_worker_available_for_append() {
+        use obzenflow_core::event::payloads::execution_payload::{
+            ExecutionPayload, StageLifecycleFact,
+        };
+        use obzenflow_core::event::provenance::FlowContext;
+        use obzenflow_core::event::ChainPayload;
+        use obzenflow_core::journal::reader::ReportScanItem;
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for grouped in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let stage = StageId::new();
+                let journal = DiskJournal::<ChainEvent>::with_owner(
+                    directory.path().join("lock-wait.log"),
+                    JournalOwner::stage(stage),
+                )
+                .unwrap();
+                let mut reader = journal.report_reader_from(0).await.unwrap();
+                let make_report = || {
+                    ChainEventFactory::create_with_context(
+                        stage.into(),
+                        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                            StageLifecycleFact::Running { stage_id: stage },
+                        )),
+                        FlowContext::new("child", stage),
+                    )
+                };
+                // Pause the actual append after it acquires the journal write
+                // lock, before it can prepare/submit its physical write. Calling
+                // the private commit unit permits safe cleanup of the old bug
+                // before any append job has been submitted.
+                let preparation_gate = journal.last_commit.write().await;
+                let frontier = CausalFrontier::default();
+                let mut append = Box::pin(async {
+                    if grouped {
+                        journal
+                            .append_records(
+                                "reports",
+                                vec![make_report(), make_report()],
+                                &frontier,
+                            )
+                            .await
+                    } else {
+                        journal
+                            .append_record(make_report(), &frontier)
+                            .await
+                            .map(|row| vec![row])
+                    }
+                });
+                assert!(futures::poll!(append.as_mut()).is_pending());
+                assert!(journal.read_write_lock.try_read().is_err());
+                {
+                    let mut next = Box::pin(reader.next_report(Default::default()));
+                    assert!(futures::poll!(next.as_mut()).is_pending());
+                }
+                // This job is behind any submitted reader job. The writer must
+                // be able to use this sole worker without first releasing its
+                // write lock. Release all gates before asserting on failure so
+                // a regression cannot hang runtime teardown.
+                let deadline = Duration::from_secs(5);
+                let mut worker = tokio::task::spawn_blocking(|| ());
+                let available = tokio::time::timeout(deadline, &mut worker).await;
+                if available.is_err() {
+                    drop(append);
+                    drop(preparation_gate);
+                    drop(reader);
+                    tokio::time::timeout(deadline, worker)
+                        .await
+                        .expect("reader cleanup releases the worker")
+                        .unwrap();
+                    panic!("selective lock wait occupied the worker required by the append");
+                }
+                available.unwrap().unwrap();
+                drop(preparation_gate);
+                let receipts = tokio::time::timeout(deadline, append)
+                    .await
+                    .expect("append must finish with one blocking worker")
+                    .unwrap();
+                for receipt in &receipts {
+                    let scan =
+                        tokio::time::timeout(deadline, reader.next_report(Default::default()))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    let ReportScanItem::Record(row) = scan.item else {
+                        panic!("committed report must be delivered");
+                    };
+                    assert_eq!(row.id(), receipt.id());
+                    assert_eq!(reader.position(), receipt.local_sequence());
+                }
+                assert!(matches!(
+                    reader.next_report(Default::default()).await.unwrap().item,
+                    ReportScanItem::Tail {
+                        committed_end: true
+                    }
+                ));
+                assert_eq!(
+                    journal.committed_position().await.unwrap(),
+                    receipts.len() as u64
+                );
+            }
+        });
+    }
+
     #[tokio::test]
     async fn cancelled_append_retains_index_clock_and_writer_serialisation() {
         use futures::FutureExt;

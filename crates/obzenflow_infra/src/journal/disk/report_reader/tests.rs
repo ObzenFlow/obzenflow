@@ -206,10 +206,152 @@ async fn cancelling_a_pending_scan_retains_its_job_and_delivers_every_report() {
         "in-flight state must not be replaced"
     );
     assert_eq!(JournalReportReader::position(&reader), 0);
+    // A cancelled caller must not discard the reader's place in the lock
+    // queue. This later writer stays behind the retained acquisition.
+    let mut later_writer = Box::pin(lock.clone().write_owned());
+    assert!(futures::poll!(later_writer.as_mut()).is_pending());
     drop(guard);
+    assert!(futures::poll!(later_writer.as_mut()).is_pending());
+    drop(later_writer);
     assert_eq!(
         drain(&mut reader).await,
         vec![(2, *rows[1].id()), (4, *rows[3].id())]
+    );
+}
+
+#[tokio::test]
+async fn writer_between_frames_yields_verified_progress_without_a_false_tail() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let stage = StageId::new();
+    let path = dir.path().join("data.log");
+    let journal =
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let rows = populate(&journal, stage, false).await;
+    let first_bytes = frame::frame_length(&std::fs::read(&path).unwrap()).unwrap();
+    let lock = super::super::journal::shared_state_for_path(&path).0;
+    let mut reader = DiskReportReader::<ChainEvent>::new(path, *journal.id(), lock.clone(), 5, 0)
+        .await
+        .unwrap();
+    let held = Arc::new(Mutex::new(None));
+    let writer = held.clone();
+    reader.state.as_mut().unwrap().after_frame_read = Some(Box::new(move || {
+        *writer.lock().unwrap() = Some(
+            lock.try_write_owned()
+                .expect("copied-frame processing must release the read lock"),
+        );
+    }));
+    let scan = tokio::time::timeout(
+        Duration::from_secs(5),
+        reader.next_report(Default::default()),
+    )
+    .await;
+    // Unblock even a regressed scanner before an assertion can fail.
+    if scan.is_err() {
+        held.lock().unwrap().take();
+    }
+    let scan = scan
+        .expect("a contended scan must yield its verified prefix")
+        .unwrap();
+    assert!(matches!(scan.item, ReportScanItem::Progress));
+    assert_eq!(scan.scanned_bytes, first_bytes);
+    assert_eq!(JournalReportReader::position(&reader), 1);
+    assert!(!JournalReportReader::is_at_end(&reader));
+    assert!(!JournalReportReader::initial_prefix_complete(&reader).unwrap());
+    assert_eq!(reader.stall_polls, 0);
+    {
+        let mut next = Box::pin(reader.next_report(Default::default()));
+        assert!(futures::poll!(next.as_mut()).is_pending());
+    }
+    assert_eq!(JournalReportReader::position(&reader), 1);
+    held.lock().unwrap().take();
+    assert_eq!(
+        drain(&mut reader).await,
+        vec![(2, *rows[1].id()), (4, *rows[3].id())]
+    );
+}
+
+#[tokio::test]
+async fn cancelled_copied_group_retains_reports_and_decodes_without_the_lock() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let stage = StageId::new();
+    let path = dir.path().join("data.log");
+    let journal =
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let rows = populate(&journal, stage, true).await;
+    let lock = super::super::journal::shared_state_for_path(&path).0;
+    let mut reader = DiskReportReader::<ChainEvent>::new(path, *journal.id(), lock.clone(), 5, 0)
+        .await
+        .unwrap();
+    let (entered, copied) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let resume = Mutex::new(resume);
+    reader.state.as_mut().unwrap().after_frame_read = Some(Box::new(move || {
+        entered.send(()).unwrap();
+        resume
+            .into_inner()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    }));
+    {
+        let next = reader.next_report(Default::default());
+        tokio::pin!(next);
+        tokio::select! {
+            _ = &mut next => panic!("scan must pause after copying the frame"),
+            result = copied => result.unwrap(),
+        }
+    }
+    assert_eq!(JournalReportReader::position(&reader), 0);
+    let writer = lock
+        .try_write()
+        .expect("decoding must not retain the read guard");
+    release.send(()).unwrap();
+    for index in [1, 3] {
+        let scan = tokio::time::timeout(
+            Duration::from_secs(5),
+            reader.next_report(Default::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let ReportScanItem::Record(row) = scan.item else {
+            panic!("retained group report must be delivered");
+        };
+        assert_eq!(row.id(), rows[index].id());
+        assert_eq!(JournalReportReader::position(&reader), (index + 1) as u64);
+    }
+    drop(writer);
+    assert!(drain(&mut reader).await.is_empty());
+    assert_eq!(JournalReportReader::position(&reader), 5);
+}
+
+#[tokio::test]
+async fn dropping_a_reader_cancels_its_queued_lock_acquisition() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = StageId::new();
+    let path = dir.path().join("data.log");
+    let journal =
+        DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
+    let lock = super::super::journal::shared_state_for_path(&path).0;
+    let mut reader = DiskReportReader::<ChainEvent>::new(path, *journal.id(), lock.clone(), 0, 0)
+        .await
+        .unwrap();
+    let writer = lock.write().await;
+    {
+        let mut next = Box::pin(reader.next_report(Default::default()));
+        assert!(futures::poll!(next.as_mut()).is_pending());
+    }
+    drop(reader);
+    drop(writer);
+    assert!(
+        lock.try_write().is_ok(),
+        "no detached lock waiter may survive the reader"
     );
 }
 

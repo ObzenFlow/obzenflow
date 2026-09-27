@@ -9,6 +9,10 @@ separate references.
 The [accepted local baseline and investigation comparison](../../../obzenflow-improvement-proposals/content/planning/obzenflow/P1/evidence/145h-journal-hot-path-baseline-2026-09-27.md)
 records all 138 cases, their work censuses, and the live-reader liveness defect
 found during fixture validation.
+The subsequent [report-reader locking comparison](../../../obzenflow-improvement-proposals/content/planning/obzenflow/P1/evidence/145h-report-reader-locking-comparison-2026-09-27.md)
+preserves a fresh 37-case before/after reference and eight completed live cases
+with two blocking workers. It records the liveness fix, its allocation cost and
+the observed live-workload regression separately from sparse-scan improvements.
 
 ## Measurement contract: journal-hot-path-v2
 
@@ -90,16 +94,23 @@ business records before each report. Three workloads separate scaling effects:
 Live cases explicitly use `blocking_capacity_512` with two async workers. Prepared
 cases retain two blocking workers. This distinction is consequential: the live
 eight-journal fixture with two blocking workers stalled twice before any parent
-report admission. A selective reader calls `blocking_read` inside a blocking job;
-an appender can hold the write lock while waiting for its own queued blocking job.
-Occupied reader workers can therefore prevent the writer that releases their lock
-from running. This is a separately recorded failure, not a slow completed sample,
-and the benchmark work does not fix it. The application leaves Tokio's default
-blocking limit in place; the fixture does not establish the cause of the earlier CI
-timeouts. Reproduce the constrained configuration explicitly:
+report admission in the original baseline. The selective reader called
+`blocking_read` inside a blocking job, while an appender could hold the write lock
+awaiting its own queued blocking job. Occupied reader workers prevented the writer
+that released their lock from running. Those failed operations have no elapsed-time
+baseline.
+
+The reader now retains an asynchronous lock acquisition before submitting its
+blocking work. After each copied frame it releases the guard; contention before
+another frame returns verified progress without declaring a tail. Sparse scans
+still process multiple frames per job when uncontended. The constrained cases now
+complete, including their report-order, processed-coverage and committed-parent
+publication checks. The default 512-worker cases remain unchanged for comparability.
+These component results do not establish the cause of the earlier CI timeouts.
+Run the complete constrained live group explicitly:
 
 ```sh
-env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_LIVE_BLOCKING_THREADS=2 cargo bench --offline --locked --profile test -p obzenflow_benchmarks --features supervision-benchmarks --bench journal_hot_path -- 'supervisor_fan_in/live_per_journal_8/blocking_capacity_2/journals_8/business_between_0$' --test
+env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_LIVE_BLOCKING_THREADS=2 cargo bench --offline --locked --profile test -p obzenflow_benchmarks --features supervision-benchmarks --bench journal_hot_path -- 'supervisor_fan_in/live_per_journal_8/blocking_capacity_2/' --test
 ```
 
 Each child ends with `Running`; earlier reports are passing contract status facts.

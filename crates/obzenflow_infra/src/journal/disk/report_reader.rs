@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Bounded payload-blind scans, retaining one blocking operation across cancellation.
+//! Bounded payload-blind scans, retaining lock acquisition and I/O across cancellation.
 use super::codec::{frame, Decoder};
 use super::identity::{read_identity, CommitmentAdmission};
 use super::scanner::read_frame_sync;
@@ -15,14 +15,16 @@ use obzenflow_core::journal::JournalError;
 use obzenflow_core::JournalId;
 use std::collections::VecDeque;
 use std::fs::File;
+use std::future::Future;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+use tokio::task::JoinError;
 
 #[cfg(test)]
 mod tests;
@@ -44,6 +46,8 @@ struct ScanState {
     admission: CommitmentAdmission,
     lock: Arc<RwLock<()>>,
     cancelled: Arc<AtomicBool>,
+    #[cfg(test)]
+    after_frame_read: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 struct Batch<T: JournalEvent> {
@@ -57,6 +61,7 @@ impl ScanState {
     fn scan<T: JournalEvent>(
         &mut self,
         budget: ReportScanBudget,
+        first_guard: OwnedRwLockReadGuard<()>,
     ) -> Result<Batch<T>, JournalError> {
         // Pin the opened incarnation, refusing replacement/truncation on a later quantum.
         let actual = std::fs::metadata(&self.path).map_err(error)?;
@@ -73,16 +78,40 @@ impl ScanState {
         }
         let from = self.through;
         let mut bytes = 0;
+        let mut first_guard = Some(first_guard);
         loop {
             if self.cancelled.load(Ordering::Relaxed) {
                 return Err(error("reader dropped"));
             }
-            let raw = {
-                // Only raw I/O holds the writer lock. Parsing, metadata loading
-                // and report reconstruction cannot block the next append.
-                let _guard = self.lock.blocking_read();
-                read_frame_sync(&mut self.input, &mut self.buf).map_err(error)?
+            // The first guard was acquired asynchronously, without occupying a
+            // blocking worker. Between frames never wait for a writer which may
+            // need this same pool to commit and release its lock. A contended
+            // quantum yields only its already verified prefix, never a tail.
+            let next_guard = if first_guard.is_some() {
+                None
+            } else {
+                match self.lock.try_read() {
+                    Ok(guard) => Some(guard),
+                    Err(_) => {
+                        return Ok(Batch {
+                            records: VecDeque::new(),
+                            through: self.through,
+                            bytes,
+                            tail: None,
+                        });
+                    }
+                }
             };
+            let raw = read_frame_sync(&mut self.input, &mut self.buf);
+            // Only raw I/O holds the journal lock. Parsing, metadata loading
+            // and report reconstruction cannot block the next append.
+            drop(next_guard);
+            drop(first_guard.take());
+            let raw = raw.map_err(error)?;
+            #[cfg(test)]
+            if let Some(after_frame_read) = self.after_frame_read.take() {
+                after_frame_read();
+            }
             let Some((consumed, _)) = raw else {
                 return Ok(Batch {
                     records: VecDeque::new(),
@@ -134,7 +163,22 @@ impl ScanState {
     }
 }
 
-type ScanJob<T> = JoinHandle<(ScanState, Result<Batch<T>, JournalError>)>;
+type ScanResult<T> = Result<(ScanState, Result<Batch<T>, JournalError>), JoinError>;
+type ScanJob<T> = Pin<Box<dyn Future<Output = ScanResult<T>> + Send + Sync>>;
+
+async fn run_scan<T: JournalEvent>(
+    mut state: ScanState,
+    budget: ReportScanBudget,
+) -> ScanResult<T> {
+    let first_guard = state.lock.clone().read_owned().await;
+    #[cfg(feature = "bench-instrumentation")]
+    obzenflow_core::benchmark::add(obzenflow_core::benchmark::Counter::DecodeBlockingJobs, 1);
+    tokio::task::spawn_blocking(move || {
+        let result = state.scan::<T>(budget, first_guard);
+        (state, result)
+    })
+    .await
+}
 
 pub(super) struct DiskReportReader<T: JournalEvent> {
     state: Option<ScanState>,
@@ -178,6 +222,8 @@ impl<T: JournalEvent> DiskReportReader<T> {
             through: 0,
             lock,
             cancelled: cancelled.clone(),
+            #[cfg(test)]
+            after_frame_read: None,
         };
         let target = position.min(initial_position);
         let mut reader = Self {
@@ -273,18 +319,11 @@ impl<T: JournalEvent> JournalReportStorageReader<T> for DiskReportReader<T> {
                 }
             }
             if self.job.is_none() {
-                let mut state = self.state.take().expect("one owned scan state");
-                #[cfg(feature = "bench-instrumentation")]
-                obzenflow_core::benchmark::add(
-                    obzenflow_core::benchmark::Counter::DecodeBlockingJobs,
-                    1,
-                );
-                self.job = Some(tokio::task::spawn_blocking(move || {
-                    let result = state.scan::<T>(budget);
-                    (state, result)
-                }));
+                let state = self.state.take().expect("one owned scan state");
+                self.job = Some(Box::pin(run_scan::<T>(state, budget)));
             }
-            // Await by reference: cancellation leaves this exact job in the reader.
+            // Cancellation retains the entire operation, including its place in
+            // the lock queue, its cursor and any submitted blocking job.
             let settled = self.job.as_mut().unwrap().await;
             self.job = None;
             let result = match settled {
