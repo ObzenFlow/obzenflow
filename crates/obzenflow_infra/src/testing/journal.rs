@@ -109,6 +109,12 @@ fn rewrite_archive(
     let manifest = load_manifest(run)?;
     let mut files = std::collections::BTreeMap::new();
     files.insert(manifest.system_journal_file, true);
+    // Metrics records can reference definitions in the other journals. Localise
+    // them in the same decode-before-replace pass so no old offsets survive.
+    if let Some(metrics) = manifest.metrics_journals {
+        files.insert(metrics.coordination_journal_file, true);
+        files.insert(metrics.export_journal_file, true);
+    }
     for stage in manifest.stages.values() {
         files.insert(stage.data_journal_file.clone(), false);
         files.insert(stage.error_journal_file.clone(), false);
