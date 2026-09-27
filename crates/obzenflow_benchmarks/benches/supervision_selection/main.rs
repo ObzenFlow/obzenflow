@@ -99,7 +99,7 @@ fn discover(runtime: &Runtime, history: &History) -> (Duration, Census) {
                         let expected = history.reports[&journal].get(*index);
                         let matches = expected.is_some_and(|e| {
                             row.journal().vector_clock == e.journal().vector_clock
-                                && row.journal().causal == e.journal().causal
+                                && row.journal().previous == e.journal().previous
                                 && matches!((&row.payload, &e.payload),
                                     (SystemPayload::StageLifecycle { stage_id: a, event: StageLifecycleEvent::Running },
                                      SystemPayload::StageLifecycle { stage_id: b, event: StageLifecycleEvent::Running }) if a == b)

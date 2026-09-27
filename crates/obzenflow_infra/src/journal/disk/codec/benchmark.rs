@@ -6,7 +6,7 @@
 use super::*;
 use obzenflow_core::event::provenance::ChainEventProvenance;
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::{CausalWitnesses, ChainPayload};
+use obzenflow_core::event::ChainPayload;
 
 pub struct ReconstructionInput {
     path: PathBuf,
@@ -19,7 +19,6 @@ pub struct ReconstructionInput {
 pub struct MetadataValue {
     pub event: ChainEventProvenance,
     pub clock: VectorClock,
-    pub causal: CausalWitnesses,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -95,7 +94,6 @@ impl MemberRead<'_> {
         MetadataValue {
             event: stored.event,
             clock: stored.vector_clock,
-            causal: stored.causal,
             timestamp: stored.timestamp,
         }
     }

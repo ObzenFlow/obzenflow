@@ -236,14 +236,6 @@ impl Renderer {
                 let (indices, closed) = self.group_indices(index);
                 let parents = parent_ids(record);
                 if (force || closed)
-                    && (force
-                        || !(self.explain || self.full)
-                        || indices.iter().all(|index| {
-                            !matches!(
-                                self.context.causal_proof(&self.pending[*index]),
-                                obzenflow_core::journal::causal::CausalProof::Unresolved { .. }
-                            )
-                        }))
                     && self.context.parents_available(record)
                     && parents.iter().all(|parent| !pending_ids.contains(parent))
                 {

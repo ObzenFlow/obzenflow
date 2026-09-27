@@ -895,7 +895,7 @@ mod tests {
             ChainEventFactory::data_event(stage_writer_id, "data.a", serde_json::json!({})),
             JournalProvenance {
                 run_id: obzenflow_core::FlowId::new(),
-                causal: Default::default(),
+                previous: None,
                 journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: clock_a,
                 timestamp: Utc::now(),
@@ -917,7 +917,7 @@ mod tests {
             ChainEventFactory::data_event(stage_writer_id, "data.b", serde_json::json!({})),
             JournalProvenance {
                 run_id: obzenflow_core::FlowId::new(),
-                causal: Default::default(),
+                previous: None,
                 journal_writer_id: JournalWriterId::from(stage_journal_impl.id),
                 vector_clock: clock_b,
                 timestamp: Utc::now(),

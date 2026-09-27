@@ -4,10 +4,9 @@
 
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{
-    CausalCommit, CausalError, CausalFrontier, ChainEventFactory, ChainPayload, JournalRecord,
-    PreparedCausalCommit, SystemEvent,
+    CausalError, CausalFrontier, ChainEventFactory, ChainPayload, JournalClock, JournalRecord,
+    SystemEvent,
 };
-use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
 use obzenflow_core::journal::{AppendOptions, Journal, JournalStorage};
 use obzenflow_core::JournalOwner;
 use obzenflow_core::{ChainEvent, FlowId, StageId};
@@ -16,13 +15,9 @@ use std::sync::Arc;
 
 fn rejects_unadmitted(record: &JournalRecord<ChainPayload>) {
     // A shape check remains useful for codecs, but cannot confer authority.
-    PreparedCausalCommit::from_record(record).unwrap();
+    JournalClock::from_record(record).unwrap();
     assert_eq!(
         CausalFrontier::from_record(record).unwrap_err(),
-        CausalError::UnadmittedRecord
-    );
-    assert_eq!(
-        CausalCommit::from_record(record).unwrap_err(),
         CausalError::UnadmittedRecord
     );
     assert!(matches!(
@@ -51,7 +46,7 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
         };
         let uncommitted = JournalRecord::new((*journal.id()).into(), event());
         rejects_unadmitted(&uncommitted);
-        let (candidate, causal) = PreparedCausalCommit::prepare(
+        let (candidate, causal) = JournalClock::prepare(
             uncommitted.envelope.provenance.journal.run_id,
             uncommitted.causal_coordinate(),
             *uncommitted.id(),
@@ -61,7 +56,7 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
         .unwrap();
         let mut provenance = uncommitted.envelope.provenance.journal.clone();
         provenance.vector_clock = candidate.clock;
-        provenance.causal = causal;
+        provenance.previous = causal;
         let candidate_record =
             JournalRecord::commit_event(uncommitted.into_authored(), provenance).unwrap();
         rejects_unadmitted(&candidate_record);
@@ -109,8 +104,8 @@ async fn construction_decoding_and_mutation_cannot_create_committed_evidence() {
             .await
             .unwrap();
         assert_eq!(
-            child.envelope.provenance.journal.causal.previous,
-            Some(CausalCommit::from_record(&receipt).unwrap().reference)
+            child.envelope.provenance.journal.previous,
+            Some(receipt.commitment())
         );
     }
 }
@@ -151,17 +146,18 @@ async fn storage_data_becomes_evidence_only_through_successful_journal_operation
             )
             .await
             .unwrap();
-        let mut cache = CausalProofCache::new(8, 8);
-        cache
-            .admit(CausalCommit::from_record(&committed).unwrap())
-            .unwrap();
+        let mut previous = &committed;
         for member in &members {
-            let evidence = CausalCommit::from_record(member).unwrap();
-            assert!(matches!(
-                cache.verify(&evidence, &member.envelope.provenance.journal.causal),
-                CausalProof::Valid { .. }
-            ));
-            cache.admit(evidence).unwrap();
+            assert_eq!(
+                member.envelope.provenance.journal.previous,
+                Some(previous.commitment())
+            );
+            let mut expected = previous.envelope.provenance.journal.vector_clock.clone();
+            expected
+                .clocks
+                .insert(member.causal_coordinate(), previous.local_sequence() + 1);
+            assert_eq!(member.envelope.provenance.journal.vector_clock, expected);
+            previous = member;
             assert_eq!(
                 CausalFrontier::from_record(&reader.next().await.unwrap().unwrap()).unwrap(),
                 CausalFrontier::from_record(member).unwrap()
@@ -295,30 +291,25 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
                 &pair[1].envelope.provenance.journal.vector_clock
             ));
         }
-        let mut cache = CausalProofCache::new(100, 1000);
-        for record in [&source, &left, &right, &joined] {
-            let commitment = CausalCommit::from_record(record).unwrap();
-            assert!(matches!(
-                cache.verify(&commitment, &record.envelope.provenance.journal.causal),
-                CausalProof::Valid { .. }
-            ));
-            cache.admit(commitment).unwrap();
-        }
-        for record in [&lifecycle, &unrelated] {
-            let commitment = CausalCommit::from_record(record).unwrap();
-            assert!(matches!(
-                cache.verify(&commitment, &record.envelope.provenance.journal.causal),
-                CausalProof::Valid { .. }
-            ));
-            cache.admit(commitment).unwrap();
-        }
-        for record in std::iter::once(&authorised).chain(&members) {
-            let commitment = CausalCommit::from_record(record).unwrap();
-            assert!(matches!(
-                cache.verify(&commitment, &record.envelope.provenance.journal.causal),
-                CausalProof::Valid { .. }
-            ));
-            cache.admit(commitment).unwrap();
+        let mut expected = left.envelope.provenance.journal.vector_clock.clone();
+        CausalOrderingService::update_with_parent(
+            &mut expected,
+            &right.envelope.provenance.journal.vector_clock,
+        );
+        expected.clocks.insert(joined.causal_coordinate(), 1);
+        assert_eq!(joined.envelope.provenance.journal.vector_clock, expected);
+        expected.clocks.insert(lifecycle.causal_coordinate(), 1);
+        assert_eq!(lifecycle.envelope.provenance.journal.vector_clock, expected);
+        expected.clocks.insert(joined.causal_coordinate(), 2);
+        assert_eq!(
+            authorised.envelope.provenance.journal.vector_clock,
+            expected
+        );
+        for (index, member) in members.iter().enumerate() {
+            expected
+                .clocks
+                .insert(joined.causal_coordinate(), index as u64 + 3);
+            assert_eq!(member.envelope.provenance.journal.vector_clock, expected);
         }
     }
 }
@@ -355,8 +346,8 @@ async fn empty_and_populated_reopen_preserve_identity_with_surviving_readers() {
         .unwrap();
     assert_eq!(second.local_sequence(), 2);
     assert_eq!(
-        second.envelope.provenance.journal.causal.previous,
-        Some(CausalCommit::from_record(&first).unwrap().reference)
+        second.envelope.provenance.journal.previous,
+        Some(first.commitment())
     );
     assert_eq!(reader.next().await.unwrap().unwrap().local_sequence(), 2);
 }

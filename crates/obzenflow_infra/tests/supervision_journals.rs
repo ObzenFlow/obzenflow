@@ -103,8 +103,8 @@ async fn physical_reports_continue_after_data_eof_and_filtered_prefixes() {
         assert_eq!(observed.journal_id(), *journal.id());
         assert_eq!(observed.position(), boundary + 1);
         assert_eq!(
-            observed.commitment().unwrap().reference,
-            obzenflow_core::event::CausalCommit::from_record(&late)
+            observed.commitment(),
+            obzenflow_core::event::JournalClock::from_record(&late)
                 .unwrap()
                 .reference
         );

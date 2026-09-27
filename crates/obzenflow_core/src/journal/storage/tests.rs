@@ -3,9 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::event::{
-    CausalFrontier, ChainEvent, ChainEventFactory, ChainPayload, PreparedCausalCommit,
-};
+use crate::event::{CausalFrontier, ChainEvent, ChainEventFactory, ChainPayload, JournalClock};
 use std::future::{pending, poll_fn, Future};
 use std::sync::Mutex;
 use std::task::Poll;
@@ -115,7 +113,7 @@ fn assert_private(storage: &Storage, count: usize) {
     let candidates = storage.candidates.lock().unwrap();
     assert_eq!(candidates.len(), count);
     for record in &*candidates {
-        PreparedCausalCommit::from_record(record).unwrap();
+        JournalClock::from_record(record).unwrap();
         assert_eq!(
             CausalFrontier::from_record(record).unwrap_err(),
             CausalError::UnadmittedRecord

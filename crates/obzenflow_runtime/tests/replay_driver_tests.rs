@@ -65,24 +65,24 @@ async fn admitted_fixture(record: JournalRecord<ChainPayload>) -> JournalRecord<
 
 #[tokio::test]
 async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
-    use obzenflow_core::event::{CausalFrontier, PreparedCausalCommit};
+    use obzenflow_core::event::{CausalFrontier, JournalClock};
 
     let writer = WriterId::from(StageId::new());
     let event = || ChainEventFactory::data_event(writer, "test.event", serde_json::json!({}));
     let first = admitted_fixture(JournalRecord::new(JournalWriterId::new(), event())).await;
     let later_input = admitted_fixture(JournalRecord::new(JournalWriterId::new(), event())).await;
     let next_event = event();
-    let (next, witnesses) = PreparedCausalCommit::prepare(
+    let (next, previous) = JournalClock::prepare(
         first.envelope.provenance.journal.run_id,
         first.causal_coordinate(),
         next_event.id,
-        Some(&PreparedCausalCommit::from_record(&first).unwrap()),
+        Some(&JournalClock::from_record(&first).unwrap()),
         &CausalFrontier::from_record(&later_input).unwrap(),
     )
     .unwrap();
     let mut provenance = first.envelope.provenance.journal.clone();
     provenance.vector_clock = next.clock;
-    provenance.causal = witnesses;
+    provenance.previous = previous;
     let second =
         admitted_fixture(JournalRecord::commit_event(next_event, provenance).unwrap()).await;
     let reader = Box::new(TestReader {
@@ -104,12 +104,8 @@ async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
             CausalFrontier::from_record(&original).unwrap()
         );
         assert_eq!(
-            replayed.origin.references(),
-            vec![
-                PreparedCausalCommit::from_record(&original)
-                    .unwrap()
-                    .reference
-            ]
+            replayed.origin.clock(),
+            &original.envelope.provenance.journal.vector_clock
         );
     }
 }

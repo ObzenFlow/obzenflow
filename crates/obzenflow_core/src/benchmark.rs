@@ -32,11 +32,9 @@ counters! {
     BusinessSerializations => "business_record_accounting_serializations",
     StructuralValidations => "structural_validations",
     ValidatedClockEntries => "validated_clock_entries",
-    ValidatedWitnessReferences => "validated_witness_references",
     ClockSerializations => "clock_serializations",
     SerializedClockEntries => "serialized_clock_entries",
     ConstructedClockComponents => "constructed_record_clock_components",
-    ConstructedWitnessReferences => "constructed_record_witness_references",
     PrimaryFrameReads => "primary_frame_reads",
     PrimaryFrameBytes => "primary_frame_bytes",
     VerifiedFrames => "verified_frames",
@@ -50,8 +48,8 @@ counters! {
 /// Exposes the real structural validator only in instrumented development builds.
 pub fn validate_structure<P: JournalPayload>(
     record: &JournalRecord<P>,
-) -> Result<crate::event::CommittedCausalRef, crate::event::CausalError> {
-    crate::event::PreparedCausalCommit::validate_record(record)
+) -> Result<crate::event::JournalCommitRef, crate::event::CausalError> {
+    crate::event::JournalClock::validate_record(record)
 }
 
 static COUNTS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
@@ -93,10 +91,6 @@ pub fn record_constructed<P: JournalPayload>(record: &JournalRecord<P>) {
     add(
         Counter::ConstructedClockComponents,
         record.envelope.provenance.journal.vector_clock.clocks.len() as u64,
-    );
-    add(
-        Counter::ConstructedWitnessReferences,
-        record.envelope.provenance.journal.causal.witnesses.len() as u64,
     );
 }
 

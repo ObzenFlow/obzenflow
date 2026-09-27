@@ -70,7 +70,7 @@ impl<P: JournalPayload> JournalRecord<P> {
     }
 
     pub(crate) fn admit_in_place(&mut self) -> Result<(), super::CausalError> {
-        super::PreparedCausalCommit::validate_record(self)?;
+        super::JournalClock::validate_record(self)?;
         self.admitted = true;
         Ok(())
     }
@@ -87,7 +87,7 @@ impl<P: JournalPayload> JournalRecord<P> {
                     event: authored.provenance.event,
                     journal: JournalProvenance {
                         run_id: crate::FlowId::new(),
-                        causal: Default::default(),
+                        previous: None,
                         journal_writer_id,
                         vector_clock,
                         timestamp: chrono::Utc::now(),
@@ -109,6 +109,16 @@ impl<P: JournalPayload> JournalRecord<P> {
     ) -> Result<Self, serde_json::Error> {
         let (authored, payload) = event.into_parts();
         Self::commit(authored, payload, journal)
+    }
+
+    /// This record's placement identity; it does not resolve or prove ancestors.
+    pub fn commitment(&self) -> super::JournalCommitRef {
+        super::JournalCommitRef {
+            run_id: self.envelope.provenance.journal.run_id,
+            journal_writer_id: self.envelope.provenance.journal.journal_writer_id,
+            sequence: self.local_sequence(),
+            event_id: *self.id(),
+        }
     }
 
     pub fn causal_coordinate(&self) -> super::CausalCoordinate {
@@ -175,7 +185,7 @@ impl<P: JournalPayload> JournalRecord<P> {
             },
             payload,
         );
-        super::PreparedCausalCommit::validate_record(&record)
+        super::JournalClock::validate_record(&record)
             .map_err(<serde_json::Error as serde::de::Error>::custom)?;
         Ok(record)
     }
@@ -189,7 +199,7 @@ impl<P: JournalPayload> Serialize for JournalRecord<P> {
         self.payload
             .validate(&self.envelope.provenance.event)
             .map_err(S::Error::custom)?;
-        super::PreparedCausalCommit::validate_record(self).map_err(S::Error::custom)?;
+        super::JournalClock::validate_record(self).map_err(S::Error::custom)?;
         let mut record = serializer.serialize_struct("JournalRecord", 2)?;
         record.serialize_field("envelope", &self.envelope)?;
         record.serialize_field("payload", &self.payload)?;
@@ -209,7 +219,7 @@ impl<'de, P: JournalPayload> Deserialize<'de> for JournalRecord<P> {
             .validate(&record.envelope.provenance.event)
             .map_err(D::Error::custom)?;
         let record = Self::from_parts(record.envelope, payload);
-        super::PreparedCausalCommit::validate_record(&record).map_err(D::Error::custom)?;
+        super::JournalClock::validate_record(&record).map_err(D::Error::custom)?;
         Ok(record)
     }
 }

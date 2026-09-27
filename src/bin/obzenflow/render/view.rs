@@ -8,8 +8,7 @@
 use super::context::{clock, event_type, Context};
 use obzenflow::journal::read::*;
 use obzenflow::journal::ProcessingStatus;
-use obzenflow_core::event::{CausalCoordinate, CausalWitnesses};
-use obzenflow_core::journal::causal::CausalProof;
+use obzenflow_core::event::CausalCoordinate;
 use obzenflow_core::JournalId;
 use serde::Serialize;
 use std::borrow::Cow;
@@ -101,11 +100,6 @@ impl<'a> ClockView<'a> {
     }
 }
 
-pub(super) struct EvidenceView<'a> {
-    pub proof: CausalProof,
-    pub witnesses: &'a CausalWitnesses,
-}
-
 impl<'a> EventView<'a> {
     pub fn from_record(record: &'a RunRecord, context: &'a Context) -> Self {
         Self { record, context }
@@ -177,13 +171,6 @@ impl<'a> EventView<'a> {
 
     pub fn body(&self) -> BodyView<'a> {
         BodyView::from_record(self.record, self.context)
-    }
-
-    pub fn evidence(&self) -> EvidenceView<'a> {
-        EvidenceView {
-            proof: self.context.causal_proof(self.record),
-            witnesses: self.record.causal_witnesses(),
-        }
     }
 
     pub fn explanation(&self) -> &'static str {

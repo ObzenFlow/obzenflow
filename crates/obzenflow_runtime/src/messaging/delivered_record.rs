@@ -68,7 +68,7 @@ impl DeliveredRecord<ChainPayload> {
 mod tests {
     use super::*;
     use crate::testing::causal_fixture::committed_input;
-    use obzenflow_core::event::{CausalCommit, ChainEventFactory};
+    use obzenflow_core::event::{ChainEventFactory, JournalClock};
     use obzenflow_core::id::CompositeId;
     use obzenflow_core::{JournalWriterId, StageId};
     use serde_json::json;
@@ -78,7 +78,7 @@ mod tests {
         let event = ChainEventFactory::data_event(StageId::new().into(), "input", json!({}));
         let record = committed_input(JournalWriterId::new(), event);
         let original = serde_json::to_value(&record).unwrap();
-        let commitment = CausalCommit::from_record(&record).unwrap();
+        let commitment = JournalClock::from_record(&record).unwrap();
         let mut delivered = DeliveredRecord::from(record);
         let activation = CompositeActivationContext::new(
             CompositeId::new("composite"),
@@ -94,7 +94,7 @@ mod tests {
 
         let deferred = delivered.clone();
         assert_eq!(serde_json::to_value(deferred.record()).unwrap(), original);
-        let deferred_commitment = CausalCommit::from_record(deferred.record()).unwrap();
+        let deferred_commitment = JournalClock::from_record(deferred.record()).unwrap();
         assert_eq!(deferred_commitment.reference, commitment.reference);
         assert_eq!(deferred_commitment.clock, commitment.clock);
         assert!(deferred.record().composite_activations().is_empty());

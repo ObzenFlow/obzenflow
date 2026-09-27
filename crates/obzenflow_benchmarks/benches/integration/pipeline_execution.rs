@@ -460,7 +460,7 @@ fn bench_metrics_reporting(c: &mut Criterion) {
 /// predecessor and an admitted, increasingly wide frontier; preparation is
 /// outside the measured loop.
 fn bench_causal_record_costs(c: &mut Criterion) {
-    use obzenflow_core::event::{CausalCommit, CausalFrontier, ChainEventFactory};
+    use obzenflow_core::event::{CausalFrontier, ChainEventFactory, JournalClock};
     use obzenflow_core::journal::{limits::record_bytes, AppendOptions};
     use obzenflow_core::{Journal, JournalOwner, StageId};
     use obzenflow_infra::journal::MemoryJournal;
@@ -471,13 +471,13 @@ fn bench_causal_record_costs(c: &mut Criterion) {
     group.sample_size(30);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(3));
-    for witnesses in [1, 32, 1024] {
+    for incoming_journals in [1, 32, 1024] {
         let record = rt.block_on(async {
             let event = |stage| {
                 ChainEventFactory::data_event(stage, "bench.causal_record", Default::default())
             };
             let mut frontier = CausalFrontier::default();
-            for _ in 0..witnesses {
+            for _ in 0..incoming_journals {
                 let stage = StageId::new();
                 let parent = MemoryJournal::with_owner(JournalOwner::stage(stage));
                 let record = parent
@@ -500,25 +500,25 @@ fn bench_causal_record_costs(c: &mut Criterion) {
                 .unwrap()
         });
         assert_eq!(
-            record.envelope.provenance.journal.causal.witnesses.len(),
-            witnesses
+            record.envelope.provenance.journal.vector_clock.clocks.len(),
+            incoming_journals + 1
         );
         group.bench_with_input(
-            BenchmarkId::new("commitment", witnesses),
+            BenchmarkId::new("journal_clock_restore", incoming_journals),
             &record,
             |b, record| {
-                b.iter(|| black_box(CausalCommit::from_record(black_box(record)).unwrap()));
+                b.iter(|| black_box(JournalClock::from_record(black_box(record)).unwrap()));
             },
         );
         group.bench_with_input(
-            BenchmarkId::new("byte_budget", witnesses),
+            BenchmarkId::new("byte_budget", incoming_journals),
             &record,
             |b, record| {
                 b.iter(|| black_box(record_bytes(black_box(record)).unwrap()));
             },
         );
         group.bench_with_input(
-            BenchmarkId::new("authored", witnesses),
+            BenchmarkId::new("authored", incoming_journals),
             &record,
             |b, record| {
                 b.iter(|| black_box(record.authored()));

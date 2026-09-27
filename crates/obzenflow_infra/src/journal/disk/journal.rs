@@ -21,7 +21,7 @@ use obzenflow_core::event::identity::{EventId, JournalWriterId};
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
 use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{CausalCoordinate, CausalFrontier, PreparedCausalCommit};
+use obzenflow_core::event::{CausalCoordinate, CausalFrontier, JournalClock};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -87,7 +87,7 @@ pub struct DiskJournal<T: JournalEvent> {
     /// Writers take a write lock; readers take a read lock to avoid torn lines.
     read_write_lock: Arc<RwLock<()>>,
     /// Last committed record of this physical journal, independent of authorship
-    last_commit: Arc<RwLock<Option<PreparedCausalCommit>>>,
+    last_commit: Arc<RwLock<Option<JournalClock>>>,
     /// Set when a failed append could not be rolled back, leaving the file in an
     /// unknown state. Further appends are rejected until the journal is reopened.
     poisoned: Arc<AtomicBool>,
@@ -289,7 +289,7 @@ impl<T: JournalEvent> DiskJournal<T> {
 
 /// In-memory index (`event_id -> byte offset`) plus the last physical journal commitment
 /// rebuilt from a journal file.
-type RebuiltIndex = (HashMap<Ulid, u64>, Option<PreparedCausalCommit>, u64);
+type RebuiltIndex = (HashMap<Ulid, u64>, Option<JournalClock>, u64);
 
 fn open_append_file(
     path: &Path,
@@ -351,7 +351,7 @@ fn rebuild_index_from_path<T: JournalEvent>(
 ) -> Result<RebuiltIndex, JournalError> {
     let mut admission = super::identity::CommitmentAdmission::open(log_path)?;
     let mut index = HashMap::with_capacity(10000);
-    let mut last_commit: Option<PreparedCausalCommit> = None;
+    let mut last_commit: Option<JournalClock> = None;
 
     if !log_path.exists() {
         return Ok((index, last_commit, 0));
@@ -504,9 +504,9 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         // Compute the journal's next clock under the write lock. The helper is
         // store-free, so the journal clock is committed only after the file write
         // and flush succeed below.
-        let (commitment, causal) = {
+        let (commitment, predecessor) = {
             let last_commit = self.last_commit.read().await;
-            PreparedCausalCommit::prepare(
+            JournalClock::prepare(
                 self.run_id,
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
@@ -524,7 +524,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                 JournalProvenance {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
                     run_id: self.run_id,
-                    causal,
+                    previous: predecessor,
                     vector_clock: commitment.clock.clone(),
                     timestamp: Utc::now(),
                     journal_group_id: None,
@@ -691,7 +691,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
 
         for (index, event) in events.into_iter().enumerate() {
-            let (commitment, causal) = PreparedCausalCommit::prepare(
+            let (commitment, predecessor) = JournalClock::prepare(
                 self.run_id,
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
@@ -709,7 +709,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
                     JournalProvenance {
                         journal_writer_id: JournalWriterId::from(self.journal_id),
                         run_id: self.run_id,
-                        causal,
+                        previous: predecessor,
                         vector_clock: commitment.clock.clone(),
                         timestamp,
                         journal_group_id: Some(group_id.to_string()),
@@ -1527,7 +1527,7 @@ mod tests {
             super::super::observations::DiskObservationReader::<ChainEvent>::open(path.clone())
                 .unwrap();
         let identity = super::super::identity::read_identity(&path).unwrap();
-        let mut previous = Some(PreparedCausalCommit::from_record(&committed).unwrap());
+        let mut previous = Some(JournalClock::from_record(&committed).unwrap());
         let uncertain = super::super::identity::fixture_record(
             identity,
             crate::journal::observability::tests::event(stage, 2),

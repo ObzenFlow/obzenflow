@@ -159,12 +159,7 @@ pub(super) fn frame(
 
 fn observation(envelope: &SupervisorRecord) -> Observation<'_> {
     Observation {
-        commitment: Some(
-            envelope
-                .commitment()
-                .expect("admitted system commitment")
-                .reference,
-        ),
+        commitment: Some(envelope.commitment()),
         timestamp_ms: envelope.timestamp(),
         vector_clock: Some(&envelope.journal().vector_clock),
         capture: None,

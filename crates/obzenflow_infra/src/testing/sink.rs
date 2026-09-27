@@ -1170,7 +1170,8 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
         .iter()
         .filter_map(|event| match &event.payload {
             ChainPayload::Execution(payload) => payload
-                .supervision_report()
+                .clone()
+                .into_supervision_report()
                 .map(|report| (event.id, report)),
             _ => None,
         })

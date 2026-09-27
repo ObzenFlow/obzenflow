@@ -16,7 +16,7 @@ use obzenflow_core::event::identity::{EventId, JournalWriterId, WriterId};
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::provenance::{JournalGroupMember, JournalProvenance};
 use obzenflow_core::event::JournalEvent;
-use obzenflow_core::event::{CausalCoordinate, CausalFrontier, PreparedCausalCommit};
+use obzenflow_core::event::{CausalCoordinate, CausalFrontier, JournalClock};
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -35,7 +35,7 @@ use super::reader::MemoryJournalReader;
 
 pub(super) struct MemoryJournalState<T: JournalEvent> {
     pub(super) events: Vec<JournalRecord<T::Payload>>,
-    last_commit: Option<PreparedCausalCommit>,
+    last_commit: Option<JournalClock>,
     observations: ObservationIndex,
     metrics_tail: MetricsTailIndex,
 }
@@ -131,7 +131,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
             }
         }
 
-        let (commitment, causal) = PreparedCausalCommit::prepare(
+        let (commitment, predecessor) = JournalClock::prepare(
             self.run_id,
             CausalCoordinate::new(self.journal_id.into()),
             *event.id(),
@@ -148,7 +148,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 JournalProvenance {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
                     run_id: self.run_id,
-                    causal,
+                    previous: predecessor,
                     vector_clock: commitment.clock.clone(),
                     timestamp: Utc::now(),
                     journal_group_id: None,
@@ -210,7 +210,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
         let mut budget = obzenflow_core::journal::limits::GroupBudget::default();
 
         for (index, event) in events.into_iter().enumerate() {
-            let (commitment, causal) = PreparedCausalCommit::prepare(
+            let (commitment, predecessor) = JournalClock::prepare(
                 self.run_id,
                 CausalCoordinate::new(self.journal_id.into()),
                 *event.id(),
@@ -227,7 +227,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
                     JournalProvenance {
                         journal_writer_id: JournalWriterId::from(self.journal_id),
                         run_id: self.run_id,
-                        causal,
+                        previous: predecessor,
                         vector_clock: commitment.clock.clone(),
                         timestamp: Utc::now(),
                         journal_group_id: Some(group_id.to_string()),

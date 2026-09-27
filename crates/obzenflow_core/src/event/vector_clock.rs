@@ -339,7 +339,7 @@ mod tests {
             event,
             JournalProvenance {
                 run_id: crate::FlowId::new(),
-                causal: Default::default(),
+                previous: None,
                 journal_writer_id: coordinate.journal_writer_id,
                 vector_clock,
                 timestamp: Utc::now(),

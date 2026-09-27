@@ -104,8 +104,6 @@ pub(super) enum Layout {
     RecordBody,
     Event,
     Coordinate,
-    Commitment,
-    Witnesses,
     Writer,
     Context,
     Processing,
@@ -155,7 +153,6 @@ impl Layout {
                     &[
                         field("event", K::Struct(S::Event)),
                         field("vector_clock", K::Clock),
-                        field("causal", K::Struct(S::Witnesses)),
                         field("timestamp", K::Timestamp),
                     ]
                 }
@@ -184,24 +181,6 @@ impl Layout {
                 }
             }
             S::Coordinate => const { &[field("journal_writer_id", K::Id)] },
-            S::Commitment => {
-                const {
-                    &[
-                        field("run_id", K::FlowId),
-                        field("journal_writer_id", K::Definition(D::JournalWriter)),
-                        field("sequence", K::Unsigned),
-                        field("event_id", K::Id),
-                    ]
-                }
-            }
-            S::Witnesses => {
-                const {
-                    &[
-                        field("previous", K::Struct(S::Commitment)),
-                        field("witnesses", K::List(&K::Struct(S::Commitment))),
-                    ]
-                }
-            }
             S::Writer => const { &[field("type", K::Enum(WRITER_KINDS)), field("id", K::Id)] },
             S::Context => {
                 const {

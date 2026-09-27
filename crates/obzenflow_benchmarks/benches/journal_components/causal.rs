@@ -4,7 +4,7 @@
 
 use super::fixtures;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
-use obzenflow_core::event::{CausalCommit, CausalCoordinate, CausalFrontier, PreparedCausalCommit};
+use obzenflow_core::event::{CausalCoordinate, CausalFrontier, JournalClock};
 use obzenflow_core::journal::limits::record_bytes;
 use obzenflow_core::EventId;
 use std::cell::LazyCell;
@@ -17,14 +17,14 @@ pub fn bench(c: &mut Criterion) {
     for (width, payload) in [(1, 256), (32, 256), (1024, 256), (32, 8192)] {
         let fixture = LazyCell::new(|| {
             let (record, input) = runtime.block_on(fixtures::causal_record(width, payload));
-            let previous = CausalCommit::from_record(&record).unwrap().into_prepared();
+            let previous = JournalClock::from_record(&record).unwrap();
             let overlapping = CausalFrontier::from_record(&record).unwrap();
             (record, input, previous, overlapping)
         });
         let id = format!("w{width}_p{payload}");
-        group.bench_function(BenchmarkId::new("commitment", &id), |b| {
+        group.bench_function(BenchmarkId::new("journal_clock_restore", &id), |b| {
             let (record, _, _, _) = &*fixture;
-            b.iter(|| black_box(CausalCommit::from_record(black_box(record)).unwrap()));
+            b.iter(|| black_box(JournalClock::from_record(black_box(record)).unwrap()));
         });
         group.bench_function(BenchmarkId::new("byte_accounting", &id), |b| {
             let (record, _, _, _) = &*fixture;
@@ -49,7 +49,7 @@ pub fn bench(c: &mut Criterion) {
             let (_, input, previous, _) = &*fixture;
             let event = EventId::new();
             let prepare = || {
-                PreparedCausalCommit::prepare(
+                JournalClock::prepare(
                     previous.reference.run_id,
                     CausalCoordinate::new(previous.reference.journal_writer_id),
                     event,

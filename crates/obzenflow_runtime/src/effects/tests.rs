@@ -2085,7 +2085,7 @@ async fn selected_effect_history_excludes_later_cursor_commitments() {
         .await
         .unwrap()
         .causal;
-    assert!(selected.witness_count() > 0);
+    assert!(!selected.clock().clocks.is_empty());
     effects
         .perform(AffineCountingEffect {
             calls: calls.clone(),

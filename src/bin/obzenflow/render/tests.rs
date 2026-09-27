@@ -62,7 +62,7 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
                 "journal": {
                     "journal_writer_id":id(stage),
                     "run_id":id(10),
-                    "causal":{"previous":{"run_id":id(10),"journal_writer_id":id(stage),"sequence":event-1,"event_id":id(event-1)},"witnesses":[]},
+                    "previous":{"run_id":id(10),"journal_writer_id":id(stage),"sequence":event-1,"event_id":id(event-1)},
                     "vector_clock":{"entries":[{"journal_writer_id":id(stage),"sequence":event}]},
                     "timestamp":"2026-09-23T00:00:00Z", "journal_group_id":null, "journal_group_member":null
                 }
@@ -141,7 +141,7 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
         })
         .collect();
     let manifest: RunManifest = serde_json::from_value(json!({
-        "journal_schema_version": "9.0",
+        "journal_schema_version": obzenflow_core::journal::JOURNAL_SCHEMA_VERSION,
         "obzenflow_version": "test",
         "flow_id": id(10),
         "pipeline_writer_id": source.run.pipeline_writer_id,
@@ -1105,7 +1105,7 @@ fn continuous_stream_with_missing_parents_has_bounded_pending_rows() {
 }
 
 #[tokio::test]
-async fn explanation_resolves_full_commitments_when_a_cross_journal_witness_arrives_later() {
+async fn explanation_shows_inherited_clock_without_waiting_for_other_journals() {
     use obzenflow_core::journal::{AppendOptions, Journal};
     use obzenflow_infra::journal::MemoryJournal;
 
@@ -1148,17 +1148,15 @@ async fn explanation_resolves_full_commitments_when_a_cross_journal_witness_arri
     renderer.full = true;
     let mut output = Vec::new();
     renderer.record(&mut output, child).unwrap();
-    assert!(
-        output.is_empty(),
-        "bounded buffering can still resolve this witness"
-    );
+    let first = std::str::from_utf8(&output).unwrap();
+    assert!(first.contains("⟨1:1,2:1⟩"), "{first}");
+    assert!(renderer.pending.is_empty());
     renderer.record(&mut output, source).unwrap();
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
-    assert_eq!(text.matches("\"status\":\"valid\"").count(), 2, "{text}");
-    assert!(text.contains("\"resolved\":[{\"reference\":"), "{text}");
-    assert!(text.contains("\"merged\":{\"entries\":[{"), "{text}");
-    assert!(!text.contains("\"status\":\"unresolved\""), "{text}");
+    assert_eq!(renderer.records, 2);
+    assert!(text.contains("⟨1:1⟩"), "{text}");
+    assert!(!text.contains("causal proof"), "{text}");
 }
 
 #[test]

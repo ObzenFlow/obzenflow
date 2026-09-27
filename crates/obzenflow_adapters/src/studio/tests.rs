@@ -307,7 +307,7 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
         expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
         expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
         expected["commitment"] = json!(
-            obzenflow_core::event::CausalCommit::from_record(&envelope)
+            obzenflow_core::event::JournalClock::from_record(&envelope)
                 .unwrap()
                 .reference
         );
@@ -466,7 +466,7 @@ fn assert_fact_payload(
     expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
     expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
     expected["commitment"] = json!(
-        obzenflow_core::event::CausalCommit::from_record(&envelope)
+        obzenflow_core::event::JournalClock::from_record(&envelope)
             .unwrap()
             .reference
     );

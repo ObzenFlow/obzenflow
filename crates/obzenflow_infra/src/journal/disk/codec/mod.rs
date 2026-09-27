@@ -40,13 +40,7 @@ use super::log_record::{LogFrame, LogRecord};
 struct BodyProvenanceRef<'a, E> {
     event: &'a E,
     vector_clock: &'a obzenflow_core::event::vector_clock::VectorClock,
-    causal: WitnessesRef<'a>,
     timestamp: &'a chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(serde::Serialize)]
-struct WitnessesRef<'a> {
-    witnesses: &'a [obzenflow_core::event::CommittedCausalRef],
 }
 
 #[derive(serde::Deserialize)]
@@ -54,7 +48,6 @@ struct WitnessesRef<'a> {
 struct BodyProvenance<E> {
     event: E,
     vector_clock: obzenflow_core::event::vector_clock::VectorClock,
-    causal: obzenflow_core::event::CausalWitnesses,
     timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -66,9 +59,6 @@ fn read_provenance<E: serde::de::DeserializeOwned, const MEASURE: bool>(
     let stored: BodyProvenance<E> =
         deserialize::read(Kind::Struct(Layout::RecordBody), &mut input, definitions)?;
     input.finish()?;
-    if stored.causal.previous.is_some() {
-        return Err(invalid("predecessor must appear only in routing metadata"));
-    }
     Ok(stored)
 }
 
@@ -138,9 +128,6 @@ pub(crate) fn prepare<P: JournalPayload>(
             &BodyProvenanceRef {
                 event: &record.envelope.provenance.event,
                 vector_clock: &record.envelope.provenance.journal.vector_clock,
-                causal: WitnessesRef {
-                    witnesses: &record.envelope.provenance.journal.causal.witnesses,
-                },
                 timestamp: &record.envelope.provenance.journal.timestamp,
             },
             None,
@@ -287,7 +274,7 @@ impl Decoder {
         let mut records = Vec::new();
         let mut previous = envelope.summary.previous;
         for (index, member) in envelope.members.iter().enumerate() {
-            let reference = obzenflow_core::event::CommittedCausalRef {
+            let reference = obzenflow_core::event::JournalCommitRef {
                 event_id: member.id,
                 sequence: envelope.summary.first.sequence + index as u64,
                 ..envelope.summary.first
@@ -313,10 +300,7 @@ impl Decoder {
                 journal: obzenflow_core::event::provenance::JournalProvenance {
                     run_id: reference.run_id,
                     journal_writer_id: reference.journal_writer_id,
-                    causal: obzenflow_core::event::CausalWitnesses {
-                        previous: predecessor,
-                        witnesses: stored.causal.witnesses,
-                    },
+                    previous: predecessor,
                     vector_clock: stored.vector_clock,
                     timestamp: stored.timestamp,
                     journal_group_id: envelope.summary.group.clone(),

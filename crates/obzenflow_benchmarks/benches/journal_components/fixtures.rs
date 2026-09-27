@@ -145,12 +145,12 @@ impl History {
 }
 
 pub async fn causal_record(
-    witnesses: usize,
+    incoming_journals: usize,
     payload_bytes: usize,
 ) -> (ChainJournalRecord, CausalFrontier) {
     let run = FlowId::new();
     let mut frontier = CausalFrontier::default();
-    for _ in 0..witnesses {
+    for _ in 0..incoming_journals {
         let stage = StageId::new();
         let journal = MemoryJournal::with_owner_in_run(JournalOwner::stage(stage), run);
         let record = journal
@@ -182,8 +182,8 @@ pub async fn causal_record(
         .await
         .unwrap();
     assert_eq!(
-        record.envelope.provenance.journal.causal.witnesses.len(),
-        witnesses
+        record.envelope.provenance.journal.vector_clock.clocks.len(),
+        incoming_journals + 1
     );
     (record, frontier)
 }

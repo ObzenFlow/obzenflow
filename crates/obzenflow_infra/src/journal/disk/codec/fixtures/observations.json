@@ -75,13 +75,10 @@
             }
           ]
         },
-        "causal": {
-          "previous": null,
-          "witnesses": []
-        },
         "timestamp": "2037-01-02T03:04:05.123456789Z",
         "journal_group_id": null,
-        "journal_group_member": null
+        "journal_group_member": null,
+        "previous": null
       }
     },
     "observability": {
@@ -365,7 +362,7 @@
         "provenance": [
           null,
           true,
-          "🙂\n\u0000"
+          "\ud83d\ude42\n\u0000"
         ]
       }
     },

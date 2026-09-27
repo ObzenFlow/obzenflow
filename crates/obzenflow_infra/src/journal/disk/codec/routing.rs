@@ -6,7 +6,7 @@
 //! and definition carriers. The caller verifies the complete frame CRC first.
 use super::primitives::{bytes, text, unsigned, Cursor};
 use super::{invalid, Result};
-use obzenflow_core::event::{CommittedCausalRef, JournalRecord};
+use obzenflow_core::event::{JournalCommitRef, JournalRecord};
 use obzenflow_core::{EventId, FlowId, JournalId, JournalPayload};
 
 pub(super) struct Member<'a> {
@@ -17,9 +17,9 @@ pub(super) struct Member<'a> {
 
 pub(crate) struct RouteSummary {
     pub group: Option<String>,
-    pub first: CommittedCausalRef,
-    pub previous: Option<CommittedCausalRef>,
-    pub last: CommittedCausalRef,
+    pub first: JournalCommitRef,
+    pub previous: Option<JournalCommitRef>,
+    pub last: JournalCommitRef,
     pub count: usize,
 }
 
@@ -64,7 +64,7 @@ impl<'a> Envelope<'a> {
         let previous = if sequence == 1 {
             None
         } else {
-            Some(CommittedCausalRef {
+            Some(JournalCommitRef {
                 run_id,
                 journal_writer_id,
                 sequence: sequence - 1,
@@ -110,7 +110,7 @@ impl<'a> Envelope<'a> {
         }
         route.finish()?;
         body.finish()?;
-        let reference = |index: usize| CommittedCausalRef {
+        let reference = |index: usize| JournalCommitRef {
             run_id,
             journal_writer_id,
             sequence: sequence + index as u64,
@@ -161,12 +161,11 @@ pub(super) fn encode<P: JournalPayload>(
     unsigned(sequence, &mut route);
     if sequence > 1 {
         let previous = journal
-            .causal
             .previous
             .ok_or_else(|| invalid("missing routing predecessor"))?;
         route.extend_from_slice(&previous.event_id.as_ulid().to_bytes());
     }
-    let mut previous = journal.causal.previous;
+    let mut previous = journal.previous;
     for (index, (record, length)) in records.iter().zip(lengths).enumerate() {
         let actual = &record.envelope.provenance.journal;
         let expected_sequence = sequence
@@ -174,12 +173,12 @@ pub(super) fn encode<P: JournalPayload>(
             .ok_or_else(|| invalid("routing sequence overflow"))?;
         if actual.run_id != journal.run_id
             || actual.journal_writer_id != journal.journal_writer_id
-            || actual.causal.previous != previous
+            || actual.previous != previous
             || record.local_sequence() != expected_sequence
         {
             return Err(invalid("noncontiguous routing group"));
         }
-        previous = Some(CommittedCausalRef {
+        previous = Some(JournalCommitRef {
             run_id: actual.run_id,
             journal_writer_id: actual.journal_writer_id,
             sequence: expected_sequence,

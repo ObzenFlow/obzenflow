@@ -7,7 +7,6 @@
 
 use obzenflow::journal::read::*;
 use obzenflow_core::event::CausalCoordinate;
-use obzenflow_core::journal::causal::{CausalProof, CausalProofCache};
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
 
 const MAX_REFERENCES: usize = 4096;
@@ -59,8 +58,6 @@ impl JournalContext {
 }
 
 pub(super) struct Context {
-    causal: CausalProofCache,
-    causal_error: Option<String>,
     pub stages: Vec<Stage>,
     pub supervisors: BTreeMap<String, SupervisorDescriptor>,
     pub journals: BTreeMap<obzenflow_core::JournalId, JournalContext>,
@@ -116,8 +113,6 @@ impl Context {
             .collect();
         let journal_label_updates = journal_numbers.keys().copied().collect();
         Self {
-            causal: CausalProofCache::new(MAX_REFERENCES, MAX_REFERENCES * 256),
-            causal_error: None,
             stages: stages
                 .into_iter()
                 .map(|stage| Stage {
@@ -165,9 +160,6 @@ impl Context {
                 position: record.position,
                 values: clock(record).clone(),
             });
-        }
-        if let Err(error) = self.causal.admit_run_record(record) {
-            self.causal_error = Some(error.to_string());
         }
         let id = event_id(record);
         if self.references.contains_key(&id) {
@@ -251,15 +243,6 @@ impl Context {
             self.supervisors.insert(writer, descriptor.clone());
         }
         Ok(())
-    }
-
-    pub fn causal_proof(&self, record: &RunRecord) -> CausalProof {
-        match &self.causal_error {
-            Some(reason) => CausalProof::Invalid {
-                reason: reason.clone(),
-            },
-            None => self.causal.verify_run_record(record),
-        }
     }
 
     fn number_journal(&mut self, id: obzenflow_core::JournalId) {

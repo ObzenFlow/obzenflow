@@ -70,7 +70,8 @@ pub struct JournalProvenance {
     pub run_id: crate::FlowId,
     pub journal_writer_id: JournalWriterId,
     pub vector_clock: VectorClock,
-    pub causal: crate::event::CausalWitnesses,
+    /// Previous placement in this journal only, for contiguous-prefix validation.
+    pub previous: Option<crate::event::JournalCommitRef>,
     pub timestamp: DateTime<Utc>,
     pub journal_group_id: Option<String>,
     pub journal_group_member: Option<JournalGroupMember>,

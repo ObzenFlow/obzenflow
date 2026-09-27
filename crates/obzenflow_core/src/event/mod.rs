@@ -31,10 +31,7 @@ pub mod status;
 pub mod utils;
 
 // Re-export main types at root level for convenience
-pub use causal::{
-    CausalCommit, CausalCoordinate, CausalError, CausalFrontier, CausalWitnesses,
-    CommittedCausalRef, PreparedCausalCommit,
-};
+pub use causal::{CausalCoordinate, CausalError, CausalFrontier, JournalClock, JournalCommitRef};
 pub use chain_event::{
     ChainEvent, ChainEventFactory, ChainPayload, CircuitBreakerAttemptSettledEventParams,
     CircuitBreakerOpenedEventParams, CircuitBreakerRecoveryCompletedEventParams,

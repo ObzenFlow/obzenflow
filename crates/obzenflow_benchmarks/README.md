@@ -5,6 +5,15 @@ Use this README to choose a suite, run it and compare equivalent operations.
 Detailed fixture matrices and investigation history live in the
 [FLOWIP evidence](../../../obzenflow-improvement-proposals/content/planning/obzenflow/P1/evidence/145h-benchmark-measurement-contracts.md).
 
+After the 145h scope reduction, causal fixtures retain the same input journals
+and clock widths but no longer create witness lists. Hot-path dimensions now
+name `advanced_inputs` separately from retained `clock` width. The former
+`commitment` extraction case is retired; `journal_clock_restore` measures the
+remaining append/recovery operation. Historical witness and proof-wrapper
+results are not current acceptance baselines. The paired
+[clock simplification comparison](../../../obzenflow-improvement-proposals/content/planning/obzenflow/P1/evidence/145h-clock-simplification-2026-09-27.md)
+retains matching clock, payload and completed-work dimensions.
+
 ## Suites
 
 | Target | Purpose | Required feature |

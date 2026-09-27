@@ -154,15 +154,6 @@ impl TerminalRenderer {
         )?;
         self.spans(output, &palette, &relation_spans)?;
         writeln!(output, "{}", self.clock(&view.clock(), &header))?;
-        if explain || full {
-            let evidence = view.evidence();
-            writeln!(output, "causal proof: {}", compact(&evidence.proof)?)?;
-            writeln!(
-                output,
-                "committed witnesses: {}",
-                compact(evidence.witnesses)?
-            )?;
-        }
         if let Some(message) = relation.processing_error {
             for line in wrap_fields(
                 &[format!("processing error: {}", safe_text(message))],

@@ -371,12 +371,8 @@ async fn causal_encoding_and_retained_frontier_scale_with_coordinates_not_histor
                 .merge(&CausalFrontier::from_record(&original).unwrap())
                 .unwrap();
             // These are the only variable-sized fields retained by a frontier:
-            // fixed-width counter/coordinate and witness/coordinate map entries.
+            // fixed-width counter/coordinate map entries.
             assert_eq!(frontier.clock().clocks.len(), participants + 1);
-            assert_eq!(frontier.witness_count(), participants + 1);
-            assert!(
-                original.envelope.provenance.journal.causal.witnesses.len() <= participants + 1
-            );
         }
         assert_eq!(std::fs::metadata(&path).unwrap().len(), total as u64);
         assert!(total < 512 * (2048 + 256 * (participants + 1)));

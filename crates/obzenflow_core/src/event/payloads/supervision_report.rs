@@ -187,8 +187,8 @@ impl ExecutionPayload {
 
     /// The supervisor's semantic view of a protected fact. Commitment identity
     /// and causality always come from the original journal record.
-    pub fn supervision_report(&self) -> Option<SystemPayload> {
-        Some(match self.clone() {
+    pub fn into_supervision_report(self) -> Option<SystemPayload> {
+        Some(match self {
             Self::ReplayLifecycle(event) => SystemPayload::ReplayLifecycle(event),
             Self::SupervisorRegistered { descriptor } => {
                 SystemPayload::SupervisorRegistered { descriptor }

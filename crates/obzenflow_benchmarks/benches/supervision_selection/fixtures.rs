@@ -311,18 +311,11 @@ impl History {
     }
 
     pub fn input_description(&self) -> serde_json::Value {
-        let witnesses: Vec<_> = self
-            .rows
-            .values()
-            .flatten()
-            .map(|r| r.envelope.provenance.journal.causal.witnesses.len())
-            .collect();
         serde_json::json!({
             "journals":self.case.readers, "records":self.case.rows()*self.case.readers,
             "business_records":self.business, "reports":self.reports.values().map(Vec::len).sum::<usize>(),
             "frames":self.frames, "encoded_bytes":self.encoded_bytes,
             "body_bytes":self.case.payload, "clock_components":self.case.external+1,
-            "witnesses_min":witnesses.iter().min(), "witnesses_max":witnesses.iter().max(),
             "cold_definitions":self.case.cold
         })
     }

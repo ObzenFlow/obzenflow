@@ -7,7 +7,7 @@
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter, RateLimiterBuilder};
 use obzenflow_core::event::{
-    CausalCoordinate, CausalFrontier, ChainPayload, JournalRecord, PreparedCausalCommit,
+    CausalCoordinate, CausalFrontier, ChainPayload, JournalClock, JournalRecord,
 };
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader};
@@ -32,7 +32,7 @@ use obzenflow_runtime::stages::common::handlers::{
 struct AppendOnlyJournal {
     id: JournalId,
     run_id: FlowId,
-    clocks: Mutex<std::collections::HashMap<obzenflow_core::WriterId, PreparedCausalCommit>>,
+    clocks: Mutex<std::collections::HashMap<obzenflow_core::WriterId, JournalClock>>,
     owner: JournalOwner,
     fail_append: bool,
 }
@@ -52,10 +52,10 @@ impl AppendOnlyJournal {
         &self,
         event: ChainEvent,
         input: &CausalFrontier,
-        clocks: &mut std::collections::HashMap<obzenflow_core::WriterId, PreparedCausalCommit>,
+        clocks: &mut std::collections::HashMap<obzenflow_core::WriterId, JournalClock>,
     ) -> Result<JournalRecord<ChainPayload>, JournalError> {
         let writer = event.writer_id;
-        let (commitment, causal) = PreparedCausalCommit::prepare(
+        let (commitment, causal) = JournalClock::prepare(
             self.run_id,
             CausalCoordinate::new(self.id.into()),
             event.id,
@@ -66,7 +66,7 @@ impl AppendOnlyJournal {
         let journal = &mut record.envelope.provenance.journal;
         journal.run_id = self.run_id;
         journal.vector_clock = commitment.clock.clone();
-        journal.causal = causal;
+        journal.previous = causal;
         clocks.insert(writer, commitment);
         Ok(record)
     }

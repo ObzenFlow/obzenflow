@@ -1,8 +1,8 @@
 # Journal format
 
-The current schema is **10.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
+The current schema is **11.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
 version for records, frame encoding, archive interpretation, and the run
-manifest. `run_manifest.json` records `journal_schema_version: "10.0"`.
+manifest. `run_manifest.json` records `journal_schema_version: "11.0"`.
 Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
@@ -25,11 +25,11 @@ Clock entries name only the physical journal incarnation. Event authors remain
 separate immutable provenance, including when events are forwarded. Every append
 merges the previous complete journal clock and the admitted frontier, then
 increments that journal component.
-Protected provenance includes the previous local commitment and sorted immediate
-witness references. References contain run, journal, sequence and event
-ID; they contain no nested clocks or ancestors. The shared causal verifier resolves
-these references and checks exact componentwise maximum plus the local increment.
-Missing references and resolver budget exhaustion remain unresolved.
+Protected provenance retains one previous local commitment for journal continuity.
+It contains run, journal, sequence and event ID. Records carry no cross-journal
+witness lists, and readers do not reconstruct an exact merge proof. Clock
+propagation is checked by tests using known incorporated inputs and committed
+predecessors.
 
 Records are limited to 8 MiB of canonical JSON, atomic groups to 4,096 records
 and 64 MiB of canonical JSON, and encoded frame bodies to 64 MiB. Providers
@@ -43,13 +43,13 @@ All fixed-width integers are little endian. A frame consists of:
 
 | Position | Bytes | Meaning |
 |---|---:|---|
-| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF10.0`) |
+| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF11.0`) |
 | 7 | 8 | Body length |
 | 15 | 4 | CRC32 of magic and body length |
 | 19 | body length | Compact body |
 | after body | 4 | CRC32 of header and body |
 | after checksum | 8 | Complete frame length, including header and trailer |
-| final | 7 | Reversed header magic (`0.01FJO`) |
+| final | 7 | Reversed header magic (`0.11FJO`) |
 
 The 19-byte trailer commits the entire ordinary record or atomic group. A reader
 validates both lengths, magic values and checksums before exposing members.
@@ -92,11 +92,10 @@ value. Slots and ordinals are zero-based unless stated otherwise.
    Each has length-delimited remaining provenance; an observation-presence byte
    (`0` absent, `1` null, `2` followed by length-delimited observations); and
    length-delimited business/protected JSON. Remaining provenance contains the
-   immutable event, complete vector clock, witnesses and journal timestamp.
+   immutable event, complete vector clock and journal timestamp.
    Run/journal identity, previous commitment and group membership are reconstructed
    from routing rather than repeated in every body. The event ID also remains in
-   immutable event provenance and full decoding checks agreement. No clocks or
-   witness lists are copied into routing.
+   immutable event provenance and full decoding checks agreement. No clocks are copied into routing.
 
 A referenced definition must be local in its carrier, never another reference.
 Carrier framing, metadata and record/group section boundaries are checked

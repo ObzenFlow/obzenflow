@@ -4,7 +4,6 @@
 
 //! Application-level conformance kits.
 
-pub mod causal;
 pub mod journal;
 #[doc(hidden)]
 pub mod journal_bench;

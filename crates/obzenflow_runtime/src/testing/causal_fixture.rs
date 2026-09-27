@@ -4,7 +4,7 @@
 
 //! Shared commitment preparation for the existing in-memory test doubles.
 use obzenflow_core::event::provenance::JournalProvenance;
-use obzenflow_core::event::{CausalCoordinate, JournalEvent, JournalRecord, PreparedCausalCommit};
+use obzenflow_core::event::{CausalCoordinate, JournalClock, JournalEvent, JournalRecord};
 use obzenflow_core::journal::{AppendOptions, JournalError};
 use obzenflow_core::{FlowId, JournalId};
 
@@ -53,11 +53,8 @@ pub(crate) fn commit<T: JournalEvent>(
         || FlowId::from(*id.as_ulid()),
         |record| record.envelope.provenance.journal.run_id,
     );
-    let previous = records
-        .last()
-        .map(PreparedCausalCommit::from_record)
-        .transpose()?;
-    let (commitment, causal) = PreparedCausalCommit::prepare(
+    let previous = records.last().map(JournalClock::from_record).transpose()?;
+    let (commitment, predecessor) = JournalClock::prepare(
         run_id,
         CausalCoordinate::new(id.into()),
         *event.id(),
@@ -70,7 +67,7 @@ pub(crate) fn commit<T: JournalEvent>(
             run_id,
             journal_writer_id: id.into(),
             vector_clock: commitment.clock,
-            causal,
+            previous: predecessor,
             timestamp: chrono::Utc::now(),
             journal_group_id: None,
             journal_group_member: None,

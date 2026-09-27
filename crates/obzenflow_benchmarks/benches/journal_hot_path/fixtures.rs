@@ -62,18 +62,18 @@ pub fn business(stage: StageId, payload_bytes: usize) -> ChainEvent {
 #[derive(Clone, Copy)]
 pub struct Dimensions {
     pub clock: usize,
-    pub witnesses: usize,
+    pub advanced_inputs: usize,
     pub payload: usize,
 }
 impl Dimensions {
     pub fn name(self) -> String {
         format!(
-            "clock_{}/witnesses_{}/payload_{}",
-            self.clock, self.witnesses, self.payload
+            "clock_{}/advanced_inputs_{}/payload_{}",
+            self.clock, self.advanced_inputs, self.payload
         )
     }
     pub fn json(self) -> serde_json::Value {
-        serde_json::json!({"clock_components":self.clock,"witnesses":self.witnesses,"payload_string_bytes":self.payload})
+        serde_json::json!({"clock_components":self.clock,"advanced_inputs":self.advanced_inputs,"payload_string_bytes":self.payload})
     }
 }
 pub fn dimensions() -> [Dimensions; 6] {
@@ -85,9 +85,9 @@ pub fn dimensions() -> [Dimensions; 6] {
         (1025, 1024, 256),
         (33, 32, 8192),
     ]
-    .map(|(clock, witnesses, payload)| Dimensions {
+    .map(|(clock, advanced_inputs, payload)| Dimensions {
         clock,
-        witnesses,
+        advanced_inputs,
         payload,
     })
 }
@@ -104,7 +104,7 @@ pub struct RecordFixture {
 }
 impl RecordFixture {
     pub async fn build(d: Dimensions) -> Self {
-        assert!(d.witnesses < d.clock);
+        assert!(d.advanced_inputs < d.clock);
         let directory = tempfile::tempdir().unwrap();
         let run = FlowId::new();
         let mut roots = Vec::new();
@@ -129,10 +129,10 @@ impl RecordFixture {
             .append(running(stage), AppendOptions::new(initial))
             .await
             .unwrap();
-        // Strictly advance W external coordinates. Equal-counter witness pruning
-        // cannot make random journal IDs change the fixture's C/W dimensions.
+        // Vary newly incorporated inputs independently of the retained clock's
+        // width. The other coordinates are inherited from the preceding append.
         let mut advanced = CausalFrontier::default();
-        for (stage, root) in roots.iter().take(d.witnesses) {
+        for (stage, root) in roots.iter().take(d.advanced_inputs) {
             let row = root
                 .append(business(*stage, 0), Default::default())
                 .await
@@ -147,7 +147,6 @@ impl RecordFixture {
             .unwrap();
         let metadata = &record.envelope.provenance.journal;
         assert_eq!(metadata.vector_clock.clocks.len(), d.clock);
-        assert_eq!(metadata.causal.witnesses.len(), d.witnesses);
         let corpus = FrameCorpus::load(&path, &[*seed.id(), *record.id()]).unwrap();
         let canonical_bytes = serde_json::to_vec(&record).unwrap().len();
         let clock_bytes = serde_json::to_vec(&metadata.vector_clock).unwrap().len();

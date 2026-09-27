@@ -86,7 +86,7 @@ fn chain_record(payload: ChainPayload, event_type: &str) -> JournalRecord<ChainP
         payload,
         JournalProvenance {
             run_id: crate::FlowId::new(),
-            causal: Default::default(),
+            previous: None,
             journal_writer_id,
             vector_clock: VectorClock {
                 clocks: [(crate::event::CausalCoordinate::new(journal_writer_id), 1)].into(),
@@ -278,7 +278,7 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
         },
         JournalProvenance {
             run_id: crate::FlowId::new(),
-            causal: Default::default(),
+            previous: None,
             journal_writer_id,
             vector_clock: VectorClock {
                 clocks: [(crate::event::CausalCoordinate::new(journal_writer_id), 1)].into(),

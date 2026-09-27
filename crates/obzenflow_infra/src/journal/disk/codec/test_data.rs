@@ -77,8 +77,8 @@ impl Stage {
         obzenflow_core::event::CausalCoordinate::new(self.journal_writer())
     }
 
-    fn commitment(self, input: u64) -> obzenflow_core::event::CommittedCausalRef {
-        obzenflow_core::event::CommittedCausalRef {
+    fn commitment(self, input: u64) -> obzenflow_core::event::JournalCommitRef {
+        obzenflow_core::event::JournalCommitRef {
             run_id: FlowId::from(ulid(1)),
             journal_writer_id: self.journal_writer(),
             sequence: self.clock(input).get(&self.coordinate()),
@@ -278,13 +278,7 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
         event,
         JournalProvenance {
             run_id: flow_id,
-            causal: obzenflow_core::event::CausalWitnesses {
-                previous: (emitted > 1).then(|| stage.commitment(input - 1)),
-                witnesses: upstream
-                    .map(|upstream| upstream.commitment(input))
-                    .into_iter()
-                    .collect(),
-            },
+            previous: (emitted > 1).then(|| stage.commitment(input - 1)),
             journal_writer_id: stage.journal_writer(),
             vector_clock: stage.clock(input),
             timestamp,

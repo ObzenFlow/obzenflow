@@ -92,7 +92,6 @@ fn operation(f: &fixtures::RecordFixture, operation: &str) -> Sample {
             let (metadata, sample) = timed(|| member.metadata());
             assert_eq!(metadata.clock, journal.vector_clock);
             // The previous reference lives in binary routing, outside this body.
-            assert_eq!(metadata.causal.witnesses, journal.causal.witnesses);
             assert_eq!(metadata.timestamp, journal.timestamp);
             assert_eq!(
                 serde_json::to_value(metadata.event).unwrap(),

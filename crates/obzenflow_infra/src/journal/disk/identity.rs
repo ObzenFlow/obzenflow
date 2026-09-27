@@ -173,7 +173,7 @@ pub(super) fn open_identity(
 #[derive(Clone)]
 pub(crate) struct CommitmentAdmission {
     identity: JournalIdentity,
-    previous: Option<obzenflow_core::event::CommittedCausalRef>,
+    previous: Option<obzenflow_core::event::JournalCommitRef>,
 }
 
 impl CommitmentAdmission {
@@ -181,9 +181,9 @@ impl CommitmentAdmission {
     /// it does not admit a skipped record as causal evidence.
     pub(crate) fn admit_range(
         &mut self,
-        first: obzenflow_core::event::CommittedCausalRef,
-        previous: Option<obzenflow_core::event::CommittedCausalRef>,
-        last: obzenflow_core::event::CommittedCausalRef,
+        first: obzenflow_core::event::JournalCommitRef,
+        previous: Option<obzenflow_core::event::JournalCommitRef>,
+        last: obzenflow_core::event::JournalCommitRef,
     ) -> Result<(), JournalError> {
         if first.run_id != self.identity.run_id
             || first.journal_writer_id.as_journal_id() != &self.identity.journal_id
@@ -213,12 +213,12 @@ impl CommitmentAdmission {
     pub(crate) fn admit<P: obzenflow_core::event::payloads::JournalPayload>(
         &mut self,
         record: &obzenflow_core::JournalRecord<P>,
-    ) -> Result<obzenflow_core::event::PreparedCausalCommit, JournalError> {
-        let commitment = obzenflow_core::event::PreparedCausalCommit::from_record(record)?;
+    ) -> Result<obzenflow_core::event::JournalClock, JournalError> {
+        let commitment = obzenflow_core::event::JournalClock::from_record(record)?;
         let reference = commitment.reference;
         if reference.run_id != self.identity.run_id
             || reference.journal_writer_id.as_journal_id() != &self.identity.journal_id
-            || record.envelope.provenance.journal.causal.previous != self.previous
+            || record.envelope.provenance.journal.previous != self.previous
         {
             return Err(obzenflow_core::event::CausalError::ConflictingCommitment.into());
         }
@@ -244,10 +244,10 @@ pub(super) fn write_fixture_identity(path: &Path, identity: JournalIdentity) {
 pub(super) fn fixture_record<T: obzenflow_core::event::JournalEvent>(
     identity: JournalIdentity,
     event: T,
-    previous: &mut Option<obzenflow_core::event::PreparedCausalCommit>,
+    previous: &mut Option<obzenflow_core::event::JournalClock>,
 ) -> obzenflow_core::JournalRecord<T::Payload> {
-    use obzenflow_core::event::{CausalCoordinate, CausalFrontier, PreparedCausalCommit};
-    let (commitment, causal) = PreparedCausalCommit::prepare(
+    use obzenflow_core::event::{CausalCoordinate, CausalFrontier, JournalClock};
+    let (commitment, predecessor) = JournalClock::prepare(
         identity.run_id,
         CausalCoordinate::new(identity.journal_id.into()),
         *event.id(),
@@ -260,7 +260,7 @@ pub(super) fn fixture_record<T: obzenflow_core::event::JournalEvent>(
         obzenflow_core::event::provenance::JournalProvenance {
             run_id: identity.run_id,
             journal_writer_id: identity.journal_id.into(),
-            causal,
+            previous: predecessor,
             vector_clock: commitment.clock.clone(),
             timestamp: chrono::Utc::now(),
             journal_group_id: None,
