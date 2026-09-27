@@ -1144,15 +1144,33 @@ mod managed_lifecycle_regressions {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prometheus_example_5k_completes_with_reporting() {
-        for intervals in [(250, 250), (250, 500), (500, 250)] {
-            prometheus_example_journal_and_metrics_proof(
-                MetricsProofMode::HostedReporting,
-                JOURNAL_PROOF_INPUTS,
-                Some(intervals),
-            )
-            .await;
-        }
+    async fn prometheus_example_5k_completes_with_reporting_250ms_capture_250ms_export() {
+        prometheus_example_journal_and_metrics_proof(
+            MetricsProofMode::HostedReporting,
+            JOURNAL_PROOF_INPUTS,
+            Some((250, 250)),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prometheus_example_5k_completes_with_reporting_250ms_capture_500ms_export() {
+        prometheus_example_journal_and_metrics_proof(
+            MetricsProofMode::HostedReporting,
+            JOURNAL_PROOF_INPUTS,
+            Some((250, 500)),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prometheus_example_5k_completes_with_reporting_500ms_capture_250ms_export() {
+        prometheus_example_journal_and_metrics_proof(
+            MetricsProofMode::HostedReporting,
+            JOURNAL_PROOF_INPUTS,
+            Some((500, 250)),
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1183,6 +1201,9 @@ mod managed_lifecycle_regressions {
             "CI journal proofs are capped at {CI_EVENT_LIMIT} inputs; use the example for larger storage measurements"
         );
         let proof_started = std::time::Instant::now();
+        println!(
+            "Prometheus proof starting: {count} inputs, mode={mode:?}, capture/export intervals={intervals:?}"
+        );
         let hosted = matches!(
             mode,
             MetricsProofMode::HostedReporting | MetricsProofMode::HostedSse

@@ -86,7 +86,7 @@ def main():
     sources += [ROOT / path for path in (
         "Cargo.lock",
         "crates/obzenflow_benchmarks/Cargo.toml",
-        "crates/obzenflow_benchmarks/COMPONENTS.md",
+        "crates/obzenflow_benchmarks/README.md",
         "crates/obzenflow_infra/src/testing/journal_bench.rs",
         "crates/obzenflow_runtime/src/pipeline/benchmarks.rs",
         "crates/obzenflow_core/src/event/causal.rs",
@@ -104,7 +104,6 @@ def main():
     if args.suite in ("supervision", "hot-path", "delivery"):
         sources += list((ROOT / "crates/obzenflow_benchmarks/benches/supervision_selection").glob("*.rs"))
         sources += [ROOT / path for path in (
-            "crates/obzenflow_benchmarks/SUPERVISION_SELECTION.md",
             "crates/obzenflow_core/Cargo.toml",
             "crates/obzenflow_core/src/benchmark.rs",
             "crates/obzenflow_core/src/lib.rs",
@@ -129,7 +128,6 @@ def main():
     if args.suite in ("hot-path", "delivery"):
         sources += list((ROOT / "crates/obzenflow_benchmarks/benches/journal_hot_path").glob("*.rs"))
         sources += [ROOT / path for path in (
-            "crates/obzenflow_benchmarks/JOURNAL_HOT_PATH.md",
             "crates/obzenflow_benchmarks/scripts/capture_component_baseline.py",
             "crates/obzenflow_infra/src/journal/disk/codec/benchmark.rs",
             "crates/obzenflow_core/src/event/vector_clock.rs",
@@ -138,7 +136,6 @@ def main():
         )]
     if args.suite == "delivery":
         sources += list((ROOT / "crates/obzenflow_benchmarks/benches/supervision_delivery").glob("*.rs"))
-        sources += [ROOT / "crates/obzenflow_benchmarks/SUPERVISION_DELIVERY.md"]
     report = {
         "measurement_contract": {"components":"journal-components-v1", "supervision":"supervision-selection-v1", "hot-path":"journal-hot-path-v2", "delivery":"supervision-delivery-v1"}[args.suite],
         "baseline": args.baseline,

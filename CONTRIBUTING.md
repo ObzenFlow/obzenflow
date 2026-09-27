@@ -45,7 +45,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # Tests
 cargo nextest run --workspace --profile ci-fast
 cargo nextest run --workspace --profile ci-full
-cargo nextest run --workspace --profile ci-fast --features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio
+cargo nextest run --workspace --profile ci-fast --features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio,cli
 
 # Dependency policy checks (CI runs these)
 cargo deny --all-features check
@@ -59,10 +59,23 @@ ObzenFlow uses `cargo-nextest` as the supported workspace test runner. The CI te
 | CI job / matrix entry | Pull requests | Pushes to `main` and manual dispatch | What it proves |
 | --- | --- | --- | --- |
 | `test` / `default` | `ci-fast`, no extra features | `ci-full`, no extra features | The workspace passes without optional production features. |
-| `test` / `production-features` | `ci-fast`, `--features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio` | `ci-full`, same features | The explicitly supported production feature set passes. |
+| `test` / `production-features` | `ci-fast`, `--features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio,cli` | `ci-full`, same features | The explicitly supported production feature set passes. |
 | `test-test-support` | `ci-fast`, `--features test-support,obzenflow_infra/warp-server`, whole workspace | `ci-full`, same features and scope | The test-only support helpers and managed-host regressions work in real tests. |
 
-`ci-fast` is the required PR gate. `ci-full` runs on pushes to `main` and manual dispatch. Both select the same tests; their time limits and retry counts differ. The two 5k Prometheus proofs use the same ten-minute whole-test limit in both profiles, including journal verification. Their five-second metrics-finalisation assertion remains separate.
+`ci-fast` is the required PR gate. `ci-full` runs on pushes to `main` and manual dispatch. Both select the same tests; their time limits and retry counts differ. The 5k Prometheus proofs use the same ten-minute whole-test limit in both profiles, including journal verification. All three reporting interval configurations run as separate tests with unchanged workloads and assertions. Their five-second metrics-finalisation assertion remains separate.
+
+Both CI profiles use four Nextest process slots and continue collecting results
+after a failure. The isolated expensive journal proofs have early scheduling
+priority and a shared two-process limit; other tests can use the remaining slots.
+The archive observation-omission proof has highest priority and a temporary
+120-second PR budget after completing successfully at 65.90 seconds in CI.
+Expensive proofs receive no retries. These are scheduling and hang-guard policies,
+not performance acceptance thresholds.
+
+CI preserves `target/nextest/<profile>/junit.xml`, including successful phase
+output, as `test-results-default`, `test-results-production-features` and
+`test-results-test-support` artifacts. Read the case timestamps to check overlap
+and use the phase output to distinguish execution from archive verification.
 
 The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
 
@@ -70,7 +83,7 @@ Expanded, the normal PR test matrix is:
 
 ```bash
 cargo nextest run --workspace --locked --profile ci-fast
-cargo nextest run --workspace --locked --profile ci-fast --features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio
+cargo nextest run --workspace --locked --profile ci-fast --features tokio-console,http-pull,ai,postgres,prometheus,web-host,studio,cli
 cargo nextest run --workspace --locked --profile ci-fast --features test-support,obzenflow_infra/warp-server
 ```
 
