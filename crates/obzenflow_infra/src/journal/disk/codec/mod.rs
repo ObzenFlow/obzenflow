@@ -6,6 +6,8 @@
 //! See README.md for the wire contract and scalar-preservation invariants.
 
 mod definitions;
+#[cfg(feature = "test-support")]
+pub(crate) mod benchmark;
 mod deserialize;
 pub(crate) mod frame;
 mod layout;
@@ -54,6 +56,32 @@ struct BodyProvenance<E> {
     vector_clock: obzenflow_core::event::vector_clock::VectorClock,
     causal: obzenflow_core::event::CausalWitnesses,
     timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+fn read_provenance<E: serde::de::DeserializeOwned, const MEASURE: bool>(
+    bytes: &[u8],
+    definitions: &mut ReadTable<'_, MEASURE>,
+) -> Result<BodyProvenance<E>> {
+    let mut input = Cursor::new(bytes);
+    let stored: BodyProvenance<E> =
+        deserialize::read(Kind::Struct(Layout::RecordBody), &mut input, definitions)?;
+    input.finish()?;
+    if stored.causal.previous.is_some() {
+        return Err(invalid("predecessor must appear only in routing metadata"));
+    }
+    Ok(stored)
+}
+
+fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> Result<P> {
+    if bytes.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES {
+        return Err(invalid("payload byte budget exceeded"));
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    obzenflow_core::benchmark::payload_decode(provenance);
+    let payload: serde_json::Value = serde_json::from_slice(bytes)?;
+    let payload = P::decode(provenance, payload)?;
+    payload.validate(provenance)?;
+    Ok(payload)
 }
 
 pub(crate) struct SelectedFrame<T: JournalEvent> {
@@ -276,17 +304,9 @@ impl Decoder {
             }
             let start = input.position();
             definitions.section(1);
-            let mut provenance_input = Cursor::new(input.bytes()?);
-            let stored =
-                deserialize::read::<BodyProvenance<<T::Payload as JournalPayload>::Provenance>>(
-                    Kind::Struct(Layout::RecordBody),
-                    &mut provenance_input,
-                    &mut definitions,
-                )?;
-            provenance_input.finish()?;
-            if stored.causal.previous.is_some() {
-                return Err(invalid("predecessor must appear only in routing metadata"));
-            }
+            let stored = read_provenance::<<T::Payload as JournalPayload>::Provenance, MEASURE>(
+                input.bytes()?, &mut definitions,
+            )?;
             let provenance = obzenflow_core::event::provenance::Provenance {
                 event: stored.event,
                 journal: obzenflow_core::event::provenance::JournalProvenance {
@@ -334,17 +354,10 @@ impl Decoder {
             }
             let start = input.position();
             let payload_bytes = input.bytes()?;
-            if payload_bytes.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES {
-                return Err(invalid("payload byte budget exceeded"));
-            }
-            #[cfg(feature = "bench-instrumentation")]
-            obzenflow_core::benchmark::payload_decode(&provenance.event);
-            let payload: serde_json::Value = serde_json::from_slice(payload_bytes)?;
+            let payload = read_payload::<T::Payload>(&provenance.event, payload_bytes)?;
             if MEASURE {
                 sizes.payload += input.position() - start;
             }
-            let payload = T::Payload::decode(&provenance.event, payload)?;
-            payload.validate(&provenance.event)?;
             if payload.is_supervision_candidate() != member.candidate {
                 return Err(invalid("supervision classification disagrees with payload"));
             }

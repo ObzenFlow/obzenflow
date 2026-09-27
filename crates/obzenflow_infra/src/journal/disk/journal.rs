@@ -129,6 +129,13 @@ trait FrameSink {
     fn rollback_to(&mut self, offset: u64) -> std::io::Result<()>;
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) fn benchmark_append_frame(file: &mut StdFile, bytes: &[u8], path: &Path) -> Result<u64, std::io::Error> {
+    append_frame(file, bytes, path)
+        .map(|commit| commit.next_offset)
+        .map_err(|error| std::io::Error::other(format!("{error:?}")))
+}
+
 impl FrameSink for StdFile {
     fn end_offset(&mut self) -> std::io::Result<u64> {
         use std::io::Seek;
@@ -548,6 +555,8 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         let observation_crc =
             u32::from_le_bytes(write_bytes[trailer..trailer + 4].try_into().unwrap());
 
+        #[cfg(feature = "bench-instrumentation")]
+        obzenflow_core::benchmark::add(obzenflow_core::benchmark::Counter::AppendBlockingJobs, 1);
         let outcome =
             tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
                 let mut file = match write_file.lock() {

@@ -317,11 +317,10 @@ impl ReportReaders {
                         ReportScanItem::Record(record) => {
                             // Retention has a separate reconstructed-record bound.
                             // Discarded business records never reach this accounting.
-                            let mut counter = ByteCount(0);
-                            serde_json::to_writer(&mut counter, &record)?;
+                            let bytes = retained_record_bytes(&record)?;
                             if let Some(report) = select(*record) {
                                 counters.selected.fetch_add(1, Ordering::Relaxed);
-                                retained.add(counter.0);
+                                retained.add(bytes);
                                 records.push_back(Box::new(report));
                             }
                         }
@@ -461,6 +460,19 @@ impl<T: JournalEvent> obzenflow_core::journal::reader::JournalReportStorageReade
     fn storage_is_at_end(&self) -> bool {
         self.0.is_at_end()
     }
+}
+
+fn retained_record_bytes(record: &impl serde::Serialize) -> Result<usize, serde_json::Error> {
+    let mut counter = ByteCount(0);
+    serde_json::to_writer(&mut counter, record)?;
+    Ok(counter.0)
+}
+
+/// Measure the same retention accounting used by the report task.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn benchmark_retained_record_bytes(record: &impl serde::Serialize) -> Result<usize, serde_json::Error> {
+    retained_record_bytes(record)
 }
 
 struct ByteCount(usize);

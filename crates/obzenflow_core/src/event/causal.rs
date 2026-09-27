@@ -270,6 +270,19 @@ impl PreparedCausalCommit {
                 return Err(CausalError::ConflictingCommitment);
             }
         }
+        #[cfg(feature = "bench-instrumentation")]
+        {
+            // Count complete successful walks once, without an atomic operation
+            // per component. Invalid iterations are never performance samples.
+            crate::benchmark::add(
+                crate::benchmark::Counter::ValidatedClockEntries,
+                journal.vector_clock.clocks.len() as u64,
+            );
+            crate::benchmark::add(
+                crate::benchmark::Counter::ValidatedWitnessReferences,
+                (journal.causal.witnesses.len() + usize::from(previous.is_some())) as u64,
+            );
+        }
         Ok(CommittedCausalRef {
             run_id: journal.run_id,
             journal_writer_id: journal.journal_writer_id,

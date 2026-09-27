@@ -31,6 +31,10 @@ counters! {
     RecordSerializations => "record_accounting_serializations",
     BusinessSerializations => "business_record_accounting_serializations",
     StructuralValidations => "structural_validations",
+    ValidatedClockEntries => "validated_clock_entries",
+    ValidatedWitnessReferences => "validated_witness_references",
+    ClockSerializations => "clock_serializations",
+    SerializedClockEntries => "serialized_clock_entries",
     ConstructedClockComponents => "constructed_record_clock_components",
     ConstructedWitnessReferences => "constructed_record_witness_references",
     PrimaryFrameReads => "primary_frame_reads",
@@ -40,6 +44,14 @@ counters! {
     DefinitionCarrierReads => "definition_carrier_reads",
     DefinitionCarrierBytes => "definition_carrier_bytes",
     DecodeBlockingJobs => "decode_blocking_jobs",
+    AppendBlockingJobs => "append_blocking_jobs",
+}
+
+/// Exposes the real structural validator only in instrumented development builds.
+pub fn validate_structure<P: JournalPayload>(
+    record: &JournalRecord<P>,
+) -> Result<crate::event::CommittedCausalRef, crate::event::CausalError> {
+    crate::event::PreparedCausalCommit::validate_record(record)
 }
 
 static COUNTS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
