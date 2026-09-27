@@ -8,7 +8,7 @@
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use crate::pipeline::benchmarks::ParentAdmission;
+pub use crate::pipeline::benchmarks::{ParentAdmission, ReportParent};
 
 pub use crate::pipeline::builder::tests::subscription_preparation_failure_joins_every_supplied_stage;
 pub use crate::pipeline::tests::admission::{

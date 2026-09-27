@@ -429,17 +429,25 @@ async fn terminal_and_drain_cannot_settle_over_an_incomplete_stage_group() {
 #[tokio::test]
 async fn admission_requires_all_files_current_schema_and_pipeline_writer() {
     let mut run = Run::new();
-    for version in ["6.0", "7.0", "8.0", "10.0"] {
+    assert!(open_disk_run(run.dir.path()).await.is_ok());
+    let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
+    let future_version = format!("{}.0", major.parse::<u64>().unwrap() + 1);
+    for version in ["6.0", "7.0", "8.0", "9.0", future_version.as_str()] {
         run.manifest.journal_schema_version = version.into();
         run.save_manifest();
-        assert!(open_disk_run(run.dir.path()).await.is_err());
+        assert!(
+            open_disk_run(run.dir.path()).await.is_err(),
+            "schema {version} must be rejected"
+        );
     }
     run.manifest.journal_schema_version = JOURNAL_SCHEMA_VERSION.into();
+    let pipeline_writer_id = run.manifest.pipeline_writer_id;
     run.manifest.pipeline_writer_id = run.stage.into();
     run.save_manifest();
     assert!(open_disk_run(run.dir.path()).await.is_err());
-    run.manifest.pipeline_writer_id = SystemId::new().into();
+    run.manifest.pipeline_writer_id = pipeline_writer_id;
     run.save_manifest();
+    assert!(open_disk_run(run.dir.path()).await.is_ok());
     std::fs::remove_file(run.dir.path().join("error.log")).unwrap();
     assert!(open_disk_run(run.dir.path()).await.is_err());
     assert!(!run.dir.path().join("error.log").exists());

@@ -117,3 +117,83 @@ impl ParentAdmission {
             .expect("benchmark publication settlement");
     }
 }
+
+/// Real readiness fold and publication handoff, without starting business stages.
+/// Only available through the development test-support feature.
+pub struct ReportParent {
+    inner: ParentAdmission,
+    pub actions_executed: usize,
+}
+
+impl ReportParent {
+    pub fn new(
+        journal: Arc<dyn Journal<SystemEvent>>,
+        topology: Arc<obzenflow_topology::Topology>,
+        children: &[StageId],
+    ) -> Self {
+        let mut inner = ParentAdmission::new(journal, topology);
+        inner.machine = build_pipeline_fsm_with_initial(PipelineFsmState::AwaitingStageReadiness);
+        inner.scope = inner.context.resources.publications.clone();
+        for child in children {
+            inner.context.stage_supervisors.insert(
+                *child,
+                super::tests::support::TestPipelineStageHandle::boxed(
+                    *child,
+                    "benchmark_child",
+                    obzenflow_core::event::context::StageType::Transform,
+                ),
+            );
+        }
+        Self {
+            inner,
+            actions_executed: 0,
+        }
+    }
+
+    pub async fn apply(&mut self, read: crate::supervised_base::report_reader::ReportRead) {
+        use crate::supervised_base::report_reader::ReportRead;
+        use obzenflow_fsm::FsmAction;
+        let scope = self.inner.scope.clone();
+        if !scope.has_capacity(4) {
+            scope.wait_for_capacity(4).await.unwrap();
+        }
+        scope
+            .enter(async {
+                match read {
+                    ReportRead::Coverage { journal, through } => {
+                        self.inner.context.report_coverage.insert(journal, through);
+                    }
+                    ReportRead::Record(row) => {
+                        let actions = self
+                            .inner
+                            .machine
+                            .handle(PipelineFsmEvent::Journal(row), &mut self.inner.context)
+                            .await
+                            .unwrap();
+                        for action in actions {
+                            action.execute(&mut self.inner.context).await.unwrap();
+                            self.actions_executed += 1;
+                        }
+                    }
+                }
+            })
+            .await;
+    }
+
+    pub fn ready(&self) -> bool {
+        self.inner.machine.state() == &PipelineFsmState::ReadyForRun
+    }
+
+    pub fn covered(&self, journal: &obzenflow_core::JournalId) -> u64 {
+        self.inner
+            .context
+            .report_coverage
+            .get(journal)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub async fn settle(&self) {
+        self.inner.settle().await;
+    }
+}

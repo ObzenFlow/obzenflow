@@ -42,8 +42,8 @@ def main():
     parser.add_argument("--profile", choices=("test", "bench"), required=True)
     parser.add_argument("--criterion-dir", type=pathlib.Path, default=ROOT / "target/criterion")
     parser.add_argument("--command", required=True, help="Exact successful Cargo benchmark command")
-    parser.add_argument("--suite", choices=("components", "supervision"), default="components")
-    parser.add_argument("--work-json", type=pathlib.Path, help="Required supervision operation censuses")
+    parser.add_argument("--suite", choices=("components", "supervision", "hot-path"), default="components")
+    parser.add_argument("--work-json", type=pathlib.Path, help="Required operation censuses for instrumented suites")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.baseline):
         parser.error("baseline must be a simple Criterion baseline name")
@@ -51,6 +51,10 @@ def main():
         "supervision_discovery", "journal_read_controls", "report_definition_resolution", "journal_append_costs",
     )
     expected = 59 if args.suite == "components" else 30
+    if args.suite == "hot-path":
+        groups = ("report_accounting", "causal_record_work", "record_reconstruction",
+                  "reader_dispatch", "supervisor_fan_in", "journal_append_cost")
+        expected = 138
     cases = []
     for group in groups:
         for benchmark_path in sorted((args.criterion_dir / group).glob(f"**/{args.baseline}/benchmark.json")):
@@ -68,11 +72,11 @@ def main():
     if len(cases) != expected or len({case["benchmark"]["full_id"] for case in cases}) != expected:
         raise ValueError(f"Contract requires all {expected} unique cases; found {len(cases)}")
     work = None
-    if args.suite == "supervision":
+    if args.suite in ("supervision", "hot-path"):
         if args.work_json is None:
-            parser.error("--suite supervision requires --work-json")
+            parser.error("instrumented suites require --work-json")
         work = json.loads(args.work_json.read_text())
-        names = [item["case"] for item in work["cases"]]
+        names = [item["case"] for item in (work if isinstance(work, list) else work["cases"])]
         if len(names) != expected or set(names) != {case["benchmark"]["full_id"] for case in cases}:
             raise ValueError("Work census does not match the complete Criterion case inventory")
     sources = list((ROOT / "crates/obzenflow_benchmarks/benches/journal_components").glob("*.rs"))
@@ -94,7 +98,7 @@ def main():
         "crates/obzenflow_runtime/src/supervised_base/publication.rs",
         "crates/obzenflow_runtime/src/pipeline/fsm/journal.rs",
     )]
-    if args.suite == "supervision":
+    if args.suite in ("supervision", "hot-path"):
         sources += list((ROOT / "crates/obzenflow_benchmarks/benches/supervision_selection").glob("*.rs"))
         sources += [ROOT / path for path in (
             "crates/obzenflow_benchmarks/SUPERVISION_SELECTION.md",
@@ -119,8 +123,18 @@ def main():
             "crates/obzenflow_infra/src/journal/memory/journal.rs",
             "crates/obzenflow_infra/src/journal/memory/reader.rs",
         )]
+    if args.suite == "hot-path":
+        sources += list((ROOT / "crates/obzenflow_benchmarks/benches/journal_hot_path").glob("*.rs"))
+        sources += [ROOT / path for path in (
+            "crates/obzenflow_benchmarks/JOURNAL_HOT_PATH.md",
+            "crates/obzenflow_benchmarks/scripts/capture_component_baseline.py",
+            "crates/obzenflow_infra/src/journal/disk/codec/benchmark.rs",
+            "crates/obzenflow_core/src/event/vector_clock.rs",
+            "crates/obzenflow_runtime/src/testing/pipeline.rs",
+            "crates/obzenflow_runtime/src/pipeline/fsm/actions.rs",
+        )]
     report = {
-        "measurement_contract": "journal-components-v1" if args.suite == "components" else "supervision-selection-v1",
+        "measurement_contract": {"components":"journal-components-v1", "supervision":"supervision-selection-v1", "hot-path":"journal-hot-path-v2"}[args.suite],
         "baseline": args.baseline,
         "captured_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "revision": command("git", "rev-parse", "HEAD"),
@@ -138,6 +152,14 @@ def main():
     }
     if work is not None:
         report["work_observations"] = work
+    if args.suite == "hot-path":
+        report["maximum_blocking_workers"] = {
+            "default": 2,
+            "live_supervisor_fan_in": sorted({
+                item["input"]["blocking_workers"] for item in work
+                if item["input"].get("concurrent_appends")
+            }),
+        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Captured {len(cases)} Criterion cases to {args.output}")

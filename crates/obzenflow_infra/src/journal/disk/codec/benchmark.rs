@@ -5,7 +5,8 @@
 //! Development access to the same codec operations used by normal readers.
 use super::*;
 use obzenflow_core::event::provenance::ChainEventProvenance;
-use obzenflow_core::event::{CausalWitnesses, ChainPayload, VectorClock};
+use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::event::{CausalWitnesses, ChainPayload};
 
 pub struct ReconstructionInput {
     path: PathBuf,
@@ -30,8 +31,24 @@ pub struct MemberRead<'a> {
 }
 
 impl ReconstructionInput {
-    pub(crate) fn new(path: PathBuf, bytes: Vec<u8>, offset: u64, event: ChainEventProvenance) -> Self {
-        Self { store: DefinitionStore::for_archive(&path), path, bytes, offset, event }
+    pub(crate) fn new(
+        path: PathBuf,
+        bytes: Vec<u8>,
+        offset: u64,
+        event: ChainEventProvenance,
+        cold: bool,
+    ) -> Self {
+        Self {
+            store: if cold {
+                DefinitionStore::default()
+            } else {
+                DefinitionStore::for_archive(&path)
+            },
+            path,
+            bytes,
+            offset,
+            event,
+        }
     }
 
     /// Untimed prerequisites for the individual member operations. Complete-frame
@@ -41,19 +58,27 @@ impl ReconstructionInput {
         let envelope = routing::Envelope::parse(body).unwrap();
         assert_eq!(envelope.members.len(), 1);
         let mut definitions = Cursor::new(envelope.definitions);
-        let mut table = ReadTable::new(&mut definitions, &self.store, &self.path, self.offset).unwrap();
+        let mut table =
+            ReadTable::new(&mut definitions, &self.store, &self.path, self.offset).unwrap();
         definitions.finish().unwrap();
         table.begin_record();
         let mut fields = Cursor::new(envelope.members[0].body);
         let provenance = fields.bytes().unwrap();
         match fields.byte().unwrap() {
-            0 | 1 => {},
-            2 => { fields.bytes().unwrap(); },
+            0 | 1 => {}
+            2 => {
+                fields.bytes().unwrap();
+            }
             _ => unreachable!(),
         }
         let payload = fields.bytes().unwrap();
         fields.finish().unwrap();
-        MemberRead { definitions: table, provenance, payload, event: &self.event }
+        MemberRead {
+            definitions: table,
+            provenance,
+            payload,
+            event: &self.event,
+        }
     }
 
     pub fn verify_and_route(&self) -> usize {
@@ -67,7 +92,12 @@ impl MemberRead<'_> {
     pub fn metadata(&mut self) -> MetadataValue {
         let stored: BodyProvenance<ChainEventProvenance> =
             read_provenance(self.provenance, &mut self.definitions).unwrap();
-        MetadataValue { event: stored.event, clock: stored.vector_clock, causal: stored.causal, timestamp: stored.timestamp }
+        MetadataValue {
+            event: stored.event,
+            clock: stored.vector_clock,
+            causal: stored.causal,
+            timestamp: stored.timestamp,
+        }
     }
     pub fn payload(&self) -> ChainPayload {
         read_payload::<ChainPayload>(self.event, self.payload).unwrap()
@@ -83,7 +113,11 @@ pub struct EncodingCursor {
 }
 impl EncodingCursor {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, store: DefinitionStore::default(), offset: 0 }
+        Self {
+            path,
+            store: DefinitionStore::default(),
+            offset: 0,
+        }
     }
     pub fn encode(&mut self, rows: &[JournalRecord<ChainPayload>], group: Option<&str>) -> Vec<u8> {
         let mut prepared = prepare(rows, group, &self.path, self.store.clone()).unwrap();

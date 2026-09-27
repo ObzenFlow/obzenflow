@@ -43,6 +43,7 @@ times are set in the benchmark sources.
 | `pipeline_execution` | Batch completion time, metrics reporting, and record costs at several causal frontier widths. |
 | `journal_components` | Selective causal, decoder, dispatch, reader, report discovery, parent admission and publication measurements; requires `components`. See [component contracts](COMPONENTS.md). |
 | `supervision_selection` | Report-discovery baseline, actual work/allocation counters, atomic-group selection, cold definition dependencies and write costs; requires `supervision-benchmarks`. See [selection contracts and comparison commands](SUPERVISION_SELECTION.md). |
+| `journal_hot_path` | 138 cases for report accounting, validation, reconstruction, dispatch, one-parent fan-in and append attribution; requires `supervision-benchmarks`. See [hot-path contracts and baseline commands](JOURNAL_HOT_PATH.md). |
 | `idle_cpu_usage` | CPU use while a running pipeline has no input. |
 | `waiting_for_gun_cpu_usage` | CPU use while a materialised pipeline waits for manual start. |
 | `tokio_worker_3_stage_experiment` | Worker-thread counts with a three-stage workload and five-stage control. |

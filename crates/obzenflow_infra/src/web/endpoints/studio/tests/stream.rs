@@ -10,6 +10,9 @@ use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::event::journal_record::SystemJournalRecord;
 use obzenflow_core::event::{PipelineLifecycleEvent, StageLifecycleEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
+use obzenflow_core::journal::reader::{
+    JournalReportReader, JournalReportStorageReader, ReportScan, ReportScanBudget, ReportScanItem,
+};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
@@ -700,6 +703,37 @@ impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ScriptedRead
     }
 }
 
+#[async_trait]
+impl JournalReportStorageReader<SystemEvent> for ScriptedReader {
+    async fn storage_next_report(
+        &mut self,
+        _: ReportScanBudget,
+    ) -> Result<ReportScan<SystemPayload>, JournalError> {
+        // Every system record is a report; share the scripted read and drop probes.
+        Ok(ReportScan {
+            item: match JournalReader::next(self).await? {
+                Some(record) => ReportScanItem::Record(Box::new(record)),
+                None => ReportScanItem::Tail {
+                    committed_end: JournalReader::is_at_end(self),
+                },
+            },
+            scanned_bytes: 0,
+        })
+    }
+
+    fn storage_position(&self) -> u64 {
+        JournalReader::position(self)
+    }
+
+    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
+        JournalReader::initial_prefix_complete(self)
+    }
+
+    fn storage_is_at_end(&self) -> bool {
+        JournalReader::is_at_end(self)
+    }
+}
+
 #[derive(Default)]
 struct PendingOpen {
     entered: tokio::sync::Notify,
@@ -756,6 +790,28 @@ impl ScriptedJournal {
             reader_opened: tokio::sync::Notify::new(),
         }
     }
+
+    async fn open_reader(&self, position: u64) -> Result<Box<ScriptedReader>, JournalError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        if let Some(probe) = &self.pending_open {
+            let _guard = PendingOpenGuard(probe.clone());
+            probe.entered.notify_one();
+            std::future::pending::<()>().await;
+        }
+        if self.fail_open {
+            return Err(JournalError::SubscriptionClosed);
+        }
+        let reader = Box::new(ScriptedReader {
+            pending_read: self.pending_read.clone(),
+            reads: self.reads.clone(),
+            events: self.inner.read_all_unordered().await?,
+            position: position as usize,
+            fail_at: self.fail_at,
+            dropped: self.reader_dropped.clone(),
+        });
+        self.reader_opened.notify_one();
+        Ok(reader)
+    }
 }
 
 #[async_trait]
@@ -791,25 +847,14 @@ impl obzenflow_core::journal::JournalStorage<SystemEvent> for ScriptedJournal {
         &self,
         position: u64,
     ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
-        self.opens.fetch_add(1, Ordering::SeqCst);
-        if let Some(probe) = &self.pending_open {
-            let _guard = PendingOpenGuard(probe.clone());
-            probe.entered.notify_one();
-            std::future::pending::<()>().await;
-        }
-        if self.fail_open {
-            return Err(JournalError::SubscriptionClosed);
-        }
-        let reader = Box::new(ScriptedReader {
-            pending_read: self.pending_read.clone(),
-            reads: self.reads.clone(),
-            events: self.inner.read_all_unordered().await?,
-            position: position as usize,
-            fail_at: self.fail_at,
-            dropped: self.reader_dropped.clone(),
-        });
-        self.reader_opened.notify_one();
-        Ok(reader)
+        Ok(self.open_reader(position).await?)
+    }
+
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReportReader<SystemEvent>>, JournalError> {
+        Ok(self.open_reader(position).await?)
     }
 
     async fn storage_read_last_n(

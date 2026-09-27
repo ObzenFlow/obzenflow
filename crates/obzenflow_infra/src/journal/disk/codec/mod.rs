@@ -5,9 +5,9 @@
 //! Private current-schema storage adapter for the current Core provenance schema.
 //! See README.md for the wire contract and scalar-preservation invariants.
 
-mod definitions;
 #[cfg(feature = "test-support")]
 pub(crate) mod benchmark;
+mod definitions;
 mod deserialize;
 pub(crate) mod frame;
 mod layout;
@@ -305,7 +305,8 @@ impl Decoder {
             let start = input.position();
             definitions.section(1);
             let stored = read_provenance::<<T::Payload as JournalPayload>::Provenance, MEASURE>(
-                input.bytes()?, &mut definitions,
+                input.bytes()?,
+                &mut definitions,
             )?;
             let provenance = obzenflow_core::event::provenance::Provenance {
                 event: stored.event,

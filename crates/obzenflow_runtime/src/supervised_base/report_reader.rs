@@ -141,6 +141,20 @@ impl ReportReaders {
         self.tasks.shutdown().await;
     }
 
+    /// Close handoffs and await complete bounded reads, including their blocking
+    /// jobs. Use only with real bounded providers after fixture writers settle;
+    /// deliberately pending test doubles still need aborting teardown above.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub async fn finish_reads_for_benchmark(mut self) {
+        self.slots.clear();
+        while let Some(result) = self.tasks.join_next().await {
+            result
+                .expect("benchmark reader task")
+                .expect("benchmark reader completion");
+        }
+    }
+
     pub fn diagnostics(&self) -> Vec<ReaderDiagnostics> {
         self.slots
             .iter()
@@ -471,7 +485,9 @@ fn retained_record_bytes(record: &impl serde::Serialize) -> Result<usize, serde_
 /// Measure the same retention accounting used by the report task.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub fn benchmark_retained_record_bytes(record: &impl serde::Serialize) -> Result<usize, serde_json::Error> {
+pub fn benchmark_retained_record_bytes(
+    record: &impl serde::Serialize,
+) -> Result<usize, serde_json::Error> {
     retained_record_bytes(record)
 }
 
