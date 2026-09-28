@@ -9,13 +9,14 @@ use super::{
     DeliveryFilter, EofOutcome, HeldHead, MergeCandidateMeta, PollResult, ReaderProgress,
     StageInputPosition, UpstreamSubscription,
 };
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::chain_payload::EventKind;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
-use obzenflow_core::event::provenance::{ChainEventProvenance, CompositeActivationContext};
+use obzenflow_core::event::provenance::CompositeActivationContext;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::{StageId, WriterId};
 use std::any::Any;
@@ -424,6 +425,9 @@ where
             catch_up,
             orders_by_own_seq,
         } = head;
+        if let Err(error) = crate::supervised_base::publication::observe_record(&envelope) {
+            return PollResult::Error(Box::new(error));
+        }
         // FLOWIP-120n F18: a delivered positional row advances the inherited
         // key for this reader's later re-authored control heads.
         if orders_by_own_seq {
@@ -459,6 +463,34 @@ where
             self.generation_by_reader[reader_index] = announced;
         }
         self.last_delivered_generation = Some(reader_generation);
+        let mut envelope = DeliveredRecord::from(envelope);
+        if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
+            if let Some(event) =
+                (envelope.authored_mut() as &mut dyn Any).downcast_mut::<ChainEvent>()
+            {
+                let provenance = &mut event.envelope.provenance.event;
+                if matches!(
+                    provenance.event_kind,
+                    EventKind::Fact | EventKind::CompositeData
+                ) {
+                    for spec in specs
+                        .iter()
+                        .filter(|spec| spec.matches(&provenance.event_type))
+                    {
+                        let activation = CompositeActivationContext::new(
+                            spec.composite_id.clone(),
+                            provenance.id,
+                            spec.port_name.clone(),
+                            provenance.processing.event_time,
+                        );
+                        match obzenflow_core::event::provenance::composite_activation_context::union_composite_activations(&provenance.composite_activations, &[activation]) {
+                            Ok(merged) => provenance.composite_activations = merged,
+                            Err(error) => return PollResult::Error(Box::new(error)),
+                        }
+                    }
+                }
+            }
+        }
         let original_authored = envelope.authored();
         let original_chain_event = (&original_authored as &dyn Any).downcast_ref::<ChainEvent>();
 
@@ -545,34 +577,6 @@ where
         self.last_delivered_upstream_stage = Some(stage_id);
         self.last_delivered_stage_input_position = delivered_stage_input_position;
 
-        let mut envelope = envelope;
-        if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
-            if let Some(provenance) = (&mut envelope.envelope.provenance.event as &mut dyn Any)
-                .downcast_mut::<ChainEventProvenance>()
-            {
-                if matches!(
-                    provenance.event_kind,
-                    EventKind::Fact | EventKind::CompositeData
-                ) {
-                    for spec in specs
-                        .iter()
-                        .filter(|spec| spec.matches(&provenance.event_type))
-                    {
-                        let activation = CompositeActivationContext::new(
-                            spec.composite_id.clone(),
-                            provenance.id,
-                            spec.port_name.clone(),
-                            provenance.processing.event_time,
-                        );
-                        match obzenflow_core::event::provenance::composite_activation_context::union_composite_activations(&provenance.composite_activations, &[activation]) {
-                            Ok(merged) => provenance.composite_activations = merged,
-                            Err(error) => return PollResult::Error(Box::new(error)),
-                        }
-                    }
-                }
-            }
-        }
-
         PollResult::Event(envelope)
     }
 
@@ -643,19 +647,17 @@ where
         stage_id: StageId,
         progress: &mut ReaderProgress,
         contract_chain_event: Option<&ChainEvent>,
-        envelope: &JournalRecord<T::Payload>,
+        envelope: &DeliveredRecord<T::Payload>,
         set_read_instant: bool,
     ) -> SeqNo {
         if let Some(chain_event) = contract_chain_event {
             if chain_event.consumes_data_credit() && self.uses_receipt_watermark() {
-                let (authored, payload) = chain_event.clone().into_parts();
-                let record = JournalRecord::commit(
-                    authored,
-                    payload,
-                    envelope.envelope.provenance.journal.clone(),
-                )
-                .expect("delivered record remains valid");
-                progress.track_pending_delivery_input(record);
+                // Retain the admitted record itself. Reconstructing identical
+                // data cannot recreate the reader's admission capability.
+                let record = (envelope as &dyn Any)
+                    .downcast_ref::<DeliveredRecord<ChainPayload>>()
+                    .expect("chain input has a chain journal record");
+                progress.track_pending_delivery_input(record.clone());
             }
 
             if chain_event.consumes_data_credit()

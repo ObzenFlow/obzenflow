@@ -25,15 +25,14 @@ use crate::supervised_base::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{ChainPayload, SystemEvent};
-use obzenflow_core::journal::{AppendOptions, Journal};
+use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{ChainEvent, JournalRecord, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 fn contract_violation_directive<H>(
     error: &HandlerError,
@@ -373,8 +372,8 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Supervis
         SupervisorKind::Stateful
     }
 
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.report_journal.clone()
     }
 
     fn name(&self) -> &str {
@@ -529,7 +528,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> Stateful
         publication::append(
             &ctx.data_journal,
             heartbeat,
-            AppendOptions::new(None)
+            AppendOptions::default()
                 .with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)])),
         )
         .await?;

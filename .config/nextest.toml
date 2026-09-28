@@ -1,21 +1,71 @@
+nextest-version = { required = "0.9.91" }
+
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 1 }
 retries = 0
 
+# Start the recently failing archive proof immediately. All these expensive
+# proofs own temporary journals; Prometheus listeners use allocated ports.
+# Two concurrent proofs leave capacity for other tests on four-slot CI runners.
+[[profile.default.overrides]]
+filter = "binary(=prometheus_example_test) & test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
+priority = 100
+
+[[profile.default.overrides]]
+filter = "(binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only) | test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts))) | (binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)) | (binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream::many_stage_pipeline_metrics_and_studio_settle_owned_journals))"
+priority = 80
+test-group = "expensive-journal-proofs"
+# Repeating a minute-long failure delays feedback and cannot qualify the fix.
+retries = 0
+
 [profile.ci-fast]
+test-threads = 4
 slow-timeout = { period = "60s", terminate-after = 1 }
 retries = 1
+fail-fast = false
 # PRs and main select the same tests; only their execution budgets differ.
 
+[profile.ci-fast.junit]
+path = "junit.xml"
+store-success-output = true
+store-failure-output = true
+
 [profile.ci-full]
+test-threads = 4
 slow-timeout = { period = "300s", terminate-after = 2 }
 retries = 2
+fail-fast = false
+
+[profile.ci-full.junit]
+path = "junit.xml"
+store-success-output = true
+store-failure-output = true
 
 # The 5k proofs include rate-limited execution and full journal verification.
 # Use the main-branch time budget when running them before merge.
+# Include the typed 5k case explicitly; its name does not share the other prefix.
 [[profile.ci-fast.overrides]]
-filter = "binary(=prometheus_example_test) & test(prometheus_example_5k_completes_)"
+filter = "binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only))"
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+# Temporary 145h merge budgets, authorised 2026-09-27. Reassess these exact
+# exceptions in FLOWIP-145i; performance acceptance remains in 145h-part-2.
+# This three-configuration archive proof passed its assertions at 65.90s in CI,
+# after the former 60s deadline. Keep all 1,000-input cases and export checks.
+[[profile.ci-fast.overrides]]
+filter = "binary(=prometheus_example_test) & test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+# Replay's outer limit covers live execution, replay preparation/execution and
+# comparison. Its separate 60s comparison assertion is unchanged.
+[[profile.ci-fast.overrides]]
+filter = "binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
+# The composed test keeps all four cases and every journal/Studio assertion.
+[[profile.ci-fast.overrides]]
+filter = "binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream::many_stage_pipeline_metrics_and_studio_settle_owned_journals)"
+slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
 filter = "binary(/metrics/)"
@@ -32,12 +82,15 @@ filter = "binary(/scale_test/)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
-filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|prometheus_example_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
+filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
 test-group = "disk-journal-paths"
 
 [[profile.ci-full.overrides]]
-filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|prometheus_example_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
+filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
 test-group = "disk-journal-paths"
+
+[test-groups.expensive-journal-proofs]
+max-threads = 2
 
 [test-groups.metrics-exporter-port]
 max-threads = 1

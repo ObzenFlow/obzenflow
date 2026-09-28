@@ -391,7 +391,7 @@ async fn running_input_delivers_descriptor_boundary_to_decide() -> Result<()> {
         .journals()
         .filter_map(|journal| journal.stage.as_ref())
     {
-        assert_eq!(stage.is_effectful, Some(stage.key == "guarded"));
+        assert_eq!(stage.is_effectful, stage.key == "guarded");
         if stage.key == "guarded" {
             assert_eq!(
                 stage.stage_type,

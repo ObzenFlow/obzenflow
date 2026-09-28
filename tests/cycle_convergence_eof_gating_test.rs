@@ -6,7 +6,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
-use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageOutputs};
@@ -45,7 +44,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::Notify;
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
@@ -96,8 +95,8 @@ async fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
 
         let mut reader =
             obzenflow_infra::journal::disk::reader::DiskJournalReader::<ChainEvent>::new(
-                path,
-                JournalId::new(),
+                path.clone(),
+                obzenflow_infra::journal::disk::identity::read_identity(&path)?.journal_id,
                 Arc::new(tokio::sync::RwLock::new(())),
             )
             .await?;
@@ -335,11 +334,11 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let handle = harness.into_inner();
     let run = tokio::spawn(handle.run());
 
-    // Drive paused time until the flow terminates.
-    for _ in 0..400 {
-        if run.is_finished() {
-            break;
-        }
+    // Disk I/O runs outside Tokio's paused clock. As in the cycle guard test,
+    // bound the scheduler with a wall-clock watchdog: a fixed yield count can
+    // expire before blocking I/O completes when other test binaries are busy.
+    let scheduler_deadline = Instant::now() + Duration::from_secs(10);
+    while !run.is_finished() && Instant::now() < scheduler_deadline {
         clock.advance(Duration::from_millis(50)).await?;
         for _ in 0..16 {
             if run.is_finished() {
@@ -350,7 +349,7 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     }
     assert!(
         run.is_finished(),
-        "flow did not terminate under paused time"
+        "flow did not terminate before the scheduler deadline under paused time"
     );
     run.await
         .expect("join handle")

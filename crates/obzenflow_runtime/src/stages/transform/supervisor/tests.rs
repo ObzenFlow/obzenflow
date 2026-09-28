@@ -27,7 +27,6 @@ use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
-use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason, StageFatalRecorded,
     SystemEvent,
@@ -135,7 +134,7 @@ async fn build_cycle_entry_harness<
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
         direct_fact_continuation: None,
         error_journal,
-        system_journal: system_journal.clone(),
+        report_journal: (system_journal.clone()).into(),
         writer_id: None,
         lineage_policy: obzenflow_core::config::LineagePolicy::default(),
         subscription: None,
@@ -190,7 +189,6 @@ async fn build_cycle_entry_harness<
 struct TestJournal<T: JournalEvent> {
     id: JournalId,
     owner: Option<JournalOwner>,
-    seq: AtomicU64,
     events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
 }
 
@@ -199,13 +197,8 @@ impl<T: JournalEvent> TestJournal<T> {
         Self {
             id: JournalId::new(),
             owner: Some(owner),
-            seq: AtomicU64::new(0),
             events: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed).saturating_add(1)
     }
 }
 
@@ -215,66 +208,52 @@ struct TestJournalReader<T: JournalEvent> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
+    fn storage_id(&self) -> &JournalId {
         &self.id
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.owner.as_ref()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        mut options: AppendOptions<'_, T>,
+        mut options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
-        let parent = options.parent;
-
-        let mut env = JournalRecord::new(JournalWriterId::from(self.id), event);
-
-        if let Some(parent) = parent {
-            CausalOrderingService::update_with_parent(
-                &mut env.envelope.provenance.journal.vector_clock,
-                &parent.envelope.provenance.journal.vector_clock,
-            );
-        }
-
-        let writer_key = env.writer_id().to_string();
-        let seq = self.next_seq();
-        env.envelope
-            .provenance
-            .journal
-            .vector_clock
-            .clocks
-            .insert(writer_key, seq);
-
         let mut guard = self.events.lock().unwrap();
+        let env = crate::testing::causal_fixture::commit(self.id, event, &options, &guard)?;
         guard.push(env.clone());
         Ok(env)
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         _event_id: &obzenflow_core::EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(None)
     }
 
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         Ok(Box::new(TestJournalReader {
             events: self.events.clone(),
             pos: position as usize,
         }))
     }
 
-    async fn read_last_n(
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -286,8 +265,10 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
 }
 
 #[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorageReader<T>
+    for TestJournalReader<T>
+{
+    async fn storage_next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         let guard = self.events.lock().unwrap();
         if self.pos >= guard.len() {
             Ok(None)
@@ -298,11 +279,11 @@ impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
         }
     }
 
-    fn position(&self) -> u64 {
+    fn storage_position(&self) -> u64 {
         self.pos as u64
     }
 
-    fn is_at_end(&self) -> bool {
+    fn storage_is_at_end(&self) -> bool {
         let guard = self.events.lock().unwrap();
         self.pos >= guard.len()
     }
@@ -388,7 +369,7 @@ fn generated_continuation(
     (
         DirectFactContinuation::new(
             DirectFactContinuationStart {
-                envelope,
+                envelope: envelope.into(),
                 upstream_stage: None,
                 input_position: Some(crate::messaging::upstream_subscription::StageInputPosition(
                     1,
@@ -504,7 +485,7 @@ async fn build_transform_harness<
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
         direct_fact_continuation: None,
         error_journal,
-        system_journal: system_journal.clone(),
+        report_journal: (system_journal.clone()).into(),
         writer_id: None,
         lineage_policy: obzenflow_core::config::LineagePolicy::default(),
         subscription: None,
@@ -635,6 +616,7 @@ async fn forwarding_fan_out_keeps_independent_local_contexts() {
         .append(original.clone(), Default::default())
         .await
         .unwrap();
+    let envelope = envelope.into();
     left.forward_control_event(&envelope, &left_ctx.stage_name)
         .await
         .unwrap();
@@ -1066,6 +1048,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
         .commit(1);
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
@@ -1102,6 +1085,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
     // loop returns to dispatch_state with the measured wait recorded.
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending2", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
@@ -1156,7 +1140,7 @@ async fn terminal_transform_records_queued_controls_and_errors_without_executing
             supervisor,
             receiver,
             watcher,
-            ctx.system_journal.clone(),
+            ctx.report_journal.clone(),
         );
         assert!(matches!(
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
@@ -1167,7 +1151,7 @@ async fn terminal_transform_records_queued_controls_and_errors_without_executing
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
             EventLoopDirective::Terminate
         ));
-        let records = ctx.system_journal.read_all_unordered().await.unwrap();
+        let records = ctx.report_journal.read_all_unordered().await.unwrap();
         assert_eq!(records.len(), 2);
         assert!(
             matches!(&records[0].payload, obzenflow_core::event::SystemPayload::SupervisorCommandDiscarded {
@@ -1202,6 +1186,7 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         .commit(1);
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
@@ -1218,7 +1203,7 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         supervisor,
         receiver,
         watcher,
-        ctx.system_journal.clone(),
+        ctx.report_journal.clone(),
     );
 
     let state = TransformState::<ExpandHandler>::Running;
@@ -1274,6 +1259,7 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
         .commit(1);
     ctx.pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },

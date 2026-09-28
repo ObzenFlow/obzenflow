@@ -74,6 +74,9 @@ pub(crate) fn frame_length(header: &[u8]) -> Result<usize, FrameProblem> {
         ));
     }
     let body_length = u64::from_le_bytes(header[MAGIC.len()..checksum_offset].try_into().unwrap());
+    if body_length > obzenflow_core::journal::limits::MAX_GROUP_BYTES as u64 {
+        return Err(FrameProblem::Corrupt("frame byte budget exceeded".into()));
+    }
     usize::try_from(body_length)
         .ok()
         .and_then(|length| length.checked_add(HEADER_LEN + TRAILER_LEN))
@@ -104,6 +107,12 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<&[u8], FrameProblem> {
         != u32::from_le_bytes(bytes[trailer..trailer + 4].try_into().unwrap())
     {
         return Err(FrameProblem::Corrupt("frame body checksum mismatch".into()));
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    {
+        use obzenflow_core::benchmark::{add, Counter};
+        add(Counter::VerifiedFrames, 1);
+        add(Counter::VerifiedFrameBytes, bytes.len() as u64);
     }
     Ok(&bytes[HEADER_LEN..trailer])
 }

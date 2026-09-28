@@ -374,7 +374,10 @@ pub async fn stage_failures_and_cancellations_before_readiness_use_journal_evide
             let mut context = test_context(topology, system_id, journal, None);
             let mut machine = crate::pipeline::fsm::build_pipeline_fsm_with_initial(state.clone());
             machine
-                .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
+                .handle(
+                    PipelineFsmEvent::Journal(Box::new((envelope).into())),
+                    &mut context,
+                )
                 .await
                 .unwrap();
             assert!(matches!(machine.state(), PipelineFsmState::SettlingStages));
@@ -402,7 +405,10 @@ pub async fn materialisation_reconsiders_readiness_facts_already_consumed(
         .await
         .unwrap();
     assert!(machine
-        .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
+        .handle(
+            PipelineFsmEvent::Journal(Box::new((envelope).into())),
+            &mut context
+        )
         .await
         .unwrap()
         .is_empty());
@@ -423,7 +429,10 @@ pub async fn materialisation_reconsiders_readiness_facts_already_consumed(
         .expect("previously consumed Running fact must authorise readiness publication");
     let envelope = journal.append(readiness, Default::default()).await.unwrap();
     machine
-        .handle(PipelineFsmEvent::Journal(Box::new(envelope)), &mut context)
+        .handle(
+            PipelineFsmEvent::Journal(Box::new((envelope).into())),
+            &mut context,
+        )
         .await
         .unwrap();
     assert!(matches!(machine.state(), PipelineFsmState::ReadyForRun));

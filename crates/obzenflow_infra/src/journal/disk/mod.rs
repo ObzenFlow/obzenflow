@@ -6,6 +6,7 @@
 
 pub(crate) mod codec;
 pub mod config;
+pub mod identity;
 pub mod inspect;
 pub mod journal;
 pub mod log_record;
@@ -13,6 +14,7 @@ pub(crate) mod manifest_gate;
 pub mod observations;
 pub mod reader;
 pub mod replay_archive;
+mod report_reader;
 mod reverse_reader;
 pub(crate) mod scanner;
 

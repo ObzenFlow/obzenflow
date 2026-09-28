@@ -25,7 +25,7 @@ pub struct SinkLifecycleFailureCommit<'a> {
     pub phase: SinkOperationPhase,
     pub error: &'a SinkOperationError,
     pub error_journal: &'a Arc<dyn Journal<ChainEvent>>,
-    pub system_journal: &'a Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: &'a crate::supervised_base::SupervisorJournal,
     pub instrumentation: &'a Arc<StageInstrumentation>,
 }
 
@@ -68,7 +68,7 @@ pub async fn record_sink_lifecycle_operation_failure(
     .mark_as_error(commit.error.detail(), commit.error.kind())
     .with_runtime_provenance(commit.instrumentation.snapshot());
     let error_journal = commit.error_journal.clone();
-    let system_journal = commit.system_journal.clone();
+    let report_journal = commit.report_journal.clone();
     let instrumentation = commit.instrumentation.clone();
     let stage_id = commit.stage_id;
     let detail = commit.error.detail();
@@ -87,10 +87,15 @@ pub async fn record_sink_lifecycle_operation_failure(
             snapshot_stage_accounting(&instrumentation),
             operation.envelope.provenance.event.id,
         );
-        let lifecycle = system_journal.append(lifecycle, Default::default()).await?;
+        let lifecycle = crate::supervised_base::publication::report_inline(
+            &report_journal,
+            lifecycle,
+            Default::default(),
+        )
+        .await?;
         Ok(SinkLifecycleFailureRecorded {
             operation,
-            lifecycle_event_id: lifecycle.envelope.provenance.event.id,
+            lifecycle_event_id: *lifecycle.id(),
         })
     })
     .await

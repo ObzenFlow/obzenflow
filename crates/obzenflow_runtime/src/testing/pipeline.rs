@@ -6,6 +6,10 @@
 //! Each factory call creates an isolated flow for a scenario or parameterised case.
 //! Only the test entry points are public; lifecycle types remain crate-private.
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use crate::pipeline::benchmarks::{ParentAdmission, ReportParent};
+
 pub use crate::pipeline::builder::tests::subscription_preparation_failure_joins_every_supplied_stage;
 pub use crate::pipeline::tests::admission::{
     controlled_journal_preserves_causality_groups_and_live_readers,
@@ -73,4 +77,6 @@ pub use crate::pipeline::tests::supervisor::{
     producer_tail_capture_finishes_an_owned_read_before_waiting_behind_a_writer,
     queued_controls_cannot_starve_bootstrap_or_automatic_start,
     ready_stage_joins_cannot_starve_other_resource_completions,
+    report_gap_cannot_complete_pipeline,
+    saturated_publications_stop_report_admission_but_not_controls_or_deadlines,
 };

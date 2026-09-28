@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{EdgeLivenessState, SystemEvent, SystemPayload};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::{ChainEvent, ChainPayload, EdgeLivenessState};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
@@ -18,6 +19,7 @@ use obzenflow_runtime::stages::common::handlers::{
     SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorJournal;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the stalled-transition test. The JSON shape is
@@ -121,18 +123,25 @@ impl InlineSink for NoopSink {
 async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     tokio::time::pause();
 
-    let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
-        Arc::new(Mutex::new(None));
-    let system_journal_slot_hook = system_journal_slot.clone();
+    type StageJournals = Vec<Arc<dyn Journal<ChainEvent>>>;
+    let stage_journals_slot: Arc<Mutex<Option<StageJournals>>> = Arc::new(Mutex::new(None));
+    let stage_journals_slot_hook = stage_journals_slot.clone();
     let mut liveness = liveness_observations::LivenessTrace::default();
     let liveness_source = liveness.source.clone();
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *liveness_source.lock().unwrap() = Some(handle.observations());
-        let system_journal = handle.system_journal().expect("system journal available");
-        *system_journal_slot_hook
+        let stage_journals = handle
+            .report_journals()
+            .into_iter()
+            .filter_map(|journal| match journal {
+                SupervisorJournal::Stage { journal, .. } => Some(journal),
+                SupervisorJournal::System(_) => None,
+            })
+            .collect();
+        *stage_journals_slot_hook
             .lock()
-            .expect("system_journal_slot lock") = Some(system_journal);
+            .expect("stage_journals_slot lock") = Some(stage_journals);
         tokio::spawn(async {})
     });
 
@@ -189,16 +198,21 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         .expect("flow did not complete after advancing tokio time")
         .expect("flow should complete successfully");
 
-    let system_journal = system_journal_slot
+    let stage_journals = stage_journals_slot
         .lock()
-        .expect("system_journal_slot lock")
+        .expect("stage_journals_slot lock")
         .clone()
-        .expect("system journal captured by hook");
+        .expect("stage journals captured by hook");
 
-    let envelopes = system_journal
-        .read_causally_ordered()
-        .await
-        .expect("read system journal");
+    let mut envelopes = Vec::new();
+    for journal in stage_journals {
+        envelopes.extend(
+            journal
+                .read_all_unordered()
+                .await
+                .expect("read stage journal"),
+        );
+    }
 
     let saw_stalled = liveness
         .states
@@ -208,14 +222,22 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
         .states
         .iter()
         .any(|(_, _, state)| *state == EdgeLivenessState::Recovered);
+    let mut contracts = 0;
     for envelope in envelopes {
-        if let SystemPayload::ContractStatus { pass, .. } = &envelope.payload {
+        if let ChainPayload::Execution(ExecutionPayload::ContractStatus { pass, .. }) =
+            &envelope.payload
+        {
+            contracts += 1;
             assert!(
                 *pass,
                 "unexpected ContractStatus(pass=false) while exercising stalled transition"
             );
         }
     }
+    assert!(
+        contracts > 0,
+        "the owning stage journals contain contract reports"
+    );
 
     assert!(
         saw_stalled,

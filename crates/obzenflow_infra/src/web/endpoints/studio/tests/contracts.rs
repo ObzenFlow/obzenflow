@@ -117,7 +117,7 @@ async fn contract_frame_keeps_one_physical_cursor_and_both_composite_aliases() {
     let envelope = contract_result_envelope(upstream, reader).await;
 
     let mut projection = StudioProjection::new(vec![], aliases).unwrap();
-    let events = projection.project(&envelope, 0);
+    let events = projection.project(&envelope.clone().into(), 0);
     assert_eq!(events.len(), 1);
     let frame = &events[0];
     assert_eq!(frame.event.as_deref(), Some("contract_result"));
@@ -206,18 +206,13 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         None,
         receiver,
     );
-    let body = collect_closing(
-        &endpoint,
-        closing,
-        Some(&cursor.envelope.provenance.event.id.to_string()),
-    )
-    .await;
+    let body = collect_closing(&endpoint, closing, Some(&super::stream::cursor(&cursor))).await;
     let contract_frames = frames(&body, "contract_result");
     assert_eq!(contract_frames.len(), 1);
     let frame = contract_frames[0];
     assert_eq!(
         frame.id.as_deref(),
-        Some(contract.envelope.provenance.event.id.to_string().as_str())
+        Some(super::stream::cursor(&contract).as_str())
     );
     assert_ne!(
         frame.id.as_deref(),
@@ -239,7 +234,7 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
 async fn ordinary_physical_edge_omits_unavailable_aliases() {
     let envelope = contract_result_envelope(StageId::new(), StageId::new()).await;
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-    let frames = projection.project(&envelope, 0);
+    let frames = projection.project(&envelope.clone().into(), 0);
     assert_eq!(frames.len(), 1);
     assert!(frame_payload(&frames[0])
         .get("composite_boundaries")

@@ -15,9 +15,7 @@ use obzenflow_core::event::types::{
 use obzenflow_core::event::{
     ChainEventFactory, ConsumptionFinalEventParams, ConsumptionProgressEventParams, JournalEvent,
 };
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{ContractResult, ViolationCause};
-use std::sync::Arc;
 use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,7 +166,7 @@ where
         reader: obzenflow_core::StageId,
         evidence: &[DirectFeedContractEvidence],
     ) -> bool {
-        let Some(system_journal) = &tracker.system_journal else {
+        let Some(report_journal) = &tracker.report_journal else {
             return true;
         };
 
@@ -192,8 +190,8 @@ where
                         advertised_writer_seq: Some(feed.advertised_writer_seq),
                     },
                 );
-                if let Err(e) = crate::supervised_base::publication::append(
-                    system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    report_journal,
                     result_event,
                     Default::default(),
                 )
@@ -227,8 +225,8 @@ where
                     reason: feed.reason.clone(),
                 },
             );
-            if let Err(e) = crate::supervised_base::publication::append(
-                system_journal,
+            if let Err(e) = crate::supervised_base::publication::report(
+                report_journal,
                 status_event,
                 Default::default(),
             )
@@ -301,12 +299,12 @@ where
     async fn emit_direct_feed_progress_contract_results(
         &mut self,
         writer_id: obzenflow_core::WriterId,
-        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+        report_journal: Option<crate::supervised_base::SupervisorJournal>,
         progress: &ReaderProgress,
         index: usize,
         reader_stage: obzenflow_core::StageId,
     ) {
-        let Some(system_journal) = system_journal else {
+        let Some(report_journal) = report_journal else {
             return;
         };
 
@@ -336,8 +334,8 @@ where
                         advertised_writer_seq: feed.advertised_writer_seq,
                     },
                 );
-                if let Err(e) = crate::supervised_base::publication::append(
-                    &system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    &report_journal,
                     result_event,
                     Default::default(),
                 )
@@ -461,13 +459,13 @@ where
         index: usize,
         status: &mut ContractStatus,
     ) {
-        let Some((reader_stage, writer_id, system_journal)) =
+        let Some((reader_stage, writer_id, report_journal)) =
             self.contract_tracker.as_ref().and_then(|tracker| {
                 tracker.reader_stage.map(|reader_stage| {
                     (
                         reader_stage,
                         tracker.writer_id,
-                        tracker.system_journal.clone(),
+                        tracker.report_journal.clone(),
                     )
                 })
             })
@@ -489,7 +487,7 @@ where
         {
             self.emit_direct_feed_progress_contract_results(
                 writer_id,
-                system_journal,
+                report_journal,
                 progress,
                 index,
                 reader_stage,
@@ -536,7 +534,7 @@ where
         //
         // MetricsAggregator also observes ContractResult, so this provides a
         // lightweight heartbeat for long-running flows (e.g. prometheus_demo).
-        if let Some(system_journal) = &tracker.system_journal {
+        if let Some(report_journal) = &tracker.report_journal {
             let mut emitted_any = false;
             for (contract_name, result) in &results {
                 // Only emit "healthy" heartbeats when we've observed additional
@@ -564,8 +562,8 @@ where
                         advertised_writer_seq: progress.advertised_writer_seq,
                     },
                 );
-                if let Err(e) = crate::supervised_base::publication::append(
-                    system_journal,
+                if let Err(e) = crate::supervised_base::publication::report(
+                    report_journal,
                     result_event,
                     Default::default(),
                 )
@@ -615,7 +613,7 @@ where
 
                 // Emit edge-level contract status to system journal so gating and SSE
                 // can react to the violation.
-                if let Some(system_journal) = &tracker.system_journal {
+                if let Some(report_journal) = &tracker.report_journal {
                     let status_event = SystemEvent::new(
                         tracker.writer_id,
                         SystemPayload::ContractStatus {
@@ -629,8 +627,8 @@ where
                             reason: Some(cause.clone()),
                         },
                     );
-                    if let Err(e) = crate::supervised_base::publication::append(
-                        system_journal,
+                    if let Err(e) = crate::supervised_base::publication::report(
+                        report_journal,
                         status_event,
                         Default::default(),
                     )
@@ -759,7 +757,7 @@ where
             // Emit per-contract verification results to the system journal so that
             // MetricsAggregator can derive contract metrics without interfering with
             // pipeline gating (which uses ContractStatus + policies).
-            if let Some(system_journal) = &tracker.system_journal {
+            if let Some(report_journal) = &tracker.report_journal {
                 for (contract_name, result) in &results {
                     let (status_label, cause_label) = contract_result_labels_for_emission(
                         result,
@@ -780,8 +778,8 @@ where
                             advertised_writer_seq: progress.advertised_writer_seq,
                         },
                     );
-                    if let Err(e) = crate::supervised_base::publication::append(
-                        system_journal,
+                    if let Err(e) = crate::supervised_base::publication::report(
+                        report_journal,
                         result_event,
                         Default::default(),
                     )
@@ -1020,8 +1018,8 @@ where
                     )
                     .await;
             }
-        } else if let (Some(system_journal), Some(reader_stage)) =
-            (&tracker.system_journal, tracker.reader_stage)
+        } else if let (Some(report_journal), Some(reader_stage)) =
+            (&tracker.report_journal, tracker.reader_stage)
         {
             let status_event = SystemEvent::new(
                 tracker.writer_id,
@@ -1036,8 +1034,8 @@ where
                     reason: status_reason,
                 },
             );
-            if let Err(e) = crate::supervised_base::publication::append(
-                system_journal,
+            if let Err(e) = crate::supervised_base::publication::report(
+                report_journal,
                 status_event,
                 Default::default(),
             )

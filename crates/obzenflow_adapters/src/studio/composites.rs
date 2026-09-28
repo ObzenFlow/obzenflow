@@ -12,7 +12,7 @@ use super::messages::{CompositeStatusPayloadV1, CompositeStatusWireV1, StudioMes
 #[cfg(test)]
 use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::composite::{CompositeLifecycleProjection, CompositeStatus};
-use obzenflow_core::event::journal_record::SystemJournalRecord;
+use obzenflow_core::event::SupervisorRecord;
 #[cfg(test)]
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::web::SseFrame;
@@ -66,12 +66,12 @@ impl CompositeLifecycleView {
 
     pub(super) fn observe(
         &mut self,
-        envelope: &SystemJournalRecord,
+        envelope: &SupervisorRecord,
     ) -> Option<CompositeStatusSnapshot> {
         use obzenflow_core::event::SystemPayload;
 
-        self.as_of_event_id = Some(envelope.envelope.provenance.event.id);
-        self.as_of_timestamp_ms = envelope.envelope.provenance.event.timestamp;
+        self.as_of_event_id = Some(*envelope.id());
+        self.as_of_timestamp_ms = envelope.timestamp();
 
         let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
             return None;
@@ -106,8 +106,8 @@ impl CompositeLifecycleView {
             .expect("projection snapshot exists for every composite");
         snapshot.status = after;
         snapshot.revision = snapshot.revision.saturating_add(1);
-        snapshot.as_of_event_id = Some(envelope.envelope.provenance.event.id);
-        snapshot.timestamp_ms = envelope.envelope.provenance.event.timestamp;
+        snapshot.as_of_event_id = Some(*envelope.id());
+        snapshot.timestamp_ms = envelope.timestamp();
         Some(snapshot.clone())
     }
 
@@ -213,7 +213,7 @@ mod composite_status_projection_tests {
     use obzenflow_core::event::{JournalRecord, StageLifecycleEvent, SystemPayload, WriterId};
     use obzenflow_core::id::{CompositeId, RoleId, StageId, SystemId};
 
-    async fn envelope(stage: StageId, event: StageLifecycleEvent) -> SystemJournalRecord {
+    async fn envelope(stage: StageId, event: StageLifecycleEvent) -> SupervisorRecord {
         let system_id = SystemId::new();
         JournalRecord::new(
             obzenflow_core::event::JournalWriterId::from(obzenflow_core::id::JournalId::new()),
@@ -225,6 +225,7 @@ mod composite_status_projection_tests {
                 },
             ),
         )
+        .into()
     }
 
     fn state(map: StageId, finish: StageId) -> CompositeLifecycleView {
@@ -249,10 +250,7 @@ mod composite_status_projection_tests {
             .expect("first running changes the view");
         assert_eq!(running.status, CompositeStatus::Running);
         assert_eq!(running.revision, 1);
-        assert_eq!(
-            running.as_of_event_id,
-            Some(running_envelope.envelope.provenance.event.id)
-        );
+        assert_eq!(running.as_of_event_id, Some(*running_envelope.id()));
 
         let sibling_running = envelope(finish, StageLifecycleEvent::Running).await;
         assert!(state.observe(&sibling_running).is_none());
@@ -260,7 +258,7 @@ mod composite_status_projection_tests {
         assert_eq!(catch_up_snapshot.revision, 1);
         assert_eq!(
             catch_up_snapshot.as_of_event_id,
-            Some(sibling_running.envelope.provenance.event.id)
+            Some(*sibling_running.id())
         );
 
         let map_completed =
@@ -279,10 +277,7 @@ mod composite_status_projection_tests {
         assert_eq!(payload["message_type"], "composite_status");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["revision"], 2);
-        assert_eq!(
-            payload["as_of_event_id"],
-            finish_completed.envelope.provenance.event.id.to_string()
-        );
+        assert_eq!(payload["as_of_event_id"], finish_completed.id().to_string());
         assert!(payload.get("system_event_type").is_none());
     }
 

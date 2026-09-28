@@ -9,6 +9,8 @@
 //! polled. The fixture compares the framework evidence and domain effect fact
 //! identities emitted by both runs.
 
+mod replay_testkit;
+
 use obzenflow_core::event::observability::ObservationRecord;
 #[path = "../examples/hn_ai_digest_demo/config.rs"]
 mod config;
@@ -56,11 +58,10 @@ use obzenflow_core::event::{
     ChainPayload, EffectAttemptStarted, EffectFailureDetail, EffectOutcomePayload,
     EffectRecoveryAbandoned, PipelineLifecycleEvent, SystemEvent, SystemPayload,
 };
-use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{id::StageId, EventId, SystemId, TypedPayload, WriterId};
+use obzenflow_core::{id::StageId, EventId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai_map_reduce, flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolutionError, EffectPortResolver, EffectRegistrationBuilder,
@@ -948,8 +949,7 @@ fn assert_generated_chunk_authorship(
         "the generated manifest carries the complete plan without a second planning row"
     );
 
-    let chunk_clock_key = chunk_writer.to_string();
-    let seed_clock_key = seed.envelope.provenance.event.writer_id.to_string();
+    let seed_clock_key = seed.causal_coordinate();
     for envelope in generated {
         assert_eq!(
             envelope.envelope.provenance.event.writer_id, chunk_writer,
@@ -972,7 +972,7 @@ fn assert_generated_chunk_authorship(
                 .provenance
                 .journal
                 .vector_clock
-                .get(&chunk_clock_key)
+                .get(&envelope.causal_coordinate())
                 > 0,
             "generated facts advance the chunk-stage clock component"
         );
@@ -1110,15 +1110,7 @@ async fn stage_envelopes(run_dir: &Path, stage_key: &str) -> Vec<JournalRecord<C
     let relative = manifest["stages"][stage_key]["data_journal_file"]
         .as_str()
         .expect("stage data journal path");
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal is readable")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative)).await
 }
 
 #[derive(Debug, PartialEq)]
@@ -1183,15 +1175,8 @@ async fn system_events(run_dir: &Path) -> Vec<SystemEvent> {
     let relative = manifest["system_journal_file"]
         .as_str()
         .expect("system journal path");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("system journal opens");
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<SystemEvent>(&run_dir.join(relative))
         .await
-        .expect("system journal is readable")
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()
@@ -2845,7 +2830,7 @@ async fn checked_gate_executes_the_shared_production_hn_flow_live_and_replay() {
     let source_packets = |rows: Vec<JournalRecord<ChainPayload>>| {
         rows.into_iter()
             .filter(|row| matches!(row.payload, ChainPayload::Fact(_)))
-            .map(|row| serde_json::to_value(row.envelope.observability).unwrap())
+            .map(|row| serde_json::to_value(&row.envelope.observability).unwrap())
             .collect::<Vec<_>>()
     };
     let live_packets = source_packets(stage_envelopes(&live_archive, "hn_stories").await);

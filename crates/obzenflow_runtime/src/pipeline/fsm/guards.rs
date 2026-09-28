@@ -6,7 +6,7 @@
 //! internal input never replaces validation at the transition boundary.
 
 use super::{PipelineContext, PipelineDeadline, PipelineFsmEvent, PipelineFsmState};
-use crate::pipeline::{resources::ProducerTail, FlowStopMode};
+use crate::pipeline::FlowStopMode;
 use crate::supervised_base::SupervisorHandle;
 use obzenflow_fsm::{EventVariant, FsmError, StateVariant};
 use std::time::{Duration, Instant};
@@ -19,11 +19,14 @@ impl PipelineFsmState {
                 ctx.resources.stages_joined && ctx.resources.publication_settlement.is_none()
             }
             Self::CatchingUpProducers => {
-                matches!(ctx.resources.producer_tail, ProducerTail::Reached)
+                ctx.resources.producer_tail.covered(&ctx.report_coverage)
                     || ctx.progress.journal_failed
             }
             Self::FinalisingMetrics => {
                 ctx.resources.metrics_joined
+                    && (ctx.resources.metrics.handle().is_none()
+                        || ctx.resources.metrics_tail.covered(&ctx.report_coverage)
+                        || ctx.progress.journal_failed)
                     && ctx.resources.publication_settlement.is_none()
                     && (ctx.progress.metrics_drained
                         || ctx.progress.metrics_cancelled

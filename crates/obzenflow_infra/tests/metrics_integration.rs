@@ -6,15 +6,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
 use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter, StageMetadata,
 };
-use obzenflow_core::JournalRecord;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::metrics::fsm::build_metrics_aggregator_fsm;
@@ -66,6 +63,15 @@ fn make_empty_context(
     stage_id: StageId,
 ) -> MetricsAggregatorContext {
     MetricsAggregatorContext {
+        journals: obzenflow_runtime::metrics::builder::MetricsJournals {
+            system_id,
+            coordination: Arc::new(obzenflow_infra::journal::MemoryJournal::with_owner(
+                obzenflow_core::JournalOwner::system(system_id),
+            )),
+            export: Arc::new(obzenflow_infra::journal::MemoryJournal::with_owner(
+                obzenflow_core::JournalOwner::system(system_id),
+            )),
+        },
         pipeline_writer: None,
         system_journal,
         // No upstream journals in this test; tail-read will simply see None.
@@ -150,8 +156,10 @@ async fn publish_drain_complete_does_not_require_historical_coverage() {
     .await
     .expect("drain publication does not require historical collection");
 
-    // Verify the completion marker was written.
-    let events = system_journal
+    // Verify the completion marker was written to the owned coordination history.
+    let events = ctx
+        .journals
+        .coordination
         .read_causally_ordered()
         .await
         .expect("read system journal");
@@ -241,8 +249,14 @@ async fn ingress_refusal_facts_do_not_invent_latest_value_totals() {
         refusal(IngressRefusalReason::RateLimited, 1, 1),
         refusal(IngressRefusalReason::Validation, 3, 2),
     ] {
-        let envelope = Box::new(JournalRecord::new(JournalWriterId::new(), event));
-        MetricsAggregatorAction::ProcessSystemEvent { envelope }
+        let envelope = Box::new(
+            ctx.system_journal
+                .append(event, Default::default())
+                .await
+                .unwrap()
+                .into(),
+        );
+        MetricsAggregatorAction::ProcessReport { envelope }
             .execute(&mut ctx)
             .await
             .unwrap();

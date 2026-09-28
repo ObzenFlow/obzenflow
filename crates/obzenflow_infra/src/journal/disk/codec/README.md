@@ -1,17 +1,41 @@
 # Journal format
 
-The current schema is **7.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
+The current schema is **11.0**. Core's `JOURNAL_SCHEMA_VERSION` is the single
 version for records, frame encoding, archive interpretation, and the run
-manifest. `run_manifest.json` records `journal_schema_version: "7.0"`.
+manifest. `run_manifest.json` records `journal_schema_version: "11.0"`.
 Frame markers and disposable observation
 checkpoint stamps derive from that same authority. A breaking change to any of
 these contracts bumps the one version. Package versions remain provenance.
 
-Earlier development archives must be re-recorded. Readers reject unsupported
-schemas before typed manifest decoding or record interpretation, including with
+Only the current journal schema is supported. Readers reject unsupported schemas
+before typed manifest decoding or record interpretation, including with
 `--allow-incomplete-archive`. There are no legacy readers or conversion paths.
+Stage manifests and run projections require the recorded `is_effectful` boolean;
+readers do not infer omitted declarations from effect records.
 The logical field layout retains absolute numbers and complete immutable
 definitions; JSONL export remains the expanded current logical record.
+
+Each physical journal has an immutable `.identity.json` descriptor containing
+its run and journal incarnation. It exists before the first append and is copied
+with read-only archives. A writable open holds the append file's local exclusive
+lock; clones share that file, committed clocks and poison state. Independent
+writers are rejected. A new run or writable fork uses new journal incarnations.
+
+Clock entries name only the physical journal incarnation. Event authors remain
+separate immutable provenance, including when events are forwarded. Every append
+merges the previous complete journal clock and the admitted frontier, then
+increments that journal component.
+Protected provenance retains one previous local commitment for journal continuity.
+It contains run, journal, sequence and event ID. Records carry no cross-journal
+witness lists, and readers do not reconstruct an exact merge proof. Clock
+propagation is checked by tests using known incorporated inputs and committed
+predecessors.
+
+Records are limited to 8 MiB of canonical JSON, atomic groups to 4,096 records
+and 64 MiB of canonical JSON, and encoded frame bodies to 64 MiB. Providers
+reject oversized appends before commitment; decoders enforce the same limits
+before exposing group members. Sequential readers decode frames on the blocking
+pool, outside Tokio worker threads.
 
 ## Framing
 
@@ -19,15 +43,15 @@ All fixed-width integers are little endian. A frame consists of:
 
 | Position | Bytes | Meaning |
 |---|---:|---|
-| 0 | 6 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF7.0`) |
-| 6 | 8 | Body length |
-| 14 | 4 | CRC32 of magic and body length |
-| 18 | body length | Compact body |
+| 0 | 7 | Magic `OJF` followed by `JOURNAL_SCHEMA_VERSION` (`OJF11.0`) |
+| 7 | 8 | Body length |
+| 15 | 4 | CRC32 of magic and body length |
+| 19 | body length | Compact body |
 | after body | 4 | CRC32 of header and body |
 | after checksum | 8 | Complete frame length, including header and trailer |
-| final | 6 | Reversed header magic (`0.7FJO`) |
+| final | 7 | Reversed header magic (`0.11FJO`) |
 
-The 18-byte trailer commits the entire ordinary record or atomic group. A reader
+The 19-byte trailer commits the entire ordinary record or atomic group. A reader
 validates both lengths, magic values and checksums before exposing members.
 Reverse reads first follow checked header lengths from the latest indexed frame
 offset to establish the physical tail boundary, then use terminal lengths.
@@ -43,27 +67,77 @@ corruption, not a legacy input or a skippable empty line.
 Every count, length, ordinal and offset below is a complete unsigned LEB128
 value. Slots and ordinals are zero-based unless stated otherwise.
 
-1. External journal-name count and names. Name tag `0` carries a UTF-8 string;
+1. Length-delimited routing section. Record tag `0` or group tag `1` (followed by
+   its nonempty UTF-8 group identity), nonzero member count, 16-byte run ID,
+   16-byte journal ID and positive base sequence. For base sequences above one,
+   the previous local event ID follows; its run/journal/sequence are implied.
+   Every member has its 16-byte event ID, classification byte (`0` other,
+   `1` supervision candidate) and body extent. Members occupy consecutive local
+   sequences and each predecessor is the prior member's commitment. Unknown
+   classifications, invalid counts, overflow and inconsistent extents fail.
+2. Length-delimited definition table, containing the following two sections.
+   First, external journal-name count and names. Name tag `0` carries a UTF-8 string;
    `1` means `system.log`; `2` carries a UTF-8 prefix and 16-byte ULID and expands
    to `<prefix>_stage_<ULID>.log`. Journal ordinal `0` means the consuming journal;
    external names have ordinals `1..N`. Names must be single archive-local
    basenames. This table is local to the frame and has no external authority.
-2. Definition-slot count and entries. Each entry starts with its kind byte:
+   Second, definition-slot count and entries. Each entry starts with its kind byte:
    writer `0`, flow/stage context `1`, complete origin `2`, descriptor `3`,
-   capture scope `4`, ordered clock-key names `5`, physical journal-writer ID
+   capture scope `4`, ordered journal coordinates `5`, physical journal-writer ID
    `6`. Storage tag `0` carries a
    length-delimited complete body. Tag `1` carries a journal ordinal, absolute
    carrier-frame offset and definition slot. Each use in a record is the
    current frame's definition-slot ordinal, checked against its contextual kind.
-3. Record tag `0` or group tag `1`. A group carries its nonempty UTF-8 identity
-   and nonzero member count. Ordinary frames contain exactly one record.
-4. Each record has length-delimited provenance; an observation-presence byte
+3. Member bodies, located by the routing extents, in unchanged append order.
+   Each has length-delimited remaining provenance; an observation-presence byte
    (`0` absent, `1` null, `2` followed by length-delimited observations); and
-   length-delimited business/protected JSON. Member order is unchanged.
+   length-delimited business/protected JSON. Remaining provenance contains the
+   immutable event, complete vector clock and journal timestamp.
+   Run/journal identity, previous commitment and group membership are reconstructed
+   from routing rather than repeated in every body. The event ID also remains in
+   immutable event provenance and full decoding checks agreement. No clocks are copied into routing.
 
 A referenced definition must be local in its carrier, never another reference.
 Carrier framing, metadata and record/group section boundaries are checked
 without materialising that carrier's records or following their references.
+
+## Selective supervision reads
+
+Core's closed payload family supplies a borrowing eligibility predicate, independent
+of application event names. All system records remain candidates. Chain candidates
+match supervisor projection, including only the selected middleware transitions.
+Owner authority is still checked by runtime after reconstruction.
+
+The selective reader verifies the complete frame before parsing routing, checks
+continuity against the journal incarnation, and reconstructs/validates every
+candidate in a group privately before releasing its first member. A business-only
+frame needs no definition table materialisation. Referenced metadata for selected
+records can still cause checked carrier reads through the same envelope parser.
+Full reads also check classification against the decoded payload.
+
+Selective traversal does not semantically validate skipped JSON or provenance.
+CRC protection detects corruption, not a dishonest writer that recomputes a false
+classification. The writer derives classification from the validated typed payload.
+The new schema rejects older frames; no compatibility path is provided.
+
+The core report-reader port distinguishes a record, bounded progress, clean tail
+and incomplete tail. Progress means preceding candidates have been delivered;
+runtime publishes processed coverage only after its report handoff is consumed.
+Skipped records cannot enter a causal frontier. Initial coverage remains a fixed
+opening boundary and data EOF does not stop later report discovery.
+
+Disk scans use one retained blocking job per reader, with record/encoded-byte
+quanta across small frames and complete-frame buffering. A hard-bounded frame may
+overrun a quantum. Scanning stops at the first candidate-bearing frame, retaining
+only its validated selected members. Cancellation of a read retains its pending job;
+a failed reader remains failed. Dropping the reader signals its bounded worker to
+stop between frames. Raw I/O alone holds the journal read lock. Memory readers
+select by borrowing stored records before cloning candidates.
+
+This removes discarded record reconstruction, not checksum I/O, writer recovery
+scans or the largest-frame raw buffer. Candidate retention remains separately
+bounded from scanned physical bytes. No report index, semantic-validation cache,
+new authoritative channel or durable parent checkpoint is introduced.
 
 ## Values
 
@@ -97,13 +171,12 @@ with the current record's complete packet capture. Capture state is cleared
 between group members. Equal owners or event IDs alone never select this tag.
 Clock components always carry their own complete unsigned values.
 
-A clock carries a reference to its complete ordered key-name list, followed by
-one complete absolute unsigned value for every key. The definition contains no
-clock values. Empty clocks and present zero-valued components remain distinct.
-Typed clock-key strings use tag `0` plus text, `1` plus a raw ULID, `2` plus a
-stage-writer ULID or `3` plus a system-writer ULID. Prefix encodings require
-exact reconstruction of the original string. A stage-identity field can reuse a
-complete `Stage` writer definition; a `System` writer is rejected in that slot.
+A clock carries a reference to its complete ordered coordinate list, followed
+by one complete absolute unsigned value for every coordinate. Each coordinate
+contains only a journal incarnation; the definition contains no
+clock values. Zero counters and duplicate coordinates are rejected. A
+stage-identity field can reuse a complete `Stage` writer definition; a `System`
+writer is rejected in that slot.
 
 Complete origins use the positional origin structure: complete `entry_time_ns`,
 `entry_event_id` and optional opaque `metadata`. The former generated-metadata

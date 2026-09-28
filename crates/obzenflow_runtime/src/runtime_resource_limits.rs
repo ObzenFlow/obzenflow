@@ -37,7 +37,8 @@ pub fn estimate_disk_journal_fds(
     metrics_enabled: bool,
 ) -> DiskJournalFdEstimate {
     let stage_writers = 2u64.saturating_mul(stages as u64); // data + error
-    let system_writer = 1u64; // system journal (DiskJournal holds a write FD)
+                                                            // Pipeline history plus metrics coordination/export histories when enabled.
+    let system_writers = if metrics_enabled { 3u64 } else { 1u64 };
 
     // One upstream reader per topology edge (subscription reader).
     let stage_readers = edges as u64;
@@ -52,16 +53,16 @@ pub fn estimate_disk_journal_fds(
         0
     };
 
-    // System journal readers owned by the pipeline runtime itself.
-    // - completion subscription is long-lived
-    // - readiness/drain readers are short-lived but can overlap during startup/shutdown
-    let system_readers = 2u64;
+    // One retained reporting cursor per stage, the pipeline's own history, and
+    // sparse metrics coordination. Export volume is never a parent subscription.
+    // Studio connections add their own cursors and need separate host headroom.
+    let system_readers = (stages as u64).saturating_add(if metrics_enabled { 2 } else { 1 });
 
     // Leave headroom for non-journal FDs (stdout/stderr, sockets, resolver, etc).
     let overhead = 32u64;
 
     let estimated = stage_writers
-        .saturating_add(system_writer)
+        .saturating_add(system_writers)
         .saturating_add(stage_readers)
         .saturating_add(metrics_readers)
         .saturating_add(system_readers)
@@ -73,7 +74,7 @@ pub fn estimate_disk_journal_fds(
         metrics_enabled,
         estimated_fds: estimated,
         breakdown: DiskJournalFdBreakdown {
-            writer_fds: stage_writers.saturating_add(system_writer),
+            writer_fds: stage_writers.saturating_add(system_writers),
             stage_reader_fds: stage_readers,
             metrics_reader_fds: metrics_readers,
             system_reader_fds: system_readers,

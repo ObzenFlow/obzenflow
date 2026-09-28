@@ -28,7 +28,6 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::StageId;
@@ -129,7 +128,6 @@ pub(super) async fn dispatch_draining<
             sup.stage_id,
             ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             ctx.last_consumed_envelope.as_ref(),
             &ctx.instrumentation,
             &ctx.backpressure_writer,
@@ -183,25 +181,9 @@ pub(super) async fn dispatch_draining<
                 if envelope.consumes_data_credit() {
                     ctx.last_input_position = stage_input_position;
                 }
-                // Retain the last consumed upstream envelope (with a merged vector-clock) so that any
-                // final drain emissions can be parented and preserve happened-before via vector clocks.
-                match ctx.last_consumed_envelope.as_mut() {
-                    Some(merged) => {
-                        CausalOrderingService::update_with_parent(
-                            &mut merged.envelope.provenance.journal.vector_clock,
-                            &envelope.envelope.provenance.journal.vector_clock,
-                        );
-                        merged.envelope.provenance.journal.journal_writer_id =
-                            envelope.envelope.provenance.journal.journal_writer_id;
-                        merged.envelope.provenance.journal.timestamp =
-                            envelope.envelope.provenance.journal.timestamp;
-                        merged.envelope.provenance.event =
-                            envelope.envelope.provenance.event.clone();
-                        merged.envelope.observability = envelope.envelope.observability.clone();
-                        merged.payload = envelope.payload.clone();
-                    }
-                    None => ctx.last_consumed_envelope = Some(envelope.clone()),
-                }
+                // Keep the genuine delivered record for authored lineage. The owner
+                // retains accumulated causal evidence independently of this payload.
+                ctx.last_consumed_envelope = Some(envelope.clone());
                 ctx.instrumentation
                     .record_consumed(&envelope, delivered_upstream_stage);
 
@@ -293,7 +275,7 @@ pub(super) async fn dispatch_draining<
                             data_journal: ctx.data_journal.clone(),
                             flow_context: Some(flow_context.clone()),
                             observers: Some(ctx.observers.clone()),
-                            system_journal: Some(ctx.system_journal.clone()),
+
                             instrumentation: Some(ctx.instrumentation.clone()),
                             heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                             parent: envelope.clone(),
@@ -396,7 +378,7 @@ pub(super) async fn dispatch_draining<
                             crate::supervised_base::publication::append(
                                 &ctx.error_journal,
                                 error_event,
-                                AppendOptions::new(Some(&envelope)),
+                                AppendOptions::from_record(Some(&envelope))?,
                             )
                             .await
                             .map_err(|e| format!("Failed to write stateful drain error: {e}"))?;
@@ -408,7 +390,7 @@ pub(super) async fn dispatch_draining<
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 enriched_error,
-                                AppendOptions::new(Some(&envelope)).with_capture(
+                                AppendOptions::from_record(Some(&envelope))?.with_capture(
                                     ctx.instrumentation.journal_capture(None, vec![(0, false)]),
                                 ),
                             )
@@ -486,7 +468,7 @@ pub(super) async fn dispatch_draining<
                                                 FrameworkObservabilityCommit {
                                                     flow_context: &flow_context,
                                                     data_journal: &ctx.data_journal,
-                                                    system_journal: Some(&ctx.system_journal),
+
                                                     instrumentation: Some(&ctx.instrumentation),
                                                     heartbeat_state: ctx
                                                         .heartbeat
@@ -532,6 +514,7 @@ pub(super) async fn dispatch_draining<
                                             let scope = observer_scope;
                                             ctx.pending_outputs.push_back(
                                                 crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                                                     event: out,
                                                     scope,
                                                 },
@@ -622,6 +605,7 @@ pub(super) async fn dispatch_draining<
                                     let scope = observer_scope;
                                     ctx.pending_outputs.push_back(
                                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        causal: crate::supervised_base::publication::capture(),
                                             event: error_event,
                                             scope,
                                         },
@@ -723,7 +707,7 @@ pub(super) async fn dispatch_draining<
                         stage_id: ctx.stage_id,
                         stage_key: &ctx.stage_name,
                         input_position: None,
-                        parent: ctx.terminal_envelope.as_ref(),
+                        parent: ctx.terminal_envelope.as_deref(),
                         lineage: ctx.lineage_policy,
                     },
                 )
@@ -746,7 +730,7 @@ pub(super) async fn dispatch_draining<
                                 stage_id: ctx.stage_id,
                                 stage_key: &ctx.stage_name,
                                 input_position: None,
-                                parent: ctx.terminal_envelope.as_ref(),
+                                parent: ctx.terminal_envelope.as_deref(),
                                 lineage: ctx.lineage_policy,
                             },
                         )
@@ -869,7 +853,7 @@ pub(super) async fn dispatch_draining<
                         FrameworkObservabilityCommit {
                             flow_context: &flow_context,
                             data_journal: &ctx.data_journal,
-                            system_journal: Some(&ctx.system_journal),
+
                             instrumentation: Some(&ctx.instrumentation),
                             heartbeat_state: ctx
                                 .heartbeat
@@ -910,6 +894,7 @@ pub(super) async fn dispatch_draining<
                     let scope = observer_scope;
                     ctx.pending_outputs.push_back(
                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                            causal: crate::supervised_base::publication::capture(),
                             event,
                             scope,
                         },
@@ -940,7 +925,7 @@ pub(super) async fn dispatch_draining<
                             stage_id: ctx.stage_id,
                             stage_key: &ctx.stage_name,
                             input_position: None,
-                            parent,
+                            parent: parent.map(crate::messaging::DeliveredRecord::record),
                             lineage: ctx.lineage_policy,
                         },
                     )

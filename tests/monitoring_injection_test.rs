@@ -88,6 +88,7 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
             }
             let handle = definition.build(context).await.unwrap();
             let system = handle.system_journal().unwrap();
+            let metrics_journals = handle.metrics_journals();
             handle.run().await.unwrap();
             assert_eq!(*admission.lock().unwrap(), vec![enabled]);
             assert_eq!(model.snapshot().app.is_some(), enabled);
@@ -110,8 +111,16 @@ async fn ordinary_and_materialised_builds_use_only_the_injected_exporter() {
                         metrics.errors_total,
                     ));
                 }
-                coordination_seen |=
-                    matches!(envelope.payload, SystemPayload::MetricsCoordination(_));
+            }
+            assert_eq!(metrics_journals.is_some(), enabled);
+            if let Some(journals) = metrics_journals {
+                coordination_seen = journals
+                    .coordination
+                    .read_all_unordered()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|row| matches!(row.payload, SystemPayload::MetricsCoordination(_)));
             }
             assert_eq!(
                 coordination_seen, enabled,

@@ -28,7 +28,11 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         Self::execution_event(
             writer_id,
-            ExecutionPayload::StageLifecycle(StageLifecycleFact::Draining { stage_id, reason }),
+            ExecutionPayload::StageLifecycle(StageLifecycleFact::Draining {
+                stage_id,
+                reason,
+                accounting: None,
+            }),
         )
     }
     pub fn stage_drained(
@@ -53,7 +57,7 @@ impl ChainEventFactory {
             writer_id,
             ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed {
                 stage_id,
-                accounting,
+                accounting: Some(accounting),
             }),
         )
     }
@@ -69,6 +73,8 @@ impl ChainEventFactory {
                 stage_id,
                 error,
                 recoverable,
+                accounting: None,
+                causal_event_id: None,
             }),
         )
     }

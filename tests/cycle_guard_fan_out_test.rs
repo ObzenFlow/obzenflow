@@ -6,7 +6,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
-use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::StageOutputs;
 use obzenflow_core::TypedPayload;
@@ -91,8 +90,8 @@ async fn any_error_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
 
         let mut reader =
             obzenflow_infra::journal::disk::reader::DiskJournalReader::<ChainEvent>::new(
-                path,
-                JournalId::new(),
+                path.clone(),
+                obzenflow_infra::journal::disk::identity::read_identity(&path)?.journal_id,
                 Arc::new(tokio::sync::RwLock::new(())),
             )
             .await?;

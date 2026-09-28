@@ -20,6 +20,10 @@ include = [
     "/NOTICE",
 ]
 
+[features]
+# Repository-only work attribution. No hooks exist in normal builds.
+bench-instrumentation = []
+
 [dependencies]
 # Core domain dependencies - minimal
 obzenflow_core_derive = { workspace = true }

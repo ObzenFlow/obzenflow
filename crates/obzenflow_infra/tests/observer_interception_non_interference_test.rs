@@ -63,7 +63,7 @@ async fn delivery_receipts(run_dir: &Path) -> Vec<Value> {
     stage_events(run_dir, "delivered")
         .await
         .into_iter()
-        .filter_map(|envelope| match envelope.payload {
+        .filter_map(|envelope| match envelope.into_parts().1 {
             ChainPayload::Delivery(payload) => {
                 let mut value = serde_json::to_value(payload).expect("serialise delivery receipt");
                 value

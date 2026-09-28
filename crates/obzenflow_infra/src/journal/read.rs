@@ -112,6 +112,21 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
         RunJournalKind::System,
         None,
     )];
+    if let Some(metrics) = &manifest.metrics_journals {
+        if !metrics.writer_id.is_system() || metrics.writer_id == manifest.pipeline_writer_id {
+            return Err(JournalReadError::Invalid("invalid metrics owner".into()));
+        }
+        files.push((
+            metrics.coordination_journal_file.clone(),
+            RunJournalKind::MetricsCoordination,
+            None,
+        ));
+        files.push((
+            metrics.export_journal_file.clone(),
+            RunJournalKind::MetricsExport,
+            None,
+        ));
+    }
     let mut stages: Vec<_> = manifest.stages.iter().collect();
     stages.sort_by(|a, b| a.0.cmp(b.0));
     let mut stage_ids = HashSet::new();
@@ -142,6 +157,7 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
     }
     let mut names = HashSet::new();
     let mut journals = Vec::with_capacity(files.len());
+    let mut incarnations = HashSet::new();
     for (name, kind, stage) in files {
         let mut components = Path::new(&name).components();
         if !matches!(components.next(), Some(Component::Normal(_)))
@@ -161,17 +177,17 @@ pub async fn open_disk_run(path: &Path) -> Result<RunSnapshot, JournalReadError>
                 file.display()
             )));
         }
-        // Disk JournalId values are process-local today. This read identity is
-        // stable across independent handles and scoped to the admitted archive.
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        digest.update(&flow_id.as_ulid().to_bytes());
-        digest.update(name.as_bytes());
-        let bytes: [u8; 16] = digest.finish().as_ref()[..16]
-            .try_into()
-            .expect("SHA256 prefix");
-        let id = JournalId::from_ulid(ulid::Ulid::from_bytes(bytes));
+        let descriptor = super::disk::identity::read_identity(&file)?;
+        if descriptor.run_id != flow_id || !incarnations.insert(descriptor.journal_id) {
+            return Err(JournalReadError::Integrity(
+                "journal belongs to another run".into(),
+            ));
+        }
+        let id = descriptor.journal_id;
         let reader = match kind {
-            RunJournalKind::System => {
+            RunJournalKind::System
+            | RunJournalKind::MetricsCoordination
+            | RunJournalKind::MetricsExport => {
                 Reader::System(DiskJournalReader::open_observer(file, id).await?)
             }
             _ => Reader::Chain(DiskJournalReader::open_observer(file, id).await?),

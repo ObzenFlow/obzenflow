@@ -5,6 +5,8 @@
 /// Journal errors (domain-level, not I/O specific)
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
+    #[error(transparent)]
+    Causal(#[from] crate::event::CausalError),
     /// Storage may have committed. Callers must neither retry nor refund
     /// committed-output reservations as if rollback had been established.
     #[error("journal commit outcome is indeterminate")]

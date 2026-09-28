@@ -5,6 +5,8 @@
 //! Runtime and journal proofs for joins adjacent to the generated AI composite.
 //! All inputs and chat responses are local fixtures; replay cannot resolve a client.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_adapters::ai::{ChatBindingEvidence, ChatCompletion, CHAT_CLIENT};
 use obzenflow_adapters::middleware::control::ai_resilience;
@@ -15,16 +17,17 @@ use obzenflow_core::ai::{
     Many, ResolvedTokenEstimator, TokenCount, TokenEstimatorFallbackReason,
     TokenEstimatorResolutionInfo,
 };
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::CompositeActivationContext;
-use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord, SystemEvent, SystemPayload};
-use obzenflow_core::journal::{Journal, RunManifest};
-use obzenflow_core::{EventId, JournalOwner, StageId, SystemId, TypedPayload, WriterId};
+use obzenflow_core::event::{ChainEvent, ChainPayload, JournalRecord};
+use obzenflow_core::journal::RunManifest;
+use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::dsl::backpressure_clause::enforced;
 use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectRegistrationBuilder, LogicalEffectBindingName, ResolvedEffectPort,
@@ -494,17 +497,10 @@ fn run_dir(root: &Path) -> PathBuf {
 
 async fn stage_records(run: &Path, stage: &str) -> Vec<JournalRecord<ChainPayload>> {
     let manifest = manifest(run);
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run.join(&manifest.stages[stage].data_journal_file),
-        JournalOwner::stage(StageId::new()),
+    replay_testkit::read_journal_envelopes_appended::<ChainEvent>(
+        &run.join(&manifest.stages[stage].data_journal_file),
     )
-    .unwrap();
-    let mut reader = journal.reader().await.unwrap();
-    let mut rows = Vec::new();
-    while let Some(row) = reader.next().await.unwrap() {
-        rows.push(row);
-    }
-    rows
+    .await
 }
 
 fn typed<T: TypedPayload>(
@@ -702,19 +698,13 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
             .collect::<Vec<_>>()
     );
 
-    let system = DiskJournal::<SystemEvent>::with_owner(
-        run.join(&manifest.system_journal_file),
-        JournalOwner::system(SystemId::new()),
-    )
-    .unwrap();
-    let mut reader = system.reader().await.unwrap();
     let mut join_feeds = Vec::new();
     let join_id = manifest.stages["joined"]
         .stage_id
         .parse::<StageId>()
         .unwrap();
-    while let Some(record) = reader.next().await.unwrap() {
-        if let SystemPayload::ContractStatus {
+    for record in stage_records(run, "joined").await {
+        if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
             reader,
             upstream,
             selected_event_type,
@@ -723,7 +713,7 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
             reader_seq,
             advertised_writer_seq,
             ..
-        } = &record.payload
+        }) = &record.payload
         {
             if *reader == join_id {
                 assert!(*pass);

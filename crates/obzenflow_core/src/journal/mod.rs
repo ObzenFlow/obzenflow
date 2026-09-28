@@ -15,9 +15,11 @@ pub mod journal_error;
 pub mod journal_name;
 pub mod journal_owner;
 pub mod journal_trait;
+pub mod limits;
 pub mod metrics_tail;
 pub mod read;
 pub mod reader;
+mod storage;
 
 pub use append::{AppendOptions, JournalCapture, ObservationCapture};
 pub use archive::{
@@ -28,8 +30,10 @@ pub use config::{JournalConfig, ObservabilityPolicy};
 pub use journal_error::JournalError;
 pub use journal_trait::Journal;
 pub use reader::{
-    JournalObservationReader, JournalReader, LocatedObservation, ObservationKey, ObservationLookup,
+    JournalObservationReader, JournalReader, JournalStorageReader, LocatedObservation,
+    ObservationKey, ObservationLookup,
 };
+pub use storage::JournalStorage;
 
 // Type aliases for clarity
 use crate::event::{ChainEvent, SystemEvent};

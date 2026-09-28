@@ -5,7 +5,7 @@
 //! Integration test for DeliveryContract wiring (FLOWIP-090f).
 //!
 //! This test runs a minimal finite flow (source -> sink) and asserts that the
-//! sink edge emits a `system.contract_result` for `DeliveryContract` with
+//! sink journal records a protected `ContractResult` for `DeliveryContract` with
 //! `status = "passed"`, proving:
 //! - per-event delivery receipts are journalled by the sink supervisor, and
 //! - receipts are bridged back into the upstream edge `ContractChain` via
@@ -14,13 +14,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
-use obzenflow_core::event::system_event::SystemEvent;
-use obzenflow_core::event::SystemPayload;
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::ChainPayload;
+use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{DeliveryContract, StageOutputs, SystemId};
+use obzenflow_core::{DeliveryContract, StageOutputs};
 use obzenflow_dsl::{flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -274,40 +273,34 @@ async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
     let flows_dir = base_path.join("flows");
     assert!(flows_dir.exists(), "expected flows dir at {flows_dir:?}");
 
-    let mut system_journal_paths = Vec::new();
+    let mut run_paths = Vec::new();
     for entry in std::fs::read_dir(&flows_dir)? {
         let path = entry?.path();
-        if path.is_dir() {
-            let system_log = path.join("system.log");
-            if system_log.exists() {
-                system_journal_paths.push(system_log);
-            }
+        if path.join("run_manifest.json").exists() {
+            run_paths.push(path);
         }
     }
 
     assert!(
-        !system_journal_paths.is_empty(),
-        "expected at least one system.log under {flows_dir:?}"
+        !run_paths.is_empty(),
+        "expected at least one run under {flows_dir:?}"
     );
 
     let mut seen_delivery_contract_pass = false;
     let mut seen_delivery_contract_fail = false;
 
-    for system_log in system_journal_paths {
-        let journal: obzenflow_infra::journal::DiskJournal<SystemEvent> =
-            obzenflow_infra::journal::DiskJournal::with_owner(
-                system_log.clone(),
-                JournalOwner::system(SystemId::new()),
-            )?;
-
-        let envelopes = journal.read_causally_ordered().await?;
-        for env in envelopes {
+    for run in run_paths {
+        let mut snapshot = obzenflow_infra::journal::read::open_disk_run(&run).await?;
+        while let Some(row) = snapshot.next().await? {
+            let RunRecordData::Chain(env) = row.record else {
+                continue;
+            };
             match &env.payload {
-                SystemPayload::ContractResult {
+                ChainPayload::Execution(ExecutionPayload::ContractResult {
                     contract_name,
                     status,
                     ..
-                } if contract_name.as_str() == DeliveryContract::NAME => match status {
+                }) if contract_name.as_str() == DeliveryContract::NAME => match status {
                     ContractResultStatusLabel::Passed => seen_delivery_contract_pass = true,
                     ContractResultStatusLabel::Failed => seen_delivery_contract_fail = true,
                     ContractResultStatusLabel::Healthy => {}
@@ -320,11 +313,11 @@ async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
 
     assert!(
         seen_delivery_contract_pass,
-        "expected a passed DeliveryContract result in system.log"
+        "expected a passed DeliveryContract result in an owning stage journal"
     );
     assert!(
         !seen_delivery_contract_fail,
-        "expected no failed DeliveryContract results in system.log"
+        "expected no failed DeliveryContract results in the stage journals"
     );
 
     Ok(())

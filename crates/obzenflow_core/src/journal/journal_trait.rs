@@ -16,7 +16,8 @@ use async_trait::async_trait;
 
 /// Core journal trait - defines what a journal must do
 ///
-/// Infrastructure will implement this trait with actual storage
+/// Infrastructure implements [`super::JournalStorage`] with actual storage;
+/// core supplies this facade and admits evidence only after successful operations.
 /// Generic over T which is the event type (ChainEvent or SystemEvent)
 #[async_trait]
 pub trait Journal<T>: Send + Sync
@@ -28,6 +29,19 @@ where
 
     /// Get the owner of this journal (if any)
     fn owner(&self) -> Option<&JournalOwner>;
+
+    /// Count of the committed append prefix at this journal. Capture only after
+    /// the relevant producers have settled; this is not a cross-journal cut.
+    async fn committed_position(&self) -> Result<u64, JournalError> {
+        Ok(self.read_last_n(1).await?.first().map_or(0, |record| {
+            record
+                .envelope
+                .provenance
+                .journal
+                .vector_clock
+                .get(&crate::event::CausalCoordinate::new((*self.id()).into()))
+        }))
+    }
 
     fn observation_reader(&self) -> Option<&dyn super::JournalObservationReader> {
         None
@@ -58,7 +72,8 @@ where
     /// Append an event to the journal
     ///
     /// The implementation MUST:
-    /// 1. Generate appropriate vector clock based on writer and parent
+    /// 1. Merge the preceding physical journal commit and the admitted frontier,
+    ///    then increment only this journal incarnation's clock component.
     /// 2. Ensure atomic append operation
     /// 3. Return the complete JournalRecord with causal information
     /// 4. Apply journal policy to inherited and deferred optional attachments.
@@ -66,13 +81,15 @@ where
     ///    attachments exactly. Payload and provenance are never sampled.
     /// 5. Retain an initiated physical commit through storage bookkeeping if
     ///    the caller stops waiting. Cancellation is not rollback.
+    /// 6. Enforce [`super::limits`] before commitment so readers have finite
+    ///    record and atomic-group materialisation bounds.
     ///
     /// An error certifies non-commit, except `JournalError::CommitIndeterminate`.
     /// That result means storage may have committed and must not be retried.
     async fn append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError>;
 
     /// Atomically append a logical group of events.
@@ -90,7 +107,7 @@ where
         &self,
         group_id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         match events.len() {
             0 => Ok(Vec::new()),
@@ -155,6 +172,18 @@ where
     /// position N is equivalent to a reader advanced past N records. Useful for
     /// resuming from a checkpoint.
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError>;
+
+    /// Select protected supervision candidates before reconstructing other records.
+    /// Positions are append counts within this journal incarnation, as for reader_from.
+    async fn report_reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn super::reader::JournalReportReader<T>>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "Journal does not support selective supervision reads".into(),
+            source: "unsupported report reader".into(),
+        })
+    }
 
     /// Read the last N events from the journal by scanning backwards from EOF.
     ///

@@ -4,18 +4,18 @@
 
 //! FLOWIP-134h journal oracle for immediate and deferred typed sink settlement.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow::stages::sinks::{CsvProjection, CsvSink};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, JournalRecord, StageFatalCode, StageFatalReason, StageFatalRecorded,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventId, StageId, TypedPayload};
+use obzenflow_core::{EventId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::common::handlers::{
@@ -211,17 +211,7 @@ async fn read_stage_journal(
     let journal_file = manifest["stages"][stage_name][manifest_field]
         .as_str()
         .unwrap_or_else(|| panic!("manifest names {manifest_field} for stage {stage_name}"));
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(journal_file),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("stage journal opens");
-    let mut reader = journal.reader().await.expect("stage journal reader opens");
-    let mut events = Vec::new();
-    while let Some(event) = reader.next().await.expect("stage journal reads") {
-        events.push(event);
-    }
-    events
+    replay_testkit::read_journal_envelopes_appended::<ChainEvent>(&run_dir.join(journal_file)).await
 }
 
 async fn read_stage(run_dir: &Path, stage_name: &str) -> Vec<JournalRecord<ChainPayload>> {

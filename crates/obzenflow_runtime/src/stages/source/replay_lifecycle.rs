@@ -5,9 +5,7 @@
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::types::{Count, DurationMs};
 use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload, WriterId};
-use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// The completion facts one exhaustion (or resume handoff) records.
@@ -30,7 +28,7 @@ impl ReplayCompletionGuard {
         &mut self,
         stage_id: StageId,
         stage_name: &str,
-        system_journal: &Arc<dyn Journal<SystemEvent>>,
+        report_journal: &crate::supervised_base::SupervisorJournal,
         replay_started_at: Option<Instant>,
         facts: ReplayCompletionFacts,
     ) {
@@ -56,8 +54,8 @@ impl ReplayCompletionGuard {
             }),
         );
 
-        if let Err(e) = crate::supervised_base::publication::append(
-            system_journal,
+        if let Err(e) = crate::supervised_base::publication::report(
+            report_journal,
             completed_event,
             Default::default(),
         )

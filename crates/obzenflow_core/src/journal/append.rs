@@ -5,7 +5,7 @@
 //! Inputs shared by individual and atomic-group appends.
 
 use crate::event::observability::ObservabilityContext;
-use crate::event::{JournalEvent, JournalRecord};
+use crate::event::{CausalFrontier, JournalEvent};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// A selected member may construct its complete optional attachment lazily.
@@ -41,19 +41,30 @@ impl<T: JournalEvent> Default for JournalCapture<T> {
     }
 }
 
-/// Causal parent and preparation for an append. The journal applies its policy
+/// Owned, payload-independent causal evidence and preparation for an append. The journal applies its policy
 /// to the complete attachment, including any inherited observations.
-pub struct AppendOptions<'a, T: JournalEvent> {
-    pub parent: Option<&'a JournalRecord<T::Payload>>,
+pub struct AppendOptions<T: JournalEvent> {
+    pub frontier: CausalFrontier,
     pub capture: JournalCapture<T>,
 }
 
-impl<'a, T: JournalEvent> AppendOptions<'a, T> {
-    pub fn new(parent: Option<&'a JournalRecord<T::Payload>>) -> Self {
+impl<T: JournalEvent> AppendOptions<T> {
+    pub fn new(frontier: CausalFrontier) -> Self {
         Self {
-            parent,
+            frontier,
             capture: JournalCapture::default(),
         }
+    }
+
+    /// Convenience admission of one committed receipt/read. This is independent
+    /// of the payload family being appended; bare event IDs cannot be admitted.
+    pub fn from_record<P: crate::event::payloads::JournalPayload>(
+        record: Option<&crate::event::JournalRecord<P>>,
+    ) -> Result<Self, super::JournalError> {
+        Ok(Self::new(match record {
+            Some(record) => CausalFrontier::from_record(record)?,
+            None => CausalFrontier::default(),
+        }))
     }
 
     pub fn with_capture(mut self, capture: JournalCapture<T>) -> Self {
@@ -62,8 +73,8 @@ impl<'a, T: JournalEvent> AppendOptions<'a, T> {
     }
 }
 
-impl<T: JournalEvent> Default for AppendOptions<'_, T> {
+impl<T: JournalEvent> Default for AppendOptions<T> {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(CausalFrontier::default())
     }
 }

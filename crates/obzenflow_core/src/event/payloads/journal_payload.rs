@@ -31,6 +31,8 @@ pub trait JournalPayload:
         + Sync;
     fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error>;
     fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error>;
+    /// Protected, borrowing classification. Owner authority is checked by the consumer.
+    fn is_supervision_candidate(&self) -> bool;
     fn visit_metrics_keys(
         &self,
         provenance: &Self::Provenance,
@@ -42,6 +44,15 @@ impl sealed::Sealed for ChainPayload {}
 impl JournalPayload for ChainPayload {
     type Event = crate::event::ChainEvent;
     type Provenance = ChainEventProvenance;
+
+    fn is_supervision_candidate(&self) -> bool {
+        match self {
+            Self::Execution(execution) => execution.is_supervision_candidate(),
+            Self::Fact(_) | Self::CompositeData(_) | Self::FlowControl(_) | Self::Delivery(_) => {
+                false
+            }
+        }
+    }
 
     fn visit_metrics_keys(
         &self,
@@ -56,6 +67,51 @@ impl JournalPayload for ChainPayload {
         }
         if provenance.runtime.is_some() {
             visit(MetricsTailKey::Accounting(stage));
+        }
+        if let Self::Execution(execution) = self {
+            use super::execution_payload::StageLifecycleFact;
+            match execution {
+                ExecutionPayload::StageLifecycle(fact) => {
+                    visit(MetricsTailKey::StageLifecycle(stage));
+                    if matches!(
+                        fact,
+                        StageLifecycleFact::Draining {
+                            accounting: Some(_),
+                            ..
+                        } | StageLifecycleFact::Completed {
+                            accounting: Some(_),
+                            ..
+                        } | StageLifecycleFact::Cancelled {
+                            accounting: Some(_),
+                            ..
+                        } | StageLifecycleFact::Failed {
+                            accounting: Some(_),
+                            ..
+                        }
+                    ) {
+                        visit(MetricsTailKey::Accounting(stage));
+                    }
+                }
+                ExecutionPayload::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    contract_name,
+                    ..
+                } => {
+                    visit(MetricsTailKey::Contract(
+                        crate::metrics::ContractMetricEdgeKey {
+                            upstream: *upstream,
+                            downstream: *reader,
+                            selected_event_type: selected_event_type.clone(),
+                            feed_role: *feed_role,
+                            contract: contract_name.clone(),
+                        },
+                    ));
+                }
+                _ => {}
+            }
         }
         match self {
             Self::Execution(ExecutionPayload::HttpPullState(_)) => {
@@ -108,6 +164,10 @@ impl sealed::Sealed for SystemPayload {}
 impl JournalPayload for SystemPayload {
     type Event = crate::event::SystemEvent;
     type Provenance = SystemEventProvenance;
+
+    fn is_supervision_candidate(&self) -> bool {
+        true
+    }
 
     fn visit_metrics_keys(
         &self,

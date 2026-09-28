@@ -69,6 +69,7 @@ pub struct PipelineBuilder {
     stages: Vec<BoxedStageHandle>,
     sources: Vec<BoxedStageHandle>,
     metrics_exporter: Option<Arc<dyn MetricsSnapshotExporter>>,
+    metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
     stage_journals: Option<StageJournalList>,
     error_journals: Option<StageJournalList>,
     flow_name: Option<String>,
@@ -84,6 +85,14 @@ pub struct PipelineBuilder {
 }
 
 impl PipelineBuilder {
+    pub fn with_metrics_journals(
+        mut self,
+        journals: crate::metrics::builder::MetricsJournals,
+    ) -> Self {
+        self.metrics_journals = Some(journals);
+        self
+    }
+
     /// Use the identity allocated by the composition root for the run manifest.
     pub fn with_pipeline_system_id(mut self, system_id: SystemId) -> Self {
         self.pipeline_system_id = system_id;
@@ -112,13 +121,17 @@ impl PipelineBuilder {
         flow_id: FlowId,
     ) -> Self {
         Self {
-            pipeline_system_id: SystemId::new(),
+            pipeline_system_id: match system_journal.owner() {
+                Some(obzenflow_core::JournalOwner::System { system_id }) => *system_id,
+                _ => SystemId::new(),
+            },
             topology,
             system_journal,
             flow_id,
             stages: Vec::new(),
             sources: Vec::new(),
             metrics_exporter: None,
+            metrics_journals: None,
             stage_journals: None,
             error_journals: None,
             flow_name: None,
@@ -381,6 +394,8 @@ impl PipelineBuilder {
                 }),
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
+            metrics_journals: self.metrics_journals.clone(),
+            report_coverage: Default::default(),
             resources: Default::default(),
             progress: Default::default(),
             contract_status: HashMap::new(),
@@ -414,14 +429,17 @@ impl PipelineBuilder {
         // A returned failure joins supplied stages; dropping this build future
         // requests cancellation through that same context fallback.
         let preparation = async {
-            pipeline_context.completion_subscription =
-                Some(crate::messaging::SystemSubscription::new(
-                    self.system_journal
-                        .reader()
-                        .await
-                        .map_err(|e| BuilderError::ContextCreationError(e.to_string()))?,
-                    "pipeline_supervisor".into(),
-                ));
+            let mut readers = crate::supervised_base::report_reader::ReportReaders::default();
+            readers.system(self.system_journal.clone());
+            for (_, journal) in &pipeline_context.stage_data_journals {
+                readers.stage(journal.clone());
+            }
+            if self.metrics_exporter.is_some() {
+                if let Some(journals) = &self.metrics_journals {
+                    readers.system(journals.coordination.clone());
+                }
+            }
+            pipeline_context.completion_subscription = Some(readers);
             pipeline_context.resources.prepared_metrics =
                 prepare_metrics(&pipeline_context).await?;
             Ok::<(), BuilderError>(())
@@ -438,6 +456,30 @@ impl PipelineBuilder {
             }
             return Err(error);
         }
+        let mut report_journals = vec![crate::supervised_base::SupervisorJournal::System(
+            self.system_journal.clone(),
+        )];
+        for (stage, journal) in &pipeline_context.stage_data_journals {
+            report_journals.push(crate::supervised_base::SupervisorJournal::stage(
+                journal.clone(),
+                obzenflow_core::event::provenance::FlowContext::new(
+                    self.topology
+                        .stages()
+                        .find(|info| info.id == stage.to_topology_id())
+                        .map(|info| info.name.clone())
+                        .unwrap_or_else(|| stage.to_string()),
+                    *stage,
+                ),
+            ));
+        }
+        if let Some(metrics) = &pipeline_context.metrics_journals {
+            report_journals.push(crate::supervised_base::SupervisorJournal::System(
+                metrics.coordination.clone(),
+            ));
+            report_journals.push(crate::supervised_base::SupervisorJournal::System(
+                metrics.export.clone(),
+            ));
+        }
         let published_outcome = pipeline_context.termination.published.clone();
         let metrics = pipeline_context.resources.metrics.clone();
         let operational_failure = pipeline_context.resources.failure.clone();
@@ -451,7 +493,7 @@ impl PipelineBuilder {
             operational_failure.clone(),
         );
         let supervisor_task = SupervisorTaskBuilder::new("pipeline_supervisor")
-            .with_publications(publications)
+            .with_publications(publications.clone())
             .spawn_self_supervised(supervisor, PipelineFsmState::Created, pipeline_context);
 
         // Build the standard handle first
@@ -483,6 +525,13 @@ impl PipelineBuilder {
                 flow_name,
                 contract_attachments,
                 system_journal: Some(self.system_journal.clone()),
+                report_journals,
+                metrics_journals: self.metrics_journals.clone(),
+                pipeline_reports: Some(super::reports::PipelineReports {
+                    journal: self.system_journal.clone(),
+                    owner: publications,
+                    writer: system_id.into(),
+                }),
                 pipeline_writer_id: WriterId::from(system_id),
                 observations: self.observations.clone(),
                 host_observations: self.host_observations.clone(),

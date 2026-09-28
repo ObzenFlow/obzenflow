@@ -61,12 +61,11 @@ impl Supervisor for MetricsAggregatorSupervisor {
         obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::MetricsAggregator
     }
 
-    fn system_journal(
+    fn report_journal(
         &self,
         _context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
-        self.system_journal.clone()
+    ) -> crate::supervised_base::SupervisorJournal {
+        self.system_journal.clone().into()
     }
 
     fn name(&self) -> &str {
@@ -242,50 +241,54 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T> JournalReader<T> for EmptyReader<T>
+    impl<T> obzenflow_core::journal::JournalStorageReader<T> for EmptyReader<T>
     where
         T: obzenflow_core::event::JournalEvent,
     {
-        async fn next(&mut self) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        fn position(&self) -> u64 {
+        fn storage_position(&self) -> u64 {
             self.position
         }
     }
 
     struct FailAppendJournal<T> {
         id: JournalId,
+        owner: JournalOwner,
         _phantom: PhantomData<T>,
     }
 
     impl<T> FailAppendJournal<T> {
-        fn new() -> Self {
+        fn new(system: SystemId) -> Self {
             Self {
                 id: JournalId::new(),
+                owner: JournalOwner::system(system),
                 _phantom: PhantomData,
             }
         }
     }
 
     #[async_trait]
-    impl<T> Journal<T> for FailAppendJournal<T>
+    impl<T> obzenflow_core::journal::JournalStorage<T> for FailAppendJournal<T>
     where
         T: obzenflow_core::event::JournalEvent + 'static,
     {
-        fn id(&self) -> &JournalId {
+        fn storage_id(&self) -> &JournalId {
             &self.id
         }
 
-        fn owner(&self) -> Option<&JournalOwner> {
-            None
+        fn storage_owner(&self) -> Option<&JournalOwner> {
+            Some(&self.owner)
         }
 
-        async fn append(
+        async fn storage_append(
             &self,
             event: T,
-            _options: obzenflow_core::journal::AppendOptions<'_, T>,
+            _options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
             // Exercise a dispatch failure after successful registration.
             if event.event_type_name() == "system.supervisor.registered" {
@@ -297,18 +300,20 @@ mod tests {
             })
         }
 
-        async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        async fn storage_read_all_unordered(
+            &self,
+        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
             Ok(Vec::new())
         }
 
-        async fn read_event(
+        async fn storage_read_event(
             &self,
             _event_id: &EventId,
         ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(None)
         }
 
-        async fn reader_from(
+        async fn storage_reader_from(
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -318,7 +323,7 @@ mod tests {
             }))
         }
 
-        async fn read_last_n(
+        async fn storage_read_last_n(
             &self,
             _count: usize,
         ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -328,9 +333,9 @@ mod tests {
 
     #[tokio::test]
     async fn state_watcher_reports_failed_on_dispatch_error() {
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(FailAppendJournal::<SystemEvent>::new());
         let system_id = SystemId::new();
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(FailAppendJournal::<SystemEvent>::new(system_id));
 
         let (_event_sender, _event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
@@ -349,6 +354,11 @@ mod tests {
         };
 
         let ctx = MetricsAggregatorContext {
+            journals: super::super::builder::MetricsJournals {
+                system_id,
+                coordination: system_journal.clone(),
+                export: system_journal.clone(),
+            },
             system_journal,
             stage_data_journals: HashMap::new(),
             stage_error_journals: HashMap::new(),

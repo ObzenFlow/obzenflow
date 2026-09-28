@@ -93,7 +93,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
             error_journal: self.resources.error_journal.clone(),
-            system_journal: self.resources.system_journal.clone(),
+            report_journal: self.resources.report_journal.clone(),
             runtime_execution: self.resources.runtime_execution.clone(),
             bus: self.resources.message_bus.clone(),
             instrumentation,
@@ -110,7 +110,7 @@ impl<H: UnifiedAsyncFiniteSourceHandler + Send + Sync + 'static> SupervisorBuild
         let supervisor = AsyncFiniteSourceSupervisor {
             name: format!("async_finite_source_{}", self.config.stage_name),
             handler,
-            system_journal: self.resources.system_journal.clone(),
+            report_journal: self.resources.report_journal.clone(),
             stage_id: self.config.stage_id,
             idle_backoff: IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),

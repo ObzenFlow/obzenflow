@@ -32,14 +32,12 @@ use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
-    StageActivity, StageLifecycleEvent, SystemEvent, SystemPayload,
+    StageActivity, StageLifecycleEvent, SupervisorRecord, SystemPayload,
 };
-use obzenflow_core::journal::journal_owner::JournalOwner;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{JournalRecord, StageId, SystemId, TypedPayload};
+use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::run_context::FlowBuildContext;
@@ -921,29 +919,7 @@ async fn read_stage_journal(
     let file = manifest["stages"][stage][field]
         .as_str()
         .expect("manifest contains the PostgreSQL stage journal");
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))
-            .expect("PostgreSQL stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("PostgreSQL stage journal reads")
-}
-
-async fn read_system_journal(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
-    let manifest = replay_testkit::archive_manifest(run);
-    let file = manifest["system_journal_file"]
-        .as_str()
-        .expect("manifest contains the system journal");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run.join(file),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("PostgreSQL system journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("PostgreSQL system journal reads")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run.join(file)).await
 }
 
 async fn assert_operation_failure_lifecycle(
@@ -978,8 +954,13 @@ async fn assert_operation_failure_lifecycle(
         expected_code.map(|code| (POSTGRES_SQLSTATE_NAMESPACE, code))
     );
 
-    let system = read_system_journal(run).await;
-    let tied_failures = system
+    let data = read_stage_journal(run, "postgres", "data_journal_file").await;
+    let reports = data
+        .iter()
+        .cloned()
+        .filter_map(SupervisorRecord::from_chain)
+        .collect::<Vec<_>>();
+    let tied_failures = reports
         .iter()
         .filter_map(|envelope| match &envelope.payload {
             SystemPayload::StageLifecycle {
@@ -998,7 +979,7 @@ async fn assert_operation_failure_lifecycle(
         "the real connector failure is the sink lifecycle's exact durable cause"
     );
     assert!(
-        !system.iter().any(|envelope| matches!(
+        !reports.iter().any(|envelope| matches!(
             &envelope.payload,
             SystemPayload::StageLifecycle {
                 stage_id,

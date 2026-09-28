@@ -18,6 +18,18 @@ pub struct ReplayContextTemplate {
     pub original_stage_id: StageId,
 }
 
+pub struct ReplayedEvent {
+    pub event: ChainEvent,
+    pub origin: obzenflow_core::event::CausalFrontier,
+}
+
+impl ReplayedEvent {
+    pub(crate) fn admit(self) -> Result<ChainEvent, obzenflow_core::journal::JournalError> {
+        crate::supervised_base::publication::incorporate(&self.origin)?;
+        Ok(self.event)
+    }
+}
+
 pub struct ReplayDriver {
     archive_reader: Box<dyn JournalReader<ChainEvent>>,
     journal_path: PathBuf,
@@ -62,7 +74,7 @@ impl ReplayDriver {
         _writer_id: WriterId,
         _stage_name: &str,
         flow_context: FlowContext,
-    ) -> Result<Option<ChainEvent>, ReplayError> {
+    ) -> Result<Option<ReplayedEvent>, ReplayError> {
         loop {
             let next =
                 self.archive_reader
@@ -87,6 +99,13 @@ impl ReplayDriver {
             if !original_event.is_source_replayable() {
                 if let ChainPayload::FlowControl(fc) = &original_event.payload {
                     if let Some(kind) = fc.eof_kind() {
+                        crate::supervised_base::publication::observe_record(&envelope).map_err(
+                            |error| ReplayError::CorruptedArchive {
+                                path: self.journal_path.clone(),
+                                record_position: self.archive_reader.position(),
+                                message: error.to_string(),
+                            },
+                        )?;
                         self.archived_eof_kind = Some(kind);
                     }
                 }
@@ -104,7 +123,18 @@ impl ReplayDriver {
             });
 
             self.replayed_events = self.replayed_events.saturating_add(1);
-            return Ok(Some(new_event));
+            let origin =
+                obzenflow_core::event::CausalFrontier::from_record(&envelope).map_err(|error| {
+                    ReplayError::CorruptedArchive {
+                        path: self.journal_path.clone(),
+                        record_position: self.archive_reader.position(),
+                        message: error.to_string(),
+                    }
+                })?;
+            return Ok(Some(ReplayedEvent {
+                event: new_event,
+                origin,
+            }));
         }
     }
 }

@@ -20,10 +20,10 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, RateLimiterFact};
 use obzenflow_core::event::{ChainPayload, SystemPayload};
-use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
-use obzenflow_core::{StageId, TypedPayload};
+use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, flow, sink, FlowDefinition};
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handlers::{
     InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext, SinkWriteReport,
@@ -134,27 +134,24 @@ fn latest_run_dir(base: &Path) -> PathBuf {
 }
 
 async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(run_dir.join("run_manifest.json"))
-            .expect("run_manifest.json should be readable"),
-    )
-    .expect("run_manifest.json should parse");
-    let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
-        .as_str()
-        .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
-    let journal: DiskJournal<ChainEvent> = DiskJournal::with_owner(
-        run_dir.join(stage_journal),
-        JournalOwner::stage(StageId::new()),
-    )
-    .expect("stage journal should open");
-
-    journal
-        .read_causally_ordered()
+    let mut snapshot = obzenflow_infra::journal::read::open_disk_run(run_dir)
         .await
-        .expect("stage journal should read")
-        .into_iter()
-        .map(|envelope| envelope.authored())
-        .collect()
+        .expect("run archive should open for observation");
+    let mut events = Vec::new();
+    while let Some(record) = snapshot.next().await.expect("run archive should read") {
+        if record.journal.kind == RunJournalKind::Data
+            && record
+                .journal
+                .stage
+                .as_ref()
+                .is_some_and(|stage| stage.key == stage_key)
+        {
+            if let RunRecordData::Chain(row) = record.record {
+                events.push(row.into_authored());
+            }
+        }
+    }
+    events
 }
 
 fn delayed_rate_limiter_events(events: &[ChainEvent]) -> usize {

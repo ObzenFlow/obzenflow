@@ -227,12 +227,20 @@ jobs:
           fi
 
       - name: Journal codec fixtures
-        if: matrix.name == 'default'
+        if: ${{ !cancelled() && matrix.name == 'default' }}
         run: |
           set -euo pipefail
           # These files are kept in the repository and omitted from crates.io.
           cargo nextest run --package obzenflow_infra --lib --locked \
             --run-ignored only current_schema_fixtures_preserve_bytes_and_logical_records
+
+      - name: Preserve test results and phase output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.name }}
+          path: target/nextest/**/junit.xml
+          if-no-files-found: warn
 
   test-test-support:
     needs: fmt
@@ -278,6 +286,14 @@ jobs:
             --locked \
             --profile "${profile}" \
             --features test-support,obzenflow_infra/warp-server
+
+      - name: Preserve test-support results and phase output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-test-support
+          path: target/nextest/**/junit.xml
+          if-no-files-found: warn
 
   postgres-conformance:
     needs: fmt

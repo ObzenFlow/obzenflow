@@ -89,10 +89,10 @@ struct ViewArgs {
     /// Include runtime, lifecycle, signal and system records in either output format.
     #[arg(long)]
     include_runtime: bool,
-    /// Show complete envelopes, payloads and the recorded run manifest.
+    /// Show complete envelopes, payloads, manifest and large clock matrices.
     #[arg(long, conflicts_with = "jsonl")]
     full: bool,
-    /// Add teaching notes beneath the operation and payload.
+    /// Add teaching notes, causal evidence and payload watermarks.
     #[arg(long, conflicts_with_all = ["compact", "jsonl"])]
     explain: bool,
     /// One line per selected record, without clocks, teaching notes or count tables.

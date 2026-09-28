@@ -312,6 +312,12 @@ async fn expired_stop_is_dispatched_before_a_full_external_control_queue() {
 }
 
 #[tokio::test]
+async fn saturated_publications_stop_report_admission_but_not_controls_or_deadlines() {
+    pipeline::saturated_publications_stop_report_admission_but_not_controls_or_deadlines(journals)
+        .await;
+}
+
+#[tokio::test]
 async fn subscription_preparation_failure_joins_every_supplied_stage() {
     pipeline::subscription_preparation_failure_joins_every_supplied_stage(journals).await;
 }
@@ -394,4 +400,9 @@ async fn metrics_manual_export_uses_the_live_control_receiver() {
         obzenflow_runtime::testing::metrics::metrics_manual_export_uses_the_live_control_receiver,
     )
     .await;
+}
+
+#[tokio::test]
+async fn metrics_export_power_law_does_not_expand_parent_coordination_work() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_export_power_law_does_not_expand_parent_coordination_work).await;
 }

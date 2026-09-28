@@ -15,9 +15,10 @@
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEvent, ChainPayload, JournalEvent, JournalRecord};
-use obzenflow_core::id::{JournalId, StageId};
+use obzenflow_core::id::StageId;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::WriterId;
+#[cfg(feature = "test-support")]
 use obzenflow_runtime::testing::DeliveredOrderProjection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -111,7 +112,9 @@ pub async fn read_journal_envelopes_appended<T: JournalEvent>(
     // would recover (truncate) an in-flight tail; a live reader only observes it.
     let mut reader = obzenflow_infra::journal::disk::reader::DiskJournalReader::<T>::new(
         path.to_path_buf(),
-        JournalId::new(),
+        obzenflow_infra::journal::disk::identity::read_identity(path)
+            .expect("persisted journal identity")
+            .journal_id,
         std::sync::Arc::new(tokio::sync::RwLock::new(())),
     )
     .await
@@ -217,6 +220,7 @@ pub async fn count_reader_telemetry_rows(run_dir: &Path, stage_key: &str) -> usi
 }
 
 /// Project a fan-in stage's delivered order from a run directory.
+#[cfg(feature = "test-support")]
 pub async fn project_delivered_order(
     run_dir: &Path,
     stage_key: &str,
@@ -234,6 +238,7 @@ pub async fn project_delivered_order(
 }
 
 /// Assert two runs delivered the same order at a fan-in stage.
+#[cfg(feature = "test-support")]
 pub async fn assert_same_delivered_order(
     run_a: &Path,
     run_b: &Path,
@@ -252,6 +257,7 @@ pub async fn assert_same_delivered_order(
 /// and FLOWIP-120n's all-sources admission barrier is what keeps the
 /// recomputed order prefix-stable once live tails appear. A pure replay is the
 /// degenerate case where the extension is empty.
+#[cfg(feature = "test-support")]
 pub async fn assert_prefix_stable(
     prefix_run: &Path,
     extended_run: &Path,

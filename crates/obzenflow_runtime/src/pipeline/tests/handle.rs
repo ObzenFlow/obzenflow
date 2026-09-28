@@ -16,6 +16,9 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 fn empty_extras() -> FlowHandleExtras {
     FlowHandleExtras {
+        metrics_journals: None,
+        report_journals: vec![],
+        pipeline_reports: None,
         observations: Arc::new(ObservationRegistry::default()),
         host_observations: Arc::new(NoObservations),
         stage_cleanup: Vec::new(),

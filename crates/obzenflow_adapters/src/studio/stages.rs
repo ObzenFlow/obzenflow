@@ -5,18 +5,18 @@
 //! Keeps each stage's latest status and any final metrics for Studio's initial
 //! display, including stages that finished before the browser connected.
 
-use obzenflow_core::event::journal_record::SystemJournalRecord;
+use obzenflow_core::event::SupervisorRecord;
 use obzenflow_core::web::SseFrame;
 use obzenflow_core::StageId;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Default)]
 pub(super) struct StageLifecycleView {
-    latest_by_stage: BTreeMap<StageId, SystemJournalRecord>,
+    latest_by_stage: BTreeMap<StageId, SupervisorRecord>,
 }
 
 impl StageLifecycleView {
-    pub(super) fn observe(&mut self, envelope: &SystemJournalRecord) {
+    pub(super) fn observe(&mut self, envelope: &SupervisorRecord) {
         use obzenflow_core::event::payloads::system_payload::StageLifecycleEvent;
         use obzenflow_core::event::SystemPayload;
 

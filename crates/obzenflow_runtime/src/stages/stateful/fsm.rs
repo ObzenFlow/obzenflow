@@ -7,13 +7,13 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
@@ -374,7 +374,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -410,7 +410,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// has succeeded. This lets protocol-aware stateful handlers reject an
     /// incomplete drain before the terminal signal becomes visible
     /// downstream.
-    pub terminal_envelope: Option<JournalRecord<ChainPayload>>,
+    pub terminal_envelope: Option<DeliveredRecord<ChainPayload>>,
 
     /// Whether the current drain was requested through the stage handle rather
     /// than by an upstream terminal control row.
@@ -433,7 +433,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Used as the parent for emitted aggregate events so their journal envelopes preserve
     /// happened-before relationships via vector clock propagation, even when upstream events are
     /// concurrent.
-    pub last_consumed_envelope: Option<JournalRecord<ChainPayload>>,
+    pub last_consumed_envelope: Option<DeliveredRecord<ChainPayload>>,
 
     /// Stage instrumentation for metrics tracking
     pub instrumentation: Arc<StageInstrumentation>,
@@ -523,7 +523,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                             writer_id,
                             contract_journal: ctx.data_journal.clone(),
                             config: ContractConfig::default(),
-                            system_journal: Some(ctx.system_journal.clone()),
+                            report_journal: Some(ctx.report_journal.clone()),
                             reader_stage: Some(ctx.stage_id),
                             control_plane: ctx.instrumentation.control_plane().clone(),
                             include_delivery_contract: false,
@@ -605,7 +605,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     "Stateful",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                 )
                 .await;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
@@ -734,7 +734,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     "Stateful",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),
@@ -767,7 +767,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     ctx.stage_id,
                     &ctx.stage_name,
                     message,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),

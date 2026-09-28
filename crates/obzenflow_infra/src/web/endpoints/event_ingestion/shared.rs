@@ -2,14 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
-use obzenflow_core::id::SystemId;
+use obzenflow_core::event::SystemPayload;
 use obzenflow_core::ingress::{
     EdgeShedReason, EventSubmission, HostedIngressBindingSlot, IngressAdmissionDecision,
     IngressAdmissionOutcome, IngressAttemptContext, IngressAttemptSeq, IngressBoundaryMiddleware,
     IngressRefusalReason, SubmissionIngressContext, SubmissionPayloadKind,
 };
-use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{EndpointError, ManagedResponse, Response};
 use obzenflow_runtime::pipeline::PipelineState;
 use serde_json::json;
@@ -80,10 +78,7 @@ impl Default for IngestionConfig {
 
 /// FLOWIP-115d: the system-journal writer that records hosted-ingress refusal
 /// facts. Installed at web-surface wiring time from the host system journal.
-struct IngressRefusalWriter {
-    journal: Arc<dyn Journal<SystemEvent>>,
-    writer_id: WriterId,
-}
+type IngressRefusalWriter = obzenflow_runtime::pipeline::reports::PipelineReports;
 
 #[derive(Debug)]
 pub(crate) struct IngressRefusalRecordError {
@@ -200,11 +195,8 @@ impl IngestionState {
     }
 
     /// Install the system-journal refusal-fact writer at web-surface wiring time.
-    pub(crate) fn install_refusal_writer(&self, journal: Arc<dyn Journal<SystemEvent>>) {
-        let _ = self.refusal_writer.set(IngressRefusalWriter {
-            journal,
-            writer_id: WriterId::from(SystemId::new()),
-        });
+    pub(crate) fn install_refusal_writer(&self, writer: IngressRefusalWriter) {
+        let _ = self.refusal_writer.set(writer);
     }
 
     /// Append one durable `IngressRefusal` fact for a refused attempt
@@ -240,26 +232,22 @@ impl IngestionState {
                 self.ingress_key
             )));
         };
-        let event = SystemEvent::new(
-            writer.writer_id,
-            SystemPayload::IngressRefusal {
-                ingress_key: self.ingress_key.clone(),
-                stage_id: filled.stage_id,
-                stage_key: filled.stage_key.clone(),
-                reason,
-                attempt_seq: attempt.attempt_seq,
-                request_count: attempt.request_count,
-                event_count: attempt.event_count,
-                batch_count: attempt.batch_count,
-                http_status,
-                // Coarse bucket matching the second-granularity `Retry-After`
-                // the client receives, so audit and response agree.
-                retry_after_ms_bucket: retry_after.map(|d| d.as_secs().max(1).saturating_mul(1000)),
-            },
-        );
+        let payload = SystemPayload::IngressRefusal {
+            ingress_key: self.ingress_key.clone(),
+            stage_id: filled.stage_id,
+            stage_key: filled.stage_key.clone(),
+            reason,
+            attempt_seq: attempt.attempt_seq,
+            request_count: attempt.request_count,
+            event_count: attempt.event_count,
+            batch_count: attempt.batch_count,
+            http_status,
+            // Coarse bucket matching the second-granularity `Retry-After`
+            // the client receives, so audit and response agree.
+            retry_after_ms_bucket: retry_after.map(|d| d.as_secs().max(1).saturating_mul(1000)),
+        };
         writer
-            .journal
-            .append(event, Default::default())
+            .record_ingress_refusal(payload)
             .await
             .map(|_| ())
             .map_err(|e| {

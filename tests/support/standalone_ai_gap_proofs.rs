@@ -453,15 +453,8 @@ async fn stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> 
     let relative = manifest["stages"][stage_key]["error_journal_file"]
         .as_str()
         .unwrap();
-    let journal = DiskJournal::<ChainEvent>::with_owner(
-        run_dir.join(relative),
-        JournalOwner::stage(StageId::new()),
-    )
-    .unwrap();
-    journal
-        .read_causally_ordered()
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run_dir.join(relative))
         .await
-        .unwrap()
         .into_iter()
         .map(|envelope| envelope.authored())
         .collect()

@@ -15,6 +15,8 @@
 //! See `obzenflow_improvement_proposals/content/P0/open/FLOWIP-114h-...md`
 //! for the full contract.
 
+#[cfg(test)]
+pub(crate) mod causal_fixture;
 pub mod delivered_order;
 pub mod flow_test_harness;
 pub mod journal_snapshot;

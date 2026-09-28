@@ -38,7 +38,6 @@ use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::types::Count;
 use obzenflow_core::event::{ChainEventFactory, ReplayLifecycleEvent, SystemEvent, SystemPayload};
-use obzenflow_core::journal::Journal;
 use obzenflow_core::{MiddlewareExecutionScope, StageId, StageKey, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
@@ -58,7 +57,7 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     pub(crate) handler: H,
 
     /// System journal for lifecycle events
-    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub(crate) report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -383,8 +382,11 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> Supervisor
         SupervisorKind::AsyncInfiniteSource
     }
 
-    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        self.system_journal.clone()
+    fn report_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> crate::supervised_base::SupervisorJournal {
+        self.report_journal.clone()
     }
 
     fn name(&self) -> &str {
@@ -427,7 +429,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
         ) {
             record_terminal_commands(
                 &mut self.external_events,
-                self.system_journal.clone(),
+                self.report_journal.clone(),
                 WriterId::from(self.stage_id),
                 &self.name,
                 state.variant_name(),
@@ -469,7 +471,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                     None,
                     &ctx.data_journal,
                     &ctx.error_journal,
-                    &ctx.system_journal,
                     &ctx.instrumentation,
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
@@ -582,8 +583,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                     source_stages: replay_archive.source_stage_keys(),
                                 }),
                             );
-                            if let Err(e) = publication::append(
-                                &self.system_journal,
+                            if let Err(e) = publication::report(
+                                &self.report_journal,
                                 started_event,
                                 Default::default(),
                             )
@@ -623,6 +624,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
 
                     match next_result {
                         Ok(Some(event)) => {
+                            let event = event.admit()?;
                             ctx.instrumentation
                                 .event_loops_with_work_total
                                 .fetch_add(1, Ordering::Relaxed);
@@ -661,7 +663,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                         .maybe_emit_completed(
                                             self.stage_id,
                                             &ctx.stage_name,
-                                            &self.system_journal,
+                                            &self.report_journal,
                                             self.replay_started_at,
                                             ReplayCompletionFacts {
                                                 replayed_count,
@@ -713,7 +715,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                         .maybe_emit_completed(
                                             self.stage_id,
                                             &ctx.stage_name,
-                                            &self.system_journal,
+                                            &self.report_journal,
                                             self.replay_started_at,
                                             ReplayCompletionFacts {
                                                 replayed_count,
@@ -738,8 +740,8 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                                             },
                                         ),
                                     );
-                                    if let Err(e) = publication::append(
-                                        &self.system_journal,
+                                    if let Err(e) = publication::report(
+                                        &self.report_journal,
                                         resumed_live,
                                         Default::default(),
                                     )
@@ -1095,7 +1097,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + 'static> AsyncInfiniteSourceSupervis
                     self.stage_id,
                     stage_name,
                     &error,
-                    &self.system_journal,
+                    &self.report_journal,
                 )
                 .await?;
             }

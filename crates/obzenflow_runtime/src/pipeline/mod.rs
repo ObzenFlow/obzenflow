@@ -11,12 +11,16 @@ pub mod handle;
 mod lifecycle;
 pub mod max_iterations;
 mod metrics;
+pub mod reports;
 pub(crate) mod resources;
 pub mod supervisor;
 mod termination;
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod tests;
+
+#[cfg(feature = "test-support")]
+pub(crate) mod benchmarks;
 
 pub use builder::PipelineBuilder;
 pub use config::{

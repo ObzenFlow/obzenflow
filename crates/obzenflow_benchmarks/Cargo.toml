@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+components = ["obzenflow_infra/test-support"]
+supervision-benchmarks = ["components", "obzenflow_infra/bench-instrumentation"]
+
 [dependencies]
 # ObzenFlow dependencies - we need all layers for integration benchmarks
 obzenflow_core = { workspace = true }
@@ -25,6 +29,7 @@ criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 
 # Data structures and serialization
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 # Utilities
 tempfile = { workspace = true }
@@ -110,3 +115,27 @@ harness = false
 name = "pipeline_execution"
 path = "benches/integration/pipeline_execution.rs"
 harness = false
+
+[[bench]]
+name = "journal_components"
+path = "benches/journal_components/main.rs"
+harness = false
+required-features = ["components"]
+
+[[bench]]
+name = "supervision_selection"
+path = "benches/supervision_selection/main.rs"
+harness = false
+required-features = ["supervision-benchmarks"]
+
+[[bench]]
+name = "journal_hot_path"
+path = "benches/journal_hot_path/main.rs"
+harness = false
+required-features = ["supervision-benchmarks"]
+
+[[bench]]
+name = "supervision_delivery"
+path = "benches/supervision_delivery/main.rs"
+harness = false
+required-features = ["supervision-benchmarks"]

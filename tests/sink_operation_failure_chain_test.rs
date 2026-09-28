@@ -4,12 +4,15 @@
 
 //! FLOWIP-122a durable sink-operation failure-chain proofs.
 
+mod replay_testkit;
+
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkDestinationErrorCode, SinkOperationFailed, SinkOperationPhase,
-    SinkWritePhase, StageLifecycleEvent, SystemEvent, SystemPayload,
+    SinkWritePhase, StageLifecycleEvent, SupervisorRecord, SystemEvent, SystemPayload,
 };
 use obzenflow_core::journal::archive::ReplayArchive;
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
@@ -17,12 +20,10 @@ use obzenflow_core::journal::journal_name::JournalName;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{Journal, JournalError, JournalReader, RunManifest};
-use obzenflow_core::{
-    AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, StageId, SystemId, TypedPayload,
-};
+use obzenflow_core::{AdmissionSeq, EventId, FlowId, JournalId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{ApplicationError, FlowApplication};
-use obzenflow_infra::journal::{disk_journals, DiskJournal, DiskJournalFactory};
+use obzenflow_infra::journal::{disk_journals, DiskJournalFactory};
 use obzenflow_runtime::effects::SinkRedeliverySafety;
 use obzenflow_runtime::stages::sink::{
     PendingSinkInput, SinkCommitReceipt, SinkConnector, SinkDescription, SinkOperationError,
@@ -61,19 +62,21 @@ struct ProbedJournal<T: obzenflow_core::event::JournalEvent> {
 }
 
 #[async_trait]
-impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
-    fn id(&self) -> &JournalId {
+impl<T: obzenflow_core::event::JournalEvent> obzenflow_core::journal::JournalStorage<T>
+    for ProbedJournal<T>
+{
+    fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
 
-    fn owner(&self) -> Option<&JournalOwner> {
+    fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
 
-    async fn append(
+    async fn storage_append(
         &self,
         event: T,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let fact = (self.fact)(&event);
         if let Some(fact) = fact {
@@ -100,31 +103,44 @@ impl<T: obzenflow_core::event::JournalEvent> Journal<T> for ProbedJournal<T> {
         result
     }
 
-    async fn append_group(
+    async fn storage_append_group(
         &self,
         group_id: &str,
         events: Vec<T>,
-        options: AppendOptions<'_, T>,
+        options: AppendOptions<T>,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.append_group(group_id, events, options).await
     }
 
-    async fn read_all_unordered(&self) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+    async fn storage_read_all_unordered(
+        &self,
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_all_unordered().await
     }
 
-    async fn read_event(
+    async fn storage_read_event(
         &self,
         event_id: &EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         self.inner.read_event(event_id).await
     }
 
-    async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+    async fn storage_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         self.inner.reader_from(position).await
     }
 
-    async fn read_last_n(
+    async fn storage_report_reader_from(
+        &self,
+        position: u64,
+    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
+    {
+        self.inner.report_reader_from(position).await
+    }
+
+    async fn storage_read_last_n(
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -145,6 +161,13 @@ fn chain_fact(event: &ChainEvent) -> Option<&'static str> {
         && matches!(event.processing.status, ProcessingStatus::Error { .. })
     {
         Some("X")
+    } else if matches!(
+        event.payload,
+        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+            StageLifecycleFact::Failed { .. }
+        ))
+    ) {
+        Some("P")
     } else {
         None
     }
@@ -152,21 +175,6 @@ fn chain_fact(event: &ChainEvent) -> Option<&'static str> {
 
 fn chain_admission_seq(event: &ChainEvent) -> Option<AdmissionSeq> {
     event.admission_seq
-}
-
-fn system_fact(event: &SystemEvent) -> Option<&'static str> {
-    matches!(
-        event.payload,
-        SystemPayload::StageLifecycle {
-            event: StageLifecycleEvent::Failed { .. },
-            ..
-        }
-    )
-    .then_some("P")
-}
-
-fn no_system_admission_seq(_event: &SystemEvent) -> Option<AdmissionSeq> {
-    None
 }
 
 struct ProbedDiskJournalFactory {
@@ -198,13 +206,7 @@ impl FlowJournalFactory for ProbedDiskJournalFactory {
         name: JournalName,
         owner: JournalOwner,
     ) -> Result<Arc<dyn Journal<SystemEvent>>, JournalError> {
-        let inner = FlowJournalFactory::create_system_journal(&mut self.inner, name, owner)?;
-        Ok(Arc::new(ProbedJournal {
-            inner,
-            probe: self.probe.clone(),
-            fact: system_fact,
-            admission_seq: no_system_admission_seq,
-        }))
+        FlowJournalFactory::create_system_journal(&mut self.inner, name, owner)
     }
 
     fn resource_preflight(&self, plan: &RunResourcePlan) -> Result<(), JournalError> {
@@ -705,29 +707,15 @@ async fn read_stage_journal(
     let file = manifest["stages"][stage][field]
         .as_str()
         .expect("manifest stage journal");
-    let journal =
-        DiskJournal::<ChainEvent>::with_owner(run.join(file), JournalOwner::stage(StageId::new()))
-            .expect("stage journal opens");
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal reads")
+    replay_testkit::read_journal_envelopes::<ChainEvent>(&run.join(file)).await
 }
 
-async fn read_system_journal(run: &Path) -> Vec<JournalRecord<SystemPayload>> {
-    let manifest = manifest(run);
-    let file = manifest["system_journal_file"]
-        .as_str()
-        .expect("manifest system journal");
-    let journal = DiskJournal::<SystemEvent>::with_owner(
-        run.join(file),
-        JournalOwner::system(SystemId::new()),
-    )
-    .expect("system journal opens");
-    journal
-        .read_causally_ordered()
+async fn read_sink_reports(run: &Path) -> Vec<SupervisorRecord> {
+    read_stage_journal(run, "probe", "data_journal_file")
         .await
-        .expect("system journal reads")
+        .into_iter()
+        .filter_map(SupervisorRecord::from_chain)
+        .collect()
 }
 
 fn direct_parent(event: &ChainEvent) -> Option<EventId> {
@@ -1145,8 +1133,8 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
     );
 
     let stage_id = chain.operation.stage_id;
-    let system_events = read_system_journal(&run).await;
-    let completed = system_events.iter().filter(|envelope| {
+    let reports = read_sink_reports(&run).await;
+    let completed = reports.iter().filter(|envelope| {
         matches!(
             &envelope.payload,
             SystemPayload::StageLifecycle {
@@ -1161,7 +1149,7 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
         "a failed sink lifecycle must never retain completion evidence"
     );
 
-    let tied_failures = system_events
+    let tied_failures = reports
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
             SystemPayload::StageLifecycle {
@@ -1328,8 +1316,8 @@ async fn assert_lifecycle_failure(
     assert_eq!(operation.failed_delivery_event_id, None);
     assert_eq!(direct_parent(operation_event), None);
 
-    let system_events = read_system_journal(&run).await;
-    let completed = system_events.iter().filter(|envelope| {
+    let reports = read_sink_reports(&run).await;
+    let completed = reports.iter().filter(|envelope| {
         matches!(
             &envelope.payload,
             SystemPayload::StageLifecycle {
@@ -1344,7 +1332,7 @@ async fn assert_lifecycle_failure(
         "a failed sink lifecycle must never retain completion evidence"
     );
 
-    let tied_failures = system_events
+    let tied_failures = reports
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
             SystemPayload::StageLifecycle {

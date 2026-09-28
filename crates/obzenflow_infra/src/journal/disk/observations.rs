@@ -1656,7 +1656,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn reopened_handles_share_the_gate_and_recover_a_checkpoint_suffix() {
+    async fn clones_share_the_gate_and_reopen_recovers_a_checkpoint_suffix() {
         use obzenflow_core::journal::ObservabilityPolicy;
         use std::time::Duration;
 
@@ -1677,11 +1677,15 @@ mod tests {
             .append(observed.clone(), Default::default())
             .await
             .unwrap();
-        let second = DiskJournal::with_owner(path.clone(), JournalOwner::stage(stage)).unwrap();
-        assert_ne!(
+        assert!(
+            DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
+                .is_err()
+        );
+        let second = first.clone();
+        assert_eq!(
             first.id(),
             second.id(),
-            "handle identity is not archive identity"
+            "clones share the immutable incarnation"
         );
         assert!(second
             .append(observed.clone(), Default::default())

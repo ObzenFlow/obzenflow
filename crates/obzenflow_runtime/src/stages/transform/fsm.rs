@@ -7,14 +7,15 @@
 //! Transforms process events from upstream stages and emit transformed events.
 //! They start processing immediately without waiting for a start signal.
 
+use crate::messaging::DeliveredRecord;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, SystemEvent};
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, JournalRecord, StageId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -102,7 +103,8 @@ impl futures::task::ArcWake for ContinuationWake {
 /// One supervisor-owned generated handler invocation suspended across event
 /// loop iterations. It is never serialised and never accepts another input.
 pub(crate) struct DirectFactContinuation {
-    pub envelope: JournalRecord<ChainPayload>,
+    pub causal: obzenflow_core::event::CausalFrontier,
+    pub envelope: DeliveredRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     pub scope: obzenflow_core::MiddlewareExecutionScope,
@@ -117,7 +119,7 @@ pub(crate) struct DirectFactContinuation {
 }
 
 pub(crate) struct DirectFactContinuationStart {
-    pub envelope: JournalRecord<ChainPayload>,
+    pub envelope: DeliveredRecord<ChainPayload>,
     pub upstream_stage: Option<StageId>,
     pub input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     pub scope: obzenflow_core::MiddlewareExecutionScope,
@@ -148,6 +150,7 @@ impl DirectFactContinuation {
             poll_state,
         } = start;
         Self {
+            causal: crate::supervised_base::publication::capture(),
             envelope,
             upstream_stage,
             input_position,
@@ -181,7 +184,9 @@ impl DirectFactContinuation {
         let complete = self.poll_complete.clone();
         let result = self.poll_result.clone();
         let wake = self.wake.clone();
-        *runner = Some(tokio::spawn(async move {
+        let owner = crate::supervised_base::publication::PublicationScope::current();
+        let causal = self.causal.clone();
+        let work = async move {
             loop {
                 request.notified().await;
                 wake.prepare_poll();
@@ -204,6 +209,14 @@ impl DirectFactContinuation {
                 if finished {
                     return;
                 }
+            }
+        };
+        *runner = Some(tokio::spawn(async move {
+            let work = crate::supervised_base::publication::with_snapshot(causal, work);
+            if let Some(owner) = owner {
+                owner.enter(work).await
+            } else {
+                work.await
             }
         }));
     }
@@ -295,7 +308,7 @@ mod direct_fact_continuation_tests {
         let envelope = JournalRecord::new(JournalWriterId::new(), event);
         let continuation = DirectFactContinuation::new(
             DirectFactContinuationStart {
-                envelope,
+                envelope: envelope.into(),
                 upstream_stage: None,
                 input_position: None,
                 scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
@@ -344,7 +357,7 @@ mod direct_fact_continuation_tests {
             let envelope = JournalRecord::new(JournalWriterId::new(), event);
             let continuation = DirectFactContinuation::new(
                 DirectFactContinuationStart {
-                    envelope,
+                    envelope: envelope.into(),
                     upstream_stage: None,
                     input_position: None,
                     scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
@@ -664,7 +677,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Writer ID for this transform (initialized during setup)
     pub writer_id: Option<WriterId>,
@@ -714,7 +727,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
-    pub(crate) pending_parent: Option<JournalRecord<ChainPayload>>,
+    pub(crate) pending_parent: Option<DeliveredRecord<ChainPayload>>,
 
     /// Upstream stage awaiting a consumption ack once pending outputs are drained.
     pub(crate) pending_ack_upstream: Option<StageId>,
@@ -739,7 +752,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) drain_received: bool,
 
     /// Buffered terminal envelope (EOF or Drain) held by SCC entry points until quiescence (FLOWIP-051n).
-    pub(crate) buffered_terminal_envelope: Option<JournalRecord<ChainPayload>>,
+    pub(crate) buffered_terminal_envelope: Option<DeliveredRecord<ChainPayload>>,
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
@@ -778,7 +791,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                         writer_id,
                         contract_journal: ctx.data_journal.clone(),
                         config: ContractConfig::default(),
-                        system_journal: Some(ctx.system_journal.clone()),
+                        report_journal: Some(ctx.report_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
@@ -837,7 +850,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     "Transform",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                 )
                 .await;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
@@ -960,7 +973,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     "Transform",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),
@@ -993,7 +1006,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     ctx.stage_id,
                     &ctx.stage_name,
                     message,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),

@@ -3,11 +3,10 @@
 // https://obzenflow.dev
 
 use crate::control_plane::ControlPlaneProvider;
-use obzenflow_core::event::journal_record::ChainJournalRecord;
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::system_payload::SystemFeedRole;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -529,7 +528,7 @@ pub(crate) struct PendingReceiptMeta {
 /// This registry is intentionally broader than `pending_receipts`: forwarded
 /// data still needs an exact durable parent even though it does not contribute
 /// to the immediate upstream writer's receipt watermark.
-pub(crate) type PendingDeliveryInput = ChainJournalRecord;
+pub(crate) type PendingDeliveryInput = DeliveredRecord<ChainPayload>;
 
 #[derive(Debug)]
 pub struct ReaderProgress {
@@ -660,7 +659,7 @@ pub struct ContractTracker {
     /// References for emission (not owned)
     pub(super) writer_id: WriterId,
     pub(super) journal: Arc<dyn Journal<ChainEvent>>,
-    pub(super) system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub(super) report_journal: Option<crate::supervised_base::SupervisorJournal>,
     pub(super) reader_stage: Option<StageId>,
     pub(super) receipt_aware_progress: bool,
 
@@ -686,7 +685,7 @@ pub struct ContractsWiring {
     pub writer_id: WriterId,
     pub contract_journal: Arc<dyn Journal<ChainEvent>>,
     pub config: ContractConfig,
-    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub report_journal: Option<crate::supervised_base::SupervisorJournal>,
     pub reader_stage: Option<StageId>,
     pub control_plane: Arc<dyn ControlPlaneProvider>,
     pub include_delivery_contract: bool,

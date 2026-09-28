@@ -144,7 +144,7 @@ pub(super) async fn dispatch_hydrating<
 
                     match resolution {
                         ControlAction::Forward => {
-                            common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                            common::forward_control_to_journal(ctx, &envelope).await?;
 
                             if envelope.is_eof() {
                                 if let Some(outcome) = subscription.take_last_eof_outcome() {
@@ -165,7 +165,7 @@ pub(super) async fn dispatch_hydrating<
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
-                            common::forward_control_event_and_mirror(ctx, &envelope).await?;
+                            common::forward_control_to_journal(ctx, &envelope).await?;
 
                             if envelope.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
@@ -264,6 +264,7 @@ pub(super) async fn dispatch_hydrating<
                         .await?;
                         ctx.pending_outputs.extend(outputs.into_iter().map(|event| {
                             crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                causal: crate::supervised_base::publication::capture(),
                                 event,
                                 scope,
                             }

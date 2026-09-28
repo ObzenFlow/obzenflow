@@ -25,10 +25,20 @@ use obzenflow_core::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Physical histories owned by the metrics supervisor. Export traffic is not
+/// part of the pipeline's lossless coordination subscription.
+#[derive(Clone)]
+pub struct MetricsJournals {
+    pub system_id: obzenflow_core::SystemId,
+    pub coordination: Arc<dyn Journal<SystemEvent>>,
+    pub export: Arc<dyn Journal<SystemEvent>>,
+}
+
 /// Builder for creating a metrics aggregator with proper FSM lifecycle
 pub struct MetricsAggregatorBuilder {
     /// Metrics inputs containing stage and system journals
     inputs: MetricsInputs,
+    journals: MetricsJournals,
 
     /// System journal for reporting
     system_journal: Arc<dyn Journal<SystemEvent>>,
@@ -51,10 +61,12 @@ impl MetricsAggregatorBuilder {
     pub fn new(
         inputs: MetricsInputs,
         system_journal: Arc<dyn Journal<SystemEvent>>,
+        journals: MetricsJournals,
         metrics_exporter: Arc<dyn MetricsSnapshotExporter>,
     ) -> Self {
         Self {
             inputs,
+            journals,
             system_journal,
             metrics_exporter,
             stage_metadata: HashMap::new(),
@@ -114,15 +126,15 @@ pub(crate) struct PreparedMetricsAggregator {
 impl MetricsAggregatorBuilder {
     pub(crate) async fn prepare(self) -> Result<PreparedMetricsAggregator, BuilderError> {
         // Create system ID for metrics aggregator
-        let system_id = obzenflow_core::id::SystemId::new();
+        let system_id = self.journals.system_id;
 
         // Create metrics context with all mutable state
         let mut metrics_context = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
+            self.journals.clone(),
             self.metrics_exporter,
             self.export_interval,
-            system_id,
             self.stage_metadata,
             self.composite_boundaries,
         )
@@ -133,7 +145,7 @@ impl MetricsAggregatorBuilder {
 
         Ok(PreparedMetricsAggregator {
             context: metrics_context,
-            system_journal: self.system_journal,
+            system_journal: self.journals.coordination,
             system_id,
         })
     }

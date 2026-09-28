@@ -5,8 +5,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{handler_observer, stage_lifecycle_observer};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::{SystemEvent, SystemPayload};
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::SystemPayload;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
@@ -174,10 +173,7 @@ impl StageLifecycleObserver for RecordsHungLifecycle {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     let flow_handle_slot: Arc<Mutex<Option<Arc<FlowHandle>>>> = Arc::new(Mutex::new(None));
-    let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
-        Arc::new(Mutex::new(None));
     let flow_handle_slot_hook = flow_handle_slot.clone();
-    let system_journal_slot_hook = system_journal_slot.clone();
     let handler_entered = Arc::new(Notify::new());
     let handler_dropped = Arc::new(AtomicBool::new(false));
     let handler_drop_observed = Arc::new(Notify::new());
@@ -193,10 +189,6 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
 
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *flow_handle_slot_hook.lock().expect("flow_handle_slot lock") = Some(handle.clone());
-        let system_journal = handle.system_journal().expect("system journal available");
-        *system_journal_slot_hook
-            .lock()
-            .expect("system_journal_slot lock") = Some(system_journal);
         tokio::spawn(async {})
     });
 
@@ -285,20 +277,32 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         .expect("flow should terminate after graceful stop timeout escalation")
         .expect("flow task join");
 
-    // FlowApplication can tear down background tasks quickly on stop; give the pipeline
-    // a moment to finish appending terminal lifecycle events to the system journal.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let system_journal = system_journal_slot
-        .lock()
-        .expect("system_journal_slot lock")
-        .clone()
-        .expect("system journal captured by hook");
-
-    let envelopes = system_journal
-        .read_causally_ordered()
-        .await
-        .expect("read system journal");
+    // The application has joined the owners and settled their publications.
+    // Read stage reports at their original placements as well as pipeline facts.
+    let mut envelopes = Vec::new();
+    for journal in flow_handle.report_journals() {
+        use obzenflow_core::event::SupervisorRecord;
+        use obzenflow_runtime::supervised_base::SupervisorJournal;
+        match journal {
+            SupervisorJournal::System(journal) => envelopes.extend(
+                journal
+                    .read_all_unordered()
+                    .await
+                    .expect("read pipeline journal")
+                    .into_iter()
+                    .map(SupervisorRecord::from),
+            ),
+            SupervisorJournal::Stage { journal, context } => envelopes.extend(
+                journal
+                    .read_all_unordered()
+                    .await
+                    .expect("read stage journal")
+                    .into_iter()
+                    .filter(|row| row.writer_id().as_stage() == Some(&context.stage_id))
+                    .filter_map(SupervisorRecord::from_chain),
+            ),
+        }
+    }
 
     let mut pipeline_events: Vec<String> = Vec::new();
     let mut saw_stop_requested = false;

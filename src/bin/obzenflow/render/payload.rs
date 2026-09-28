@@ -4,70 +4,18 @@
 
 //! Domain-neutral payload formatting. Field names and units stay as recorded.
 
-use serde_json::Value;
+use serde::Serialize;
 use std::fmt::Write;
 
-/// Preserve JSON structure and scalar types. Callers label any string value
-/// shortened for the terminal and offer the complete record via --full.
-pub(super) fn pretty(value: &Value, width: usize) -> (String, bool) {
-    let mut preview = value.clone();
-    let mut shortened = false;
-    fit_strings(&mut preview, 0, 0, width, &mut shortened);
-    (
-        json_text(&serde_json::to_string_pretty(&preview).unwrap()),
-        shortened,
-    )
+/// Preserve every recorded field, value and scalar type. Arbitrary payloads
+/// have no width limit: shortening a string changes its meaning. Compact mode
+/// abbreviates the final display line explicitly; full output keeps the source.
+pub(super) fn pretty(value: &impl Serialize) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(value).map(|json| json_text(&json))
 }
 
-pub(super) fn compact(value: &Value) -> String {
-    json_text(&value.to_string())
-}
-
-fn fit_strings(
-    value: &mut Value,
-    indent: usize,
-    column: usize,
-    width: usize,
-    shortened: &mut bool,
-) {
-    match value {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                let key_width = compact(&Value::String(key.clone())).chars().count();
-                fit_strings(
-                    value,
-                    indent + 2,
-                    indent + 2 + key_width + 2,
-                    width,
-                    shortened,
-                );
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                fit_strings(value, indent + 2, indent + 2, width, shortened);
-            }
-        }
-        Value::String(text) => {
-            let available = width.saturating_sub(column + 1); // Room for a comma.
-            if compact(&Value::String(text.clone())).chars().count() > available {
-                let mut prefix = String::new();
-                let mut remaining = available.saturating_sub(3); // Quotes and ellipsis.
-                for ch in text.chars() {
-                    let encoded_width = compact(&Value::String(ch.to_string())).chars().count() - 2;
-                    if encoded_width > remaining {
-                        break;
-                    }
-                    prefix.push(ch);
-                    remaining -= encoded_width;
-                }
-                prefix.push('…');
-                *text = prefix;
-                *shortened = true;
-            }
-        }
-        _ => {}
-    }
+pub(super) fn compact(value: &impl Serialize) -> Result<String, serde_json::Error> {
+    serde_json::to_string(value).map(|json| json_text(&json))
 }
 
 /// Escape terminal controls and bidi overrides with valid JSON escapes.

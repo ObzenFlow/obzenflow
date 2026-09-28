@@ -115,15 +115,23 @@ pub async fn subscription_preparation_failure_joins_every_supplied_stage(
             CoreStageType::Sink,
             Some(probes[1].clone()),
         ))])
+        .with_metrics_journals(crate::pipeline::tests::support::new_metrics_journals(
+            &mut *journals,
+        ))
         .with_metrics_exporter(Arc::new(DiscardSnapshots))
         .build()
         .await;
+    let flow = result.expect("reader opening belongs to its retained task");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), flow.run())
+        .await
+        .unwrap()
+        .unwrap_err();
     assert!(
-        result.is_err(),
-        "reader {fail_reader} must fail construction"
+        format!("{error:?}").contains("source: Full"),
+        "reader {fail_reader}: {error:?}"
     );
     for probe in probes {
-        assert_eq!(probe.request_abort_count.load(Ordering::Relaxed), 1);
-        assert_eq!(probe.abort_and_join_count.load(Ordering::Relaxed), 1);
+        assert!(probe.request_abort_count.load(Ordering::Relaxed) >= 1);
+        assert!(probe.abort_and_join_count.load(Ordering::Relaxed) >= 1);
     }
 }

@@ -5,6 +5,8 @@
 //! Private current-schema storage adapter for the current Core provenance schema.
 //! See README.md for the wire contract and scalar-preservation invariants.
 
+#[cfg(feature = "test-support")]
+pub(crate) mod benchmark;
 mod definitions;
 mod deserialize;
 pub(crate) mod frame;
@@ -12,6 +14,9 @@ mod layout;
 #[cfg(test)]
 mod performance_tests;
 mod primitives;
+mod routing;
+#[cfg(test)]
+mod selection_tests;
 mod serialize;
 #[cfg(test)]
 mod test_data;
@@ -26,10 +31,53 @@ use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::JournalPayload;
 use obzenflow_core::event::provenance::JournalGroupMember;
 use obzenflow_core::event::JournalEvent;
-use primitives::{bytes, text, unsigned, Cursor};
+use primitives::{bytes, Cursor};
 use std::path::{Path, PathBuf};
 
 use super::log_record::{LogFrame, LogRecord};
+
+#[derive(serde::Serialize)]
+struct BodyProvenanceRef<'a, E> {
+    event: &'a E,
+    vector_clock: &'a obzenflow_core::event::vector_clock::VectorClock,
+    timestamp: &'a chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BodyProvenance<E> {
+    event: E,
+    vector_clock: obzenflow_core::event::vector_clock::VectorClock,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+fn read_provenance<E: serde::de::DeserializeOwned, const MEASURE: bool>(
+    bytes: &[u8],
+    definitions: &mut ReadTable<'_, MEASURE>,
+) -> Result<BodyProvenance<E>> {
+    let mut input = Cursor::new(bytes);
+    let stored: BodyProvenance<E> =
+        deserialize::read(Kind::Struct(Layout::RecordBody), &mut input, definitions)?;
+    input.finish()?;
+    Ok(stored)
+}
+
+fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> Result<P> {
+    if bytes.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES {
+        return Err(invalid("payload byte budget exceeded"));
+    }
+    #[cfg(feature = "bench-instrumentation")]
+    obzenflow_core::benchmark::payload_decode(provenance);
+    let payload: serde_json::Value = serde_json::from_slice(bytes)?;
+    let payload = P::decode(provenance, payload)?;
+    payload.validate(provenance)?;
+    Ok(payload)
+}
+
+pub(crate) struct SelectedFrame<T: JournalEvent> {
+    pub records: Vec<JournalRecord<T::Payload>>,
+    pub routing: routing::RouteSummary,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -65,23 +113,23 @@ pub(crate) fn prepare<P: JournalPayload>(
     store: DefinitionStore,
 ) -> Result<PreparedFrame> {
     validate_membership(records, group)?;
+    obzenflow_core::journal::limits::validate_group(records)
+        .map_err(|error| invalid(error.to_string()))?;
     let mut definitions = WriteTable::new(store, path)?;
     let mut content = Vec::new();
-    match group {
-        None => content.push(0),
-        Some(group) => {
-            content.push(1);
-            text(group, &mut content);
-            unsigned(records.len() as u64, &mut content);
-        }
-    }
+    let mut lengths = Vec::with_capacity(records.len());
     for record in records {
+        let member_start = content.len();
         definitions.begin_record();
         record.payload.validate(&record.envelope.provenance.event)?;
         let mut provenance = Vec::new();
         serialize::write(
-            Kind::Struct(Layout::Provenance),
-            &record.envelope.provenance,
+            Kind::Struct(Layout::RecordBody),
+            &BodyProvenanceRef {
+                event: &record.envelope.provenance.event,
+                vector_clock: &record.envelope.provenance.journal.vector_clock,
+                timestamp: &record.envelope.provenance.journal.timestamp,
+            },
             None,
             &mut provenance,
             &mut definitions,
@@ -103,16 +151,23 @@ pub(crate) fn prepare<P: JournalPayload>(
             }
         }
         bytes(&serde_json::to_vec(&record.payload)?, &mut content);
+        lengths.push(content.len() - member_start);
     }
-    let mut body = Vec::new();
-    definitions.encode(&mut body);
+    let mut body = routing::encode(records, group, &lengths)?;
+    let mut table = Vec::new();
+    definitions.encode(&mut table);
+    bytes(&table, &mut body);
     body.extend_from_slice(&content);
+    if body.len() > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
+        return Err(invalid("frame byte budget exceeded"));
+    }
     Ok(PreparedFrame {
         bytes: frame::encode(&body),
         definitions,
     })
 }
 
+#[derive(Clone)]
 pub(crate) struct Decoder {
     path: PathBuf,
     store: DefinitionStore,
@@ -158,8 +213,27 @@ impl Decoder {
         body: &[u8],
         offset: u64,
     ) -> Result<LogFrame<T>> {
-        self.decode_inner::<T, false>(body, offset)
+        self.decode_inner::<T, false>(body, offset, false)
+            .map(|(frame, _)| Self::full_frame(frame))
+    }
+
+    pub(crate) fn decode_selected<T: JournalEvent>(
+        &mut self,
+        body: &[u8],
+        offset: u64,
+    ) -> Result<SelectedFrame<T>> {
+        self.decode_inner::<T, false>(body, offset, true)
             .map(|(frame, _)| frame)
+    }
+
+    fn full_frame<T: JournalEvent>(mut frame: SelectedFrame<T>) -> LogFrame<T> {
+        match frame.routing.group {
+            Some(group_id) => LogFrame::AtomicGroup {
+                group_id,
+                records: frame.records,
+            },
+            None => LogFrame::Record(frame.records.pop().expect("validated ordinary member")),
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -168,7 +242,8 @@ impl Decoder {
         body: &[u8],
         offset: u64,
     ) -> Result<(LogFrame<T>, FrameSizes)> {
-        self.decode_inner::<T, true>(body, offset)
+        self.decode_inner::<T, true>(body, offset, false)
+            .map(|(frame, sizes)| (Self::full_frame(frame), sizes))
     }
 
     // Both modes use identical parsing and validation. Byte attribution is a
@@ -177,38 +252,66 @@ impl Decoder {
         &mut self,
         body: &[u8],
         offset: u64,
-    ) -> Result<(LogFrame<T>, FrameSizes)> {
+        selective: bool,
+    ) -> Result<(SelectedFrame<T>, FrameSizes)> {
         let mut sizes = FrameSizes::default();
-        let mut input = Cursor::new(body);
+        let envelope = routing::Envelope::parse(body)?;
+        // Business-only frames need neither definition materialisation nor a decoder.
+        if selective && envelope.members.iter().all(|member| !member.candidate) {
+            return Ok((
+                SelectedFrame {
+                    records: Vec::new(),
+                    routing: envelope.summary,
+                },
+                sizes,
+            ));
+        }
+        let mut table = Cursor::new(envelope.definitions);
         let mut definitions =
-            ReadTable::<MEASURE>::new(&mut input, &self.store, &self.path, offset)?;
-        let (group, count) = match input.byte()? {
-            0 => (None, 1),
-            1 => {
-                let group = input.text()?;
-                (Some(group), values::bounded_count(&mut input)?)
-            }
-            _ => return Err(invalid("unknown frame kind")),
-        };
+            ReadTable::<MEASURE>::new(&mut table, &self.store, &self.path, offset)?;
+        table.finish()?;
+        let mut decoded_bytes = 0usize;
         let mut records = Vec::new();
-        for _ in 0..count {
+        let mut previous = envelope.summary.previous;
+        for (index, member) in envelope.members.iter().enumerate() {
+            let reference = obzenflow_core::event::JournalCommitRef {
+                event_id: member.id,
+                sequence: envelope.summary.first.sequence + index as u64,
+                ..envelope.summary.first
+            };
+            let predecessor = previous;
+            previous = Some(reference);
+            if selective && !member.candidate {
+                continue;
+            }
+            let mut input = Cursor::new(member.body);
             definitions.begin_record();
             if MEASURE {
                 sizes.records += 1;
             }
             let start = input.position();
             definitions.section(1);
-            let mut provenance_input = Cursor::new(input.bytes()?);
-            let provenance = deserialize::read::<
-                obzenflow_core::event::provenance::Provenance<
-                    <T::Payload as JournalPayload>::Provenance,
-                >,
-            >(
-                Kind::Struct(Layout::Provenance),
-                &mut provenance_input,
+            let stored = read_provenance::<<T::Payload as JournalPayload>::Provenance, MEASURE>(
+                input.bytes()?,
                 &mut definitions,
             )?;
-            provenance_input.finish()?;
+            let provenance = obzenflow_core::event::provenance::Provenance {
+                event: stored.event,
+                journal: obzenflow_core::event::provenance::JournalProvenance {
+                    run_id: reference.run_id,
+                    journal_writer_id: reference.journal_writer_id,
+                    previous: predecessor,
+                    vector_clock: stored.vector_clock,
+                    timestamp: stored.timestamp,
+                    journal_group_id: envelope.summary.group.clone(),
+                    journal_group_member: envelope.summary.group.as_ref().map(|_| {
+                        JournalGroupMember {
+                            index: index as u32,
+                            size: envelope.summary.count as u32,
+                        }
+                    }),
+                },
+            };
             if MEASURE {
                 sizes.provenance += input.position() - start;
             }
@@ -235,22 +338,31 @@ impl Decoder {
                 sizes.observability += input.position() - start;
             }
             let start = input.position();
-            let payload: serde_json::Value = serde_json::from_slice(input.bytes()?)?;
+            let payload_bytes = input.bytes()?;
+            let payload = read_payload::<T::Payload>(&provenance.event, payload_bytes)?;
             if MEASURE {
                 sizes.payload += input.position() - start;
             }
-            let payload = T::Payload::decode(&provenance.event, payload)?;
-            payload.validate(&provenance.event)?;
-            let record: LogRecord<T> = JournalRecord {
-                envelope: obzenflow_core::event::envelope::EventEnvelope {
+            if payload.is_supervision_candidate() != member.candidate {
+                return Err(invalid("supervision classification disagrees with payload"));
+            }
+            let record: LogRecord<T> = JournalRecord::from_parts(
+                obzenflow_core::event::envelope::EventEnvelope {
                     provenance,
                     observability,
                 },
                 payload,
-            };
+            );
+            if *record.id() != reference.event_id || record.local_sequence() != reference.sequence {
+                return Err(invalid("record disagrees with routing commitment"));
+            }
+            decoded_bytes += obzenflow_core::journal::limits::record_bytes(&record)?;
+            if decoded_bytes > obzenflow_core::journal::limits::MAX_GROUP_BYTES {
+                return Err(invalid("decoded frame byte budget exceeded"));
+            }
             records.push(record);
+            input.finish()?;
         }
-        input.finish()?;
         if MEASURE {
             let (provenance, observations) = definitions.attributed_bytes();
             (
@@ -265,15 +377,10 @@ impl Decoder {
                 - sizes.observability
                 - sizes.payload;
         }
-        validate_membership(&records, group.as_deref())?;
         Ok((
-            match group {
-                Some(group_id) => LogFrame::AtomicGroup { group_id, records },
-                None => LogFrame::Record(
-                    records
-                        .pop()
-                        .ok_or_else(|| invalid("empty ordinary frame"))?,
-                ),
+            SelectedFrame {
+                records,
+                routing: envelope.summary,
             },
             sizes,
         ))
@@ -303,47 +410,6 @@ fn validate_membership<P: JournalPayload>(
         if journal.journal_group_id.as_deref() != group || journal.journal_group_member != member {
             return Err(invalid("record membership disagrees with physical frame"));
         }
-    }
-    Ok(())
-}
-
-/// Check that a referenced metadata table belongs to an ordinary record/group
-/// carrier. Skip its length-delimited records without chasing their references:
-/// resolving metadata never expands an ancestor record or another definition.
-fn validate_carrier(input: &mut Cursor<'_>) -> Result<()> {
-    let count = match input.byte()? {
-        0 => 1,
-        1 => {
-            if input.text()?.is_empty() {
-                return Err(invalid("empty carrier group id"));
-            }
-            let count = values::bounded_count(input)?;
-            if count == 0 {
-                return Err(invalid("empty carrier group"));
-            }
-            count
-        }
-        _ => return Err(invalid("definition carrier is not a record/group frame")),
-    };
-    for _ in 0..count {
-        if input.bytes()?.is_empty() {
-            return Err(invalid("empty carrier provenance"));
-        }
-        match input.byte()? {
-            0 | 1 => {}
-            2 => {
-                if input.bytes()?.is_empty() {
-                    return Err(invalid("empty carrier observation"));
-                }
-            }
-            _ => return Err(invalid("invalid carrier observation tag")),
-        }
-        if input.bytes()?.is_empty() {
-            return Err(invalid("empty carrier payload"));
-        }
-    }
-    if input.remaining() != 0 {
-        return Err(invalid("trailing carrier bytes"));
     }
     Ok(())
 }

@@ -9,7 +9,7 @@
 //! the immediate `fx.emit` path for typed derived facts, domain effect outcome
 //! facts, and the effects-layer reserved framework effect/capture record append.
 //! The shared core includes wide-event enrichment, per-type instrumentation,
-//! journal append, heartbeat tracking, and the middleware mirror.
+//! journal append and heartbeat tracking.
 //!
 //! This is not yet a type-system-enforced journal write boundary. Stage
 //! contexts still expose raw journal handles for control, error, delivery, and
@@ -37,6 +37,7 @@
 //! framework effect/capture record path supplies only the journal, preserving
 //! its compatibility append until typed outcome facts replace it.
 
+use crate::messaging::DeliveredRecord;
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::journal::AppendOptions;
 use std::sync::Arc;
@@ -46,7 +47,7 @@ use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::FlowContext;
 
-use obzenflow_core::event::{ChainPayload, CorrelationId, JournalRecord, SystemEvent};
+use obzenflow_core::event::{ChainPayload, CorrelationId, JournalRecord};
 use obzenflow_core::journal::{Journal, JournalCapture};
 use obzenflow_core::{ChainEvent, WriterId};
 
@@ -54,7 +55,6 @@ use crate::backpressure::{BackpressureReservation, BackpressureWriter, DirectFac
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::{CaptureProjection, RuntimeCapture, StageInstrumentation};
 use crate::stages::common::heartbeat::HeartbeatState;
-use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
 
 fn output_contract_summary(output_contract: &StageOutputContract) -> String {
     output_contract
@@ -133,9 +133,12 @@ pub(crate) fn commit_control_output(
         snapshot.project_emission(&event);
         event = snapshot.attach_to(event);
         let capture = instrumentation.journal_capture(None, vec![(1, true)]);
-        let written = journal
-            .append(event, AppendOptions::new(None).with_capture(capture))
-            .await?;
+        let written = crate::supervised_base::publication::append_inline(
+            &journal,
+            event,
+            AppendOptions::default().with_capture(capture),
+        )
+        .await?;
         instrumentation.record_emitted(&written.authored());
         Ok(written)
     })
@@ -147,7 +150,7 @@ pub(crate) fn commit_error_output(
     journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     mut event: ChainEvent,
-    parent: Option<&JournalRecord<ChainPayload>>,
+    parent: Option<&DeliveredRecord<ChainPayload>>,
 ) -> futures::future::BoxFuture<'static, Result<JournalRecord<ChainPayload>, CommitError>> {
     use futures::FutureExt;
     let journal = journal.clone();
@@ -163,12 +166,13 @@ pub(crate) fn commit_error_output(
         let emitted = u64::from(event.consumes_data_credit());
         event = snapshot.attach_to(event);
         let capture = instrumentation.journal_capture(None, vec![(emitted, true)]);
-        let written = journal
-            .append(
-                event,
-                AppendOptions::new(parent.as_ref()).with_capture(capture),
-            )
-            .await?;
+        let written = crate::supervised_base::publication::append_inline(
+            &journal,
+            event,
+            AppendOptions::from_record(parent.as_ref().map(DeliveredRecord::record))?
+                .with_capture(capture),
+        )
+        .await?;
         if written.consumes_data_credit() {
             instrumentation.record_error_journal_output_event(&written.authored());
         }
@@ -260,12 +264,6 @@ pub(crate) struct CommitOptions {
     pub validate_output_contract: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MirrorPolicy {
-    None,
-    FrameworkMiddlewareAllowlist,
-}
-
 /// The kind of stage-runtime journal append, used to gate runtime enrichment
 /// and the framework system-journal mirror.
 ///
@@ -293,15 +291,6 @@ pub(crate) struct AtomicCommitEntry {
 }
 
 impl StageAppendIntent {
-    pub(crate) fn mirror_policy(self) -> MirrorPolicy {
-        match self {
-            Self::FrameworkObservability => MirrorPolicy::FrameworkMiddlewareAllowlist,
-            Self::NormalStageData | Self::NonDataStageFact | Self::FrameworkTerminal => {
-                MirrorPolicy::None
-            }
-        }
-    }
-
     pub(crate) fn receives_runtime_data_enrichment(self) -> bool {
         matches!(self, Self::NormalStageData)
     }
@@ -318,9 +307,7 @@ pub(crate) struct OutputCommitter<'a> {
     /// Wide-event flow context stamped on the committed event. Absent on the
     /// effects-layer path, which does not enrich effect records today.
     pub flow_context: Option<&'a FlowContext>,
-    /// System journal for mirroring middleware lifecycle rows. Absent on the
-    /// effects-layer path.
-    pub system_journal: Option<&'a Arc<dyn Journal<SystemEvent>>>,
+
     /// Stage instrumentation for per-type producer counting and the
     /// runtime-context snapshot. Absent on the effects-layer path.
     pub instrumentation: Option<&'a Arc<StageInstrumentation>>,
@@ -344,9 +331,7 @@ struct OwnedOutputCommitter {
     /// Wide-event flow context stamped on the committed event. Absent on the
     /// effects-layer path, which does not enrich effect records today.
     pub flow_context: Option<FlowContext>,
-    /// System journal for mirroring middleware lifecycle rows. Absent on the
-    /// effects-layer path.
-    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+
     /// Stage instrumentation for per-type producer counting and the
     /// runtime-context snapshot. Absent on the effects-layer path.
     pub instrumentation: Option<Arc<StageInstrumentation>>,
@@ -368,7 +353,7 @@ impl OwnedOutputCommitter {
         OutputCommitter {
             data_journal: &self.data_journal,
             flow_context: self.flow_context.as_ref(),
-            system_journal: self.system_journal.as_ref(),
+
             instrumentation: self.instrumentation.as_ref(),
             heartbeat_state: self.heartbeat_state.as_ref(),
             output_contract: self.output_contract.as_ref(),
@@ -383,7 +368,7 @@ impl OutputCommitter<'_> {
         OwnedOutputCommitter {
             data_journal: self.data_journal.clone(),
             flow_context: self.flow_context.cloned(),
-            system_journal: self.system_journal.cloned(),
+
             instrumentation: self.instrumentation.cloned(),
             heartbeat_state: self.heartbeat_state.cloned(),
             output_contract: self.output_contract.cloned(),
@@ -398,14 +383,14 @@ impl OutputCommitter<'_> {
     /// effect-provenance or error status its author set. This applies the shared
     /// commit core in the same order the drain used before Step 1: flow-context
     /// enrichment, optional per-type counting, runtime-context enrichment,
-    /// journal append, heartbeat tracking, and the middleware mirror. Each step
+    /// journal append and heartbeat tracking. Each step
     /// is gated on the relevant handle, so an effects-layer committer holding
     /// only a journal handle performs a bare append, exactly as
     /// `append_effect_record` did before Step 1.
     pub(crate) async fn commit_prebuilt(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let intent = if event.consumes_data_credit() {
@@ -425,7 +410,7 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_prebuilt_with_intent(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
@@ -443,7 +428,7 @@ impl OutputCommitter<'_> {
     async fn commit_prebuilt_with_intent_inline(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
@@ -463,10 +448,12 @@ impl OutputCommitter<'_> {
             u64::from(options.count_output && event.consumes_data_credit()),
             intent.receives_runtime_data_enrichment(),
         )]);
-        let written = match self
-            .data_journal
-            .append(event, AppendOptions::new(parent).with_capture(capture))
-            .await
+        let written = match crate::supervised_base::publication::append_inline(
+            self.data_journal,
+            event,
+            AppendOptions::from_record(parent.map(DeliveredRecord::record))?.with_capture(capture),
+        )
+        .await
         {
             Ok(written) => written,
             Err(error) => {
@@ -483,14 +470,14 @@ impl OutputCommitter<'_> {
             reservation.commit(1)?;
         }
 
-        self.finish_committed(&written, options, intent).await;
+        self.account_committed(&written, options);
         Ok(written)
     }
 
     pub(crate) async fn commit_reserved_prebuilt(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         reservation: BackpressureReservation,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
@@ -510,13 +497,13 @@ impl OutputCommitter<'_> {
                 u64::from(options.count_output && event.consumes_data_credit()),
                 true,
             )]);
-            let written = match committer
-                .data_journal
-                .append(
-                    event,
-                    AppendOptions::new(parent.as_ref()).with_capture(capture),
-                )
-                .await
+            let written = match crate::supervised_base::publication::append_inline(
+                committer.data_journal,
+                event,
+                AppendOptions::from_record(parent.as_ref().map(DeliveredRecord::record))?
+                    .with_capture(capture),
+            )
+            .await
             {
                 Ok(written) => written,
                 Err(error) => {
@@ -527,9 +514,7 @@ impl OutputCommitter<'_> {
                 }
             };
             reservation.commit(1);
-            committer
-                .finish_committed(&written, options, StageAppendIntent::NormalStageData)
-                .await;
+            committer.account_committed(&written, options);
             Ok(written)
         })
         .await
@@ -544,7 +529,7 @@ impl OutputCommitter<'_> {
     pub(crate) async fn commit_authored_terminal(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
@@ -560,7 +545,7 @@ impl OutputCommitter<'_> {
     async fn commit_authored_terminal_inline(
         &self,
         mut event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<JournalRecord<ChainPayload>, CommitError> {
         let flow_context = self
             .flow_context
@@ -640,7 +625,7 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         let owned = self.owned();
         let parent = parent.cloned();
@@ -658,7 +643,7 @@ impl OutputCommitter<'_> {
         &self,
         group_id: &str,
         entries: Vec<AtomicCommitEntry>,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, CommitError> {
         if entries.is_empty() {
             return Ok(Vec::new());
@@ -700,14 +685,14 @@ impl OutputCommitter<'_> {
             reserve_direct_data_rows(self.backpressure_writer, data_count)?;
 
         let member_count = metadata.len();
-        let written = match self
-            .data_journal
-            .append_group(
-                group_id,
-                prepared,
-                AppendOptions::new(parent).with_capture(self.observation_capture(projections)),
-            )
-            .await
+        let written = match crate::supervised_base::publication::append_group_inline(
+            self.data_journal,
+            group_id,
+            prepared,
+            AppendOptions::from_record(parent.map(DeliveredRecord::record))?
+                .with_capture(self.observation_capture(projections)),
+        )
+        .await
         {
             Ok(written) => written,
             Err(error) => {
@@ -751,16 +736,13 @@ impl OutputCommitter<'_> {
         for (envelope, (options, _)) in written.iter().zip(&metadata) {
             self.account_committed(envelope, *options);
         }
-        for (envelope, (_, intent)) in written.iter().zip(metadata) {
-            self.mirror_committed(envelope, intent).await;
-        }
         Ok(written)
     }
 
     async fn prepare_prebuilt_with_intent(
         &self,
         event: ChainEvent,
-        parent: Option<&JournalRecord<ChainPayload>>,
+        parent: Option<&DeliveredRecord<ChainPayload>>,
         options: CommitOptions,
         intent: StageAppendIntent,
     ) -> Result<ChainEvent, CommitError> {
@@ -867,16 +849,6 @@ impl OutputCommitter<'_> {
         }
     }
 
-    async fn finish_committed(
-        &self,
-        written: &JournalRecord<ChainPayload>,
-        options: CommitOptions,
-        intent: StageAppendIntent,
-    ) {
-        self.account_committed(written, options);
-        self.mirror_committed(written, intent).await;
-    }
-
     fn account_committed(&self, written: &JournalRecord<ChainPayload>, options: CommitOptions) {
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.consumes_data_credit() {
@@ -897,21 +869,6 @@ impl OutputCommitter<'_> {
 
         if let Some(heartbeat) = self.heartbeat_state {
             heartbeat.record_last_output(written.envelope.provenance.event.id);
-        }
-    }
-
-    async fn mirror_committed(
-        &self,
-        written: &JournalRecord<ChainPayload>,
-        intent: StageAppendIntent,
-    ) {
-        if matches!(
-            intent.mirror_policy(),
-            MirrorPolicy::FrameworkMiddlewareAllowlist
-        ) {
-            if let Some(system_journal) = self.system_journal {
-                mirror_middleware_event_to_system_journal(written, system_journal).await;
-            }
         }
     }
 
@@ -963,14 +920,14 @@ impl OutputCommitter<'_> {
 pub(crate) struct FrameworkObservabilityCommit<'a> {
     pub flow_context: &'a FlowContext,
     pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
-    pub system_journal: Option<&'a Arc<dyn Journal<SystemEvent>>>,
+
     pub instrumentation: Option<&'a Arc<StageInstrumentation>>,
     pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
     /// Stage physical-row writer. Most events on this path are non-Data, but
     /// middleware may author durable framework Data facts through the same
     /// buffer, and those rows participate in B2 accounting.
     pub backpressure_writer: &'a BackpressureWriter,
-    pub parent: Option<&'a JournalRecord<ChainPayload>>,
+    pub parent: Option<&'a DeliveredRecord<ChainPayload>>,
     pub observer_scope: MiddlewareExecutionScope,
 }
 
@@ -985,7 +942,7 @@ pub(crate) async fn commit_framework_observability_events(
     let committer = OutputCommitter {
         data_journal: context.data_journal,
         flow_context: Some(context.flow_context),
-        system_journal: context.system_journal,
+
         instrumentation: context.instrumentation,
         heartbeat_state: context.heartbeat_state,
         output_contract: None,

@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use obzenflow::stages::stateful;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::ChainEvent;
-use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageOutputs};
@@ -242,8 +241,8 @@ async fn count_journal_records(run_dir: &Path) -> Result<usize> {
         }
         let mut reader =
             obzenflow_infra::journal::disk::reader::DiskJournalReader::<ChainEvent>::new(
-                path,
-                JournalId::new(),
+                path.clone(),
+                obzenflow_infra::journal::disk::identity::read_identity(&path)?.journal_id,
                 Arc::new(tokio::sync::RwLock::new(())),
             )
             .await?;

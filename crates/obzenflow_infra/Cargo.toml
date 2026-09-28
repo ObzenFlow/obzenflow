@@ -81,6 +81,7 @@ studio-registration = ["prometheus", "warp-server", "reqwest-client"]
 ai-rig = ["reqwest-client", "dep:rig_rs"]
 ai-tiktoken = ["dep:tiktoken-rs"]
 test-support = ["obzenflow_runtime/test-support"]
+bench-instrumentation = ["test-support", "obzenflow_runtime/bench-instrumentation"]
 
 [dev-dependencies]
 hyper = { workspace = true, features = ["client", "http2"] }

@@ -159,7 +159,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             direct_fact_plan: self.resources.direct_fact_plan.clone(),
             direct_fact_continuation: None,
             error_journal: self.resources.error_journal.clone(),
-            system_journal: self.resources.system_journal.clone(),
+            report_journal: self.resources.report_journal.clone(),
             writer_id: None,
             lineage_policy: self.resources.lineage_policy,
             subscription: None,
@@ -216,7 +216,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.system_journal.clone(),
+            self.resources.report_journal.clone(),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

@@ -13,8 +13,7 @@ use super::{
 use crate::stages::common::stage_handle::discarded_control_details;
 use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent};
-use obzenflow_core::journal::Journal;
+use obzenflow_core::event::CommandDiscardDisposition;
 use obzenflow_core::{StageId, SystemId, WriterId};
 use obzenflow_fsm::{
     fsm, EventVariant, FsmAction, FsmContext, FsmError, StateMachine, StateVariant, Transition,
@@ -134,8 +133,8 @@ impl Supervisor for TestSelfSupervisor {
         SupervisorKind::Pipeline
     }
 
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.system_journal.clone().into()
     }
 
     fn name(&self) -> &str {
@@ -195,8 +194,8 @@ impl Supervisor for TestHandlerSupervisor {
         SupervisorKind::Transform
     }
 
-    fn system_journal(&self, context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.system_journal.clone().into()
     }
 
     fn name(&self) -> &str {
@@ -274,7 +273,10 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
         completion_writes: completion_writes.clone(),
     };
     let ctx = TestContext {
-        system_journal: Arc::new(terminal_commands::TestJournal::default()),
+        system_journal: Arc::new(
+            terminal_commands::TestJournal::default()
+                .with_owner(obzenflow_core::JournalOwner::system(SystemId::new_const(1))),
+        ),
         failure_actions_executed: failure_actions_executed.clone(),
         publications: publications.clone(),
     };
@@ -395,8 +397,15 @@ impl Supervisor for ExternalEventTestSelfSupervisor {
         SupervisorKind::Pipeline
     }
 
-    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        Arc::new(terminal_commands::TestJournal::default())
+    fn report_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> crate::supervised_base::SupervisorJournal {
+        Arc::new(
+            terminal_commands::TestJournal::default()
+                .with_owner(obzenflow_core::JournalOwner::system(SystemId::new_const(1))),
+        )
+        .into()
     }
 
     fn name(&self) -> &str {
@@ -477,8 +486,11 @@ impl Supervisor for ExternalEventTestHandlerSupervisor {
         SupervisorKind::Transform
     }
 
-    fn system_journal(&self, _context: &Self::Context) -> Arc<dyn Journal<SystemEvent>> {
-        Arc::new(terminal_commands::TestJournal::default())
+    fn report_journal(
+        &self,
+        _context: &Self::Context,
+    ) -> crate::supervised_base::SupervisorJournal {
+        Arc::new(terminal_commands::TestJournal::default()).into()
     }
 
     fn name(&self) -> &str {
@@ -552,7 +564,7 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         inner,
         receiver,
         watcher,
-        Arc::new(terminal_commands::TestJournal::default()),
+        Arc::new(terminal_commands::TestJournal::default()).into(),
     );
     let mut ctx = ExternalEventTestContext;
 
@@ -591,7 +603,7 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         inner,
         receiver,
         watcher,
-        Arc::new(terminal_commands::TestJournal::default()),
+        (Arc::new(terminal_commands::TestJournal::default())).into(),
     );
     let mut ctx = ExternalEventTestContext;
 
@@ -635,7 +647,7 @@ async fn with_external_events_defer_mode_preserves_commands_for_later_execution(
         inner,
         receiver,
         watcher,
-        Arc::new(terminal_commands::TestJournal::default()),
+        Arc::new(terminal_commands::TestJournal::default()).into(),
     );
     let mut ctx = ExternalEventTestContext;
 

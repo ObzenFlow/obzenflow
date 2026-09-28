@@ -11,6 +11,7 @@
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
 use crate::stages::common::control_strategies::SignalGate;
@@ -28,7 +29,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainPayload, JournalRecord, SinkOperationPhase, SystemEvent};
+use obzenflow_core::event::{ChainPayload, SinkOperationPhase, SystemEvent};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
@@ -361,7 +362,7 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -454,7 +455,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         writer_id,
                         contract_journal: ctx.data_journal.clone(),
                         config: ContractConfig::default(),
-                        system_journal: Some(ctx.system_journal.clone()),
+                        report_journal: Some(ctx.report_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: true,
@@ -513,7 +514,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     "Sink",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                 )
                 .await;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
@@ -546,7 +547,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     "Sink",
                     ctx.stage_id,
                     &ctx.stage_name,
-                    &ctx.system_journal,
+                    &ctx.report_journal,
                     &ctx.data_journal,
                     Some(&ctx.error_journal),
                     ctx.instrumentation.as_ref(),
@@ -583,8 +584,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             snapshot_stage_accounting(ctx.instrumentation.as_ref()),
                             causal_event_id,
                         );
-                        crate::supervised_base::publication::append(
-                            &ctx.system_journal,
+                        crate::supervised_base::publication::report(
+                            &ctx.report_journal,
                             event,
                             Default::default(),
                         )
@@ -600,7 +601,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             ctx.stage_id,
                             &ctx.stage_name,
                             message,
-                            &ctx.system_journal,
+                            &ctx.report_journal,
                             &ctx.data_journal,
                             Some(&ctx.error_journal),
                             ctx.instrumentation.as_ref(),
@@ -710,7 +711,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                             crate::supervised_base::publication::append(
                                 &ctx.data_journal,
                                 evt,
-                                AppendOptions::new(None).with_capture(
+                                AppendOptions::default().with_capture(
                                     ctx.instrumentation.journal_capture(None, vec![(0, false)]),
                                 ),
                             )
@@ -738,7 +739,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                     phase: SinkOperationPhase::Flush,
                                     error,
                                     error_journal: &ctx.error_journal,
-                                    system_journal: &ctx.system_journal,
+                                    report_journal: &ctx.report_journal,
                                     instrumentation: &ctx.instrumentation,
                                 },
                             )
@@ -832,7 +833,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                         phase: SinkOperationPhase::Drain,
                                         error: operation_error,
                                         error_journal: &ctx.error_journal,
-                                        system_journal: &ctx.system_journal,
+                                        report_journal: &ctx.report_journal,
                                         instrumentation: &ctx.instrumentation,
                                     },
                                 )
@@ -907,7 +908,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                                 .with_flow_context(flow_ctx);
                         let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                        crate::supervised_base::publication::append(&ctx.data_journal, evt, AppendOptions::new(None).with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
+                        crate::supervised_base::publication::append(&ctx.data_journal, evt, AppendOptions::default().with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
                             obzenflow_fsm::FsmError::HandlerError(format!(
                                 "Failed to write delivery receipt: {e}"
                             ))
@@ -992,7 +993,7 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
 
 async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
-    parent_envelope: &JournalRecord<ChainPayload>,
+    parent_envelope: &DeliveredRecord<ChainPayload>,
     payload: DeliveryPayload,
 ) -> Result<(), obzenflow_fsm::FsmError> {
     let writer_id = ctx.writer_id.ok_or_else(|| {
@@ -1018,7 +1019,6 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
     let data_journal = ctx.data_journal.clone();
-    let system_journal = ctx.system_journal.clone();
     let instrumentation = ctx.instrumentation.clone();
     let parent = parent_envelope.clone();
     let mut settlement = ctx
@@ -1030,7 +1030,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         let written = data_journal
             .append(
                 event,
-                AppendOptions::new(Some(&parent))
+                AppendOptions::from_record(Some(&parent))?
                     .with_capture(instrumentation.journal_capture(None, vec![(1, false)])),
             )
             .await?;
@@ -1040,11 +1040,6 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
                 instrumentation.record_receipted_position(seq.0, event_id, vector_clock);
             }
         }
-        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-            &written,
-            &system_journal,
-        )
-        .await;
         Ok(settlement)
     })
     .await
@@ -1113,7 +1108,7 @@ mod tests {
             flow_id: FlowId::new(),
             data_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
             error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
-            system_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            report_journal: (Arc::new(TestJournal::new(JournalOwner::stage(stage_id)))).into(),
             effect_history: None,
             runtime_execution: crate::execution::RuntimeExecution::new(
                 crate::execution::RuntimeMode::Live,
@@ -1302,7 +1297,7 @@ mod tests {
                 terminal_supervisor,
                 receiver,
                 watcher,
-                ctx.system_journal.clone(),
+                ctx.report_journal.clone(),
             );
             assert!(matches!(
                 wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),

@@ -7,13 +7,13 @@
 use super::fsm::{PipelineAction, PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use super::resources::{OperationalFailure, ProducerTail};
 use super::PipelineState;
-use crate::messaging::{PollResult, SubscriptionPoller, SystemSubscription};
 use crate::stages::common::stage_handle::StageError;
+use crate::supervised_base::report_reader::{ReportRead, ReportReaders};
 use crate::supervised_base::{
     EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher,
 };
-use futures::{future::BoxFuture, FutureExt, Stream};
-use obzenflow_core::event::{SystemEvent, WriterId};
+use futures::{future::BoxFuture, Stream};
+use obzenflow_core::event::WriterId;
 use obzenflow_core::id::SystemId;
 use std::future::Future;
 use std::pin::Pin;
@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 pub use super::fsm::context::ContractEdgeStatus;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type JournalRead = BoxFuture<'static, (SystemSubscription<SystemEvent>, PollResult<SystemEvent>)>;
 
 pub(crate) struct PipelineSupervisor {
     name: String,
@@ -32,9 +31,8 @@ pub(crate) struct PipelineSupervisor {
     controls: EventReceiver<PipelineFsmEvent>,
     controls_open: bool,
     watcher: StateWatcher<PipelineState>,
-    subscription: Option<SystemSubscription<SystemEvent>>,
-    pending_read: Mutex<Option<JournalRead>>,
-    idle: Option<Pin<Box<tokio::time::Sleep>>>,
+    subscription: Option<ReportReaders>,
+    capacity_wait: Mutex<Option<BoxFuture<'static, Result<(), BoxError>>>>,
     input_cursor: RoundRobinCursor<SupervisorInput>,
     resource_cursor: RoundRobinCursor<ResourceInput>,
     failure: OperationalFailure,
@@ -55,8 +53,7 @@ impl PipelineSupervisor {
             controls_open: true,
             watcher,
             subscription: None,
-            pending_read: Mutex::new(None),
-            idle: None,
+            capacity_wait: Mutex::new(None),
             input_cursor: RoundRobinCursor::new(SupervisorInput::ORDER),
             resource_cursor: RoundRobinCursor::new(ResourceInput::ORDER),
             failure,
@@ -65,13 +62,7 @@ impl PipelineSupervisor {
     }
 
     fn attach_journal_subscription(&mut self, ctx: &mut PipelineContext) {
-        if self.subscription.is_none()
-            && self
-                .pending_read
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_none()
-        {
+        if self.subscription.is_none() {
             self.subscription = ctx.completion_subscription.take();
         }
     }
@@ -172,53 +163,45 @@ impl PipelineSupervisor {
         if ctx.progress.journal_failed {
             return Poll::Pending;
         }
-        let pending = self
-            .pending_read
+        // Keep ordinary output headroom before admitting another report. The
+        // control and resource turns remain runnable while publication stalls.
+        let wait = self
+            .capacity_wait
             .get_mut()
             .unwrap_or_else(|e| e.into_inner());
-        if pending.is_none() {
-            // Finish any already-owned read before capturing the producer
-            // tail, but do not start another. A suspended read may hold the
-            // journal lock; freezing it can deadlock tail capture behind a
-            // queued writer. The resource turn waits for this read to finish.
-            if matches!(ctx.resources.producer_tail, ProducerTail::Reading(_)) {
-                return Poll::Pending;
-            }
-            if let Some(idle) = &mut self.idle {
-                if idle.as_mut().poll(cx).is_pending() {
-                    return Poll::Pending;
-                }
-            }
-            self.idle = None;
-            let Some(mut subscription) = self.subscription.take() else {
-                return Poll::Pending;
-            };
-            *pending = Some(
-                async move {
-                    let result = subscription.poll_next().await;
-                    (subscription, result)
-                }
-                .boxed(),
-            );
+        if wait.is_none() && !ctx.resources.publications.has_capacity(4) {
+            *wait = Some(ctx.resources.publications.wait_for_capacity(4));
         }
-        let Poll::Ready((subscription, result)) =
-            pending.as_mut().expect("owned read").as_mut().poll(cx)
-        else {
+        if let Some(pending) = wait {
+            match pending.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => {
+                    ctx.resources.retain_failure(error);
+                    *wait = None;
+                    return Poll::Ready(EventLoopDirective::Continue);
+                }
+                Poll::Ready(Ok(())) => {
+                    *wait = None;
+                }
+            }
+        }
+        let Some(readers) = &mut self.subscription else {
             return Poll::Pending;
         };
-        *pending = None;
-        self.subscription = Some(subscription);
+        let Poll::Ready(result) = readers.poll_next(cx) else {
+            return Poll::Pending;
+        };
         Poll::Ready(match result {
-            PollResult::Event(envelope) => {
-                EventLoopDirective::Transition(PipelineFsmEvent::Journal(Box::new(envelope)))
+            Ok(ReportRead::Record(record)) => {
+                EventLoopDirective::Transition(PipelineFsmEvent::Journal(record))
             }
-            PollResult::Error(error) => {
-                ctx.progress.journal_failed = true;
-                ctx.resources.retain_failure(error);
+            Ok(ReportRead::Coverage { journal, through }) => {
+                ctx.report_coverage.insert(journal, through);
                 EventLoopDirective::Continue
             }
-            PollResult::NoEvents | PollResult::CursorAdvanced { .. } => {
-                self.idle = Some(Box::pin(tokio::time::sleep(Duration::from_millis(10))));
+            Err(error) => {
+                ctx.progress.journal_failed = true;
+                ctx.resources.retain_failure(error);
                 EventLoopDirective::Continue
             }
         })
@@ -232,7 +215,6 @@ impl PipelineSupervisor {
         let Poll::Ready(Some(result)) = ctx.resources.delivery.poll(cx) else {
             return Poll::Pending;
         };
-        self.idle = None;
         if let Err(error) = result {
             ctx.resources.retain_failure(Box::new(error));
         }
@@ -269,27 +251,13 @@ impl PipelineSupervisor {
             let result = match input {
                 ResourceInput::StageJoin => Self::poll_stage_join(ctx, cx),
                 ResourceInput::PublicationSettlement => Self::poll_publication_settlement(ctx, cx),
-                ResourceInput::ProducerTail => {
-                    // Do not begin capture until the owned read has returned
-                    // and its result has been folded. Once capture begins,
-                    // poll_journal cannot start a read that overtakes it.
-                    if self
-                        .pending_read
-                        .get_mut()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .is_some()
-                    {
-                        Poll::Pending
-                    } else {
-                        Self::poll_producer_tail(ctx, cx)
-                    }
-                }
+                ResourceInput::ProducerTail => Self::poll_producer_tail(ctx, cx),
+                ResourceInput::MetricsTail => Self::poll_metrics_tail(ctx, cx),
                 ResourceInput::MetricsJoin => Self::poll_metrics_join(ctx, cx),
             };
             if result.is_ready() {
                 // A producer or our own append has settled. Check the existing
                 // journal again without extending a previous temporary-EOF wait.
-                self.idle = None;
                 self.resource_cursor.advance_after(input);
                 return result;
             }
@@ -348,8 +316,44 @@ impl PipelineSupervisor {
             return Poll::Pending;
         };
         ctx.resources.producer_tail = match result {
-            Ok(Some(id)) if ctx.last_system_event_id_seen != Some(id) => ProducerTail::Through(id),
-            Ok(_) => ProducerTail::Reached,
+            Ok(targets)
+                if targets.iter().all(|(journal, through)| {
+                    ctx.report_coverage.get(journal).copied().unwrap_or(0) >= *through
+                }) =>
+            {
+                ProducerTail::Reached
+            }
+            Ok(targets) => ProducerTail::Through(targets),
+            Err(error) => {
+                ctx.progress.journal_failed = true;
+                ctx.resources.retain_failure(error);
+                ProducerTail::Reached
+            }
+        };
+        Poll::Ready(())
+    }
+
+    fn poll_metrics_tail(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
+        let ProducerTail::Reading(read) = &mut ctx.resources.metrics_tail else {
+            return Poll::Pending;
+        };
+        let Poll::Ready(result) = read
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .poll(cx)
+        else {
+            return Poll::Pending;
+        };
+        ctx.resources.metrics_tail = match result {
+            Ok(targets)
+                if targets.iter().all(|(journal, through)| {
+                    ctx.report_coverage.get(journal).copied().unwrap_or(0) >= *through
+                }) =>
+            {
+                ProducerTail::Reached
+            }
+            Ok(targets) => ProducerTail::Through(targets),
             Err(error) => {
                 ctx.progress.journal_failed = true;
                 ctx.resources.retain_failure(error);
@@ -373,6 +377,14 @@ impl PipelineSupervisor {
         };
         ctx.resources.metrics_join = None;
         ctx.resources.metrics_joined = true;
+        ctx.resources.metrics_tail = if let Some(metrics) = &ctx.metrics_journals {
+            let journal = metrics.coordination.clone();
+            ProducerTail::Reading(Mutex::new(Box::pin(async move {
+                Ok([(*journal.id(), journal.committed_position().await?)].into())
+            })))
+        } else {
+            ProducerTail::Reached
+        };
         if let Err(error) = result {
             if !(ctx.progress.metrics_cancelled && matches!(error, HandleError::SupervisorAborted))
             {
@@ -406,6 +418,7 @@ enum ResourceInput {
     PublicationSettlement,
     ProducerTail,
     MetricsJoin,
+    MetricsTail,
 }
 
 impl ResourceInput {
@@ -414,6 +427,7 @@ impl ResourceInput {
         Self::PublicationSettlement,
         Self::ProducerTail,
         Self::MetricsJoin,
+        Self::MetricsTail,
     ];
 }
 
@@ -463,12 +477,8 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
         obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
     }
 
-    fn system_journal(
-        &self,
-        context: &Self::Context,
-    ) -> std::sync::Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::SystemEvent>>
-    {
-        context.system_journal.clone()
+    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
+        context.system_journal.clone().into()
     }
 
     fn name(&self) -> &str {

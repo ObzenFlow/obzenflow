@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+mod replay_testkit;
+
 #[path = "../examples/product_catalog_enrichment/support.rs"]
 mod product_catalog_enrichment;
 
@@ -28,9 +30,8 @@ use catalog_fixture::{build_for_proof, ProofProbe};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::journal::{RunManifest, JOURNAL_SCHEMA_VERSION};
-use obzenflow_core::{Journal, JournalOwner, StageId, WriterId};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::DiskJournal;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -59,15 +60,13 @@ async fn projection(run: &Path) -> Projection {
     let mut result = BTreeMap::new();
     for (name, stage) in manifest.stages {
         let id: StageId = stage.stage_id.parse().unwrap();
-        let journal = DiskJournal::<ChainEvent>::with_owner(
-            run.join(stage.data_journal_file),
-            JournalOwner::stage(id),
+        let records = replay_testkit::read_journal_envelopes_appended::<ChainEvent>(
+            &run.join(stage.data_journal_file),
         )
-        .unwrap();
-        let mut reader = journal.reader().await.unwrap();
+        .await;
         let mut facts = Vec::new();
         let mut terminals = Vec::new();
-        while let Some(record) = reader.next().await.unwrap() {
+        for record in records {
             match &record.payload {
                 ChainPayload::Fact(value) => facts.push(value.clone()),
                 ChainPayload::FlowControl(FlowControlPayload::Eof { kind, .. })

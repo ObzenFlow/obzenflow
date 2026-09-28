@@ -8,6 +8,7 @@
 use super::TransformSupervisor;
 use crate::backpressure::DirectFactAdmission;
 use crate::effects::EffectInvocationContext;
+use crate::messaging::DeliveredRecord;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -34,7 +35,7 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainPayload, StageFatalCode, StageFatalReason};
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::{ChainEvent, JournalRecord, MiddlewareExecutionScope, StageId};
+use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, StageId};
 use std::collections::VecDeque;
 use std::task::Poll;
 
@@ -52,7 +53,7 @@ pub(super) async fn start_if_eligible<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut TransformContext<H>,
-    envelope: &JournalRecord<ChainPayload>,
+    envelope: &DeliveredRecord<ChainPayload>,
     upstream_stage: Option<StageId>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     scope: MiddlewareExecutionScope,
@@ -112,7 +113,7 @@ pub(super) async fn start_if_eligible<
         data_journal: ctx.data_journal.clone(),
         flow_context: Some(flow_context.clone()),
         observers: Some(ctx.observers.clone()),
-        system_journal: Some(ctx.system_journal.clone()),
+
         instrumentation: Some(ctx.instrumentation.clone()),
         heartbeat_state: handler_heartbeat_state.clone(),
         parent: future_envelope,
@@ -288,7 +289,7 @@ async fn finish_success<
                 FrameworkObservabilityCommit {
                     flow_context,
                     data_journal: &ctx.data_journal,
-                    system_journal: Some(&ctx.system_journal),
+
                     instrumentation: Some(&ctx.instrumentation),
                     heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
                     backpressure_writer: &ctx.backpressure_writer,
@@ -320,7 +321,7 @@ async fn finish_success<
             if let Err(error) = crate::supervised_base::publication::append(
                 &ctx.error_journal,
                 event,
-                AppendOptions::new(Some(&continuation.envelope)),
+                AppendOptions::from_record(Some(&continuation.envelope))?,
             )
             .await
             {
@@ -338,6 +339,7 @@ async fn finish_success<
             }
         } else {
             pending.push_back(PendingOutput {
+                causal: crate::supervised_base::publication::capture(),
                 event,
                 scope: continuation.scope,
             });
@@ -353,7 +355,6 @@ async fn finish_success<
                 .as_ref()
                 .map(|heartbeat| heartbeat.state.clone()),
             &ctx.data_journal,
-            &ctx.system_journal,
             Some(&continuation.envelope),
             &ctx.instrumentation,
             &ctx.backpressure_writer,
@@ -410,6 +411,7 @@ pub(super) async fn service<
         .direct_fact_continuation
         .take()
         .expect("service is called only for an occupied generated continuation");
+    crate::supervised_base::publication::with_snapshot(continuation.causal.clone(), Box::pin(async {
     if continuation.admission.event_type().as_str() != continuation.envelope.event_type() {
         let observed = continuation.envelope.event_type();
         let expected = continuation.admission.event_type().as_str().to_string();
@@ -518,4 +520,5 @@ pub(super) async fn service<
             }
         }
     }
+    })).await
 }

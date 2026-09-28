@@ -78,12 +78,12 @@ async fn periodic_capture_reduces_representative_storage_without_changing_protec
         dense_packets += usize::from(control.envelope.observability.is_some());
         sparse_packets += usize::from(treatment.envelope.observability.is_some());
         assert_eq!(
-            serde_json::to_value(control.payload).unwrap(),
-            serde_json::to_value(treatment.payload).unwrap()
+            serde_json::to_value(&control.payload).unwrap(),
+            serde_json::to_value(&treatment.payload).unwrap()
         );
         assert_eq!(
-            serde_json::to_value(control.envelope.provenance.event).unwrap(),
-            serde_json::to_value(treatment.envelope.provenance.event).unwrap()
+            serde_json::to_value(&control.envelope.provenance.event).unwrap(),
+            serde_json::to_value(&treatment.envelope.provenance.event).unwrap()
         );
         tokio::time::advance(Duration::from_millis(1)).await;
     }
@@ -134,7 +134,20 @@ struct Timings {
 async fn matched_representative_stream_append_read_and_reopen_costs() {
     use crate::journal::disk::{scanner::read_frame_sync, DiskJournal};
     let samples = super::test_data::records();
-    let records: Vec<_> = samples.iter().cycle().take(768).collect();
+    let identity = super::super::identity::JournalIdentity {
+        run_id: obzenflow_core::FlowId::new(),
+        journal_id: obzenflow_core::JournalId::new(),
+    };
+    let mut previous = None;
+    let committed: Vec<_> = samples
+        .iter()
+        .cycle()
+        .take(768)
+        .map(|sample| {
+            super::super::identity::fixture_record(identity, sample.authored(), &mut previous)
+        })
+        .collect();
+    let records: Vec<_> = committed.iter().collect();
     let dir = tempfile::tempdir().unwrap();
     for repetition in 0..3 {
         // Alternate execution order to avoid consistently favouring one codec.
@@ -144,6 +157,7 @@ async fn matched_representative_stream_append_read_and_reopen_costs() {
             [true, false]
         } {
             let path = dir.path().join(format!("trial-{repetition}-{compact}.log"));
+            super::super::identity::write_fixture_identity(&path, identity);
             let mut file = std::fs::File::create(&path).unwrap();
             let store = DefinitionStore::default();
             let mut latency = Vec::new();

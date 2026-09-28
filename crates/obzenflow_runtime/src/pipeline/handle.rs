@@ -29,6 +29,9 @@ pub(crate) struct FlowHandleExtras {
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
+    pub pipeline_reports: Option<super::reports::PipelineReports>,
+    pub metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
+    pub report_journals: Vec<crate::supervised_base::SupervisorJournal>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub pipeline_writer_id: WriterId,
     pub observations: Arc<dyn ObservationSource>,
@@ -73,6 +76,9 @@ pub struct FlowHandle {
     contract_attachments: Option<ContractAttachments>,
 
     /// System journal for lifecycle events (for SSE / observability)
+    pipeline_reports: Option<super::reports::PipelineReports>,
+    metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
+    report_journals: Vec<crate::supervised_base::SupervisorJournal>,
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 
     /// Writer identity for this pipeline's lifecycle facts in the system journal.
@@ -91,6 +97,16 @@ pub struct FlowHandle {
 }
 
 impl FlowHandle {
+    pub fn metrics_journals(&self) -> Option<crate::metrics::builder::MetricsJournals> {
+        self.metrics_journals.clone()
+    }
+    pub fn pipeline_reports(&self) -> Option<super::reports::PipelineReports> {
+        self.pipeline_reports.clone()
+    }
+    pub fn report_journals(&self) -> Vec<crate::supervised_base::SupervisorJournal> {
+        self.report_journals.clone()
+    }
+
     /// Create a new flow handle from a standard handle and extras
     pub(crate) fn new(
         handle: StandardHandle<PipelineFsmEvent, PipelineState>,
@@ -105,6 +121,9 @@ impl FlowHandle {
             flow_name,
             contract_attachments,
             system_journal,
+            report_journals,
+            metrics_journals,
+            pipeline_reports,
             pipeline_writer_id,
             observations,
             host_observations,
@@ -123,6 +142,9 @@ impl FlowHandle {
             flow_name,
             contract_attachments,
             system_journal,
+            report_journals,
+            metrics_journals,
+            pipeline_reports,
             pipeline_writer_id,
             observations,
             host_observations,

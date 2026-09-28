@@ -85,7 +85,7 @@ impl DiskJournalFactory {
         }
 
         let journal = Arc::new(
-            DiskJournal::<ChainEvent>::with_owner(journal_path, owner)?
+            DiskJournal::<ChainEvent>::with_owner_in_run(journal_path, owner, self.flow_id)?
                 .with_admission_sequencer(self.admission_sequencer.clone()),
         );
         self.chain_journals.insert(name, journal.clone());
@@ -110,7 +110,11 @@ impl DiskJournalFactory {
             })?;
         }
 
-        let journal = Arc::new(DiskJournal::<SystemEvent>::with_owner(journal_path, owner)?);
+        let journal = Arc::new(DiskJournal::<SystemEvent>::with_owner_in_run(
+            journal_path,
+            owner,
+            self.flow_id,
+        )?);
         self.system_journals.insert(name, journal.clone());
         Ok(journal)
     }
@@ -134,6 +138,7 @@ impl DiskJournalFactory {
 
 /// Simple memory journal factory
 pub struct MemoryJournalFactory {
+    flow_id: FlowId,
     // Keep created journals so we can return the same instance for the same name
     chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
     system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
@@ -142,8 +147,9 @@ pub struct MemoryJournalFactory {
 }
 
 impl MemoryJournalFactory {
-    pub fn new(_flow_id: FlowId) -> Self {
+    pub fn new(flow_id: FlowId) -> Self {
         Self {
+            flow_id,
             chain_journals: HashMap::new(),
             system_journals: HashMap::new(),
             admission_sequencer: Arc::new(AtomicU64::new(0)),
@@ -161,7 +167,7 @@ impl MemoryJournalFactory {
             .entry(name)
             .or_insert_with(|| {
                 Arc::new(
-                    MemoryJournal::<ChainEvent>::with_owner(owner)
+                    MemoryJournal::<ChainEvent>::with_owner_in_run(owner, self.flow_id)
                         .with_admission_sequencer(sequencer),
                 )
             })
@@ -176,7 +182,12 @@ impl MemoryJournalFactory {
         Ok(self
             .system_journals
             .entry(name)
-            .or_insert_with(|| Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner)))
+            .or_insert_with(|| {
+                Arc::new(MemoryJournal::<SystemEvent>::with_owner_in_run(
+                    owner,
+                    self.flow_id,
+                ))
+            })
             .clone())
     }
 }

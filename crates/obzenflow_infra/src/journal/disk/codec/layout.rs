@@ -40,7 +40,7 @@ impl DefinitionKind {
             Self::Origin => Kind::Struct(Layout::Origin),
             Self::Descriptor => Kind::Text,
             Self::CaptureScope => Kind::Struct(Layout::CaptureScope),
-            Self::ClockKeys => Kind::List(&Kind::ClockKey),
+            Self::ClockKeys => Kind::List(&Kind::Struct(Layout::Coordinate)),
             Self::JournalWriter => Kind::Id,
         }
     }
@@ -54,7 +54,6 @@ pub(super) enum Kind {
     Text,
     Id,
     FlowId,
-    ClockKey,
     Timestamp,
     PacketCapture,
     SnapshotCapture,
@@ -102,9 +101,9 @@ const fn field(name: &'static str, kind: Kind) -> Field {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Layout {
-    Provenance,
+    RecordBody,
     Event,
-    Journal,
+    Coordinate,
     Writer,
     Context,
     Processing,
@@ -129,7 +128,6 @@ pub(super) enum Layout {
     EffectRateLimiter,
     Metrics,
     Sli,
-    GroupMember,
 }
 
 const EVENT_KINDS: &[&str] = &[
@@ -150,11 +148,12 @@ impl Layout {
         use Kind as K;
         use Layout as S;
         match self {
-            S::Provenance => {
+            S::RecordBody => {
                 const {
                     &[
                         field("event", K::Struct(S::Event)),
-                        field("journal", K::Struct(S::Journal)),
+                        field("vector_clock", K::Clock),
+                        field("timestamp", K::Timestamp),
                     ]
                 }
             }
@@ -181,17 +180,7 @@ impl Layout {
                     ]
                 }
             }
-            S::Journal => {
-                const {
-                    &[
-                        field("journal_writer_id", K::Definition(D::JournalWriter)),
-                        field("vector_clock", K::Clock),
-                        field("timestamp", K::Timestamp),
-                        field("journal_group_id", K::Text),
-                        field("journal_group_member", K::Struct(S::GroupMember)),
-                    ]
-                }
-            }
+            S::Coordinate => const { &[field("journal_writer_id", K::Id)] },
             S::Writer => const { &[field("type", K::Enum(WRITER_KINDS)), field("id", K::Id)] },
             S::Context => {
                 const {
@@ -454,7 +443,6 @@ impl Layout {
                     ]
                 }
             }
-            S::GroupMember => const { &[field("index", K::Unsigned), field("size", K::Unsigned)] },
         }
     }
 }

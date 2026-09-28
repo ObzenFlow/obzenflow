@@ -18,7 +18,6 @@ use crate::stages::resources_builder::{StageResources, StageResourcesBuilder};
 use crate::supervised_base::{SupervisorBuilder, SupervisorHandle};
 use async_trait::async_trait;
 use futures::FutureExt;
-use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::archive::{
     ArchiveStatus, ReplayArchive, ReplayError, StatusDerivation,
 };
@@ -184,7 +183,7 @@ impl TypedAsyncInfiniteSourceHandler for Reader {
     }
 }
 
-async fn resources(counts: &Counts) -> (StageId, StageResources, Arc<TestJournal<SystemEvent>>) {
+async fn resources(counts: &Counts) -> (StageId, StageResources, Arc<dyn Journal<ChainEvent>>) {
     let mut topology = obzenflow_topology::TopologyBuilder::new();
     let source = topology.add_stage(Some("input".into()));
     let sink = topology.add_stage(Some("output".into()));
@@ -211,11 +210,9 @@ async fn resources(counts: &Counts) -> (StageId, StageResources, Arc<TestJournal
     .build()
     .await
     .unwrap();
-    (
-        stage,
-        resources.take_stage_resources(stage).unwrap(),
-        system,
-    )
+    let stage_resources = resources.take_stage_resources(stage).unwrap();
+    let reports = stage_resources.data_journal.clone();
+    (stage, stage_resources, reports)
 }
 
 struct ParkBeforePoll(Arc<Notify>);
@@ -249,7 +246,7 @@ macro_rules! lifecycle_family {
                 fixture: Fixture,
                 boundary: Option<Arc<dyn SourceBoundary>>,
                 resume: bool,
-            ) -> (Handle, Arc<TestJournal<SystemEvent>>) {
+            ) -> (Handle, Arc<dyn Journal<ChainEvent>>) {
                 let (stage, mut resources, journal) = resources(&fixture.counts).await;
                 if resume {
                     resources.runtime_execution = crate::execution::RuntimeExecution::new(
@@ -455,7 +452,7 @@ macro_rules! lifecycle_family {
                     assert_eq!(
                         evidence.iter().filter(|row| matches!(
                             row.payload,
-                            obzenflow_core::event::SystemPayload::SourceCleanupFailed { .. }
+                            obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SourceCleanupFailed { .. })
                         )).count(),
                         usize::from(fail)
                     );
@@ -553,7 +550,7 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
             .iter()
             .filter(|row| matches!(
                 row.payload,
-                obzenflow_core::event::SystemPayload::SourceCleanupFailed { .. }
+                obzenflow_core::event::ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SourceCleanupFailed { .. })
             ))
             .count(),
         1

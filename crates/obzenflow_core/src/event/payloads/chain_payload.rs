@@ -157,6 +157,13 @@ impl ChainPayload {
                 ExecutionPayload::EffectAttemptStarted(_)
                 | ExecutionPayload::EffectRecoveryAbandoned(_) => ReplayDisposition::ReAdmit,
                 ExecutionPayload::EffectRecord(_)
+                | ExecutionPayload::ReplayLifecycle(_)
+                | ExecutionPayload::SupervisorRegistered { .. }
+                | ExecutionPayload::SupervisorCommandDiscarded { .. }
+                | ExecutionPayload::SourceCleanupFailed { .. }
+                | ExecutionPayload::ContractStatus { .. }
+                | ExecutionPayload::ContractResult { .. }
+                | ExecutionPayload::IngressRefusal { .. }
                 | ExecutionPayload::StageLifecycle(_)
                 | ExecutionPayload::MetricsCoordination(_)
                 | ExecutionPayload::CircuitBreaker(_)

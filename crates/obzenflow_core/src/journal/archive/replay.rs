@@ -113,8 +113,8 @@ pub trait ReplayArchive: Send + Sync {
 
     /// Maximum recorded resume generation in this archive (FLOWIP-120n). A
     /// resume run enters this plus one. The default answers for archives with
-    /// no recorded catch-up boundary; `DiskReplayArchive` overrides it
-    /// manifest-first with a source-journal scan fallback.
+    /// no recorded catch-up boundary; `DiskReplayArchive` derives it from
+    /// committed boundaries in the source journals.
     fn max_recorded_generation(&self) -> crate::ReaderGeneration {
         crate::ReaderGeneration(0)
     }
@@ -122,7 +122,7 @@ pub trait ReplayArchive: Send + Sync {
     /// Maximum recorded admission sequence in this archive's source journals
     /// (FLOWIP-120n F18). The run's flow sequencer is seeded above it so live
     /// stamps order after every re-admitted sequence. The default answers for
-    /// archives predating the field; `DiskReplayArchive` overrides it from the
+    /// archives with no recorded source admissions; `DiskReplayArchive` overrides it from the
     /// same single-pass source-journal scan as `max_recorded_generation`.
     fn max_recorded_admission_seq(&self) -> crate::AdmissionSeq {
         crate::AdmissionSeq(0)
