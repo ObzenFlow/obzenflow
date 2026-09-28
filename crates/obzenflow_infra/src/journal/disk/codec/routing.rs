@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! The same payload-blind envelope parser serves full reads, selective reads
-//! and definition carriers. The caller verifies the complete frame CRC first.
+//! Ordinary frame provenance and member extents, also used by definition carriers.
+//! The caller verifies the complete frame CRC first.
 use super::primitives::{bytes, text, unsigned, Cursor};
 use super::{invalid, Result};
 use obzenflow_core::event::{JournalCommitRef, JournalRecord};
@@ -11,7 +11,6 @@ use obzenflow_core::{EventId, FlowId, JournalId, JournalPayload};
 
 pub(super) struct Member<'a> {
     pub id: EventId,
-    pub candidate: bool,
     pub body: &'a [u8],
 }
 
@@ -19,7 +18,6 @@ pub(crate) struct RouteSummary {
     pub group: Option<String>,
     pub first: JournalCommitRef,
     pub previous: Option<JournalCommitRef>,
-    pub last: JournalCommitRef,
     pub count: usize,
 }
 
@@ -75,11 +73,6 @@ impl<'a> Envelope<'a> {
         let mut members = Vec::with_capacity(count);
         for _ in 0..count {
             let id = id(&mut route)?.into();
-            let candidate = match route.byte()? {
-                0 => false,
-                1 => true,
-                _ => return Err(invalid("unknown supervision classification")),
-            };
             let member_body = body.take(route.length()?)?;
             // Structural extents only: no JSON, clock, witness or record creation.
             let mut fields = Cursor::new(member_body);
@@ -104,7 +97,6 @@ impl<'a> Envelope<'a> {
             fields.finish()?;
             members.push(Member {
                 id,
-                candidate,
                 body: member_body,
             });
         }
@@ -121,7 +113,6 @@ impl<'a> Envelope<'a> {
                 group,
                 first: reference(0),
                 previous,
-                last: reference(count - 1),
                 count,
             },
             definitions,
@@ -185,7 +176,6 @@ pub(super) fn encode<P: JournalPayload>(
             event_id: *record.id(),
         });
         route.extend_from_slice(&record.id().as_ulid().to_bytes());
-        route.push(u8::from(record.payload.is_supervision_candidate()));
         unsigned(*length as u64, &mut route);
     }
     let mut output = Vec::new();

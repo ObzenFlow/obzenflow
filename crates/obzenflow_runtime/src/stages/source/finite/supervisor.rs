@@ -9,7 +9,7 @@ use super::fsm::{
     SourceCompletionOrigin,
 };
 use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
-use crate::replay::{ReplayContextTemplate, ReplayDriver};
+use crate::replay::ReplayDriver;
 use crate::stages::common::handlers::UnifiedFiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
@@ -25,16 +25,15 @@ use crate::stages::source::{
     SourcePollResult, SourceReaderInitContext,
 };
 use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
+use crate::supervised_base::handler_supervised::SupervisorAction;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{
-    publication, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
+    EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload};
 use obzenflow_core::{MiddlewareExecutionScope, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
@@ -49,10 +48,12 @@ pub(crate) struct FiniteSourceSupervisor<H: UnifiedFiniteSourceHandler + Send + 
     pub(crate) name: String,
 
     /// The handler instance that implements source logic
-    pub(crate) handler: H,
+    pub(crate) handler: Option<H>,
 
     /// System journal for lifecycle events
-    pub(crate) report_journal: crate::supervised_base::SupervisorJournal,
+    pub(crate) data_journal:
+        std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
+    pub(crate) flow_context: obzenflow_core::event::provenance::FlowContext,
 
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -103,271 +104,218 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
         // Construction starts in Created. Entry hooks mirror the engine-assigned
         // state before the supervisor executes any transition actions.
         fsm! {
-            state:   FiniteSourceState<H>;
-            event:   FiniteSourceEvent<H>;
+            state: FiniteSourceState<H>;
+            event: FiniteSourceEvent<H>;
             context: FiniteSourceContext<H>;
-            action:  FiniteSourceAction<H>;
+            action: FiniteSourceAction<H>;
             initial: initial_state;
 
             state FiniteSourceState::Created {
                 on FiniteSourceEvent::Initialize => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Initialized,
-                            actions: vec![FiniteSourceAction::AllocateResources],
-                        })
-                    })
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Initializing, actions: vec![FiniteSourceAction::Host(SupervisorAction::Register), FiniteSourceAction::AllocateResources, FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::InitializationCompleted))] }) })
                 };
-
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
+                };
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        let error_msg = if let FiniteSourceEvent::Error(msg) = event {
-                            msg
-                        } else {
-                            "Unknown error".to_string()
-                        };
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
+                };
+            }
 
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Failed(error_msg.clone()),
-                            actions: vec![
-                                FiniteSourceAction::SendError { message: error_msg },
-                                FiniteSourceAction::Cleanup,
-                            ],
-                        })
-                    })
+            state FiniteSourceState::Initializing {
+                on FiniteSourceEvent::InitializationCompleted => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Initialized, actions: vec![] }) })
+                };
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
+                };
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
                 };
             }
 
             state FiniteSourceState::Initialized {
-                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        ctx.instrumentation.transition_to_state(state.variant_name());
-                        Ok(vec![])
-                    })
-                };
-
                 on FiniteSourceEvent::Ready => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: FiniteSourceState::WaitingForGun,
-                            actions: vec![],
-                        })
-                    })
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::WaitingForGun, actions: vec![] }) })
                 };
-
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
+                };
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        let error_msg = if let FiniteSourceEvent::Error(msg) = event {
-                            msg
-                        } else {
-                            "Unknown error".to_string()
-                        };
-
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Failed(error_msg.clone()),
-                            actions: vec![
-                                FiniteSourceAction::SendError { message: error_msg },
-                                FiniteSourceAction::Cleanup,
-                            ],
-                        })
-                    })
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
                 };
             }
 
-            state FiniteSourceState::WaitingForGun {
-                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        ctx.instrumentation.transition_to_state(state.variant_name());
-                        Ok(vec![])
-                    })
+            state FiniteSourceState::Starting {
+                on FiniteSourceEvent::ActivationCompleted => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Running, actions: vec![] }) })
                 };
-
-                on FiniteSourceEvent::Start => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Running,
-                            actions: vec![FiniteSourceAction::PublishRunning],
-                        })
-                    })
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
                 };
-
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        let error_msg = if let FiniteSourceEvent::Error(msg) = event {
-                            msg
-                        } else {
-                            "Unknown error".to_string()
-                        };
-
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Failed(error_msg.clone()),
-                            actions: vec![
-                                FiniteSourceAction::SendError { message: error_msg },
-                                FiniteSourceAction::Cleanup,
-                            ],
-                        })
-                    })
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
                 };
             }
 
             state FiniteSourceState::Running {
-                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        ctx.instrumentation.transition_to_state(state.variant_name());
-                        Ok(vec![])
-                    })
+                on FiniteSourceEvent::ResumeLiveInput => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::AcquiringInput, actions: vec![] }) })
                 };
 
                 on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Draining,
-                            actions: vec![],
-                        })
-                    })
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
                 };
-
                 on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Draining,
-                            actions: vec![],
-                        })
-                    })
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
                 };
-
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let FiniteSourceEvent::Error(msg) = event {
-                            Ok(Transition {
-                                next_state: FiniteSourceState::Failed(msg.clone()),
-                                actions: vec![
-                                    FiniteSourceAction::SendError { message: msg },
-                                    FiniteSourceAction::Cleanup,
-                                ],
-                            })
-                        } else {
-                            Err(FsmError::HandlerError(
-                                "Invalid event".to_string(),
-                            ))
-                        }
-                    })
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
                 };
             }
 
             state FiniteSourceState::Draining {
-                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        ctx.instrumentation.transition_to_state(state.variant_name());
-                        Ok(vec![])
-                    })
-                };
-
                 on FiniteSourceEvent::Completed => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Drained,
-                            actions: vec![
-                                FiniteSourceAction::SendEOF,
-                                FiniteSourceAction::WriteStageCompleted,
-                                FiniteSourceAction::Cleanup,
-                            ],
-                        })
-                    })
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Finalising, actions: vec![FiniteSourceAction::SendEOF, FiniteSourceAction::WriteStageCompleted, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::FinalisationCompleted))] }) })
                 };
-
                 on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        let error_msg = if let FiniteSourceEvent::Error(msg) = event {
-                            msg
-                        } else {
-                            "Unknown error".to_string()
-                        };
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
+                };
+            }
 
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Failed(error_msg.clone()),
-                            actions: vec![
-                                FiniteSourceAction::SendError { message: error_msg },
-                                FiniteSourceAction::Cleanup,
-                            ],
-                        })
-                    })
+            state FiniteSourceState::Finalising {
+                on FiniteSourceEvent::FinalisationCompleted => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Drained, actions: vec![] }) })
+                };
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
                 };
             }
 
             state FiniteSourceState::Drained {
-                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        ctx.instrumentation.transition_to_state(state.variant_name());
-                        Ok(vec![])
-                    })
-                };
 
-                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let event = event.clone();
-                    Box::pin(async move {
-                        let error_msg = if let FiniteSourceEvent::Error(msg) = event {
-                            msg
-                        } else {
-                            "Unknown error".to_string()
-                        };
+            }
 
-                        Ok(Transition {
-                            next_state: FiniteSourceState::Failed(error_msg.clone()),
-                            actions: vec![
-                                FiniteSourceAction::SendError { message: error_msg },
-                                FiniteSourceAction::Cleanup,
-                            ],
-                        })
-                    })
+            state FiniteSourceState::Failing {
+                on FiniteSourceEvent::TerminationSettled => |state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceState::Failing(cause) = state else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Failed(cause), actions: vec![] }) })
                 };
             }
 
             state FiniteSourceState::Failed {
-                on_entry |state: &FiniteSourceState<H>, ctx: &mut FiniteSourceContext<H>| {
-                    Box::pin(async move {
-                        ctx.instrumentation.transition_to_state(state.variant_name());
-                        Ok(vec![])
-                    })
+
+            }
+
+            state FiniteSourceState::Cancelling {
+                on FiniteSourceEvent::Error => |state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    let next = FiniteSourceState::failure(cause.clone());
+                    let repeated_cancel = matches!(next, FiniteSourceState::Cancelling(_));
+                    let next_state = if repeated_cancel { state.clone() } else { next };
+                    Box::pin(async move { Ok(Transition { next_state, actions: if repeated_cancel { vec![] } else { vec![
+                        FiniteSourceAction::SendError { message: cause },
+                        FiniteSourceAction::Cleanup,
+                        FiniteSourceAction::Host(SupervisorAction::Cleanup),
+                        FiniteSourceAction::Host(SupervisorAction::CloseMailbox),
+                        FiniteSourceAction::Host(SupervisorAction::SettlePublications),
+                        FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled)),
+                    ] } }) })
                 };
 
-                on FiniteSourceEvent::Error => |state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                    let state = state.clone();
-                    let event = event.clone();
-                    Box::pin(async move {
-                        if let FiniteSourceEvent::Error(_msg) = event {
-                            Ok(Transition {
-                                next_state: state,
-                                actions: vec![],
-                            })
-                        } else {
-                            Err(FsmError::HandlerError(
-                                "Invalid event".to_string(),
-                            ))
-                        }
-                    })
+                on FiniteSourceEvent::TerminationSettled => |state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceState::Cancelling(cause) = state else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Cancelled(cause), actions: vec![] }) })
                 };
             }
 
+            state FiniteSourceState::Cancelled {
+
+            }
+
+            state FiniteSourceState::WaitingForGun {
+                on FiniteSourceEvent::Start => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::AcquiringInput, actions: vec![] }) })
+                };
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
+                };
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
+                };
+            }
+
+            state FiniteSourceState::AcquiringInput {
+                on FiniteSourceEvent::InputAcquired => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Starting, actions: vec![FiniteSourceAction::PublishRunning, FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::ActivationCompleted))] }) })
+                };
+                on FiniteSourceEvent::BeginDrain => |_state: &FiniteSourceState<H>, _event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    Box::pin(async move { Ok(Transition { next_state: FiniteSourceState::Draining, actions: vec![] }) })
+                };
+                on FiniteSourceEvent::Error => |_state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
+                    let FiniteSourceEvent::Error(cause) = event else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition {
+                        next_state: FiniteSourceState::failure(cause.clone()),
+                        actions: vec![FiniteSourceAction::SendError { message: cause }, FiniteSourceAction::Cleanup, FiniteSourceAction::Host(SupervisorAction::Cleanup), FiniteSourceAction::Host(SupervisorAction::CloseMailbox), FiniteSourceAction::Host(SupervisorAction::SettlePublications), FiniteSourceAction::Host(SupervisorAction::Emit(FiniteSourceEvent::TerminationSettled))],
+                    }) })
+                };
+            }
             unhandled => |state: &FiniteSourceState<H>, event: &FiniteSourceEvent<H>, _ctx: &mut FiniteSourceContext<H>| {
-                let state_name = state.variant_name().to_string();
-                let event_name = event.variant_name().to_string();
+                let state = state.clone();
+                let event = event.clone();
                 Box::pin(async move {
-                    tracing::error!(
-                        supervisor = "FiniteSourceSupervisor",
-                        state = %state_name,
-                        event = %event_name,
-                        "Unhandled event in FSM - this indicates a state machine configuration error"
-                    );
-                    Err(FsmError::UnhandledEvent {
-                        state: state_name,
-                        event: event_name,
-                    })
+                    if (matches!(state, FiniteSourceState::Draining)
+                        && matches!(event, FiniteSourceEvent::InputAcquired | FiniteSourceEvent::ActivationCompleted | FiniteSourceEvent::ResumeLiveInput))
+                        || matches!(event, FiniteSourceEvent::Initialize | FiniteSourceEvent::Ready | FiniteSourceEvent::BeginDrain | FiniteSourceEvent::Start)
+                        || matches!(state, FiniteSourceState::Failing(_) | FiniteSourceState::Cancelling(_) | FiniteSourceState::Failed(_) | FiniteSourceState::Cancelled(_) | FiniteSourceState::Drained)
+                    {
+                        return Ok(());
+                    }
+                    Err(FsmError::UnhandledEvent { state: state.variant_name().into(), event: event.variant_name().into() })
                 })
             };
         }
@@ -377,21 +325,21 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> Supervisor
         SupervisorKind::FiniteSource
     }
 
-    fn report_journal(
+    fn registration(
         &self,
         _context: &Self::Context,
-    ) -> crate::supervised_base::SupervisorJournal {
-        self.report_journal.clone()
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        crate::supervised_base::base::register_stage(
+            self.data_journal.clone(),
+            self.flow_context.clone(),
+            descriptor,
+        )
     }
 
     fn name(&self) -> &str {
         &self.name
     }
-}
-
-impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervisedCleanup
-    for FiniteSourceSupervisor<H>
-{
 }
 
 #[async_trait::async_trait]
@@ -400,16 +348,128 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
 {
     type Handler = H;
 
+    fn lifecycle_phase(
+        &self,
+        state: &Self::State,
+    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        state.lifecycle_phase()
+    }
+
+    fn accounting(
+        &self,
+        context: &Self::Context,
+    ) -> obzenflow_core::event::provenance::ExecutionAccounting {
+        crate::metrics::instrumentation::snapshot_stage_accounting(&context.instrumentation)
+    }
+
+    fn after_transition(&mut self, state: &Self::State, context: &Self::Context) {
+        context
+            .instrumentation
+            .transition_to_state(state.variant_name());
+    }
+
+    fn supervisor_action(
+        &self,
+        action: &Self::Action,
+    ) -> Option<crate::supervised_base::handler_supervised::SupervisorAction<Self::Event>> {
+        match action {
+            FiniteSourceAction::Host(action) => Some(action.clone()),
+            _ => None,
+        }
+    }
+
+    async fn execute_action(
+        &mut self,
+        action: Self::Action,
+        context: &mut Self::Context,
+    ) -> Result<
+        crate::supervised_base::handler_supervised::ActionExecution<Self::Context, Self::Event>,
+        FsmError,
+    > {
+        use crate::supervised_base::handler_supervised::{ActionCompletion, ActionExecution};
+        let mut resources = context.resources.take().ok_or_else(|| {
+            FsmError::HandlerError("source operation already owns resources".into())
+        })?;
+        Ok(ActionExecution::Pending(Box::pin(async move {
+            let result = action.execute_resources(&mut resources).await;
+            Box::new(move |context: &mut FiniteSourceContext<H>| {
+                context.resources = Some(resources);
+                result.map(|()| None)
+            }) as ActionCompletion<FiniteSourceContext<H>, FiniteSourceEvent<H>>
+        })))
+    }
+
+    async fn execute_cleanup(
+        &mut self,
+        _context: &Self::Context,
+    ) -> Result<
+        crate::supervised_base::handler_supervised::ActionExecution<Self::Context, Self::Event>,
+        FsmError,
+    > {
+        self.handler.take();
+        self.replay_driver.take();
+        Ok(crate::supervised_base::handler_supervised::ActionExecution::Completed)
+    }
+
     fn writer_id(&self) -> WriterId {
         WriterId::from(self.stage_id)
     }
 
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-
     fn event_for_action_error(&self, msg: String) -> FiniteSourceEvent<H> {
         FiniteSourceEvent::Error(msg)
+    }
+
+    fn owned_dispatch(
+        &mut self,
+        state: &Self::State,
+        context: &mut Self::Context,
+    ) -> Option<crate::supervised_base::handler_supervised::OwnedDispatch<Self>> {
+        if !matches!(
+            state,
+            FiniteSourceState::AcquiringInput
+                | FiniteSourceState::Running
+                | FiniteSourceState::Draining
+        ) {
+            return None;
+        }
+        let resources = context.resources.take()?;
+        let state = state.clone();
+        let mut worker = Self {
+            name: self.name.clone(),
+            handler: self.handler.take(),
+            data_journal: self.data_journal.clone(),
+            flow_context: self.flow_context.clone(),
+            stage_id: self.stage_id,
+            idle_backoff: self.idle_backoff.clone(),
+            pending_idle_delay: self.pending_idle_delay.take(),
+            replay_driver: self.replay_driver.take(),
+            replay_started_at: self.replay_started_at.take(),
+            replay_completion: self.replay_completion.clone(),
+            source_boundary: self.source_boundary.clone(),
+            pending_boundary_error: self.pending_boundary_error.take(),
+            pending_boundary_eof: self.pending_boundary_eof,
+            pending_boundary_rejected: self.pending_boundary_rejected,
+        };
+        Some(Box::pin(async move {
+            let mut owned_context = FiniteSourceContext {
+                instrumentation: resources.instrumentation.clone(),
+                resources: Some(resources),
+            };
+            let result = worker.dispatch_state(&state, &mut owned_context).await;
+            Box::new(move |owner: &mut Self, context: &mut Self::Context| {
+                owner.handler = worker.handler;
+                owner.idle_backoff = worker.idle_backoff;
+                owner.pending_idle_delay = worker.pending_idle_delay;
+                owner.replay_driver = worker.replay_driver;
+                owner.replay_started_at = worker.replay_started_at;
+                owner.replay_completion = worker.replay_completion;
+                owner.pending_boundary_error = worker.pending_boundary_error;
+                owner.pending_boundary_eof = worker.pending_boundary_eof;
+                owner.pending_boundary_rejected = worker.pending_boundary_rejected;
+                context.resources = owned_context.resources;
+                result
+            }) as crate::supervised_base::handler_supervised::DispatchCompletion<Self>
+        }))
     }
 
     async fn dispatch_state(
@@ -417,8 +477,16 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         state: &Self::State,
         ctx: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
+        let ctx = ctx.resources_mut()?;
         // Track every event loop iteration
         match state {
+            FiniteSourceState::Initializing
+            | FiniteSourceState::Starting
+            | FiniteSourceState::Finalising
+            | FiniteSourceState::Failing(_)
+            | FiniteSourceState::Cancelling(_) => Ok(EventLoopDirective::Continue),
+            FiniteSourceState::Cancelled(_) => Ok(EventLoopDirective::Terminate),
+
             FiniteSourceState::Created => {
                 self.idle_backoff.reset();
                 self.pending_idle_delay = None;
@@ -438,6 +506,44 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 self.pending_idle_delay = None;
                 // Wait for start signal from pipeline
                 Ok(EventLoopDirective::Continue)
+            }
+
+            FiniteSourceState::AcquiringInput => {
+                if matches!(
+                    ctx.runtime_execution.source_phase_for(self.stage_id),
+                    SourceExecutionPhase::Replaying
+                ) {
+                    self.replay_driver = Some(
+                        crate::stages::source::supervision::acquire_replay_input(
+                            &ctx.runtime_execution,
+                            &self.flow_context,
+                            StageType::FiniteSource,
+                            &self.data_journal,
+                        )
+                        .await?,
+                    );
+                    self.replay_started_at = Some(Instant::now());
+                } else if let Err(error) = self
+                    .handler
+                    .as_mut()
+                    .expect("handler available before cleanup")
+                    .acquire(SourceReaderInitContext {
+                        stage_id: self.stage_id,
+                        stage_name: ctx.stage_name.clone(),
+                        flow_name: ctx.flow_name.clone(),
+                    })
+                {
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                        source_open_failure(
+                            &ctx.stage_name,
+                            ctx.runtime_execution.resume_control().is_some(),
+                            &error,
+                        ),
+                    )));
+                }
+                Ok(EventLoopDirective::Transition(
+                    FiniteSourceEvent::InputAcquired,
+                ))
             }
 
             FiniteSourceState::Running | FiniteSourceState::Draining => {
@@ -515,58 +621,6 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                     .fetch_add(1, Ordering::Relaxed);
 
                 if replaying {
-                    let replay_archive = ctx
-                        .runtime_execution
-                        .archive_for_io()
-                        .map(|a| a.as_ref())
-                        .expect("Replaying phase requires a replay archive (archive_for_io)");
-                    if self.replay_driver.is_none() {
-                        let stage_key = ctx.stage_name.as_str();
-                        let journal_path = replay_archive
-                            .source_data_journal_path(stage_key)
-                            .map_err(|e| format!("Failed to locate archived journal: {e}"))?;
-                        let reader = replay_archive
-                            .open_source_reader(stage_key, StageType::FiniteSource)
-                            .await
-                            .map_err(|e| format!("Failed to open archived journal reader: {e}"))?;
-                        let replay_context = ReplayContextTemplate {
-                            original_flow_id: replay_archive.archive_flow_id().to_string(),
-                            original_stage_id: replay_archive
-                                .archived_stage_id(stage_key)
-                                .map_err(|e| format!("Failed to resolve archived stage id: {e}"))?,
-                        };
-                        self.replay_driver =
-                            Some(ReplayDriver::new(reader, journal_path, replay_context));
-
-                        if self.replay_started_at.is_none() {
-                            self.replay_started_at = Some(Instant::now());
-                            let started_event = SystemEvent::new(
-                                WriterId::from(self.stage_id),
-                                SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::Started {
-                                    archive_path: replay_archive.archive_path().to_path_buf(),
-                                    archive_flow_id: replay_archive.archive_flow_id().to_string(),
-                                    archive_status: replay_archive.archive_status(),
-                                    archive_status_derivation: replay_archive.status_derivation(),
-                                    allow_incomplete: replay_archive.allow_incomplete_archive(),
-                                    source_stages: replay_archive.source_stage_keys(),
-                                }),
-                            );
-                            if let Err(e) = publication::report(
-                                &self.report_journal,
-                                started_event,
-                                Default::default(),
-                            )
-                            .await
-                            {
-                                tracing::error!(
-                                    stage_name = %ctx.stage_name,
-                                    journal_error = %e,
-                                    "Failed to append ReplayLifecycle::Started system event"
-                                );
-                            }
-                        }
-                    }
-
                     let flow_context = stage_flow_context.clone();
 
                     let tick_started_at = Instant::now();
@@ -624,9 +678,8 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                         });
                                     self.replay_completion
                                         .maybe_emit_completed(
-                                            self.stage_id,
-                                            &ctx.stage_name,
-                                            &self.report_journal,
+                                            &self.flow_context,
+                                            &self.data_journal,
                                             self.replay_started_at,
                                             ReplayCompletionFacts {
                                                 replayed_count,
@@ -646,7 +699,9 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                                     self.idle_backoff.reset();
                                     self.pending_idle_delay = None;
                                     self.replay_driver = None;
-                                    Ok(EventLoopDirective::Continue)
+                                    Ok(EventLoopDirective::Transition(
+                                        FiniteSourceEvent::ResumeLiveInput,
+                                    ))
                                 }
                             }
                         }
@@ -655,26 +710,16 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                         ))),
                     }
                 } else {
-                    if let Err(error) = self.handler.acquire(SourceReaderInitContext {
-                        stage_id: self.stage_id,
-                        stage_name: ctx.stage_name.clone(),
-                        flow_name: ctx.flow_name.clone(),
-                    }) {
-                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                            source_open_failure(
-                                &ctx.stage_name,
-                                ctx.runtime_execution.resume_control().is_some(),
-                                &error,
-                            ),
-                        )));
-                    }
-
                     let source_boundary = self.source_boundary.clone();
                     let report = around_source_boundary(
                         source_boundary,
                         Box::pin(async {
                             let poll_started_at = time::Instant::now();
-                            let invocation = self.handler.next_invocation();
+                            let invocation = self
+                                .handler
+                                .as_mut()
+                                .expect("handler available before cleanup")
+                                .next_invocation();
                             let poll_duration = poll_started_at.elapsed();
                             SourcePollReport::from_erased(invocation, poll_duration)
                         }),
@@ -898,18 +943,22 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> ExternalEventPolicy
                 | FiniteSourceState::WaitingForGun
         ) {
             ExternalEventMode::Block
-        } else if matches!(
-            state,
-            FiniteSourceState::Drained | FiniteSourceState::Failed(_)
-        ) {
-            ExternalEventMode::CloseAndRecord
         } else {
             ExternalEventMode::Poll
         }
     }
 
+    fn defer_external_event(state: &Self::State, event: &Self::Event) -> bool {
+        FiniteSourceState::defer_external_event(state, event)
+    }
+
     fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event> {
-        if matches!(state, FiniteSourceState::Failed(_)) {
+        if matches!(
+            state,
+            FiniteSourceState::Drained
+                | FiniteSourceState::Failed(_)
+                | FiniteSourceState::Cancelled(_)
+        ) {
             None
         } else {
             Some(FiniteSourceEvent::Error(

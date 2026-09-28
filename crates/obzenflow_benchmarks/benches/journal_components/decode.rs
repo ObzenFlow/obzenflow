@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::fixtures::{self, Backend, History, DEADLINE};
+use super::fixtures::{self, History, DEADLINE};
 use criterion::{BenchmarkId, Criterion, Throughput};
 use obzenflow_core::{EventId, StageId};
 use obzenflow_infra::testing::journal_bench::{DecodeCursor, FrameCorpus};
@@ -143,7 +143,6 @@ fn prepare(
     physical_group: usize,
 ) -> (History, Vec<EventId>, Arc<FrameCorpus>) {
     let history = runtime.block_on(History::build(
-        Backend::Disk,
         &[StageId::new()],
         64,
         0,

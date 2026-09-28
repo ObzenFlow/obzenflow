@@ -6,136 +6,85 @@ use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrument
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
-use obzenflow_core::event::SystemEvent;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+use obzenflow_core::{ChainEvent, Journal};
 use std::future::Future;
 use std::sync::Arc;
 
-pub(crate) async fn publish_running_best_effort(
-    stage_label: &'static str,
-    stage_id: StageId,
-    stage_name: &str,
-    report_journal: &crate::supervised_base::SupervisorJournal,
-) {
-    let running_event = SystemEvent::stage_running(stage_id);
-
-    if let Err(e) = crate::supervised_base::publication::report(
-        report_journal,
-        running_event,
-        Default::default(),
-    )
-    .await
-    {
-        tracing::error!(
-            stage_name = %stage_name,
-            journal_error = %e,
-            "Failed to publish running event; continuing without system journal entry"
-        );
-    }
-
-    tracing::info!(
-        stage_name = %stage_name,
-        "{} published running event",
-        stage_label
+async fn publish(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    context: FlowContext,
+    fact: StageLifecycleFact,
+) -> Result<(), obzenflow_fsm::FsmError> {
+    let event = ChainEventFactory::create_with_context(
+        context.stage_id.into(),
+        ChainPayload::Execution(ExecutionPayload::StageLifecycle(fact)),
+        context,
     );
+    crate::supervised_base::publication::append(journal, event, Default::default())
+        .await
+        .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+    Ok(())
 }
 
-pub(crate) async fn send_completion_best_effort(
-    stage_label: &'static str,
-    stage_id: StageId,
-    stage_name: &str,
-    report_journal: &crate::supervised_base::SupervisorJournal,
-    _data_journal: &Arc<dyn Journal<ChainEvent>>,
-    _error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
-    instrumentation: &StageInstrumentation,
-) {
-    // Terminal facts use owner accounting, including for empty or filtered streams.
-    let metrics = snapshot_stage_accounting(instrumentation);
-    let completion_event = SystemEvent::stage_completed_with_accounting(stage_id, metrics);
-
-    if let Err(e) = crate::supervised_base::publication::report(
-        report_journal,
-        completion_event,
-        Default::default(),
-    )
-    .await
-    {
-        tracing::error!(
-            stage_name = %stage_name,
-            journal_error = %e,
-            "Failed to write completion event; continuing without system journal entry"
-        );
-    }
-
-    tracing::info!(stage_name = %stage_name, "{} sent completion event", stage_label);
+pub(crate) async fn publish_running(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    context: FlowContext,
+) -> Result<(), obzenflow_fsm::FsmError> {
+    let stage_id = context.stage_id;
+    publish(journal, context, StageLifecycleFact::Running { stage_id }).await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn send_failure_best_effort(
-    stage_label: &'static str,
-    stage_id: StageId,
-    stage_name: &str,
-    message: &str,
-    report_journal: &crate::supervised_base::SupervisorJournal,
-    _data_journal: &Arc<dyn Journal<ChainEvent>>,
-    _error_journal: Option<&Arc<dyn Journal<ChainEvent>>>,
+pub(crate) async fn send_completion(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    context: FlowContext,
     instrumentation: &StageInstrumentation,
-) {
-    // Failure accounting is independent of optional capture and journal lookup.
-    let metrics = snapshot_stage_accounting(instrumentation);
-
-    let cancel_reason = match message {
-        FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
-        STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
-        _ => None,
-    };
-
-    let system_event = if let Some(reason) = cancel_reason {
-        SystemEvent::stage_cancelled_with_accounting(stage_id, reason.to_string(), metrics)
-    } else {
-        SystemEvent::stage_failed_with_accounting(
+) -> Result<(), obzenflow_fsm::FsmError> {
+    let stage_id = context.stage_id;
+    publish(
+        journal,
+        context,
+        StageLifecycleFact::Completed {
             stage_id,
-            message.to_string(),
-            false, // not recoverable
-            metrics,
-        )
-    };
-
-    match crate::supervised_base::publication::report(
-        report_journal,
-        system_event,
-        Default::default(),
+            accounting: Some(snapshot_stage_accounting(instrumentation)),
+        },
     )
     .await
-    {
-        Ok(_) => {
-            if let Some(reason) = cancel_reason {
-                tracing::info!(
-                    stage_name = %stage_name,
-                    reason = %reason,
-                    "{} stage cancelled",
-                    stage_label
-                );
+}
+
+pub(crate) async fn send_failure(
+    journal: &Arc<dyn Journal<ChainEvent>>,
+    context: FlowContext,
+    message: &str,
+    instrumentation: &StageInstrumentation,
+    causal_event_id: Option<obzenflow_core::EventId>,
+) -> Result<(), obzenflow_fsm::FsmError> {
+    let stage_id = context.stage_id;
+    let accounting = Some(snapshot_stage_accounting(instrumentation));
+    let fact = match message {
+        FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT => {
+            let reason = if message == STOP_REASON_TIMEOUT {
+                STOP_REASON_TIMEOUT
             } else {
-                tracing::error!(
-                    stage_name = %stage_name,
-                    error = %message,
-                    "{} stage encountered error",
-                    stage_label
-                );
+                STOP_REASON_USER_STOP
+            };
+            StageLifecycleFact::Cancelled {
+                stage_id,
+                reason: reason.to_string(),
+                accounting,
             }
         }
-        Err(e) => {
-            tracing::error!(
-                stage_name = %stage_name,
-                error = %message,
-                journal_error = %e,
-                "{} stage encountered error but failed to write error event",
-                stage_label
-            );
-        }
-    }
+        _ => StageLifecycleFact::Failed {
+            stage_id,
+            error: message.to_string(),
+            recoverable: Some(false),
+            accounting,
+            causal_event_id,
+        },
+    };
+    publish(journal, context, fact).await
 }
 
 pub(crate) async fn cleanup_best_effort<E, Fut>(
@@ -166,7 +115,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::event::types::EventId;
-    use obzenflow_core::event::{JournalWriterId, SystemPayload};
+    use obzenflow_core::event::{ChainPayload, JournalWriterId};
     use obzenflow_core::id::{JournalId, StageId};
     use obzenflow_core::journal::{JournalError, JournalReader};
     use obzenflow_core::{ChainEvent, Journal, JournalRecord};
@@ -194,82 +143,13 @@ mod tests {
         }
     }
 
-    struct EmptyJournal<T> {
-        id: JournalId,
-        _phantom: PhantomData<T>,
-    }
-
-    impl<T> EmptyJournal<T> {
-        fn new() -> Self {
-            Self {
-                id: JournalId::new(),
-                _phantom: PhantomData,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl<T> obzenflow_core::journal::JournalStorage<T> for EmptyJournal<T>
-    where
-        T: obzenflow_core::event::JournalEvent + 'static,
-    {
-        fn storage_id(&self) -> &JournalId {
-            &self.id
-        }
-
-        fn storage_owner(&self) -> Option<&obzenflow_core::JournalOwner> {
-            None
-        }
-
-        async fn storage_append(
-            &self,
-            _event: T,
-            _options: obzenflow_core::journal::AppendOptions<T>,
-        ) -> Result<JournalRecord<T::Payload>, JournalError> {
-            Err(JournalError::Implementation {
-                message: "append not supported in EmptyJournal".to_string(),
-                source: Box::new(std::io::Error::other("append not supported")),
-            })
-        }
-
-        async fn storage_read_all_unordered(
-            &self,
-        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-            Ok(Vec::new())
-        }
-
-        async fn storage_read_event(
-            &self,
-            _event_id: &EventId,
-        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
-            Ok(None)
-        }
-
-        async fn storage_reader_from(
-            &self,
-            position: u64,
-        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(EmptyReader {
-                position,
-                _phantom: PhantomData,
-            }))
-        }
-
-        async fn storage_read_last_n(
-            &self,
-            _count: usize,
-        ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
-            Ok(Vec::new())
-        }
-    }
-
-    struct RecordingSystemJournal {
+    struct RecordingJournal {
         owner: obzenflow_core::JournalOwner,
         id: JournalId,
-        events: Mutex<Vec<SystemEvent>>,
+        events: Mutex<Vec<ChainEvent>>,
     }
 
-    impl RecordingSystemJournal {
+    impl RecordingJournal {
         fn new(stage: StageId) -> Self {
             Self {
                 id: JournalId::new(),
@@ -278,13 +158,13 @@ mod tests {
             }
         }
 
-        fn take(&self) -> Vec<SystemEvent> {
+        fn take(&self) -> Vec<ChainEvent> {
             std::mem::take(&mut self.events.lock().expect("lock poisoned"))
         }
     }
 
     #[async_trait]
-    impl obzenflow_core::journal::JournalStorage<SystemEvent> for RecordingSystemJournal {
+    impl obzenflow_core::journal::JournalStorage<ChainEvent> for RecordingJournal {
         fn storage_id(&self) -> &JournalId {
             &self.id
         }
@@ -295,34 +175,34 @@ mod tests {
 
         async fn storage_append(
             &self,
-            event: SystemEvent,
-            mut options: obzenflow_core::journal::AppendOptions<SystemEvent>,
-        ) -> Result<JournalRecord<SystemPayload>, JournalError> {
+            event: ChainEvent,
+            mut options: obzenflow_core::journal::AppendOptions<ChainEvent>,
+        ) -> Result<JournalRecord<ChainPayload>, JournalError> {
             let event = options.capture.prepare(0, event);
             self.events
                 .lock()
                 .expect("lock poisoned")
                 .push(event.clone());
-            Ok(JournalRecord::new(JournalWriterId::new(), event))
+            Ok(JournalRecord::new(JournalWriterId::from(self.id), event))
         }
 
         async fn storage_read_all_unordered(
             &self,
-        ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             Ok(Vec::new())
         }
 
         async fn storage_read_event(
             &self,
             _event_id: &EventId,
-        ) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
+        ) -> Result<Option<JournalRecord<ChainPayload>>, JournalError> {
             Ok(None)
         }
 
         async fn storage_reader_from(
             &self,
             position: u64,
-        ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
+        ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
             Ok(Box::new(EmptyReader {
                 position,
                 _phantom: PhantomData,
@@ -332,45 +212,37 @@ mod tests {
         async fn storage_read_last_n(
             &self,
             _count: usize,
-        ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
+        ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalError> {
             Ok(Vec::new())
         }
     }
 
-    async fn exercise_failure(message: &str) -> SystemEvent {
+    async fn exercise_failure(message: &str) -> ChainEvent {
         let stage_id = StageId::new();
-        let system = Arc::new(RecordingSystemJournal::new(stage_id));
-        let system_journal: Arc<dyn Journal<SystemEvent>> = system.clone();
-
-        let data_journal: Arc<dyn Journal<ChainEvent>> =
-            Arc::new(EmptyJournal::<ChainEvent>::new());
-        let error_journal: Arc<dyn Journal<ChainEvent>> =
-            Arc::new(EmptyJournal::<ChainEvent>::new());
+        let system = Arc::new(RecordingJournal::new(stage_id));
+        let journal: Arc<dyn Journal<ChainEvent>> = system.clone();
         let instrumentation = StageInstrumentation::new();
-
-        send_failure_best_effort(
-            "Test",
-            stage_id,
-            "test_stage",
+        send_failure(
+            &journal,
+            FlowContext::new("test_stage", stage_id),
             message,
-            &system_journal.clone().into(),
-            &data_journal,
-            Some(&error_journal),
             &instrumentation,
+            None,
         )
-        .await;
+        .await
+        .unwrap();
 
         let events = system.take();
-        assert_eq!(events.len(), 1, "expected exactly one system event");
-        events.into_iter().next().expect("missing system event")
+        assert_eq!(events.len(), 1, "expected exactly one stage fact");
+        events.into_iter().next().expect("missing stage fact")
     }
 
     #[tokio::test]
     async fn send_failure_emits_cancelled_for_timeout() {
         let event = exercise_failure(STOP_REASON_TIMEOUT).await;
         match event.payload {
-            SystemPayload::StageLifecycle { event, .. } => match event {
-                obzenflow_core::event::StageLifecycleEvent::Cancelled { reason, .. } => {
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) => match event {
+                StageLifecycleFact::Cancelled { reason, .. } => {
                     assert_eq!(reason, STOP_REASON_TIMEOUT);
                 }
                 other => panic!("expected Cancelled, got {other:?}"),
@@ -383,8 +255,8 @@ mod tests {
     async fn send_failure_emits_cancelled_for_user_stop() {
         let event = exercise_failure(STOP_REASON_USER_STOP).await;
         match event.payload {
-            SystemPayload::StageLifecycle { event, .. } => match event {
-                obzenflow_core::event::StageLifecycleEvent::Cancelled { reason, .. } => {
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) => match event {
+                StageLifecycleFact::Cancelled { reason, .. } => {
                     assert_eq!(reason, STOP_REASON_USER_STOP);
                 }
                 other => panic!("expected Cancelled, got {other:?}"),
@@ -397,8 +269,8 @@ mod tests {
     async fn send_failure_emits_failed_for_other_errors() {
         let event = exercise_failure("boom").await;
         match event.payload {
-            SystemPayload::StageLifecycle { event, .. } => match event {
-                obzenflow_core::event::StageLifecycleEvent::Failed { error, .. } => {
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) => match event {
+                StageLifecycleFact::Failed { error, .. } => {
                     assert_eq!(error, "boom");
                 }
                 other => panic!("expected Failed, got {other:?}"),

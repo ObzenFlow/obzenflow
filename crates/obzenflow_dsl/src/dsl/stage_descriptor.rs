@@ -2214,7 +2214,7 @@ impl<C: SinkConnector + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
                     phase: SinkOperationPhase::Open,
                     error: &error,
                     error_journal: &resources.error_journal,
-                    report_journal: &resources.report_journal,
+                    data_journal: &resources.data_journal,
                     instrumentation: &instrumentation,
                 })
                 .await
@@ -2276,12 +2276,19 @@ fn check_finite_source_state<H>(
     use crate::stage_handle_adapter::StageStatus;
     match state {
         FiniteSourceState::Created => StageStatus::Created,
+        FiniteSourceState::Initializing => StageStatus::Initializing,
+        FiniteSourceState::Starting => StageStatus::Starting,
+        FiniteSourceState::Finalising => StageStatus::Finalising,
+        FiniteSourceState::AcquiringInput => StageStatus::AcquiringInput,
+        FiniteSourceState::Failing(_) => StageStatus::Failing,
+        FiniteSourceState::Cancelling(_) => StageStatus::Cancelling,
+        FiniteSourceState::Cancelled(_) => StageStatus::Cancelled,
         FiniteSourceState::Initialized | FiniteSourceState::WaitingForGun => StageStatus::Ready,
         FiniteSourceState::Running => StageStatus::Running,
         FiniteSourceState::Draining => StageStatus::Draining,
         FiniteSourceState::Drained => StageStatus::Drained,
         FiniteSourceState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
+        FiniteSourceState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -2308,12 +2315,19 @@ fn check_infinite_source_state<H>(
     use crate::stage_handle_adapter::StageStatus;
     match state {
         InfiniteSourceState::Created => StageStatus::Created,
+        InfiniteSourceState::Initializing => StageStatus::Initializing,
+        InfiniteSourceState::Starting => StageStatus::Starting,
+        InfiniteSourceState::Finalising => StageStatus::Finalising,
+        InfiniteSourceState::AcquiringInput => StageStatus::AcquiringInput,
+        InfiniteSourceState::Failing(_) => StageStatus::Failing,
+        InfiniteSourceState::Cancelling(_) => StageStatus::Cancelling,
+        InfiniteSourceState::Cancelled(_) => StageStatus::Cancelled,
         InfiniteSourceState::Initialized | InfiniteSourceState::WaitingForGun => StageStatus::Ready,
         InfiniteSourceState::Running => StageStatus::Running,
         InfiniteSourceState::Draining => StageStatus::Draining,
         InfiniteSourceState::Drained => StageStatus::Drained,
         InfiniteSourceState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
+        InfiniteSourceState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -2331,12 +2345,18 @@ fn check_transform_state<H>(state: &TransformState<H>) -> crate::stage_handle_ad
     use crate::stage_handle_adapter::StageStatus;
     match state {
         TransformState::Created => StageStatus::Created,
+        TransformState::Initializing => StageStatus::Initializing,
+        TransformState::Starting => StageStatus::Starting,
+        TransformState::Finalising => StageStatus::Finalising,
+        TransformState::Failing(_) => StageStatus::Failing,
+        TransformState::Cancelling(_) => StageStatus::Cancelling,
+        TransformState::Cancelled(_) => StageStatus::Cancelled,
         TransformState::Initialized => StageStatus::Ready,
         TransformState::Running => StageStatus::Running,
         TransformState::Draining => StageStatus::Draining,
         TransformState::Drained => StageStatus::Drained,
         TransformState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
+        TransformState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -2356,12 +2376,21 @@ fn check_sink_state<H>(state: &JournalSinkState<H>) -> crate::stage_handle_adapt
     use crate::stage_handle_adapter::StageStatus;
     match state {
         JournalSinkState::Created => StageStatus::Created,
+        JournalSinkState::Initializing => StageStatus::Initializing,
+        JournalSinkState::Starting => StageStatus::Starting,
+        JournalSinkState::Finalising => StageStatus::Finalising,
+        JournalSinkState::Flushing => StageStatus::Flushing,
+        JournalSinkState::DrainingWriter => StageStatus::DrainingWriter,
+        JournalSinkState::CheckingContracts => StageStatus::CheckingContracts,
+        JournalSinkState::Failing(_) => StageStatus::Failing,
+        JournalSinkState::Cancelling(_) => StageStatus::Cancelling,
+        JournalSinkState::Cancelled(_) => StageStatus::Cancelled,
         JournalSinkState::Initialized => StageStatus::Ready,
         JournalSinkState::Running => StageStatus::Running,
-        JournalSinkState::Flushing | JournalSinkState::Draining => StageStatus::Draining,
+        JournalSinkState::Draining => StageStatus::Draining,
         JournalSinkState::Drained => StageStatus::Drained,
         JournalSinkState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
+        JournalSinkState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -2745,12 +2774,22 @@ fn check_stateful_state<H>(state: &StatefulState<H>) -> crate::stage_handle_adap
     use crate::stage_handle_adapter::StageStatus;
     match state {
         StatefulState::Created => StageStatus::Created,
+        StatefulState::Initializing => StageStatus::Initializing,
+        StatefulState::Starting => StageStatus::Starting,
+        StatefulState::Finalising => StageStatus::Finalising,
+        StatefulState::ValidatingTerminal => StageStatus::ValidatingTerminal,
+        StatefulState::ForwardingTerminal => StageStatus::ForwardingTerminal,
+        StatefulState::ProducingFinalOutput => StageStatus::ProducingFinalOutput,
+        StatefulState::DrainingFinalOutput => StageStatus::DrainingFinalOutput,
+        StatefulState::Failing(_) => StageStatus::Failing,
+        StatefulState::Cancelling(_) => StageStatus::Cancelling,
+        StatefulState::Cancelled(_) => StageStatus::Cancelled,
         StatefulState::Initialized => StageStatus::Ready,
         StatefulState::Accumulating | StatefulState::Emitting => StageStatus::Running,
-        StatefulState::Draining => StageStatus::Draining,
+        StatefulState::Draining | StatefulState::EmittingDuringDrain => StageStatus::Draining,
         StatefulState::Drained => StageStatus::Drained,
         StatefulState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
+        StatefulState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -2946,12 +2985,18 @@ fn check_join_state<H>(state: &JoinState<H>) -> crate::stage_handle_adapter::Sta
     use crate::stage_handle_adapter::StageStatus;
     match state {
         JoinState::Created => StageStatus::Created,
+        JoinState::Initializing => StageStatus::Initializing,
+        JoinState::Starting => StageStatus::Starting,
+        JoinState::Finalising => StageStatus::Finalising,
+        JoinState::Failing(_) => StageStatus::Failing,
+        JoinState::Cancelling(_) => StageStatus::Cancelling,
+        JoinState::Cancelled(_) => StageStatus::Cancelled,
         JoinState::Initialized => StageStatus::Ready,
         JoinState::Hydrating | JoinState::Live | JoinState::Enriching => StageStatus::Running,
         JoinState::Draining => StageStatus::Draining,
         JoinState::Drained => StageStatus::Drained,
         JoinState::Failed(_) => StageStatus::Failed,
-        _ => StageStatus::Created,
+        JoinState::_Phantom(_) => unreachable!("phantom stage state is never entered"),
     }
 }
 
@@ -2977,7 +3022,7 @@ impl<H: UnifiedJoinHandler + 'static> sealed::Sealed for JoinDescriptor<H> {}
 mod tests {
     use super::*;
     use obzenflow_adapters::middleware::CircuitBreaker;
-    use obzenflow_core::event::{JournalEvent, SystemEvent};
+    use obzenflow_core::event::JournalEvent;
     use obzenflow_core::{
         BoundedBindingEvidence, ChainEvent, FlowId, JournalRecord, StageKey, TypedPayload,
     };
@@ -4005,15 +4050,12 @@ mod tests {
             }
         }
 
-        let system_owner = JournalOwner::system(obzenflow_core::SystemId::new());
         let stage_owner = JournalOwner::stage(stage_id);
 
         let data_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(NoopJournal::new(stage_owner.clone()));
         let error_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(NoopJournal::new(stage_owner.clone()));
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(NoopJournal::new(system_owner));
 
         let topology_stage_id = obzenflow_topology::StageId::from_ulid(stage_id.as_ulid());
         let topology_stage = obzenflow_topology::StageInfo::new(
@@ -4049,7 +4091,10 @@ mod tests {
             heartbeat_interval: 1000,
             data_journal,
             error_journal,
-            report_journal: system_journal.into(),
+            flow_context: obzenflow_core::event::provenance::FlowContext::new(
+                "cb_source",
+                stage_id,
+            ),
             upstream_journals: Vec::new(),
             upstream_stage_names: std::collections::HashMap::new(),
             output_contract: Default::default(),

@@ -80,6 +80,7 @@ impl DirectFactPlan {
 pub struct SubscriptionFactory {
     /// Pre-computed stage names for all potential upstreams
     stage_names: HashMap<StageId, String>,
+    advisory_contract_upstreams: HashSet<StageId>,
     /// Stable current-to-archive stage identity used by contract authorship
     /// during replay and resume.
     archived_stage_ids_by_current: HashMap<StageId, StageId>,
@@ -96,6 +97,7 @@ pub struct SubscriptionFactory {
 pub struct BoundSubscriptionFactory {
     /// Owner label for logging/attribution
     pub owner_label: String,
+    advisory_contract_upstreams: HashSet<StageId>,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
     archived_stage_ids_by_current: HashMap<StageId, StageId>,
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
@@ -117,6 +119,7 @@ impl SubscriptionFactory {
     pub fn new(stage_names: HashMap<StageId, String>) -> Self {
         Self {
             stage_names,
+            advisory_contract_upstreams: HashSet::new(),
             archived_stage_ids_by_current: HashMap::new(),
             entered_generation: obzenflow_core::ReaderGeneration::default(),
         }
@@ -167,6 +170,7 @@ impl SubscriptionFactory {
 
         BoundSubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
+            advisory_contract_upstreams: self.advisory_contract_upstreams.clone(),
             journals_with_names,
             archived_stage_ids_by_current: self.archived_stage_ids_by_current.clone(),
             selected_feeds_by_stage: HashMap::new(),
@@ -248,6 +252,7 @@ impl BoundSubscriptionFactory {
                 .with_seq_ordered(self.seq_ordered)
                 .with_entered_generation(self.entered_generation)
                 .with_contracts(wiring)
+                .with_advisory_contract_upstreams(self.advisory_contract_upstreams.clone())
                 .transport_only();
 
         Ok(subscription)
@@ -297,8 +302,8 @@ pub struct StageResources {
     /// Stage's own journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// Owned publication destination for protected supervisor reports
-    pub report_journal: crate::supervised_base::SupervisorJournal,
+    /// Canonical authoring identity for facts owned by this stage.
+    pub flow_context: obzenflow_core::event::provenance::FlowContext,
 
     /// Upstream journals for reading events
     pub upstream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
@@ -400,6 +405,8 @@ pub struct StageResourcesBuilder {
     lineage_policies: HashMap<StageId, obzenflow_core::config::LineagePolicy>,
     /// FLOWIP-010: build-resolved per-stage heartbeat interval.
     heartbeat_intervals: HashMap<StageId, u64>,
+    source_contract_strict_mode:
+        crate::messaging::upstream_subscription_policy::SourceContractStrictMode,
 }
 
 impl StageResourcesBuilder {
@@ -427,7 +434,17 @@ impl StageResourcesBuilder {
             seq_ordered_fan_ins: HashSet::new(),
             lineage_policies: HashMap::new(),
             heartbeat_intervals: HashMap::new(),
+            source_contract_strict_mode: Default::default(),
         }
+    }
+
+    /// Resolve source-edge contract policy at the child subscription boundary.
+    pub fn with_source_contract_strict_mode(
+        mut self,
+        mode: crate::messaging::upstream_subscription_policy::SourceContractStrictMode,
+    ) -> Self {
+        self.source_contract_strict_mode = mode;
+        self
     }
 
     /// Configure a flow-scoped backpressure plan (FLOWIP-086k).
@@ -704,6 +721,24 @@ impl StageResourcesBuilder {
             // Keep a copy for logging before moving into the factory
             let all_stage_names_for_log = all_stage_names.clone();
             let mut subscription_factory = SubscriptionFactory::new(all_stage_names);
+            if matches!(
+                self.source_contract_strict_mode,
+                crate::messaging::upstream_subscription_policy::SourceContractStrictMode::Warn
+            ) {
+                subscription_factory.advisory_contract_upstreams = self
+                    .topology
+                    .stages()
+                    .filter(|stage| {
+                        matches!(
+                            stage.stage_type,
+                            obzenflow_topology::StageType::FiniteSource
+                                | obzenflow_topology::StageType::InfiniteSource
+                        )
+                    })
+                    .map(|stage| StageId::from_topology_id(stage.id))
+                    .collect();
+            }
+
             subscription_factory.entered_generation = entered_generation;
             subscription_factory.archived_stage_ids_by_current =
                 archived_stage_ids_by_current.clone();
@@ -811,37 +846,34 @@ impl StageResourcesBuilder {
 
             let resources = StageResources {
                 flow_id: self.flow_id,
-                report_journal: crate::supervised_base::SupervisorJournal::stage(
-                    data_journal.clone(),
-                    obzenflow_core::event::provenance::FlowContext {
-                        flow_id: self.flow_id.to_string(),
-                        flow_name: self.topology.flow_name(),
-                        stage_type: match stage_info.stage_type {
-                            obzenflow_topology::StageType::FiniteSource => {
-                                obzenflow_core::event::context::StageType::FiniteSource
-                            }
-                            obzenflow_topology::StageType::InfiniteSource => {
-                                obzenflow_core::event::context::StageType::InfiniteSource
-                            }
-                            obzenflow_topology::StageType::Transform => {
-                                obzenflow_core::event::context::StageType::Transform
-                            }
-                            obzenflow_topology::StageType::Stateful => {
-                                obzenflow_core::event::context::StageType::Stateful
-                            }
-                            obzenflow_topology::StageType::Sink => {
-                                obzenflow_core::event::context::StageType::Sink
-                            }
-                            obzenflow_topology::StageType::Join => {
-                                obzenflow_core::event::context::StageType::Join
-                            }
-                        },
-                        ..obzenflow_core::event::provenance::FlowContext::new(
-                            stage_info.name.clone(),
-                            stage_id,
-                        )
+                flow_context: obzenflow_core::event::provenance::FlowContext {
+                    flow_id: self.flow_id.to_string(),
+                    flow_name: self.topology.flow_name(),
+                    stage_type: match stage_info.stage_type {
+                        obzenflow_topology::StageType::FiniteSource => {
+                            obzenflow_core::event::context::StageType::FiniteSource
+                        }
+                        obzenflow_topology::StageType::InfiniteSource => {
+                            obzenflow_core::event::context::StageType::InfiniteSource
+                        }
+                        obzenflow_topology::StageType::Transform => {
+                            obzenflow_core::event::context::StageType::Transform
+                        }
+                        obzenflow_topology::StageType::Stateful => {
+                            obzenflow_core::event::context::StageType::Stateful
+                        }
+                        obzenflow_topology::StageType::Sink => {
+                            obzenflow_core::event::context::StageType::Sink
+                        }
+                        obzenflow_topology::StageType::Join => {
+                            obzenflow_core::event::context::StageType::Join
+                        }
                     },
-                ),
+                    ..obzenflow_core::event::provenance::FlowContext::new(
+                        stage_info.name.clone(),
+                        stage_id,
+                    )
+                },
                 data_journal,
                 error_journal,
                 upstream_journals: upstream_journals.clone(),

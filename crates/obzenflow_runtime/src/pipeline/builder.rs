@@ -376,8 +376,11 @@ impl PipelineBuilder {
             system_journal: self.system_journal.clone(),
             stage_supervisors: stage_map,
             source_supervisors: source_map,
-            completed_stages: Vec::new(),
-            running_stages: std::collections::HashSet::new(),
+            completed_stages: Default::default(),
+            outstanding_milestones: Default::default(),
+            outstanding_children: Default::default(),
+            cleanup_deadline: None,
+            metrics_deadline: None,
             stage_data_journals: self.stage_journals.unwrap_or_default(),
             stage_error_journals: self.error_journals.unwrap_or_default(),
             backpressure_registry: self.backpressure_registry.clone(),
@@ -392,32 +395,13 @@ impl PipelineBuilder {
                         crate::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
                     )
                 }),
-            completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
             metrics_journals: self.metrics_journals.clone(),
-            report_coverage: Default::default(),
             resources: Default::default(),
-            progress: Default::default(),
-            contract_status: HashMap::new(),
-            contract_pairs: HashMap::new(),
-            expected_contract_pairs,
-            expected_sources,
             stage_lifecycle_metrics: HashMap::new(),
             flow_start_time: None,
-            last_system_event_id_seen: None,
             stop_intent: Default::default(),
             termination: Default::default(),
-            // FLOWIP-010: global knobs from the build-resolved effective
-            // config; registry defaults when no snapshot is threaded (tests).
-            source_contract_strict: self
-                .flow_effective_config
-                .as_ref()
-                .map(|cfg| {
-                    super::config::SourceContractStrictMode::from_token(
-                        cfg.source_contract_strict_mode(),
-                    )
-                })
-                .unwrap_or_default(),
             metrics_drain_timeout_ms: self
                 .flow_effective_config
                 .as_ref()
@@ -429,17 +413,6 @@ impl PipelineBuilder {
         // A returned failure joins supplied stages; dropping this build future
         // requests cancellation through that same context fallback.
         let preparation = async {
-            let mut readers = crate::supervised_base::report_reader::ReportReaders::default();
-            readers.system(self.system_journal.clone());
-            for (_, journal) in &pipeline_context.stage_data_journals {
-                readers.stage(journal.clone());
-            }
-            if self.metrics_exporter.is_some() {
-                if let Some(journals) = &self.metrics_journals {
-                    readers.system(journals.coordination.clone());
-                }
-            }
-            pipeline_context.completion_subscription = Some(readers);
             pipeline_context.resources.prepared_metrics =
                 prepare_metrics(&pipeline_context).await?;
             Ok::<(), BuilderError>(())
@@ -456,29 +429,15 @@ impl PipelineBuilder {
             }
             return Err(error);
         }
-        let mut report_journals = vec![crate::supervised_base::SupervisorJournal::System(
-            self.system_journal.clone(),
-        )];
-        for (stage, journal) in &pipeline_context.stage_data_journals {
-            report_journals.push(crate::supervised_base::SupervisorJournal::stage(
-                journal.clone(),
-                obzenflow_core::event::provenance::FlowContext::new(
-                    self.topology
-                        .stages()
-                        .find(|info| info.id == stage.to_topology_id())
-                        .map(|info| info.name.clone())
-                        .unwrap_or_else(|| stage.to_string()),
-                    *stage,
-                ),
-            ));
-        }
+        let stage_journals = pipeline_context
+            .stage_data_journals
+            .iter()
+            .map(|(stage, journal)| (*stage, journal.clone()))
+            .collect();
+        let mut system_journals = vec![self.system_journal.clone()];
         if let Some(metrics) = &pipeline_context.metrics_journals {
-            report_journals.push(crate::supervised_base::SupervisorJournal::System(
-                metrics.coordination.clone(),
-            ));
-            report_journals.push(crate::supervised_base::SupervisorJournal::System(
-                metrics.export.clone(),
-            ));
+            system_journals.push(metrics.coordination.clone());
+            system_journals.push(metrics.export.clone());
         }
         let published_outcome = pipeline_context.termination.published.clone();
         let metrics = pipeline_context.resources.metrics.clone();
@@ -491,6 +450,7 @@ impl PipelineBuilder {
             event_receiver,
             state_watcher.clone(),
             operational_failure.clone(),
+            self.system_journal.clone(),
         );
         let supervisor_task = SupervisorTaskBuilder::new("pipeline_supervisor")
             .with_publications(publications.clone())
@@ -525,7 +485,8 @@ impl PipelineBuilder {
                 flow_name,
                 contract_attachments,
                 system_journal: Some(self.system_journal.clone()),
-                report_journals,
+                stage_journals,
+                system_journals,
                 metrics_journals: self.metrics_journals.clone(),
                 pipeline_reports: Some(super::reports::PipelineReports {
                     journal: self.system_journal.clone(),

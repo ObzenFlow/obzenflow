@@ -1053,24 +1053,6 @@ impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for D
         ))
     }
 
-    async fn storage_report_reader_from(
-        &self,
-        position: u64,
-    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
-    {
-        let initial_position = self.storage_committed_position().await?;
-        Ok(Box::new(
-            super::report_reader::DiskReportReader::<T>::new(
-                self.path.clone(),
-                self.journal_id,
-                self.read_write_lock.clone(),
-                initial_position,
-                position,
-            )
-            .await?,
-        ))
-    }
-
     async fn storage_read_metrics_tail(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
@@ -1191,13 +1173,12 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn selective_lock_wait_leaves_blocking_worker_available_for_append() {
+    fn ordinary_reader_lock_wait_leaves_blocking_worker_available_for_append() {
         use obzenflow_core::event::payloads::execution_payload::{
             ExecutionPayload, StageLifecycleFact,
         };
         use obzenflow_core::event::provenance::FlowContext;
         use obzenflow_core::event::ChainPayload;
-        use obzenflow_core::journal::reader::ReportScanItem;
         use std::time::Duration;
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1214,7 +1195,7 @@ mod tests {
                     JournalOwner::stage(stage),
                 )
                 .unwrap();
-                let mut reader = journal.report_reader_from(0).await.unwrap();
+                let mut reader = journal.reader_from(0).await.unwrap();
                 let make_report = || {
                     ChainEventFactory::create_with_context(
                         stage.into(),
@@ -1249,7 +1230,7 @@ mod tests {
                 assert!(futures::poll!(append.as_mut()).is_pending());
                 assert!(journal.read_write_lock.try_read().is_err());
                 {
-                    let mut next = Box::pin(reader.next_report(Default::default()));
+                    let mut next = Box::pin(reader.next());
                     assert!(futures::poll!(next.as_mut()).is_pending());
                 }
                 // This job is behind any submitted reader job. The writer must
@@ -1267,7 +1248,7 @@ mod tests {
                         .await
                         .expect("reader cleanup releases the worker")
                         .unwrap();
-                    panic!("selective lock wait occupied the worker required by the append");
+                    panic!("ordinary reader lock wait occupied the worker required by the append");
                 }
                 available.unwrap().unwrap();
                 drop(preparation_gate);
@@ -1276,23 +1257,18 @@ mod tests {
                     .expect("append must finish with one blocking worker")
                     .unwrap();
                 for receipt in &receipts {
-                    let scan =
-                        tokio::time::timeout(deadline, reader.next_report(Default::default()))
-                            .await
-                            .unwrap()
-                            .unwrap();
-                    let ReportScanItem::Record(row) = scan.item else {
+                    let scan = tokio::time::timeout(deadline, reader.next())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let Some(row) = scan else {
                         panic!("committed report must be delivered");
                     };
                     assert_eq!(row.id(), receipt.id());
                     assert_eq!(reader.position(), receipt.local_sequence());
                 }
-                assert!(matches!(
-                    reader.next_report(Default::default()).await.unwrap().item,
-                    ReportScanItem::Tail {
-                        committed_end: true
-                    }
-                ));
+                assert!(reader.next().await.unwrap().is_none());
+                assert!(reader.is_at_end());
                 assert_eq!(
                     journal.committed_position().await.unwrap(),
                     receipts.len() as u64

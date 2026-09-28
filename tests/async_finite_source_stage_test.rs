@@ -18,7 +18,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::observer::{SourcePollObserver, SourcePollObserverContext};
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorJournal;
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the async-finite source stage test. The JSON
@@ -295,16 +294,19 @@ async fn cleanup_failure_is_durable_and_does_not_block_eof_or_completion() -> Re
     .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
+    let source = handle
+        .topology()
+        .unwrap()
+        .stages()
+        .find(|stage| stage.name == "source")
+        .unwrap()
+        .id;
     let source_journal = handle
-        .report_journals()
+        .stage_journals()
         .into_iter()
-        .find_map(|journal| match journal {
-            SupervisorJournal::Stage { journal, context } if context.stage_name == "source" => {
-                Some(journal)
-            }
-            _ => None,
-        })
-        .expect("source owns its cleanup report journal");
+        .find(|(id, _)| *id == obzenflow_core::StageId::from_ulid(source.ulid()))
+        .expect("source owns its cleanup fact journal")
+        .1;
 
     handle.run().await?;
 

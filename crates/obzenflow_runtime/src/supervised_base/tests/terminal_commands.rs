@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::stages::common::stage_handle::STOP_REASON_USER_STOP;
-use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use crate::supervised_base::with_external_events::record_terminal_commands;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::{CommandDiscardDisposition, JournalRecord, SystemEvent, SystemPayload};
@@ -68,68 +67,41 @@ impl TestJournal {
 }
 
 #[tokio::test]
-async fn registration_failure_prevents_both_supervisor_runners_from_executing() {
-    for handler_supervised in [false, true] {
-        let journal = Arc::new(TestJournal {
-            fail: true,
-            owner: Some(if handler_supervised {
-                JournalOwner::stage(StageId::new_const(1))
-            } else {
-                JournalOwner::system(SystemId::new_const(1))
-            }),
-            ..Default::default()
-        });
-        let publications = PublicationScope::new();
-        let actions = Arc::new(AtomicUsize::new(0));
-        let completions = Arc::new(AtomicUsize::new(0));
-        let context = TestContext {
-            system_journal: journal.clone(),
-            failure_actions_executed: actions.clone(),
-            publications: publications.clone(),
-        };
-        let (sender, _receiver, watcher) =
-            ChannelBuilder::<TestEvent, TestState>::new().build(TestState::Running);
-        let task = if handler_supervised {
-            SupervisorTaskBuilder::new("handler")
-                .with_publications(publications)
-                .spawn_handler_supervised(
-                    TestHandlerSupervisor {
-                        name: "handler".into(),
-                        completion_writes: completions.clone(),
-                        stage_id: StageId::new_const(1),
-                    },
-                    TestState::Running,
-                    context,
-                )
-        } else {
-            SupervisorTaskBuilder::new("runtime")
-                .with_publications(publications)
-                .spawn_self_supervised(
-                    TestSelfSupervisor {
-                        name: "runtime".into(),
-                        completion_writes: completions.clone(),
-                    },
-                    TestState::Running,
-                    context,
-                )
-        };
-        let handle = HandleBuilder::new()
-            .with_event_sender(sender)
-            .with_state_watcher(watcher)
-            .with_supervisor_task(task)
-            .build_standard()
-            .unwrap();
-        assert!(handle
-            .wait_for_completion()
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("Journal is full"));
-        assert_eq!(journal.attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(actions.load(Ordering::SeqCst), 0);
-        assert_eq!(completions.load(Ordering::SeqCst), 0);
-        assert!(journal.records.lock().unwrap().is_empty());
-    }
+async fn self_supervised_runner_does_not_invent_registration_actions() {
+    let journal = Arc::new(
+        TestJournal::failing_registration()
+            .with_owner(JournalOwner::system(SystemId::new_const(1))),
+    );
+    let publications = PublicationScope::new();
+    let actions = Arc::new(AtomicUsize::new(0));
+    let completions = Arc::new(AtomicUsize::new(0));
+    let context = TestContext {
+        system_journal: journal.clone(),
+        failure_actions_executed: actions.clone(),
+        publications: publications.clone(),
+    };
+    let (sender, _receiver, watcher) =
+        ChannelBuilder::<TestEvent, TestState>::new().build(TestState::Running);
+    let task = SupervisorTaskBuilder::new("runtime")
+        .with_publications(publications)
+        .spawn_self_supervised(
+            TestSelfSupervisor {
+                name: "runtime".into(),
+            },
+            TestState::Running,
+            context,
+        );
+    let handle = HandleBuilder::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap();
+    handle.wait_for_completion().await.unwrap();
+    assert_eq!(journal.attempts.load(Ordering::SeqCst), 0);
+    assert_eq!(actions.load(Ordering::SeqCst), 1);
+    assert_eq!(completions.load(Ordering::SeqCst), 0);
+    assert!(journal.records.lock().unwrap().is_empty());
 }
 
 #[async_trait::async_trait]
@@ -245,7 +217,10 @@ async fn terminal_mailbox_records_each_command_once_and_rejects_later_sends() {
             inner,
             receiver,
             watcher,
-            (journal.clone()).into(),
+            crate::supervised_base::with_external_events::system_commands(
+                journal.clone(),
+                StageId::new_const(1).into(),
+            ),
         );
         let mut context = ExternalEventTestContext;
         supervisor
@@ -328,8 +303,10 @@ async fn terminal_mailbox_retains_the_whole_queue_when_recording_waiter_is_cance
         owner
             .enter(record_terminal_commands(
                 &mut receiver,
-                (target).into(),
-                WriterId::from(StageId::new_const(1)),
+                crate::supervised_base::with_external_events::system_commands(
+                    target,
+                    WriterId::from(StageId::new_const(1)),
+                ),
                 "worker",
                 "Drained",
             ))
@@ -352,183 +329,287 @@ struct CompletionContext {
     entered: Arc<Notify>,
     release: Arc<Notify>,
     fail_action: bool,
+    journal: Arc<TestJournal>,
 }
 impl FsmContext for CompletionContext {}
 
+#[derive(Clone, Debug, PartialEq, StateVariant)]
+enum CompletionState {
+    Created,
+    Initializing,
+    Finalising,
+    Failing(String),
+    Drained,
+    Failed(String),
+}
+#[derive(Clone, Debug, EventVariant)]
+enum CompletionEvent {
+    Initialize,
+    Initialized,
+    Settled,
+    Error(String),
+}
 #[derive(Clone, Debug)]
-struct CompletionAction;
+enum CompletionAction {
+    Host(crate::supervised_base::handler_supervised::SupervisorAction<CompletionEvent>),
+    Work,
+}
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, SupervisorAction,
+};
 
 #[async_trait::async_trait]
 impl FsmAction for CompletionAction {
     type Context = CompletionContext;
-
-    async fn execute(&self, context: &mut CompletionContext) -> Result<(), FsmError> {
-        context.entered.notify_one();
-        context.release.notified().await;
-        if context.fail_action {
-            return Err(FsmError::HandlerError("terminal action failed".into()));
-        }
-        Ok(())
+    async fn execute(&self, _: &mut CompletionContext) -> Result<(), FsmError> {
+        unreachable!("completion work is an owned operation")
     }
 }
 
 struct CompletionSupervisor;
-
+fn completion_failure<'a>(
+    _: &'a CompletionState,
+    event: &'a CompletionEvent,
+    _: &'a mut CompletionContext,
+) -> futures::future::BoxFuture<'a, Result<Transition<CompletionState, CompletionAction>, FsmError>>
+{
+    let CompletionEvent::Error(error) = event else {
+        unreachable!()
+    };
+    let cause = error.clone();
+    Box::pin(async move {
+        Ok(Transition {
+            next_state: CompletionState::Failing(cause),
+            actions: vec![
+                CompletionAction::Host(SupervisorAction::CloseMailbox),
+                CompletionAction::Host(SupervisorAction::SettlePublications),
+                CompletionAction::Host(SupervisorAction::Emit(CompletionEvent::Settled)),
+            ],
+        })
+    })
+}
 impl Supervisor for CompletionSupervisor {
-    type State = ExternalEventTestState;
-    type Event = ExternalEventTestEvent;
+    type State = CompletionState;
+    type Event = CompletionEvent;
     type Context = CompletionContext;
     type Action = CompletionAction;
-
     fn build_state_machine(
         &self,
         initial_state: Self::State,
     ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         fsm! {
-            state: ExternalEventTestState;
-            event: ExternalEventTestEvent;
-            context: CompletionContext;
-            action: CompletionAction;
-            initial: initial_state;
-
-            state ExternalEventTestState::Running {
-                on ExternalEventTestEvent::Initialize => |_state: &ExternalEventTestState, _event: &ExternalEventTestEvent, _ctx: &mut CompletionContext| {
-                    Box::pin(async { Ok(Transition { next_state: ExternalEventTestState::Drained, actions: vec![CompletionAction] }) })
+            state: CompletionState; event: CompletionEvent; context: CompletionContext; action: CompletionAction; initial: initial_state;
+            state CompletionState::Created {
+                on CompletionEvent::Initialize => |_: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
+                    Box::pin(async { Ok(Transition { next_state: CompletionState::Initializing, actions: vec![CompletionAction::Host(SupervisorAction::Register), CompletionAction::Host(SupervisorAction::Emit(CompletionEvent::Initialized))] }) })
                 };
             }
-            state ExternalEventTestState::Drained {
-                on ExternalEventTestEvent::Error => |_state: &ExternalEventTestState, event: &ExternalEventTestEvent, _ctx: &mut CompletionContext| {
-                    let ExternalEventTestEvent::Error(error) = event else { unreachable!() };
-                    let error = error.clone();
-                    Box::pin(async { Ok(Transition { next_state: ExternalEventTestState::Failed(error), actions: vec![] }) })
+            state CompletionState::Initializing {
+                on CompletionEvent::Initialized => |_: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
+                    Box::pin(async { Ok(Transition { next_state: CompletionState::Finalising, actions: vec![CompletionAction::Work, CompletionAction::Host(SupervisorAction::CloseMailbox), CompletionAction::Host(SupervisorAction::SettlePublications), CompletionAction::Host(SupervisorAction::Emit(CompletionEvent::Settled))] }) })
                 };
+                on CompletionEvent::Error => completion_failure;
             }
-            state ExternalEventTestState::Failed {
-                on ExternalEventTestEvent::Error => |state: &ExternalEventTestState, _event: &ExternalEventTestEvent, _ctx: &mut CompletionContext| {
+            state CompletionState::Finalising {
+                on CompletionEvent::Settled => |_: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
+                    Box::pin(async { Ok(Transition { next_state: CompletionState::Drained, actions: vec![] }) })
+                };
+                on CompletionEvent::Error => completion_failure;
+            }
+            state CompletionState::Failing {
+                on CompletionEvent::Error => |state: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
                     let state = state.clone();
                     Box::pin(async { Ok(Transition { next_state: state, actions: vec![] }) })
                 };
+                on CompletionEvent::Settled => |state: &CompletionState, _: &CompletionEvent, _: &mut CompletionContext| {
+                    let CompletionState::Failing(cause) = state else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition { next_state: CompletionState::Failed(cause), actions: vec![] }) })
+                };
             }
+            state CompletionState::Drained {}
+            state CompletionState::Failed {}
         }
     }
-
     fn supervisor_kind(&self) -> SupervisorKind {
         SupervisorKind::Transform
     }
-
-    fn report_journal(
+    fn registration(
         &self,
-        _context: &Self::Context,
-    ) -> crate::supervised_base::SupervisorJournal {
-        Arc::new(TestJournal::default()).into()
+        context: &Self::Context,
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
+            context.journal.clone();
+        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
     }
-
     fn name(&self) -> &str {
         "completion-worker"
     }
 }
-
-impl ExternalEventPolicy for CompletionSupervisor {
-    fn external_event_mode(state: &Self::State) -> ExternalEventMode {
-        ExternalEventTestHandlerSupervisor::external_event_mode(state)
-    }
-
-    fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event> {
-        ExternalEventTestHandlerSupervisor::on_external_event_channel_closed(state)
+impl crate::supervised_base::with_external_events::ExternalControlEvent for CompletionEvent {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(cause) => Some(cause),
+            _ => None,
+        })
     }
 }
-
-impl HandlerSupervisedCleanup for CompletionSupervisor {}
+impl ExternalEventPolicy for CompletionSupervisor {
+    fn external_event_mode(state: &Self::State) -> ExternalEventMode {
+        if matches!(state, CompletionState::Created) {
+            ExternalEventMode::Block
+        } else {
+            ExternalEventMode::Poll
+        }
+    }
+    fn defer_external_event(state: &Self::State, event: &Self::Event) -> bool {
+        !matches!(state, CompletionState::Created) && matches!(event, CompletionEvent::Initialize)
+    }
+    fn on_external_event_channel_closed(_: &Self::State) -> Option<Self::Event> {
+        None
+    }
+}
 
 #[async_trait::async_trait]
 impl HandlerSupervised for CompletionSupervisor {
     type Handler = ();
-
+    fn lifecycle_phase(&self, state: &CompletionState) -> LifecyclePhase {
+        match state {
+            CompletionState::Created => LifecyclePhase::Other,
+            CompletionState::Initializing => LifecyclePhase::Initializing,
+            CompletionState::Finalising => LifecyclePhase::Finalising,
+            CompletionState::Failing(cause) => LifecyclePhase::Failing(cause.clone()),
+            CompletionState::Drained => LifecyclePhase::Completed,
+            CompletionState::Failed(cause) => LifecyclePhase::Failed(cause.clone()),
+        }
+    }
+    fn supervisor_action(
+        &self,
+        action: &CompletionAction,
+    ) -> Option<SupervisorAction<CompletionEvent>> {
+        match action {
+            CompletionAction::Host(action) => Some(action.clone()),
+            _ => None,
+        }
+    }
+    async fn execute_action(
+        &mut self,
+        _: CompletionAction,
+        context: &mut CompletionContext,
+    ) -> Result<ActionExecution<CompletionContext, CompletionEvent>, FsmError> {
+        let entered = context.entered.clone();
+        let release = context.release.clone();
+        let fail = context.fail_action;
+        Ok(ActionExecution::Pending(Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            Box::new(move |_: &mut CompletionContext| {
+                if fail {
+                    Err(FsmError::HandlerError("terminal action failed".into()))
+                } else {
+                    Ok(None)
+                }
+            }) as ActionCompletion<CompletionContext, CompletionEvent>
+        })))
+    }
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
-        _context: &mut Self::Context,
+        _: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
         assert!(matches!(
             state,
-            ExternalEventTestState::Drained | ExternalEventTestState::Failed(_)
+            CompletionState::Drained | CompletionState::Failed(_)
         ));
         Ok(EventLoopDirective::Terminate)
     }
-
     fn writer_id(&self) -> WriterId {
-        WriterId::from(self.stage_id())
+        StageId::new_const(1).into()
     }
-    fn stage_id(&self) -> StageId {
-        StageId::new_const(1)
-    }
-    fn event_for_action_error(&self, error: String) -> Self::Event {
-        ExternalEventTestEvent::Error(error)
+
+    fn event_for_action_error(&self, error: String) -> CompletionEvent {
+        CompletionEvent::Error(error)
     }
 }
 
+fn spawn_completion(
+    context: CompletionContext,
+) -> crate::supervised_base::handle::StandardHandle<CompletionEvent, CompletionState> {
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(CompletionState::Created);
+    let supervisor = HandlerSupervisedWithExternalEvents::new(
+        CompletionSupervisor,
+        receiver,
+        watcher.clone(),
+        crate::supervised_base::with_external_events::system_commands(
+            context.journal.clone(),
+            StageId::new_const(1).into(),
+        ),
+    );
+    let task = SupervisorTaskBuilder::new("completion-worker").spawn_handler_supervised(
+        supervisor,
+        CompletionState::Created,
+        context,
+    );
+    HandleBuilder::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap()
+}
+
 #[tokio::test]
-async fn terminal_mailbox_records_errors_arriving_during_completion_actions() {
+async fn terminal_mailbox_preserves_commands_and_failure_during_owned_completion_work() {
     for fail_action in [false, true] {
         let journal = Arc::new(TestJournal::default());
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let (sender, receiver, watcher) =
-            ChannelBuilder::new().build(ExternalEventTestState::Running);
-        sender
-            .send(ExternalEventTestEvent::Initialize)
+        let handle = spawn_completion(CompletionContext {
+            entered: entered.clone(),
+            release: release.clone(),
+            fail_action,
+            journal: journal.clone(),
+        });
+        handle
+            .send_event(CompletionEvent::Initialize)
             .await
-            .unwrap();
-        let supervisor = HandlerSupervisedWithExternalEvents::new(
-            CompletionSupervisor,
-            receiver,
-            watcher.clone(),
-            (journal.clone()).into(),
-        );
-        let task = SupervisorTaskBuilder::new("completion-worker").spawn_handler_supervised(
-            supervisor,
-            ExternalEventTestState::Running,
-            CompletionContext {
-                entered: entered.clone(),
-                release: release.clone(),
-                fail_action,
-            },
-        );
-        let handle = HandleBuilder::new()
-            .with_event_sender(sender.clone())
-            .with_state_watcher(watcher.clone())
-            .with_supervisor_task(task)
-            .build_standard()
             .unwrap();
         entered.notified().await;
-        sender
-            .send(ExternalEventTestEvent::Initialize)
+        assert_eq!(handle.current_state(), CompletionState::Finalising);
+        handle
+            .send_event(CompletionEvent::Initialize)
             .await
             .unwrap();
-        sender
-            .send(ExternalEventTestEvent::Error(
-                "late external failure".into(),
-            ))
+        handle
+            .send_event(CompletionEvent::Error("late external failure".into()))
             .await
             .unwrap();
+        let failure =
+            tokio::time::timeout(std::time::Duration::from_secs(3), handle.wait_for_failure())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(failure.cause.to_string().contains("late external failure"));
+        assert!(matches!(
+            handle.current_state(),
+            CompletionState::Failing(_)
+        ));
         release.notify_one();
-        handle.wait_for_completion().await.unwrap();
-        let state = watcher.current();
-        if fail_action {
-            assert!(
-                matches!(&state, ExternalEventTestState::Failed(error) if error.contains("terminal action failed"))
-            );
-        } else {
-            assert_eq!(state, ExternalEventTestState::Drained);
-        }
+        let error = handle.wait_for_completion().await.unwrap_err();
+        assert!(
+            error.to_string().contains("late external failure"),
+            "{error}"
+        );
         let records = journal.read_all_unordered().await.unwrap();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 2);
         assert!(matches!(
             &records[0].payload,
             SystemPayload::SupervisorRegistered { .. }
         ));
         assert!(
-            matches!(&records[2].payload, SystemPayload::SupervisorCommandDiscarded { terminal_state, disposition: CommandDiscardDisposition::UnexpectedError, error: Some(error), .. } if terminal_state == state.variant_name() && error == "late external failure")
+            matches!(&records[1].payload, SystemPayload::SupervisorCommandDiscarded { command, disposition: CommandDiscardDisposition::ObsoleteControl, .. } if command == "Initialize")
         );
     }
 }
@@ -540,33 +621,24 @@ async fn terminal_mailbox_journal_failure_is_retained_by_supervisor_join() {
         allow_registration: true,
         ..Default::default()
     });
-    let (sender, receiver, watcher) = ChannelBuilder::new().build(ExternalEventTestState::Drained);
-    sender
-        .send(ExternalEventTestEvent::Initialize)
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let handle = spawn_completion(CompletionContext {
+        entered: entered.clone(),
+        release: release.clone(),
+        fail_action: false,
+        journal: journal.clone(),
+    });
+    handle
+        .send_event(CompletionEvent::Initialize)
         .await
         .unwrap();
-    let supervisor = HandlerSupervisedWithExternalEvents::new(
-        CompletionSupervisor,
-        receiver,
-        watcher.clone(),
-        (journal.clone()).into(),
-    );
-    let context = CompletionContext {
-        entered: Arc::new(Notify::new()),
-        release: Arc::new(Notify::new()),
-        fail_action: false,
-    };
-    let task = SupervisorTaskBuilder::new("completion-worker").spawn_handler_supervised(
-        supervisor,
-        ExternalEventTestState::Drained,
-        context,
-    );
-    let handle = HandleBuilder::new()
-        .with_event_sender(sender)
-        .with_state_watcher(watcher)
-        .with_supervisor_task(task)
-        .build_standard()
+    entered.notified().await;
+    handle
+        .send_event(CompletionEvent::Initialize)
+        .await
         .unwrap();
+    release.notify_one();
     let error = handle.wait_for_completion().await.unwrap_err();
     assert!(error.to_string().contains("Journal is full"), "{error}");
     assert_eq!(
@@ -580,4 +652,63 @@ async fn terminal_mailbox_journal_failure_is_retained_by_supervisor_join() {
         &records[0].payload,
         SystemPayload::SupervisorRegistered { .. }
     ));
+}
+
+#[tokio::test]
+async fn deferred_commands_keep_distinct_payloads_capacity_and_admission_causality() {
+    use crate::supervised_base::publication::{capture, with_snapshot};
+    use crate::supervised_base::with_external_events::CommandMailbox;
+    use obzenflow_core::event::CausalFrontier;
+
+    #[derive(Debug, PartialEq)]
+    enum Command {
+        Value(u64),
+    }
+
+    let journal = TestJournal::default();
+    let event = || {
+        SystemEvent::new(
+            SystemId::new().into(),
+            SystemPayload::PipelineLifecycle(
+                obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent::Starting,
+            ),
+        )
+    };
+    let first = journal.append(event(), Default::default()).await.unwrap();
+    let second = journal.append(event(), Default::default()).await.unwrap();
+    let first_frontier = CausalFrontier::from_record(&first).unwrap();
+    let second_frontier = CausalFrontier::from_record(&second).unwrap();
+    let (sender, receiver, _) = ChannelBuilder::<Command, ()>::new()
+        .with_event_buffer(2)
+        .build(());
+    with_snapshot(first_frontier.clone(), async {
+        sender.send(Command::Value(1)).await
+    })
+    .await
+    .unwrap();
+    with_snapshot(second_frontier.clone(), async {
+        sender.send(Command::Value(2)).await
+    })
+    .await
+    .unwrap();
+    let mut mailbox: CommandMailbox<_> = receiver.into();
+    with_snapshot(CausalFrontier::default(), async {
+        let mut deferred = tokio_test::task::spawn(mailbox.recv(|_| false));
+        tokio_test::assert_pending!(deferred.poll());
+        drop(deferred);
+        assert_eq!(
+            capture(),
+            CausalFrontier::default(),
+            "deferral is not causal admission"
+        );
+        let mut third = tokio_test::task::spawn(sender.send(Command::Value(3)));
+        tokio_test::assert_pending!(third.poll());
+        assert_eq!(mailbox.recv(|_| true).await, Some(Command::Value(1)));
+        assert_eq!(capture(), first_frontier);
+        tokio_test::assert_ready!(third.poll()).unwrap();
+        assert_eq!(mailbox.recv(|_| true).await, Some(Command::Value(2)));
+        assert_eq!(capture(), second_frontier);
+        assert_eq!(mailbox.recv(|_| true).await, Some(Command::Value(3)));
+    })
+    .await;
 }

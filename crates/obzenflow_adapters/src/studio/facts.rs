@@ -7,40 +7,64 @@
 
 use super::messages::{ContractEdge, MetricsUpdate, Observation, StudioMessage};
 use super::{middleware::MiddlewareView, ContractBoundaryAliases};
-use obzenflow_core::event::{MetricsCoordinationEvent, SupervisorRecord, SystemPayload};
+use obzenflow_core::event::journal_record::{ChainJournalRecord, SystemJournalRecord};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+use obzenflow_core::event::{ChainPayload, MetricsCoordinationEvent, SystemPayload};
+use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::web::SseFrame;
 
-pub(super) fn stage_message(envelope: &SupervisorRecord) -> Option<StudioMessage<'_>> {
-    let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
+pub(super) fn stage_message(envelope: &ChainJournalRecord) -> Option<StudioMessage<'_>> {
+    let ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) = &envelope.payload else {
         return None;
     };
     Some(StudioMessage::StageLifecycle {
-        stage_id: *stage_id,
+        stage_id: event.stage_id(),
         event,
-        at: observation(envelope),
+        at: observation(
+            envelope,
+            envelope.envelope.provenance.event.processing.event_time,
+        ),
     })
 }
 
 pub(super) fn frame(
-    envelope: &SupervisorRecord,
+    record: &RunRecordData,
     middleware: &MiddlewareView,
     aliases: &ContractBoundaryAliases,
 ) -> Option<SseFrame> {
-    let at = observation(envelope);
-    let message = match &envelope.payload {
-        SystemPayload::SupervisorRegistered { descriptor } => StudioMessage::SupervisorRegistered {
-            writer_id: envelope.writer_id(),
-            descriptor,
-            at,
-        },
-        SystemPayload::StageLifecycle { .. } => stage_message(envelope)?,
-        SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
-        SystemPayload::ReplayLifecycle(event) => StudioMessage::ReplayLifecycle {
+    match record {
+        RunRecordData::Chain(record) => stage_frame(record, middleware, aliases),
+        RunRecordData::System(record) => system_frame(record),
+    }
+}
+
+fn stage_frame(
+    envelope: &ChainJournalRecord,
+    middleware: &MiddlewareView,
+    aliases: &ContractBoundaryAliases,
+) -> Option<SseFrame> {
+    let ChainPayload::Execution(payload) = &envelope.payload else {
+        return None;
+    };
+    let at = observation(
+        envelope,
+        envelope.envelope.provenance.event.processing.event_time,
+    );
+    let message = match payload {
+        ExecutionPayload::SupervisorRegistered { descriptor } => {
+            StudioMessage::SupervisorRegistered {
+                writer_id: envelope.writer_id(),
+                descriptor,
+                at,
+            }
+        }
+        ExecutionPayload::StageLifecycle(_) => stage_message(envelope)?,
+        ExecutionPayload::ReplayLifecycle(event) => StudioMessage::ReplayLifecycle {
             stage_id: envelope.writer_id().as_stage().map(|id| id.to_string()),
             event,
             at,
         },
-        SystemPayload::SupervisorCommandDiscarded {
+        ExecutionPayload::SupervisorCommandDiscarded {
             supervisor,
             terminal_state,
             command,
@@ -55,7 +79,7 @@ pub(super) fn frame(
             error: error.as_deref(),
             at,
         },
-        SystemPayload::SourceCleanupFailed {
+        ExecutionPayload::SourceCleanupFailed {
             stage_id,
             stage_name,
             error,
@@ -65,29 +89,25 @@ pub(super) fn frame(
             error,
             at,
         },
-        SystemPayload::MiddlewareLifecycle {
-            stage_id,
-            stage_name,
-            flow_id,
-            flow_name,
-            origin,
-            middleware: event,
-        } => {
-            let Some(update) = middleware.message(*stage_id, event) else {
-                return Some(SseFrame::comment("unsupported_middleware_event_skipped"));
-            };
+        ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_) => {
+            let context = &envelope.envelope.provenance.event.flow_context;
+            let update = middleware.message(context.stage_id, payload)?;
             StudioMessage::MiddlewareLifecycle {
-                stage_id: *stage_id,
-                stage_name: stage_name.as_deref(),
-                flow_id: flow_id.as_deref(),
-                flow_name: flow_name.as_deref(),
-                origin,
-                revision: origin.seq,
+                stage_id: context.stage_id,
+                stage_name: Some(&context.stage_name),
+                flow_id: Some(&context.flow_id),
+                flow_name: Some(&context.flow_name),
+                origin: super::messages::MiddlewareEventOrigin {
+                    event_id: *envelope.id(),
+                    writer_key: envelope.writer_id().to_string(),
+                    seq: obzenflow_core::event::types::SeqNo(envelope.local_sequence()),
+                },
+                revision: obzenflow_core::event::types::SeqNo(envelope.local_sequence()),
                 update,
                 at,
             }
         }
-        SystemPayload::ContractStatus {
+        ExecutionPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -110,7 +130,7 @@ pub(super) fn frame(
             reason: reason.as_ref(),
             at,
         },
-        SystemPayload::ContractResult {
+        ExecutionPayload::ContractResult {
             upstream,
             reader,
             selected_event_type,
@@ -135,6 +155,35 @@ pub(super) fn frame(
             cause: cause.as_deref(),
             at,
         },
+        _ => return None,
+    };
+    Some(message.frame(Some(*envelope.id())))
+}
+
+fn system_frame(envelope: &SystemJournalRecord) -> Option<SseFrame> {
+    let at = observation(envelope, envelope.envelope.provenance.event.timestamp);
+    let message = match &envelope.payload {
+        SystemPayload::SupervisorRegistered { descriptor } => StudioMessage::SupervisorRegistered {
+            writer_id: envelope.writer_id(),
+            descriptor,
+            at,
+        },
+        SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
+        SystemPayload::SupervisorCommandDiscarded {
+            supervisor,
+            terminal_state,
+            command,
+            disposition,
+            error,
+        } => StudioMessage::SupervisorCommandDiscarded {
+            stage_id: envelope.writer_id().as_stage().map(|id| id.to_string()),
+            supervisor,
+            terminal_state,
+            command,
+            disposition: *disposition,
+            error: error.as_deref(),
+            at,
+        },
         SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark }) => {
             StudioMessage::MetricsWatermark {
                 watermark,
@@ -152,16 +201,19 @@ pub(super) fn frame(
             },
             at,
         },
-        SystemPayload::IngressRefusal { .. } => return None,
+        _ => return None,
     };
     Some(message.frame(Some(*envelope.id())))
 }
 
-fn observation(envelope: &SupervisorRecord) -> Observation<'_> {
+fn observation<P: obzenflow_core::JournalPayload>(
+    envelope: &obzenflow_core::JournalRecord<P>,
+    timestamp_ms: u64,
+) -> Observation<'_> {
     Observation {
         commitment: Some(envelope.commitment()),
-        timestamp_ms: envelope.timestamp(),
-        vector_clock: Some(&envelope.journal().vector_clock),
+        timestamp_ms,
+        vector_clock: Some(&envelope.envelope.provenance.journal.vector_clock),
         capture: None,
     }
 }

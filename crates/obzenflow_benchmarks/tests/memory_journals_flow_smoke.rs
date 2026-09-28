@@ -152,7 +152,7 @@ async fn memory_journals_flow_runs_to_completion() {
             match &*state_rx.borrow() {
                 PipelineState::Drained
                 | PipelineState::Failed { .. }
-                | PipelineState::AbortRequested { .. } => break,
+                | PipelineState::FailingChildren { .. } => break,
                 _ => {}
             }
             if state_rx.changed().await.is_err() {

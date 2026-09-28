@@ -13,7 +13,7 @@ use obzenflow_core::{
     event::payloads::delivery_payload::DeliveryMethod,
     event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
-    event::{ChainPayload, StageLifecycleEvent, SupervisorRecord, SystemPayload},
+    event::{payloads::execution_payload::StageLifecycleFact, ChainPayload},
     id::StageId,
     BoundedBindingEvidence, StageOutputs, TypedPayload,
 };
@@ -1670,23 +1670,19 @@ async fn assert_replay_stateful_contract_failure_archive(
     let stage_id = stage_id_from_manifest(run_dir, "effectful");
     let reports = replay_testkit::read_stage_envelopes_appended(run_dir, "effectful")
         .await
-        .into_iter()
-        .filter_map(SupervisorRecord::from_chain);
+        .into_iter();
     let mut failure_count = 0;
     for report in reports {
-        let SystemPayload::StageLifecycle {
-            stage_id: lifecycle_stage_id,
-            event,
-        } = report.payload
+        let ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) = &report.payload
         else {
             continue;
         };
-        if lifecycle_stage_id != stage_id {
+        if event.stage_id() != stage_id {
             continue;
         }
 
         match event {
-            StageLifecycleEvent::Failed {
+            StageLifecycleFact::Failed {
                 error,
                 accounting: metrics,
                 ..
@@ -1718,12 +1714,12 @@ async fn assert_replay_stateful_contract_failure_archive(
                     );
                 }
             }
-            StageLifecycleEvent::Completed { .. } | StageLifecycleEvent::Drained => {
+            StageLifecycleFact::Completed { .. } | StageLifecycleFact::Drained { .. } => {
                 panic!("a stateful contract violation must not reach a successful terminal state")
             }
-            StageLifecycleEvent::Running
-            | StageLifecycleEvent::Draining { .. }
-            | StageLifecycleEvent::Cancelled { .. } => {}
+            StageLifecycleFact::Running { .. }
+            | StageLifecycleFact::Draining { .. }
+            | StageLifecycleFact::Cancelled { .. } => {}
         }
     }
     assert_eq!(

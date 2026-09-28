@@ -20,10 +20,6 @@ GROUPS = (
     "causal_components",
     "disk_components",
     "decode_dispatch",
-    "report_discovery",
-    "ready_report_handoff",
-    "parent_admission",
-    "parent_publication",
 )
 
 
@@ -42,22 +38,16 @@ def main():
     parser.add_argument("--profile", choices=("test", "bench"), required=True)
     parser.add_argument("--criterion-dir", type=pathlib.Path, default=ROOT / "target/criterion")
     parser.add_argument("--command", required=True, help="Exact successful Cargo benchmark command")
-    parser.add_argument("--suite", choices=("components", "supervision", "hot-path", "delivery"), default="components")
+    parser.add_argument("--suite", choices=("components", "hot-path"), default="components")
     parser.add_argument("--work-json", type=pathlib.Path, help="Required operation censuses for instrumented suites")
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.baseline):
         parser.error("baseline must be a simple Criterion baseline name")
     groups = GROUPS if args.suite == "components" else (
-        "supervision_discovery", "journal_read_controls", "report_definition_resolution", "journal_append_costs",
+        "record_accounting", "causal_record_work", "record_reconstruction",
+        "reader_dispatch", "journal_append_cost",
     )
-    expected = 59 if args.suite == "components" else 30
-    if args.suite == "hot-path":
-        groups = ("report_accounting", "causal_record_work", "record_reconstruction",
-                  "reader_dispatch", "supervisor_fan_in", "journal_append_cost")
-        expected = 138
-    elif args.suite == "delivery":
-        groups = ("supervision_delivery",)
-        expected = 30
+    expected = 33 if args.suite == "components" else 75
     cases = []
     for group in groups:
         for benchmark_path in sorted((args.criterion_dir / group).glob(f"**/{args.baseline}/benchmark.json")):
@@ -75,7 +65,7 @@ def main():
     if len(cases) != expected or len({case["benchmark"]["full_id"] for case in cases}) != expected:
         raise ValueError(f"Contract requires all {expected} unique cases; found {len(cases)}")
     work = None
-    if args.suite in ("supervision", "hot-path", "delivery"):
+    if args.suite == "hot-path":
         if args.work_json is None:
             parser.error("instrumented suites require --work-json")
         work = json.loads(args.work_json.read_text())
@@ -88,7 +78,6 @@ def main():
         "crates/obzenflow_benchmarks/Cargo.toml",
         "crates/obzenflow_benchmarks/README.md",
         "crates/obzenflow_infra/src/testing/journal_bench.rs",
-        "crates/obzenflow_runtime/src/pipeline/benchmarks.rs",
         "crates/obzenflow_core/src/event/causal.rs",
         "crates/obzenflow_core/src/event/journal_record.rs",
         "crates/obzenflow_core/src/journal/limits.rs",
@@ -97,12 +86,9 @@ def main():
         "crates/obzenflow_infra/src/journal/disk/identity.rs",
         "crates/obzenflow_infra/src/journal/disk/reader.rs",
         "crates/obzenflow_infra/src/journal/disk/journal.rs",
-        "crates/obzenflow_runtime/src/supervised_base/report_reader.rs",
         "crates/obzenflow_runtime/src/supervised_base/publication.rs",
-        "crates/obzenflow_runtime/src/pipeline/fsm/journal.rs",
     )]
-    if args.suite in ("supervision", "hot-path", "delivery"):
-        sources += list((ROOT / "crates/obzenflow_benchmarks/benches/supervision_selection").glob("*.rs"))
+    if args.suite == "hot-path":
         sources += [ROOT / path for path in (
             "crates/obzenflow_core/Cargo.toml",
             "crates/obzenflow_core/src/benchmark.rs",
@@ -112,20 +98,16 @@ def main():
             "crates/obzenflow_infra/src/journal/disk/codec/frame.rs",
             "crates/obzenflow_infra/src/journal/disk/codec/definitions.rs",
             "crates/obzenflow_infra/src/journal/disk/scanner.rs",
-            "crates/obzenflow_core/src/event/supervisor_record.rs",
             "crates/obzenflow_core/src/event/payloads/journal_payload.rs",
-            "crates/obzenflow_core/src/event/payloads/supervision_report.rs",
             "crates/obzenflow_core/src/journal/archive/manifest.rs",
             "crates/obzenflow_core/src/journal/journal_trait.rs",
             "crates/obzenflow_core/src/journal/storage.rs",
-            "crates/obzenflow_core/src/journal/reader/reports.rs",
             "crates/obzenflow_infra/src/journal/disk/codec/routing.rs",
             "crates/obzenflow_infra/src/journal/disk/codec/layout.rs",
-            "crates/obzenflow_infra/src/journal/disk/report_reader.rs",
             "crates/obzenflow_infra/src/journal/memory/journal.rs",
             "crates/obzenflow_infra/src/journal/memory/reader.rs",
         )]
-    if args.suite in ("hot-path", "delivery"):
+    if args.suite == "hot-path":
         sources += list((ROOT / "crates/obzenflow_benchmarks/benches/journal_hot_path").glob("*.rs"))
         sources += [ROOT / path for path in (
             "crates/obzenflow_benchmarks/scripts/capture_component_baseline.py",
@@ -134,10 +116,8 @@ def main():
             "crates/obzenflow_runtime/src/testing/pipeline.rs",
             "crates/obzenflow_runtime/src/pipeline/fsm/actions.rs",
         )]
-    if args.suite == "delivery":
-        sources += list((ROOT / "crates/obzenflow_benchmarks/benches/supervision_delivery").glob("*.rs"))
     report = {
-        "measurement_contract": {"components":"journal-components-v1", "supervision":"supervision-selection-v1", "hot-path":"journal-hot-path-v2", "delivery":"supervision-delivery-v1"}[args.suite],
+        "measurement_contract": {"components":"journal-components-v2", "hot-path":"journal-hot-path-v3"}[args.suite],
         "baseline": args.baseline,
         "captured_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "revision": command("git", "rev-parse", "HEAD"),
@@ -146,7 +126,7 @@ def main():
         "platform": platform.platform(),
         "machine": platform.machine(),
         "profile": args.profile,
-        "features": ["components" if args.suite == "components" else "supervision-benchmarks"],
+        "features": ["components" if args.suite == "components" else "journal-benchmarks"],
         "async_workers": 2,
         "maximum_blocking_workers": 2,
         "command": args.command,
@@ -155,14 +135,6 @@ def main():
     }
     if work is not None:
         report["work_observations"] = work
-    if args.suite == "hot-path":
-        report["maximum_blocking_workers"] = {
-            "default": 2,
-            "live_supervisor_fan_in": sorted({
-                item["input"]["blocking_workers"] for item in work
-                if item["input"].get("concurrent_appends")
-            }),
-        }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Captured {len(cases)} Criterion cases to {args.output}")

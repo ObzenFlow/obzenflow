@@ -29,7 +29,7 @@ use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 
 use super::TransformSupervisor;
-use crate::stages::transform::fsm::{TransformContext, TransformEvent, TransformState};
+use crate::stages::transform::fsm::{TransformEvent, TransformResources, TransformState};
 
 /// Dispatch a single event-loop iteration for the Draining state.
 pub(super) async fn dispatch_draining<
@@ -37,7 +37,7 @@ pub(super) async fn dispatch_draining<
 >(
     sup: &mut TransformSupervisor<H>,
     state: &TransformState<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat.state.mark_draining();
@@ -64,7 +64,7 @@ async fn dispatch_draining_inner<
 >(
     sup: &mut TransformSupervisor<H>,
     state: &TransformState<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
     flow_context: &FlowContext,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if sup.subscription.is_some() {
@@ -206,7 +206,10 @@ async fn dispatch_draining_inner<
             }
 
             let envelope_clone = envelope.clone();
-            let handler = &ctx.handler;
+            let handler = ctx
+                .handler
+                .as_ref()
+                .expect("handler available before cleanup");
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
             let handler_heartbeat_state = heartbeat_state.clone();
             let effect_context = stage_input_position.and_then(|input_seq| {
@@ -456,11 +459,10 @@ async fn dispatch_draining_inner<
         }
         PollResult::NoEvents => {
             if let Some(subscription) = sup.subscription.as_mut() {
-                drop(
-                    subscription
-                        .check_contracts(&mut ctx.contract_state[..])
-                        .await,
-                );
+                subscription
+                    .check_contracts(&mut ctx.contract_state[..])
+                    .await
+                    .into_result()?;
             }
 
             tracing::info!(stage_name = %ctx.stage_name, "Transform queue drained");

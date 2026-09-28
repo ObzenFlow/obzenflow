@@ -27,8 +27,8 @@ use crate::stages::observer::dispatch::{
     run_after_handler_observers, run_before_handler_observers,
 };
 use crate::stages::transform::fsm::{
-    DirectFactContinuation, DirectFactContinuationStart, DirectFactPollState, TransformContext,
-    TransformEvent,
+    DirectFactContinuation, DirectFactContinuationStart, DirectFactPollState, TransformEvent,
+    TransformResources,
 };
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::provenance::FlowContext;
@@ -52,7 +52,7 @@ fn direct_fatal(
 pub(super) async fn start_if_eligible<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
     envelope: &DeliveredRecord<ChainPayload>,
     upstream_stage: Option<StageId>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
@@ -92,7 +92,11 @@ pub(super) async fn start_if_eligible<
         .backpressure_writer
         .clone()
         .with_direct_fact_admission(admission.clone());
-    let handler = ctx.handler.clone();
+    let handler = ctx
+        .handler
+        .as_ref()
+        .expect("handler available before cleanup")
+        .clone();
     let handler_heartbeat_state = ctx
         .heartbeat
         .as_ref()
@@ -192,7 +196,7 @@ async fn close_and_track<
 }
 
 fn acknowledge<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
-    ctx: &TransformContext<H>,
+    ctx: &TransformResources<H>,
     upstream: Option<StageId>,
 ) {
     let Some(upstream) = upstream else {
@@ -211,7 +215,7 @@ fn acknowledge<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Syn
 
 async fn fail<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
     sup: &mut TransformSupervisor<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
     continuation: DirectFactContinuation,
     fatal: StageFatal,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -247,7 +251,7 @@ async fn finish_success<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut TransformSupervisor<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
     continuation: DirectFactContinuation,
     flow_context: &FlowContext,
     transformed_events: Vec<ChainEvent>,
@@ -404,7 +408,7 @@ pub(super) async fn service<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut TransformSupervisor<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
     flow_context: &FlowContext,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let mut continuation = ctx

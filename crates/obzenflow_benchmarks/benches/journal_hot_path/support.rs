@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-#[path = "../supervision_selection/allocations.rs"]
+#[path = "allocations.rs"]
 mod allocations;
 
 #[global_allocator]

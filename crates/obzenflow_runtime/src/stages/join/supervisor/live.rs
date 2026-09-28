@@ -27,14 +27,14 @@ use std::time::Instant;
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::fsm::{
-    JoinContext, JoinEvent, JoinSubscriptionSide, PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinSubscriptionSide, PendingSubscriptionAck,
 };
 
 pub(super) async fn dispatch_live<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
 
@@ -80,24 +80,24 @@ pub(super) async fn dispatch_live<
     }
 
     if let Some(subscription) = sup.reference_subscription.as_mut() {
-        drop(
-            subscription
-                .maybe_check_contracts_tick(
-                    &mut ctx.reference_contract_state[..],
-                    &mut ctx.reference_last_contract_check,
-                )
-                .await,
-        );
+        subscription
+            .maybe_check_contracts_tick(
+                &mut ctx.reference_contract_state[..],
+                &mut ctx.reference_last_contract_check,
+            )
+            .await
+            .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+            .into_result()?;
     }
     if let Some(subscription) = sup.stream_subscription.as_mut() {
-        drop(
-            subscription
-                .maybe_check_contracts_tick(
-                    &mut ctx.stream_contract_state[..],
-                    &mut ctx.stream_last_contract_check,
-                )
-                .await,
-        );
+        subscription
+            .maybe_check_contracts_tick(
+                &mut ctx.stream_contract_state[..],
+                &mut ctx.stream_last_contract_check,
+            )
+            .await
+            .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+            .into_result()?;
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -108,7 +108,7 @@ async fn poll_live_reference<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let poll = {
         let Some(subscription) = sup.reference_subscription.as_mut() else {
@@ -148,7 +148,7 @@ async fn handle_reference_envelope<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     envelope: DeliveredRecord<ChainPayload>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
@@ -337,14 +337,14 @@ async fn handle_reference_envelope<
                     Some(&envelope),
                 )
                 .await?;
-                drop(
-                    subscription
-                        .maybe_check_contracts_tick(
-                            &mut ctx.reference_contract_state[..],
-                            &mut ctx.reference_last_contract_check,
-                        )
-                        .await,
-                );
+                subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.reference_contract_state[..],
+                        &mut ctx.reference_last_contract_check,
+                    )
+                    .await
+                    .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+                    .into_result()?;
                 return Ok(Some(EventLoopDirective::Continue));
             }
 
@@ -355,13 +355,17 @@ async fn handle_reference_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
-            let result = ctx.handler.process_reference(
-                &mut ctx.handler_state,
-                event.clone(),
-                source_id,
-                writer_id,
-                scope,
-            );
+            let result = ctx
+                .handler
+                .as_ref()
+                .expect("handler available before cleanup")
+                .process_reference(
+                    &mut ctx.handler_state,
+                    event.clone(),
+                    source_id,
+                    writer_id,
+                    scope,
+                );
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
             }
@@ -465,14 +469,14 @@ async fn handle_reference_envelope<
         _ => Some(EventLoopDirective::Continue),
     };
 
-    drop(
-        subscription
-            .maybe_check_contracts_tick(
-                &mut ctx.reference_contract_state[..],
-                &mut ctx.reference_last_contract_check,
-            )
-            .await,
-    );
+    subscription
+        .maybe_check_contracts_tick(
+            &mut ctx.reference_contract_state[..],
+            &mut ctx.reference_last_contract_check,
+        )
+        .await
+        .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+        .into_result()?;
 
     Ok(directive)
 }
@@ -481,7 +485,7 @@ async fn poll_live_stream<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let poll = {
         let Some(subscription) = sup.stream_subscription.as_mut() else {
@@ -521,7 +525,7 @@ async fn handle_stream_envelope<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     envelope: DeliveredRecord<ChainPayload>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
@@ -731,14 +735,14 @@ async fn handle_stream_envelope<
                     Some(&envelope),
                 )
                 .await?;
-                drop(
-                    subscription
-                        .maybe_check_contracts_tick(
-                            &mut ctx.stream_contract_state[..],
-                            &mut ctx.stream_last_contract_check,
-                        )
-                        .await,
-                );
+                subscription
+                    .maybe_check_contracts_tick(
+                        &mut ctx.stream_contract_state[..],
+                        &mut ctx.stream_last_contract_check,
+                    )
+                    .await
+                    .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+                    .into_result()?;
                 return Ok(Some(EventLoopDirective::Continue));
             }
 
@@ -751,13 +755,17 @@ async fn handle_stream_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
-            let result = ctx.handler.process_stream(
-                &mut ctx.handler_state,
-                event.clone(),
-                source_id,
-                writer_id,
-                scope,
-            );
+            let result = ctx
+                .handler
+                .as_ref()
+                .expect("handler available before cleanup")
+                .process_stream(
+                    &mut ctx.handler_state,
+                    event.clone(),
+                    source_id,
+                    writer_id,
+                    scope,
+                );
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
             }
@@ -865,14 +873,14 @@ async fn handle_stream_envelope<
         _ => Some(EventLoopDirective::Continue),
     };
 
-    drop(
-        subscription
-            .maybe_check_contracts_tick(
-                &mut ctx.stream_contract_state[..],
-                &mut ctx.stream_last_contract_check,
-            )
-            .await,
-    );
+    subscription
+        .maybe_check_contracts_tick(
+            &mut ctx.stream_contract_state[..],
+            &mut ctx.stream_last_contract_check,
+        )
+        .await
+        .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+        .into_result()?;
 
     Ok(directive)
 }
@@ -928,28 +936,29 @@ async fn run_live_contract_ticks<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
-) {
+    ctx: &mut JoinResources<H>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(subscription) = sup.reference_subscription.as_mut() {
-        drop(
-            subscription
-                .maybe_check_contracts_tick(
-                    &mut ctx.reference_contract_state[..],
-                    &mut ctx.reference_last_contract_check,
-                )
-                .await,
-        );
+        subscription
+            .maybe_check_contracts_tick(
+                &mut ctx.reference_contract_state[..],
+                &mut ctx.reference_last_contract_check,
+            )
+            .await
+            .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+            .into_result()?;
     }
     if let Some(subscription) = sup.stream_subscription.as_mut() {
-        drop(
-            subscription
-                .maybe_check_contracts_tick(
-                    &mut ctx.stream_contract_state[..],
-                    &mut ctx.stream_last_contract_check,
-                )
-                .await,
-        );
+        subscription
+            .maybe_check_contracts_tick(
+                &mut ctx.stream_contract_state[..],
+                &mut ctx.stream_last_contract_check,
+            )
+            .await
+            .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+            .into_result()?;
     }
+    Ok(())
 }
 
 /// Canonical deterministic dispatch for ordered live joins (FLOWIP-095d).
@@ -963,7 +972,7 @@ async fn dispatch_live_canonical<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     // Seq mode repeats the two ensure rounds until neither side acquired a
     // new head (FLOWIP-120n F18): every headless reader's last empty poll
@@ -1077,7 +1086,7 @@ async fn dispatch_live_canonical<
                     .and_then(|subscription| subscription.merge_wait())
             });
         crate::stages::common::heartbeat::note_merge_wait(ctx.heartbeat.as_ref(), wait);
-        run_live_contract_ticks(sup, ctx).await;
+        run_live_contract_ticks(sup, ctx).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         return Ok(EventLoopDirective::Continue);
     }
@@ -1110,7 +1119,7 @@ async fn dispatch_live_canonical<
     let Some(side) = side else {
         // Both sides exhausted: EOF directives were produced at EOF delivery;
         // keep cycling like the unordered path does when nothing polls.
-        run_live_contract_ticks(sup, ctx).await;
+        run_live_contract_ticks(sup, ctx).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         return Ok(EventLoopDirective::Continue);
     };
@@ -1178,7 +1187,7 @@ async fn dispatch_live_canonical<
 
 async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     side: JoinSubscriptionSide,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,

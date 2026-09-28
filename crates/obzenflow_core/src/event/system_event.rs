@@ -8,9 +8,9 @@ use crate::event::envelope::AuthoredEnvelope;
 use crate::event::payloads::chain_payload::EventKind;
 use crate::event::payloads::system_payload::*;
 use crate::event::payloads::JournalPayload;
-use crate::event::provenance::{ExecutionAccounting, SystemEventProvenance};
+use crate::event::provenance::SystemEventProvenance;
 use crate::event::types::{DurationMs, EventId, WriterId};
-use crate::id::{StageId, SystemId};
+use crate::id::SystemId;
 use crate::metrics::FlowLifecycleMetricsSnapshot;
 use serde::{Deserialize, Serialize};
 /// An authored system record, without journal commitment provenance.
@@ -80,152 +80,6 @@ impl SystemEvent {
             payload: event,
         }
     }
-
-    /// Helper for stages to create lifecycle events
-    pub fn stage_running(stage_id: StageId) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Running,
-            },
-        )
-    }
-
-    /// Helper for stages to create completed events
-    pub fn stage_completed(stage_id: StageId) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Completed { accounting: None },
-            },
-        )
-    }
-
-    /// Helper for stages to create cancelled events
-    pub fn stage_cancelled(stage_id: StageId, reason: String) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Cancelled {
-                    reason,
-                    accounting: None,
-                },
-            },
-        )
-    }
-
-    /// Helper for stages to create failed events
-    pub fn stage_failed(stage_id: StageId, error: String, recoverable: bool) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Failed {
-                    error,
-                    recoverable: Some(recoverable),
-                    accounting: None,
-                    causal_event_id: None,
-                },
-            },
-        )
-    }
-
-    /// Helper for stages to create draining events with metrics
-    pub fn stage_draining_with_accounting(
-        stage_id: StageId,
-        accounting: ExecutionAccounting,
-    ) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Draining {
-                    accounting: Some(accounting),
-                },
-            },
-        )
-    }
-
-    /// Helper for stages to create completed events with metrics
-    pub fn stage_completed_with_accounting(
-        stage_id: StageId,
-        accounting: ExecutionAccounting,
-    ) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Completed {
-                    accounting: Some(accounting),
-                },
-            },
-        )
-    }
-
-    /// Helper for stages to create failed events with metrics
-    pub fn stage_failed_with_accounting(
-        stage_id: StageId,
-        error: String,
-        recoverable: bool,
-        accounting: ExecutionAccounting,
-    ) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Failed {
-                    error,
-                    recoverable: Some(recoverable),
-                    accounting: Some(accounting),
-                    causal_event_id: None,
-                },
-            },
-        )
-    }
-
-    /// Construct correctness-bearing failed lifecycle evidence causally linked
-    /// to the final chain event in a sink failure sequence.
-    pub fn stage_failed_with_accounting_causal(
-        stage_id: StageId,
-        error: String,
-        recoverable: bool,
-        accounting: ExecutionAccounting,
-        causal_event_id: EventId,
-    ) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Failed {
-                    error,
-                    recoverable: Some(recoverable),
-                    accounting: Some(accounting),
-                    causal_event_id: Some(causal_event_id),
-                },
-            },
-        )
-    }
-
-    /// Helper for stages to create cancelled events with metrics
-    pub fn stage_cancelled_with_accounting(
-        stage_id: StageId,
-        reason: String,
-        accounting: ExecutionAccounting,
-    ) -> Self {
-        Self::new(
-            WriterId::from(stage_id),
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Cancelled {
-                    reason,
-                    accounting: Some(accounting),
-                },
-            },
-        )
-    }
 }
 
 /// Get current timestamp in milliseconds since epoch
@@ -247,101 +101,6 @@ impl SystemEventFactory {
         Self {
             writer_id: WriterId::from(system_id),
         }
-    }
-
-    // === Stage Lifecycle Events ===
-
-    pub fn stage_running(&self, stage_id: StageId) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Running,
-            },
-        )
-    }
-
-    pub fn stage_draining(&self, stage_id: StageId) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Draining { accounting: None },
-            },
-        )
-    }
-
-    pub fn stage_drained(&self, stage_id: StageId) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Drained,
-            },
-        )
-    }
-
-    pub fn stage_completed(&self, stage_id: StageId) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Completed { accounting: None },
-            },
-        )
-    }
-
-    pub fn stage_failed(&self, stage_id: StageId, error: String, recoverable: bool) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Failed {
-                    error,
-                    recoverable: Some(recoverable),
-                    accounting: None,
-                    causal_event_id: None,
-                },
-            },
-        )
-    }
-
-    pub fn stage_cancelled(&self, stage_id: StageId, reason: String) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Cancelled {
-                    reason,
-                    accounting: None,
-                },
-            },
-        )
-    }
-
-    /// Contract status summary emitted by readers/subscribers (per upstream)
-    pub fn contract_status(
-        &self,
-        upstream: StageId,
-        reader: StageId,
-        pass: bool,
-        reader_seq: Option<crate::event::types::SeqNo>,
-        advertised_writer_seq: Option<crate::event::types::SeqNo>,
-        reason: Option<crate::event::types::ViolationCause>,
-    ) -> SystemEvent {
-        SystemEvent::new(
-            self.writer_id,
-            SystemPayload::ContractStatus {
-                upstream,
-                reader,
-                selected_event_type: None,
-                feed_role: None,
-                pass,
-                reader_seq,
-                advertised_writer_seq,
-                reason,
-            },
-        )
     }
 
     // === Pipeline Lifecycle Events ===
@@ -519,8 +278,6 @@ impl JournalEvent for SystemEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::types::SeqNo;
-    use crate::{EventType, StageId};
     use serde_json::json;
 
     #[test]
@@ -567,59 +324,6 @@ mod tests {
             json!({"pipeline_event": "stop_admitted", "admission": {"mode": "graceful"}}),
         ] {
             assert!(serde_json::from_value::<PipelineLifecycleEvent>(obsolete).is_err());
-        }
-    }
-
-    #[test]
-    fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
-        let payload = SystemPayload::ContractResult {
-            upstream: StageId::new(),
-            reader: StageId::new(),
-            selected_event_type: Some(EventType::from("test.selected.v1")),
-            feed_role: Some(SystemFeedRole::Reference),
-            contract_name: ContractName::from("TransportContract"),
-            status: ContractResultStatusLabel::Healthy,
-            cause: None,
-            reader_seq: Some(SeqNo(3)),
-            advertised_writer_seq: Some(SeqNo(5)),
-        };
-
-        let serialized = serde_json::to_value(&payload).expect("system event should serialize");
-        assert_eq!(serialized["selected_event_type"], "test.selected.v1");
-        assert_eq!(serialized["feed_role"], "reference");
-        assert_eq!(serialized["contract_name"], "TransportContract");
-        assert_eq!(serialized["status"], "healthy");
-
-        let decoded: SystemPayload = serde_json::from_value(json!({
-            "system_event_type": "contract_result",
-            "upstream": serialized["upstream"].clone(),
-            "reader": serialized["reader"].clone(),
-            "selected_event_type": "test.selected.v1",
-            "feed_role": "reference",
-            "contract_name": "TransportContract",
-            "status": "healthy",
-            "reader_seq": 3,
-            "advertised_writer_seq": 5
-        }))
-        .expect("string-label system event should deserialize");
-
-        match decoded {
-            SystemPayload::ContractResult {
-                selected_event_type,
-                feed_role,
-                contract_name,
-                status,
-                ..
-            } => {
-                assert_eq!(
-                    selected_event_type,
-                    Some(EventType::from("test.selected.v1"))
-                );
-                assert_eq!(feed_role, Some(SystemFeedRole::Reference));
-                assert_eq!(contract_name.as_str(), "TransportContract");
-                assert_eq!(status, ContractResultStatusLabel::Healthy);
-            }
-            other => panic!("expected ContractResult, got {other:?}"),
         }
     }
 }

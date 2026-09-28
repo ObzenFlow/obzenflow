@@ -278,12 +278,12 @@ fn run(
     StandardHandle<Event, State>,
     crate::supervised_base::builder::EventSender<Event>,
 ) {
-    let (control, receiver, watcher) = ChannelBuilder::new().build(State::Initializing);
+    let (control, receiver, watcher) = ChannelBuilder::new().build(State::Created);
     let supervisor = MetricsAggregatorSupervisor {
         name: "metrics-test".into(),
         system_journal: ctx.journals.coordination.clone(),
         system_id: ctx.system_id,
-        control: receiver,
+        control: receiver.into(),
         readers: None,
         final_refresh: None,
         state_watcher: watcher.clone(),
@@ -296,7 +296,7 @@ fn run(
             .with_supervisor_task(
                 SupervisorTaskBuilder::new("metrics-test").spawn_self_supervised(
                     supervisor,
-                    State::Initializing,
+                    State::Created,
                     ctx,
                 ),
             )
@@ -559,45 +559,35 @@ pub async fn metrics_terminal_accounting_survives_without_optional_packets(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::provenance::ExecutionAccounting;
-    use obzenflow_core::event::{StageLifecycleEvent, SystemPayload};
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "filtered");
-    let (mut ctx, system, exports) = context(&mut *factory, vec![(stage, data)], vec![]).await;
+    let (mut ctx, system, exports) =
+        context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
     let writer = SystemId::new();
     ctx.pipeline_writer = Some(writer.into());
-    system
-        .append(
-            SystemEvent::new(
-                stage.into(),
-                SystemPayload::StageLifecycle {
-                    stage_id: stage,
-                    event: StageLifecycleEvent::Completed {
-                        accounting: Some(ExecutionAccounting {
-                            events_processed_total: 1000,
-                            events_emitted_total: 0,
-                            ..Default::default()
-                        }),
-                    },
-                },
-            ),
-            Default::default(),
+    let owner = obzenflow_core::event::provenance::FlowContext::new("filtered", stage);
+    data.append(
+        ChainEventFactory::stage_completed(
+            stage.into(),
+            stage,
+            ExecutionAccounting {
+                events_processed_total: 1000,
+                events_emitted_total: 0,
+                ..Default::default()
+            },
         )
-        .await
-        .unwrap();
+        .with_flow_context(owner.clone()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     // A later lifecycle without counters cannot discard the accounting slot.
-    system
-        .append(
-            SystemEvent::new(
-                stage.into(),
-                SystemPayload::StageLifecycle {
-                    stage_id: stage,
-                    event: StageLifecycleEvent::Drained,
-                },
-            ),
-            Default::default(),
-        )
-        .await
-        .unwrap();
+    data.append(
+        ChainEventFactory::stage_drained(stage.into(), stage, None).with_flow_context(owner),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     system
         .append(
             SystemEventFactory::new(writer).pipeline_not_started(),
@@ -684,98 +674,30 @@ pub async fn metrics_manual_export_uses_the_live_control_receiver(
     let _ = task.wait_for_completion().await;
 }
 
-pub async fn metrics_export_power_law_does_not_expand_parent_coordination_work(
+pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
-    use crate::supervised_base::report_reader::{ReportRead, ReportReaders};
-    use obzenflow_core::event::payloads::execution_payload::{
-        ExecutionPayload, StageLifecycleFact,
-    };
-    use obzenflow_core::event::ChainPayload;
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "quiet");
-    data.append(fact(stage, stage.into(), 1, 0), Default::default())
-        .await
-        .unwrap();
-    let (mut ctx, pipeline, exports) =
-        context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let (mut ctx, pipeline, exports) = context(&mut *factory, vec![], vec![]).await;
     ctx.export_interval = Duration::from_secs(60);
     let journals = ctx.journals.clone();
-    let mut parent = ReportReaders::default();
-    parent.stage(data.inner.clone());
-    parent.system(journals.coordination.clone());
     let (task, control) = run(ctx);
     until(|| !exports.0.lock().unwrap().is_empty()).await;
-    let mut admitted = 0;
-    while admitted < 2 || !parent.initial_prefix_complete() {
-        if let ReportRead::Record(_) = std::future::poll_fn(|cx| parent.poll_next(cx))
-            .await
-            .unwrap()
-        {
-            admitted += 1;
-        }
-    }
     for volume in [1, 100, 1000] {
         let baseline = exports.0.lock().unwrap().len();
-        let quiet = data
-            .append(
-                ChainEventFactory::create_event(
-                    stage.into(),
-                    ChainPayload::Execution(ExecutionPayload::StageLifecycle(
-                        StageLifecycleFact::Running { stage_id: stage },
-                    )),
-                ),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        let started = std::time::Instant::now();
-        let sender = control.clone();
-        let flood = tokio::spawn(async move {
-            for _ in 0..volume {
-                sender.send(Event::ExportMetrics).await.unwrap();
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let ReportRead::Record(row) = std::future::poll_fn(|cx| parent.poll_next(cx))
-                    .await
-                    .unwrap()
-                {
-                    admitted += 1;
-                    if row.id() == quiet.id() {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .expect("quiet reports remain serviceable during export traffic");
-        let latency = started.elapsed();
-        flood.await.unwrap();
+        for _ in 0..volume {
+            control.send(Event::ExportMetrics).await.unwrap();
+        }
         until(|| exports.0.lock().unwrap().len() == baseline + volume).await;
-        let coord = journals.coordination.committed_position().await.unwrap();
         assert_eq!(
-            coord, 2,
-            "only registration and readiness; exports have a separate physical history"
-        );
-        let stats = parent.diagnostics();
-        assert_eq!(
-            stats
-                .iter()
-                .find(|row| row.journal == *journals.coordination.id())
-                .unwrap()
-                .scanned_records,
+            journals.coordination.committed_position().await.unwrap(),
             2,
-            "parent must not read/decode/filter export history"
+            "accepted exports settle in the export journal without extending coordination history"
         );
-        assert!(stats.iter().all(|row| row.journal != *journals.export.id()));
-        eprintln!("exports_per_quiet_report={volume}, quiet_admission={latency:?}, parent_coordination_scans=2");
+        assert_eq!(
+            journals.export.committed_position().await.unwrap(),
+            (baseline + volume) as u64
+        );
     }
-    assert_eq!(
-        admitted, 5,
-        "two coordination facts and three quiet reports"
-    );
     pipeline
         .append(
             SystemEventFactory::new(SystemId::new()).pipeline_not_started(),

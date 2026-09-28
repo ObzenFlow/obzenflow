@@ -8,6 +8,10 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
+use crate::stages::common::stage_handle::{
+    FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+};
+
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::StageType;
@@ -16,7 +20,6 @@ use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath};
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, ConsumptionFinalEventParams, SourceContractEventParams,
-    SystemEvent,
 };
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::Journal;
@@ -29,11 +32,8 @@ use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
-use crate::metrics::instrumentation::{snapshot_stage_accounting, StageInstrumentation};
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::stage_handle::{
-    FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
-};
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::source::strategies::{CompletionContext, CompletionGate};
 
@@ -46,6 +46,14 @@ use crate::stages::source::strategies::{CompletionContext, CompletionGate};
 pub enum FiniteSourceState<H> {
     /// Initial state - source has been created but not initialized
     Created,
+
+    Initializing,
+    Starting,
+    Finalising,
+    AcquiringInput,
+    Failing(String),
+    Cancelling(String),
+    Cancelled(String),
 
     /// Resources allocated, subscriptions created, ready to wait for start signal
     Initialized,
@@ -75,6 +83,14 @@ impl<H> Clone for FiniteSourceState<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Created => Self::Created,
+            Self::Initializing => Self::Initializing,
+            Self::Starting => Self::Starting,
+            Self::Finalising => Self::Finalising,
+            Self::AcquiringInput => Self::AcquiringInput,
+            Self::Failing(cause) => Self::Failing(cause.clone()),
+            Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
+            Self::Cancelled(cause) => Self::Cancelled(cause.clone()),
+
             Self::Initialized => Self::Initialized,
             Self::WaitingForGun => Self::WaitingForGun,
             Self::Running => Self::Running,
@@ -90,6 +106,14 @@ impl<H> std::fmt::Debug for FiniteSourceState<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Created => write!(f, "Created"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Starting => write!(f, "Starting"),
+            Self::Finalising => write!(f, "Finalising"),
+            Self::AcquiringInput => write!(f, "AcquiringInput"),
+            Self::Failing(cause) => write!(f, "Failing({cause:?})"),
+            Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
+            Self::Cancelled(cause) => write!(f, "Cancelled({cause:?})"),
+
             Self::Initialized => write!(f, "Initialized"),
             Self::WaitingForGun => write!(f, "WaitingForGun"),
             Self::Running => write!(f, "Running"),
@@ -105,6 +129,14 @@ impl<H: Send + Sync> PartialEq for FiniteSourceState<H> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (FiniteSourceState::Created, FiniteSourceState::Created) => true,
+            (Self::Initializing, Self::Initializing) => true,
+            (Self::Starting, Self::Starting) => true,
+            (Self::Finalising, Self::Finalising) => true,
+            (Self::AcquiringInput, Self::AcquiringInput) => true,
+            (Self::Failing(a), Self::Failing(b)) => a == b,
+            (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
+            (Self::Cancelled(a), Self::Cancelled(b)) => a == b,
+
             (FiniteSourceState::Initialized, FiniteSourceState::Initialized) => true,
             (FiniteSourceState::WaitingForGun, FiniteSourceState::WaitingForGun) => true,
             (FiniteSourceState::Running, FiniteSourceState::Running) => true,
@@ -120,6 +152,14 @@ impl<H: Send + Sync + 'static> StateVariant for FiniteSourceState<H> {
     fn variant_name(&self) -> &str {
         match self {
             FiniteSourceState::Created => "Created",
+            Self::Initializing => "Initializing",
+            Self::Starting => "Starting",
+            Self::Finalising => "Finalising",
+            Self::AcquiringInput => "AcquiringInput",
+            Self::Failing(..) => "Failing",
+            Self::Cancelling(..) => "Cancelling",
+            Self::Cancelled(..) => "Cancelled",
+
             FiniteSourceState::Initialized => "Initialized",
             FiniteSourceState::WaitingForGun => "WaitingForGun",
             FiniteSourceState::Running => "Running",
@@ -127,6 +167,48 @@ impl<H: Send + Sync + 'static> StateVariant for FiniteSourceState<H> {
             FiniteSourceState::Drained => "Drained",
             FiniteSourceState::Failed(_) => "Failed",
             FiniteSourceState::_Phantom(_) => unreachable!("PhantomData variant"),
+        }
+    }
+}
+
+impl<H> FiniteSourceState<H> {
+    pub(crate) fn defer_external_event(state: &Self, event: &FiniteSourceEvent<H>) -> bool {
+        match state {
+            Self::Initializing => matches!(
+                event,
+                FiniteSourceEvent::Ready | FiniteSourceEvent::Start | FiniteSourceEvent::BeginDrain
+            ),
+            Self::AcquiringInput | Self::Starting | Self::Running => !matches!(
+                event,
+                FiniteSourceEvent::Error(_) | FiniteSourceEvent::BeginDrain
+            ),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn failure(cause: String) -> Self {
+        match cause.as_str() {
+            FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT => {
+                Self::Cancelling(cause)
+            }
+            _ => Self::Failing(cause),
+        }
+    }
+
+    pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
+        match self {
+            Self::Initializing => Phase::Initializing,
+            Self::Initialized => Phase::Initialized,
+            Self::WaitingForGun => Phase::Ready,
+            Self::Running => Phase::Active,
+            Self::Finalising => Phase::Finalising,
+            Self::Failing(cause) => Phase::Failing(cause.clone()),
+            Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
+            Self::Drained => Phase::Completed,
+            Self::Failed(cause) => Phase::Failed(cause.clone()),
+            Self::Cancelled(reason) => Phase::Cancelled(reason.clone()),
+            _ => Phase::Other,
         }
     }
 }
@@ -139,6 +221,12 @@ impl<H: Send + Sync + 'static> StateVariant for FiniteSourceState<H> {
 pub enum FiniteSourceEvent<H> {
     /// Initialize the source - allocate resources, create writer ID
     Initialize,
+    InitializationCompleted,
+    ActivationCompleted,
+    FinalisationCompleted,
+    TerminationSettled,
+    InputAcquired,
+    ResumeLiveInput,
 
     /// Source is ready - transition to WaitingForGun state
     Ready,
@@ -166,6 +254,13 @@ impl<H> Clone for FiniteSourceEvent<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Initialize => Self::Initialize,
+            Self::InitializationCompleted => Self::InitializationCompleted,
+            Self::ActivationCompleted => Self::ActivationCompleted,
+            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::TerminationSettled => Self::TerminationSettled,
+            Self::InputAcquired => Self::InputAcquired,
+            Self::ResumeLiveInput => Self::ResumeLiveInput,
+
             Self::Ready => Self::Ready,
             Self::Start => Self::Start,
             Self::BeginDrain => Self::BeginDrain,
@@ -180,6 +275,13 @@ impl<H> std::fmt::Debug for FiniteSourceEvent<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initialize => write!(f, "Initialize"),
+            Self::InitializationCompleted => write!(f, "InitializationCompleted"),
+            Self::ActivationCompleted => write!(f, "ActivationCompleted"),
+            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::TerminationSettled => write!(f, "TerminationSettled"),
+            Self::InputAcquired => write!(f, "InputAcquired"),
+            Self::ResumeLiveInput => write!(f, "ResumeLiveInput"),
+
             Self::Ready => write!(f, "Ready"),
             Self::Start => write!(f, "Start"),
             Self::BeginDrain => write!(f, "BeginDrain"),
@@ -201,6 +303,12 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
     ) {
         crate::stages::common::stage_handle::discarded_control_details(match self {
             Self::Error(message) => Some(message.as_str()),
+            Self::InitializationCompleted
+            | Self::ActivationCompleted
+            | Self::FinalisationCompleted
+            | Self::TerminationSettled
+            | Self::InputAcquired
+            | Self::ResumeLiveInput => None,
             Self::Initialize | Self::Ready | Self::Start | Self::BeginDrain | Self::Completed => {
                 None
             }
@@ -213,6 +321,13 @@ impl<H: Send + Sync + 'static> EventVariant for FiniteSourceEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
             FiniteSourceEvent::Initialize => "Initialize",
+            Self::InitializationCompleted => "InitializationCompleted",
+            Self::ActivationCompleted => "ActivationCompleted",
+            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::TerminationSettled => "TerminationSettled",
+            Self::InputAcquired => "InputAcquired",
+            Self::ResumeLiveInput => "ResumeLiveInput",
+
             FiniteSourceEvent::Ready => "Ready",
             FiniteSourceEvent::Start => "Start",
             FiniteSourceEvent::BeginDrain => "BeginDrain",
@@ -229,6 +344,7 @@ impl<H: Send + Sync + 'static> EventVariant for FiniteSourceEvent<H> {
 
 /// Actions that finite source FSM transitions can emit
 pub enum FiniteSourceAction<H> {
+    Host(crate::supervised_base::handler_supervised::SupervisorAction<FiniteSourceEvent<H>>),
     /// Allocate resources needed by the source
     /// - Register writer ID with journal
     /// - Open file handles, network connections, etc.
@@ -238,7 +354,9 @@ pub enum FiniteSourceAction<H> {
     SendEOF,
 
     /// Send error event to journal for diagnostics
-    SendError { message: String },
+    SendError {
+        message: String,
+    },
 
     /// Publish running lifecycle event
     PublishRunning,
@@ -270,8 +388,7 @@ pub enum SourceCompletionOrigin {
 }
 
 /// Context for finite source handlers - contains everything actions need
-#[derive(Clone)]
-pub struct FiniteSourceContext<H> {
+pub struct FiniteSourceResources<H> {
     /// This source's stage ID
     pub stage_id: obzenflow_core::StageId,
 
@@ -294,7 +411,6 @@ pub struct FiniteSourceContext<H> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: crate::execution::RuntimeExecution,
@@ -346,7 +462,6 @@ pub struct FiniteSourceContextInit {
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
-    pub report_journal: crate::supervised_base::SupervisorJournal,
     pub runtime_execution: crate::execution::RuntimeExecution,
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     pub instrumentation: Arc<StageInstrumentation>,
@@ -355,7 +470,7 @@ pub struct FiniteSourceContextInit {
     pub output_contract: StageOutputContract,
 }
 
-impl<H> FiniteSourceContext<H> {
+impl<H> FiniteSourceResources<H> {
     pub fn new(init: FiniteSourceContextInit) -> Self {
         Self {
             stage_id: init.stage_id,
@@ -365,7 +480,6 @@ impl<H> FiniteSourceContext<H> {
             flow_id: init.flow_id,
             data_journal: init.data_journal,
             error_journal: init.error_journal,
-            report_journal: init.report_journal,
             runtime_execution: init.runtime_execution,
             bus: init.bus,
             writer_id: None,
@@ -383,6 +497,30 @@ impl<H> FiniteSourceContext<H> {
     }
 }
 
+/// FSM observation data remains available while an owned operation uses resources.
+pub struct FiniteSourceContext<H> {
+    pub(crate) resources: Option<FiniteSourceResources<H>>,
+    pub instrumentation: Arc<StageInstrumentation>,
+}
+
+impl<H> FiniteSourceContext<H> {
+    pub fn new(init: FiniteSourceContextInit) -> Self {
+        let instrumentation = init.instrumentation.clone();
+        Self {
+            resources: Some(FiniteSourceResources::new(init)),
+            instrumentation,
+        }
+    }
+
+    pub(crate) fn resources_mut(
+        &mut self,
+    ) -> Result<&mut FiniteSourceResources<H>, obzenflow_fsm::FsmError> {
+        self.resources.as_mut().ok_or_else(|| {
+            obzenflow_fsm::FsmError::HandlerError("source operation owns resources".into())
+        })
+    }
+}
+
 impl<H: Send + Sync + 'static> FsmContext for FiniteSourceContext<H> {}
 
 // ============================================================================
@@ -393,6 +531,8 @@ impl<H: Send + Sync + 'static> FsmContext for FiniteSourceContext<H> {}
 impl<H> Clone for FiniteSourceAction<H> {
     fn clone(&self) -> Self {
         match self {
+            Self::Host(action) => Self::Host(action.clone()),
+
             Self::AllocateResources => Self::AllocateResources,
             Self::SendEOF => Self::SendEOF,
             Self::SendError { message } => Self::SendError {
@@ -409,6 +549,8 @@ impl<H> Clone for FiniteSourceAction<H> {
 impl<H> std::fmt::Debug for FiniteSourceAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Host(action) => action.fmt(f),
+
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::SendEOF => write!(f, "SendEOF"),
             Self::SendError { message } => write!(f, "SendError({message:?})"),
@@ -425,7 +567,20 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
     type Context = FiniteSourceContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+        self.execute_resources(ctx.resources_mut()?).await
+    }
+}
+
+impl<H: Send + Sync + 'static> FiniteSourceAction<H> {
+    pub(crate) async fn execute_resources(
+        &self,
+        ctx: &mut FiniteSourceResources<H>,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
+            FiniteSourceAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
+                "host action requires the supervised runner".into(),
+            )),
+
             FiniteSourceAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id);
@@ -563,63 +718,20 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
             }
 
             FiniteSourceAction::SendError { message } => {
-                // Tail-read metrics for failure; if no runtime_context is present
-                // in the journals, fall back to a best-effort snapshot from
-                // instrumentation rather than failing the failure path.
-                let metrics = snapshot_stage_accounting(ctx.instrumentation.as_ref());
-                let cancel_reason = match message.as_str() {
-                    FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP => Some(STOP_REASON_USER_STOP),
-                    STOP_REASON_TIMEOUT => Some(STOP_REASON_TIMEOUT),
-                    _ => None,
-                };
-
-                let system_event = if let Some(reason) = cancel_reason {
-                    SystemEvent::stage_cancelled_with_accounting(
+                crate::stages::common::supervision::lifecycle_actions::send_failure(
+                    &ctx.data_journal,
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
                         ctx.stage_id,
-                        reason.to_string(),
-                        metrics,
-                    )
-                } else {
-                    SystemEvent::stage_failed_with_accounting(
-                        ctx.stage_id,
-                        message.clone(),
-                        false, // not recoverable
-                        metrics,
-                    )
-                };
-
-                // Best-effort: log journal failures but don't fail the FSM
-                match crate::supervised_base::publication::report(
-                    &ctx.report_journal,
-                    system_event,
-                    Default::default(),
+                        obzenflow_core::event::context::StageType::FiniteSource,
+                    ),
+                    message,
+                    ctx.instrumentation.as_ref(),
+                    None,
                 )
-                .await
-                {
-                    Ok(_) => {
-                        if let Some(reason) = cancel_reason {
-                            tracing::info!(
-                                stage_name = %ctx.stage_name,
-                                reason = %reason,
-                                "Finite source cancelled"
-                            );
-                        } else {
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = %message,
-                                "Finite source encountered error"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            stage_name = %ctx.stage_name,
-                            error = %message,
-                            journal_error = %e,
-                            "Finite source encountered error but failed to write error event"
-                        );
-                    }
-                }
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -651,21 +763,17 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 };
 
                 // Write running event to system journal
-                let running_event = SystemEvent::stage_running(ctx.stage_id);
-
-                if let Err(e) = crate::supervised_base::publication::report(
-                    &ctx.report_journal,
-                    running_event,
-                    Default::default(),
+                crate::stages::common::supervision::lifecycle_actions::publish_running(
+                    &ctx.data_journal,
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::FiniteSource,
+                    ),
                 )
-                .await
-                {
-                    tracing::error!(
-                        stage_name = %ctx.stage_name,
-                        journal_error = %e,
-                        "Failed to publish running event; continuing without system journal entry"
-                    );
-                }
+                .await?;
 
                 // Emit writer-side source contract with runtime defaults (expected_count unknown)
                 let contract = ChainEventFactory::source_contract_event(
@@ -729,28 +837,18 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 // Write completion with protected accounting from the stage owner.
                 //
                 // Zero-input stages need no journal lookup or optional final capture.
-                let metrics = snapshot_stage_accounting(ctx.instrumentation.as_ref());
-                let completion_event =
-                    SystemEvent::stage_completed_with_accounting(ctx.stage_id, metrics);
-
-                if let Err(e) = crate::supervised_base::publication::report(
-                    &ctx.report_journal,
-                    completion_event,
-                    Default::default(),
+                crate::stages::common::supervision::lifecycle_actions::send_completion(
+                    &ctx.data_journal,
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::FiniteSource,
+                    ),
+                    ctx.instrumentation.as_ref(),
                 )
-                .await
-                {
-                    tracing::error!(
-                        stage_name = %ctx.stage_name,
-                        journal_error = %e,
-                        "Failed to write completion event; continuing without system journal entry"
-                    );
-                }
-
-                tracing::info!(
-                    stage_name = %ctx.stage_name,
-                    "Finite source sent completion event"
-                );
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -794,7 +892,6 @@ pub(crate) mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::journal_event::JournalEvent;
     use obzenflow_core::event::journal_record::JournalRecord;
-    use obzenflow_core::event::system_event::SystemEvent;
     use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
@@ -834,15 +931,41 @@ pub(crate) mod tests {
         }
     }
 
+    type AppendGate<T> = (
+        Box<dyn Fn(&T) -> bool + Send + Sync>,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    );
+
     /// Minimal in-memory journal for tests
     pub(crate) struct TestJournal<T: JournalEvent> {
         id: JournalId,
         fail_appends: Arc<std::sync::atomic::AtomicBool>,
+        append_gate: Mutex<Option<AppendGate<T>>>,
         owner: Option<JournalOwner>,
         events: Arc<Mutex<Vec<JournalRecord<T::Payload>>>>,
     }
 
     impl<T: JournalEvent> TestJournal<T> {
+        pub(crate) fn block_next_append(
+            &self,
+        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            self.block_matching_append(|_| true)
+        }
+
+        pub(crate) fn block_matching_append(
+            &self,
+            matches: impl Fn(&T) -> bool + Send + Sync + 'static,
+        ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+            let gate = (
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(tokio::sync::Notify::new()),
+            );
+            *self.append_gate.lock().unwrap() =
+                Some((Box::new(matches), gate.0.clone(), gate.1.clone()));
+            gate
+        }
+
         pub(crate) fn with_append_failure(
             mut self,
             fail: Arc<std::sync::atomic::AtomicBool>,
@@ -855,6 +978,7 @@ pub(crate) mod tests {
             Self {
                 id: JournalId::new(),
                 fail_appends: Arc::default(),
+                append_gate: Mutex::new(None),
                 owner: Some(owner),
                 events: Arc::new(Mutex::new(Vec::new())),
             }
@@ -881,6 +1005,21 @@ pub(crate) mod tests {
             event: T,
             mut options: obzenflow_core::journal::AppendOptions<T>,
         ) -> Result<JournalRecord<T::Payload>, JournalError> {
+            let gate = {
+                let mut guard = self.append_gate.lock().unwrap();
+                if guard
+                    .as_ref()
+                    .is_some_and(|(matches, _, _)| matches(&event))
+                {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             if self.fail_appends.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(JournalError::Full);
             }
@@ -1000,19 +1139,18 @@ pub(crate) mod tests {
                 use crate::supervised_base::base::Supervisor;
                 use crate::supervised_base::{
                     ChannelBuilder, idle_backoff::IdleBackoff, HandlerSupervised,
-                    HandlerSupervisedWithExternalEvents, EventLoopDirective,
                 };
-                use obzenflow_core::event::SystemPayload;
                 use std::time::{Duration, Instant};
 
                 for asynchronous in [false, true] {
                     let stage_id = CoreStageId::new();
-                    let system_journal: Arc<dyn Journal<SystemEvent>> =
+                    let data_journal: Arc<dyn Journal<ChainEvent>> =
                         Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
                     let build_async = |external_events, state_watcher| $async {
                         name: "source_projection".into(),
-                        handler: DummySource,
-                        report_journal: system_journal.clone().into(),
+                        handler: Some(DummySource),
+                        data_journal: data_journal.clone(),
+                        flow_context: FlowContext::new("source_projection", stage_id),
                         stage_id,
                         idle_backoff: IdleBackoff::exponential_with_cap(
                             Duration::from_millis(1), Duration::from_millis(10)),
@@ -1026,13 +1164,13 @@ pub(crate) mod tests {
                         source_boundary: None,
                         pending_boundary_error: None,
                         reader_acquired: false,
-                        cleanup_attempted: false,
                         $($extra: $value,)*
                     };
                     let build_sync = || $sync {
                         name: "source_projection".into(),
-                        handler: DummySource,
-                        report_journal: system_journal.clone().into(),
+                        handler: Some(DummySource),
+                        data_journal: data_journal.clone(),
+                        flow_context: FlowContext::new("source_projection", stage_id),
                         stage_id,
                         idle_backoff: IdleBackoff::exponential_with_cap(
                             Duration::from_millis(1), Duration::from_millis(10)),
@@ -1048,7 +1186,7 @@ pub(crate) mod tests {
                         if asynchronous {
                             let (_, external_events, state_watcher) =
                                 ChannelBuilder::new().build($state::<DummySource>::Created);
-                            build_async(external_events, state_watcher).build_state_machine(initial_state)
+                            build_async(external_events.into(), state_watcher).build_state_machine(initial_state)
                         } else {
                             build_sync().build_state_machine(initial_state)
                         }
@@ -1061,7 +1199,6 @@ pub(crate) mod tests {
                         flow_id: FlowId::new(),
                         data_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
                         error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
-                        report_journal: system_journal.clone().into(),
                         runtime_execution: crate::execution::RuntimeExecution::new(
                             crate::execution::RuntimeMode::Live, None),
                         bus: Arc::new(FsmMessageBus::new()),
@@ -1070,92 +1207,84 @@ pub(crate) mod tests {
                         backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
                         output_contract: StageOutputContract::empty(),
                     });
-                    ctx.instrumentation.bind_observations(ctx.flow_id, WriterId::from(stage_id), &ctx.runtime_execution);
+                    ctx.instrumentation.bind_observations(ctx.resources.as_ref().unwrap().flow_id, WriterId::from(stage_id), &ctx.resources.as_ref().unwrap().runtime_execution);
                     assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Created");
                     let mut fsm = build_fsm($state::Created);
                     for (event, destination) in [
-                        ($event::Initialize, "Initialized"),
+                        ($event::Initialize, "Initializing"),
+                        ($event::InitializationCompleted, "Initialized"),
                         ($event::Ready, "WaitingForGun"),
-                        ($event::Start, "Running"),
+                        ($event::Start, "AcquiringInput"),
+                        ($event::InputAcquired, "Starting"),
+                        ($event::ActivationCompleted, "Running"),
                         ($event::BeginDrain, "Draining"),
-                        ($event::Completed, "Drained"),
+                        ($event::Completed, "Finalising"),
+                        ($event::FinalisationCompleted, "Drained"),
                     ] {
                         let old_entry = Instant::now() - Duration::from_secs(60);
                         *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
                         let actions = fsm.handle(event, &mut ctx).await.unwrap();
+                        if asynchronous {
+                            let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
+                            build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
+                        } else {
+                            build_sync().after_transition(fsm.state(), &ctx);
+                        }
                         assert_eq!(fsm.state().variant_name(), destination);
                         assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), destination);
                         assert!(*ctx.instrumentation.state_entered_at.read().unwrap() > old_entry);
                         for action in actions {
-                            action.execute(&mut ctx).await.unwrap();
+                            if build_sync().supervisor_action(&action).is_none() {
+                                action.execute(&mut ctx).await.unwrap();
+                            }
                         }
                     }
-                    let events = ctx.data_journal.read_causally_ordered().await.unwrap();
+                    let events = ctx.resources_mut().unwrap().data_journal.read_causally_ordered().await.unwrap();
                     assert_eq!(events.iter().filter(|env| matches!(env.payload,
                         ChainPayload::FlowControl(FlowControlPayload::SourceContract { .. }))).count(),
                         usize::from($finite));
                     let eof = events.iter().find(|env| env.is_eof()).expect("authored EOF");
-                    assert_eq!(eof.envelope.observability.as_ref().unwrap().runtime_snapshot.as_ref().unwrap().fsm_state, "Drained");
+                    assert_eq!(eof.envelope.observability.as_ref().unwrap().runtime_snapshot.as_ref().unwrap().fsm_state, "Finalising");
                     for env in &events {
                         if matches!(env.payload, ChainPayload::FlowControl(
                             FlowControlPayload::SourceContract { .. })) {
                             assert_eq!(env.envelope.provenance.event.writer_id, WriterId::from(stage_id));
                             assert_eq!(env.envelope.provenance.event.flow_context.stage_id, stage_id);
-                            assert_eq!(env.envelope.provenance.event.flow_context.stage_name, ctx.stage_name);
+                            assert_eq!(env.envelope.provenance.event.flow_context.stage_name, ctx.resources_mut().unwrap().stage_name);
                             assert_eq!(env.envelope.provenance.event.flow_context.stage_type, StageType::FiniteSource);
-                            assert_eq!(env.envelope.provenance.event.flow_context.flow_name, ctx.flow_name);
-                            assert_eq!(env.envelope.provenance.event.flow_context.flow_id, ctx.flow_id.to_string());
+                            assert_eq!(env.envelope.provenance.event.flow_context.flow_name, ctx.resources_mut().unwrap().flow_name);
+                            assert_eq!(env.envelope.provenance.event.flow_context.flow_id, ctx.resources_mut().unwrap().flow_id.to_string());
                         }
                     }
 
-                    // Each error edge must project Failed before error actions;
-                    // a repeated failure must not manufacture a new entry time.
-                    for initial in [$state::Created, $state::Initialized, $state::WaitingForGun,
-                        $state::Running, $state::Draining, $state::Drained, $state::Failed("first".into())] {
+                    // Failure is visible in the pending state before settlement actions.
+                    for initial in [$state::Created, $state::Initializing, $state::Initialized,
+                        $state::WaitingForGun, $state::AcquiringInput, $state::Starting,
+                        $state::Running, $state::Draining, $state::Finalising,
+                        $state::Failing("first".into())] {
                         ctx.instrumentation.transition_to_state(initial.variant_name());
                         let old_entry = Instant::now() - Duration::from_secs(60);
                         *ctx.instrumentation.state_entered_at.write().unwrap() = old_entry;
-                        let repeated = matches!(initial, $state::Failed(_));
+                        let repeated = matches!(initial, $state::Failing(_));
                         let mut fsm = build_fsm(initial);
                         let actions = fsm.handle($event::Error("failure".into()), &mut ctx).await.unwrap();
-                        let expected_reason = if repeated { "first" } else { "failure" };
-                        assert_eq!(fsm.state(), &$state::Failed(expected_reason.into()));
-                        assert_eq!(actions.is_empty(), repeated);
-                        assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Failed");
-                        assert_eq!(*ctx.instrumentation.state_entered_at.read().unwrap() == old_entry, repeated);
-                    }
-                    // Both physical source paths must account for terminal
-                    // controls, including unexpected errors, without dispatching them.
-                    for state in [$state::Drained, $state::Failed("first failure".into())] {
-                        let before = system_journal.read_all_unordered().await.unwrap().len();
-                        let (sender, receiver, watcher) = ChannelBuilder::new().build(state.clone());
-                        sender.send($event::Ready).await.unwrap();
-                        sender.send($event::Error("late failure".into())).await.unwrap();
                         if asynchronous {
-                            let mut supervisor = build_async(receiver, watcher);
-                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
-                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
+                            let (_, receiver, watcher) = ChannelBuilder::new().build(fsm.state().clone());
+                            build_async(receiver.into(), watcher).after_transition(fsm.state(), &ctx);
                         } else {
-                            let mut supervisor = HandlerSupervisedWithExternalEvents::new(build_sync(), receiver, watcher, (system_journal.clone()).into());
-                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
-                            assert!(matches!(supervisor.dispatch_state(&state, &mut ctx).await.unwrap(), EventLoopDirective::Terminate));
+                            build_sync().after_transition(fsm.state(), &ctx);
                         }
-                        assert!(sender.send($event::Ready).await.is_err());
-                        let records = system_journal.read_all_unordered().await.unwrap();
-                        let recorded = &records[before..];
-                        assert_eq!(recorded.len(), 2, "each command recorded once, async={asynchronous}");
-                        assert!(recorded.iter().all(|record| *record.writer_id() == WriterId::from(stage_id)));
-                        assert!(matches!(&recorded[0].payload, SystemPayload::SupervisorCommandDiscarded {
-                            command, disposition: obzenflow_core::event::CommandDiscardDisposition::ObsoleteControl, error: None, ..
-                        } if command == "Ready"));
-                        assert!(matches!(&recorded[1].payload, SystemPayload::SupervisorCommandDiscarded {
-                            terminal_state, command, disposition: obzenflow_core::event::CommandDiscardDisposition::UnexpectedError, error: Some(error), ..
-                        } if terminal_state == state.variant_name() && command == "Error" && error == "late failure"));
+                        let expected_reason = if repeated { "first" } else { "failure" };
+                        assert_eq!(fsm.state(), &$state::Failing(expected_reason.into()));
+                        assert_eq!(actions.is_empty(), repeated);
+                        assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Failing");
+                        assert_eq!(*ctx.instrumentation.state_entered_at.read().unwrap() == old_entry, repeated);
                     }
                     if $finite {
                         ctx.instrumentation.transition_to_state("Running");
                         let mut fsm = build_fsm($state::Running);
                         let actions = fsm.handle($event::Completed, &mut ctx).await.unwrap();
+                        build_sync().after_transition(fsm.state(), &ctx);
                         assert_eq!(*ctx.instrumentation.current_state.read().unwrap(), "Draining");
                         assert!(actions.is_empty());
                     }
@@ -1198,8 +1327,6 @@ pub(crate) mod tests {
             Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
         let error_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
-        let system_journal: Arc<dyn Journal<SystemEvent>> =
-            Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
 
         let bus = Arc::new(FsmMessageBus::new());
         // Helper to build a fresh context with a given control strategy
@@ -1213,7 +1340,6 @@ pub(crate) mod tests {
                 flow_id,
                 data_journal: data_journal.clone(),
                 error_journal: error_journal.clone(),
-                report_journal: (system_journal.clone()).into(),
                 runtime_execution: crate::execution::RuntimeExecution::new(
                     crate::execution::RuntimeMode::Live,
                     None,
@@ -1242,7 +1368,11 @@ pub(crate) mod tests {
         ctx.instrumentation
             .events_processed_total
             .store(3, std::sync::atomic::Ordering::Relaxed);
-        let source_writer_id = ctx.writer_id.expect("source should have a writer id");
+        let source_writer_id = ctx
+            .resources_mut()
+            .unwrap()
+            .writer_id
+            .expect("source should have a writer id");
         ctx.instrumentation
             .record_output_event(&ChainEventFactory::data_event(
                 source_writer_id,
@@ -1351,7 +1481,6 @@ pub(crate) mod tests {
                 flow_id: FlowId::new(),
                 data_journal: data_journal.clone(),
                 error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
-                report_journal: (Arc::new(TestJournal::new(JournalOwner::stage(stage_id)))).into(),
                 runtime_execution: crate::execution::RuntimeExecution::new(
                     crate::execution::RuntimeMode::Live,
                     None,
@@ -1369,7 +1498,8 @@ pub(crate) mod tests {
                 .execute(&mut ctx)
                 .await
                 .unwrap();
-            ctx.completion_origin = SourceCompletionOrigin::ReplayExhausted { recorded_kind };
+            ctx.resources_mut().unwrap().completion_origin =
+                SourceCompletionOrigin::ReplayExhausted { recorded_kind };
 
             FiniteSourceAction::<DummySource>::SendEOF
                 .execute(&mut ctx)

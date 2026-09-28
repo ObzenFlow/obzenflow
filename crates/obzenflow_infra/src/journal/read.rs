@@ -382,9 +382,7 @@ impl ReadState {
 fn classify(journal: &RunJournal, record: &RunRecordData) -> RunRecordKind {
     match record {
         RunRecordData::System(record) => match record.payload {
-            SystemPayload::PipelineLifecycle(_)
-            | SystemPayload::StageLifecycle { .. }
-            | SystemPayload::ReplayLifecycle(_) => RunRecordKind::Lifecycle,
+            SystemPayload::PipelineLifecycle(_) => RunRecordKind::Lifecycle,
             _ => RunRecordKind::System,
         },
         RunRecordData::Chain(record) => match &record.payload {

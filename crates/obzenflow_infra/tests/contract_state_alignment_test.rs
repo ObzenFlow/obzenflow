@@ -90,7 +90,6 @@ async fn build_subscription_with_contracts(
         writer_id,
         contract_journal: data_journal.clone(),
         config,
-        report_journal: None,
         reader_stage: Some(stage_id),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,

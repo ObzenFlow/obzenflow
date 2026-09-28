@@ -7,13 +7,56 @@
 //! This trait defines the interface that all stage supervisors must implement
 //! so the Pipeline FSM can coordinate them properly.
 
+pub use super::stage_lifecycle::StageMilestone;
+use super::stage_lifecycle::{LifecycleExit, LifecycleFailure, MilestoneAck, StageSnapshot};
+
+#[derive(Clone, Debug)]
+pub struct StageAck {
+    pub stage_id: obzenflow_core::StageId,
+    pub milestone: StageMilestone,
+    pub snapshot: StageSnapshot,
+}
+
+impl StageAck {
+    pub fn from_result(stage_id: obzenflow_core::StageId, result: MilestoneAck) -> Self {
+        Self {
+            stage_id,
+            milestone: result.milestone,
+            snapshot: result.snapshot,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StageFailure {
+    pub stage_id: obzenflow_core::StageId,
+    pub cause: StageError,
+    pub snapshot: StageSnapshot,
+}
+
+impl StageFailure {
+    pub fn from_result(stage_id: obzenflow_core::StageId, result: LifecycleFailure) -> Self {
+        Self {
+            stage_id,
+            cause: result.cause,
+            snapshot: result.snapshot,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StageExit {
+    pub stage_id: obzenflow_core::StageId,
+    pub outcome: LifecycleExit,
+}
+
 use obzenflow_core::{event::context::StageType, StageId};
 use std::fmt;
 
 /// Canonical error message used when the pipeline requests an immediate stage shutdown.
 ///
 /// Stage supervisors treat this as an *intentional cancellation* signal (not a "failed" error),
-/// and should emit `system.stage.cancelled` lifecycle events for observability/UI correctness.
+/// and should author a canonical `StageLifecycleFact::Cancelled` for observers.
 pub const FORCE_SHUTDOWN_MESSAGE: &str = "Force shutdown requested";
 
 /// Stable stop/cancel reason labels used across lifecycle events.
@@ -133,7 +176,8 @@ pub enum StageEvent {
 /// Command methods retain a pending mailbox send until acceptance. Dropping an
 /// unaccepted command future cancels that send; an accepted message belongs to
 /// the receiving stage. Returning from a command does not certify the requested
-/// lifecycle transition: the pipeline observes its committed system-journal fact.
+/// lifecycle transition. Achieved transitions are observed separately through
+/// retained FSM acknowledgements; observation never cancels child work.
 #[async_trait::async_trait]
 pub trait StageHandle: Send + Sync {
     /// Get the stage ID
@@ -169,9 +213,14 @@ pub trait StageHandle: Send + Sync {
     /// Force shutdown
     async fn force_shutdown(&self) -> Result<(), StageError>;
 
-    /// Wait for the stage task and every accepted publication to settle.
-    /// A state observation or timeout does not establish resource completion.
-    async fn wait_for_completion(&self) -> Result<(), StageError>;
+    /// Observe a retained achieved transition. Dropping this wait leaves work alone.
+    async fn wait_for_milestone(&self, milestone: StageMilestone) -> Result<StageAck, StageError>;
+
+    /// Observe the original failure as soon as the FSM selects its failure path.
+    async fn wait_for_failure(&self) -> Option<StageFailure>;
+
+    /// Wait for physical task termination and every accepted publication to settle.
+    async fn wait_for_completion(&self) -> StageExit;
 
     /// Abort the underlying supervisor task and join it deterministically.
     async fn abort_and_join(&self) -> Result<(), StageError>;
@@ -181,19 +230,6 @@ pub trait StageHandle: Send + Sync {
     /// Implementations must be idempotent and non-blocking.
     #[doc(hidden)]
     fn request_abort(&self);
-
-    #[doc(hidden)]
-    fn publish_pipeline_control(
-        &self,
-        _journal: std::sync::Arc<
-            dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,
-        >,
-        _event: obzenflow_core::event::ChainEvent,
-    ) -> Result<(), StageError> {
-        Err(StageError::InvalidState(
-            "stage has no retained publication writer".into(),
-        ))
-    }
 }
 
 /// Type-erased stage handle for pipeline storage

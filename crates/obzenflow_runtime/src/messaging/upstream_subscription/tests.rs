@@ -16,9 +16,8 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectProvenance};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::payloads::system_payload::{ContractResultStatusLabel, SystemPayload};
+use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
-use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
@@ -84,7 +83,15 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
     let owner = contract_flow_context(StageId::new());
     let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(ControlledJournal::new(
         JournalOwner::stage(owner.stage_id),
-        Arc::new(|_: &ChainEvent, call| call == 0),
+        Arc::new({
+            let first = std::sync::atomic::AtomicBool::new(true);
+            move |event: &ChainEvent, _| {
+                matches!(
+                    event.payload,
+                    ChainPayload::FlowControl(FlowControlPayload::ConsumptionProgress { .. })
+                ) && first.swap(false, std::sync::atomic::Ordering::SeqCst)
+            }
+        }),
     ));
     let mut sub = UpstreamSubscription::new_with_names("consumer", &upstreams)
         .await
@@ -93,7 +100,6 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             writer_id: WriterId::from(owner.stage_id),
             contract_journal: journal.clone(),
             config: ContractConfig::default(),
-            report_journal: None,
             reader_stage: Some(owner.stage_id),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -119,7 +125,6 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
     assert_eq!(progress[0].last_progress_seq, SeqNo(1));
     assert_eq!(progress[1].last_progress_seq, SeqNo(2));
     let events = journal.read_causally_ordered().await.unwrap();
-    assert_eq!(events.len(), 2);
     let mut observed = HashMap::new();
     for env in events {
         assert_contract_owner(&env.authored(), &owner);
@@ -130,7 +135,7 @@ async fn contract_owner_context_survives_fan_in_append_failure_and_retry() {
             ..
         }) = env.into_parts().1
         else {
-            panic!("expected progress")
+            continue;
         };
         observed.insert(reader_index.0, (reader_path.0, reader_seq));
     }
@@ -496,7 +501,6 @@ async fn progress_append_failure_does_not_advance_progress_state() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -540,7 +544,6 @@ async fn final_append_failure_keeps_final_emitted_false() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -585,7 +588,6 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -631,8 +633,8 @@ async fn diagnostics_only_eof_check_does_not_emit_stall() {
     let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
 
     let reader_stage = StageId::new();
-    let system_owner = JournalOwner::stage(reader_stage);
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(system_owner));
+
+    let evidence_journal = contract_journal.clone();
 
     let config = ContractConfig {
         progress_min_events: Count(100),
@@ -646,7 +648,6 @@ async fn diagnostics_only_eof_check_does_not_emit_stall() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -679,10 +680,10 @@ async fn diagnostics_only_eof_check_does_not_emit_stall() {
         .await
         .expect("read contract journal")
         .is_empty());
-    assert!(system_journal
+    assert!(evidence_journal
         .read_causally_ordered()
         .await
-        .expect("read system journal")
+        .expect("read stage journal")
         .is_empty());
 }
 
@@ -698,15 +699,16 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         .unwrap();
 
     let contract_stage = StageId::new();
-    let contract_owner = JournalOwner::stage(contract_stage);
-    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
 
     let reader_stage = StageId::new();
-    let system_owner = JournalOwner::stage(reader_stage);
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(ControlledJournal::new(
-        system_owner,
-        Arc::new(|event: &SystemEvent, _call| {
-            matches!(&event.payload, SystemPayload::ContractStatus { .. })
+
+    let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(ControlledJournal::new(
+        JournalOwner::stage(contract_stage),
+        Arc::new(|event: &ChainEvent, _call| {
+            matches!(
+                &event.payload,
+                ChainPayload::Execution(ExecutionPayload::ContractStatus { .. })
+            )
         }),
     ));
 
@@ -714,7 +716,6 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -722,7 +723,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
     });
 
     // Avoid contract-chain variability: force legacy fallback path while still
-    // emitting a ContractStatus system event.
+    // emitting a ContractStatus execution fact.
     subscription.contract_chains = (0..subscription.readers.len()).map(|_| None).collect();
     subscription.contract_policies = (0..subscription.readers.len()).map(|_| None).collect();
 
@@ -763,14 +764,13 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     let contract_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(contract_owner));
 
     let reader_stage = contract_stage;
-    let system_owner = JournalOwner::stage(reader_stage);
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(system_owner));
+
+    let evidence_journal = contract_journal.clone();
 
     subscription = subscription.with_contracts(ContractsWiring {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -787,11 +787,12 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
 
     let _status = subscription.check_contracts(&mut reader_progress).await;
 
-    let events = system_journal.read_causally_ordered().await.unwrap();
+    let events = evidence_journal.read_causally_ordered().await.unwrap();
     assert!(
         !events.iter().any(|env| matches!(
             &env.payload,
-            SystemPayload::ContractResult { .. } | SystemPayload::ContractStatus { .. }
+            ChainPayload::Execution(ExecutionPayload::ContractResult { .. })
+                | ChainPayload::Execution(ExecutionPayload::ContractStatus { .. })
         )),
         "expected progress contract heartbeats to be suppressed before any data is observed"
     );
@@ -800,11 +801,11 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
     reader_progress[0].reader_seq = SeqNo(1);
     let _status = subscription.check_contracts(&mut reader_progress).await;
 
-    let events = system_journal.read_causally_ordered().await.unwrap();
+    let events = evidence_journal.read_causally_ordered().await.unwrap();
     assert!(
         events.iter().any(|env| matches!(
             &env.payload,
-            SystemPayload::ContractResult { contract_name, status, cause, .. }
+            ChainPayload::Execution(ExecutionPayload::ContractResult { contract_name, status, cause, .. })
                 if contract_name.as_str() == TransportContract::NAME
                     && *status == ContractResultStatusLabel::Healthy
                     && cause.is_none()
@@ -832,7 +833,6 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -900,7 +900,6 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -978,7 +977,6 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
         writer_id: WriterId::from(sink_stage),
         contract_journal,
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: Some(sink_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
@@ -1056,7 +1054,6 @@ async fn stall_append_failure_does_not_set_stalled_since() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config,
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1107,7 +1104,6 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1193,7 +1189,6 @@ async fn idle_reader_without_any_reads_does_not_emit_stall() {
         writer_id: WriterId::from(contract_stage),
         contract_journal: contract_journal.clone(),
         config,
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1257,7 +1252,6 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
         writer_id: WriterId::from(contract_stage),
         contract_journal,
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: None,
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -1288,7 +1282,7 @@ async fn build_upstream_with_seq_divergence(
 ) -> (
     UpstreamSubscription<ChainEvent>,
     Arc<dyn Journal<ChainEvent>>,
-    Arc<dyn Journal<SystemEvent>>,
+    Arc<dyn Journal<ChainEvent>>,
     StageId,
     StageId,
 ) {
@@ -1301,7 +1295,7 @@ async fn build_upstream_with_seq_divergence(
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
     let contract_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(reader_owner.clone()));
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+    let evidence_journal = contract_journal.clone();
 
     // One data event followed by EOF that advertises more events than read.
     let writer_id = WriterId::Stage(upstream_stage);
@@ -1338,7 +1332,6 @@ async fn build_upstream_with_seq_divergence(
         writer_id: writer_id_for_contracts,
         contract_journal: contract_journal.clone(),
         config: contract_config,
-        report_journal: Some((system_journal.clone()).into()),
         reader_stage: Some(reader_stage),
         control_plane,
         include_delivery_contract: false,
@@ -1348,7 +1341,7 @@ async fn build_upstream_with_seq_divergence(
     (
         subscription,
         contract_journal,
-        system_journal,
+        evidence_journal,
         upstream_stage,
         reader_stage,
     )
@@ -1375,7 +1368,7 @@ async fn drive_subscription_to_eof(
 
 #[tokio::test]
 async fn strict_mode_produces_seq_divergence_and_gap_event() {
-    let (mut subscription, contract_journal, system_journal, upstream_stage, reader_stage) =
+    let (mut subscription, contract_journal, evidence_journal, upstream_stage, reader_stage) =
         build_upstream_with_seq_divergence(Arc::new(NoControlPlane)).await;
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
@@ -1465,17 +1458,17 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
         "expected an AtLeastOnceViolation event for SeqDivergence"
     );
 
-    let system_events = system_journal.read_causally_ordered().await.unwrap();
+    let execution_events = evidence_journal.read_causally_ordered().await.unwrap();
     let mut status_found = false;
 
-    for env in &system_events {
-        if let SystemPayload::ContractStatus {
+    for env in &execution_events {
+        if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
             upstream,
             reader,
             pass,
             reason,
             ..
-        } = &env.payload
+        }) = &env.payload
         {
             if *pass {
                 // FLOWIP-080r may emit passing contract-status heartbeats during
@@ -1496,7 +1489,7 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
         }
     }
 
-    assert!(status_found, "expected ContractStatus system event");
+    assert!(status_found, "expected ContractStatus execution fact");
 }
 
 #[tokio::test]
@@ -1629,7 +1622,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
     let contract_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(reader_owner.clone()));
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+    let evidence_journal = contract_journal.clone();
 
     let writer_id = WriterId::Stage(upstream_stage);
 
@@ -1696,7 +1689,6 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -1792,10 +1784,10 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     }
     assert!(final_found, "expected a selected-feed ConsumptionFinal");
 
-    let system_events = system_journal.read_causally_ordered().await.unwrap();
-    assert!(system_events.iter().any(|env| matches!(
+    let execution_events = evidence_journal.read_causally_ordered().await.unwrap();
+    assert!(execution_events.iter().any(|env| matches!(
         &env.payload,
-        SystemPayload::ContractStatus {
+        ChainPayload::Execution(ExecutionPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -1804,7 +1796,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             reader_seq,
             advertised_writer_seq,
             reason,
-        } if *upstream == upstream_stage
+        }) if *upstream == upstream_stage
             && *reader == reader_stage
             && selected_event_type.as_ref().map(|event_type| event_type.as_str())
                 == Some("test.selected.v1")
@@ -1906,7 +1898,6 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            report_journal: None,
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2052,7 +2043,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
     let contract_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(reader_owner.clone()));
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+    let evidence_journal = contract_journal.clone();
 
     let writer_id = WriterId::Stage(upstream_stage);
     upstream_journal
@@ -2109,7 +2100,6 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2126,13 +2116,13 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
         "per-feed divergence should fail even when aggregate selected counts reconcile, got {status:?}"
     );
 
-    let system_events = system_journal.read_causally_ordered().await.unwrap();
+    let execution_events = evidence_journal.read_causally_ordered().await.unwrap();
     let mut first_status = None;
     let mut second_status = None;
     let mut aggregate_status_found = false;
 
-    for env in &system_events {
-        if let SystemPayload::ContractStatus {
+    for env in &execution_events {
+        if let ChainPayload::Execution(ExecutionPayload::ContractStatus {
             upstream,
             reader,
             selected_event_type,
@@ -2141,7 +2131,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             reader_seq,
             advertised_writer_seq,
             reason,
-        } = &env.payload
+        }) = &env.payload
         {
             if *upstream != upstream_stage || *reader != reader_stage {
                 continue;
@@ -2207,7 +2197,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
     let contract_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(reader_owner.clone()));
-    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+    let evidence_journal = contract_journal.clone();
 
     let writer_id = WriterId::Stage(upstream_stage);
     upstream_journal
@@ -2244,9 +2234,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .with_selected_feeds(selected_feeds)
         .with_contracts(ContractsWiring {
             writer_id: WriterId::from(reader_stage),
-            contract_journal,
+            contract_journal: contract_journal.clone(),
             config: ContractConfig::default(),
-            report_journal: Some((system_journal.clone()).into()),
             reader_stage: Some(reader_stage),
             control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
@@ -2270,13 +2259,13 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         ContractStatus::ProgressEmitted | ContractStatus::Healthy
     ));
 
-    let events_after_first = system_journal.read_causally_ordered().await.unwrap();
+    let events_after_first = evidence_journal.read_causally_ordered().await.unwrap();
     let first_feed_results = events_after_first
         .iter()
         .filter(|env| {
             matches!(
                 &env.payload,
-                SystemPayload::ContractResult {
+                ChainPayload::Execution(ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
@@ -2286,7 +2275,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     reader_seq,
                     advertised_writer_seq,
                     ..
-                } if *upstream == upstream_stage
+                }) if *upstream == upstream_stage
                     && *reader == reader_stage
                     && selected_event_type.as_ref().map(|event_type| event_type.as_str())
                         == Some("test.first.v1")
@@ -2303,13 +2292,13 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .filter(|env| {
             matches!(
                 &env.payload,
-                SystemPayload::ContractResult {
+                ChainPayload::Execution(ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
                     feed_role,
                     ..
-                } if *upstream == upstream_stage
+                }) if *upstream == upstream_stage
                     && *reader == reader_stage
                     && selected_event_type.as_ref().map(|event_type| event_type.as_str())
                         == Some("test.second.v1")
@@ -2322,13 +2311,13 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .filter(|env| {
             matches!(
                 &env.payload,
-                SystemPayload::ContractResult {
+                ChainPayload::Execution(ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type: None,
                     feed_role: None,
                     ..
-                } if *upstream == upstream_stage && *reader == reader_stage
+                }) if *upstream == upstream_stage && *reader == reader_stage
             )
         })
         .count();
@@ -2350,19 +2339,19 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         ContractStatus::ProgressEmitted | ContractStatus::Healthy
     ));
 
-    let events_after_second = system_journal.read_causally_ordered().await.unwrap();
+    let events_after_second = evidence_journal.read_causally_ordered().await.unwrap();
     let first_feed_results_after_second = events_after_second
         .iter()
         .filter(|env| {
             matches!(
                 &env.payload,
-                SystemPayload::ContractResult {
+                ChainPayload::Execution(ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
                     feed_role,
                     ..
-                } if *upstream == upstream_stage
+                }) if *upstream == upstream_stage
                     && *reader == reader_stage
                     && selected_event_type.as_ref().map(|event_type| event_type.as_str())
                         == Some("test.first.v1")
@@ -2375,7 +2364,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .filter(|env| {
             matches!(
                 &env.payload,
-                SystemPayload::ContractResult {
+                ChainPayload::Execution(ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type,
@@ -2385,7 +2374,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     reader_seq,
                     advertised_writer_seq,
                     ..
-                } if *upstream == upstream_stage
+                }) if *upstream == upstream_stage
                     && *reader == reader_stage
                     && selected_event_type.as_ref().map(|event_type| event_type.as_str())
                         == Some("test.second.v1")
@@ -3207,7 +3196,6 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         writer_id: WriterId::from(reader_stage),
         contract_journal,
         config: ContractConfig::default(),
-        report_journal: None,
         reader_stage: Some(reader_stage),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -4135,4 +4123,88 @@ async fn seq_reader_below_entered_generation_keeps_kahn_wait_until_crossing() {
     let fourth = expect_delivery(&mut subscription).await;
     assert_eq!(fourth.event_type(), "b1");
     assert!(subscription.merge_wait().is_none());
+}
+
+#[tokio::test]
+async fn source_warning_cannot_mask_another_inputs_contract_failure() {
+    for source_first in [false, true] {
+        for advisory in [false, true] {
+            let source = StageId::new();
+            let transform = StageId::new();
+            let reader = StageId::new();
+            let ids = if source_first {
+                [source, transform]
+            } else {
+                [transform, source]
+            };
+            let mut upstreams = Vec::new();
+            for id in ids {
+                let journal: Arc<dyn Journal<ChainEvent>> =
+                    Arc::new(TestJournal::new(JournalOwner::stage(id)));
+                let writer = WriterId::from(id);
+                journal
+                    .append(
+                        ChainEventFactory::data_event(writer, "input.v1", json!({})),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                let mut eof = ChainEventFactory::eof_event(writer, true);
+                let ChainPayload::FlowControl(FlowControlPayload::Eof {
+                    writer_id,
+                    writer_seq,
+                    ..
+                }) = &mut eof.payload
+                else {
+                    unreachable!()
+                };
+                *writer_id = Some(writer);
+                *writer_seq = Some(SeqNo(3));
+                journal.append(eof, Default::default()).await.unwrap();
+                upstreams.push((id, id.to_string(), journal));
+            }
+            let journal: Arc<dyn Journal<ChainEvent>> =
+                Arc::new(TestJournal::new(JournalOwner::stage(reader)));
+            let mut subscription = UpstreamSubscription::new_with_names("fan_in", &upstreams)
+                .await
+                .unwrap()
+                .with_contracts(ContractsWiring {
+                    writer_id: reader.into(),
+                    contract_journal: journal.clone(),
+                    config: ContractConfig::default(),
+                    reader_stage: Some(reader),
+                    control_plane: Arc::new(NoControlPlane),
+                    include_delivery_contract: false,
+                    cycle_guard_config: None,
+                })
+                .with_contract_flow_context(contract_flow_context(reader))
+                .with_advisory_contract_upstreams(if advisory {
+                    [source].into_iter().collect()
+                } else {
+                    Default::default()
+                });
+            let mut progress = ids.map(ReaderProgress::new);
+            drive_subscription_to_eof(&mut subscription, &mut progress).await;
+            let status = subscription.check_contracts(&mut progress).await;
+            let ContractStatus::Violated { upstream, .. } = status else {
+                panic!("fatal edge must survive fan-in: {status:?}");
+            };
+            assert_eq!(upstream, if advisory { transform } else { ids[0] });
+            let records = journal.read_causally_ordered().await.unwrap();
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| matches!(
+                        &record.payload,
+                        ChainPayload::FlowControl(FlowControlPayload::ConsumptionFinal {
+                            pass: false,
+                            ..
+                        })
+                    ))
+                    .count(),
+                2,
+                "warning policy preserves both raw failed contract facts"
+            );
+        }
+    }
 }

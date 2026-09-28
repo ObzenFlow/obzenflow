@@ -15,8 +15,6 @@ mod layout;
 mod performance_tests;
 mod primitives;
 mod routing;
-#[cfg(test)]
-mod selection_tests;
 mod serialize;
 #[cfg(test)]
 mod test_data;
@@ -72,11 +70,6 @@ fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> 
     let payload = P::decode(provenance, payload)?;
     payload.validate(provenance)?;
     Ok(payload)
-}
-
-pub(crate) struct SelectedFrame<T: JournalEvent> {
-    pub records: Vec<JournalRecord<T::Payload>>,
-    pub routing: routing::RouteSummary,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -213,27 +206,8 @@ impl Decoder {
         body: &[u8],
         offset: u64,
     ) -> Result<LogFrame<T>> {
-        self.decode_inner::<T, false>(body, offset, false)
-            .map(|(frame, _)| Self::full_frame(frame))
-    }
-
-    pub(crate) fn decode_selected<T: JournalEvent>(
-        &mut self,
-        body: &[u8],
-        offset: u64,
-    ) -> Result<SelectedFrame<T>> {
-        self.decode_inner::<T, false>(body, offset, true)
+        self.decode_inner::<T, false>(body, offset)
             .map(|(frame, _)| frame)
-    }
-
-    fn full_frame<T: JournalEvent>(mut frame: SelectedFrame<T>) -> LogFrame<T> {
-        match frame.routing.group {
-            Some(group_id) => LogFrame::AtomicGroup {
-                group_id,
-                records: frame.records,
-            },
-            None => LogFrame::Record(frame.records.pop().expect("validated ordinary member")),
-        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -242,30 +216,18 @@ impl Decoder {
         body: &[u8],
         offset: u64,
     ) -> Result<(LogFrame<T>, FrameSizes)> {
-        self.decode_inner::<T, true>(body, offset, false)
-            .map(|(frame, sizes)| (Self::full_frame(frame), sizes))
+        self.decode_inner::<T, true>(body, offset)
     }
 
-    // Both modes use identical parsing and validation. Byte attribution is a
+    // Byte attribution uses the same ordinary parsing and validation. It is a
     // diagnostic cost, not part of a normal journal read.
     fn decode_inner<T: JournalEvent, const MEASURE: bool>(
         &mut self,
         body: &[u8],
         offset: u64,
-        selective: bool,
-    ) -> Result<(SelectedFrame<T>, FrameSizes)> {
+    ) -> Result<(LogFrame<T>, FrameSizes)> {
         let mut sizes = FrameSizes::default();
         let envelope = routing::Envelope::parse(body)?;
-        // Business-only frames need neither definition materialisation nor a decoder.
-        if selective && envelope.members.iter().all(|member| !member.candidate) {
-            return Ok((
-                SelectedFrame {
-                    records: Vec::new(),
-                    routing: envelope.summary,
-                },
-                sizes,
-            ));
-        }
         let mut table = Cursor::new(envelope.definitions);
         let mut definitions =
             ReadTable::<MEASURE>::new(&mut table, &self.store, &self.path, offset)?;
@@ -281,9 +243,6 @@ impl Decoder {
             };
             let predecessor = previous;
             previous = Some(reference);
-            if selective && !member.candidate {
-                continue;
-            }
             let mut input = Cursor::new(member.body);
             definitions.begin_record();
             if MEASURE {
@@ -343,9 +302,6 @@ impl Decoder {
             if MEASURE {
                 sizes.payload += input.position() - start;
             }
-            if payload.is_supervision_candidate() != member.candidate {
-                return Err(invalid("supervision classification disagrees with payload"));
-            }
             let record: LogRecord<T> = JournalRecord::from_parts(
                 obzenflow_core::event::envelope::EventEnvelope {
                     provenance,
@@ -378,9 +334,9 @@ impl Decoder {
                 - sizes.payload;
         }
         Ok((
-            SelectedFrame {
-                records,
-                routing: envelope.summary,
+            match envelope.summary.group {
+                Some(group_id) => LogFrame::AtomicGroup { group_id, records },
+                None => LogFrame::Record(records.pop().expect("validated ordinary member")),
             },
             sizes,
         ))

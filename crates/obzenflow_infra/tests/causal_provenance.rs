@@ -235,14 +235,14 @@ async fn journal_scoped_fanout_reconvergence_cross_family_and_private_groups() {
             .unwrap();
         let lifecycle = system
             .append(
-                SystemEvent::stage_completed(author),
+                SystemEvent::new(obzenflow_core::SystemId::new().into(), obzenflow_core::event::SystemPayload::PipelineLifecycle(obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent::Drained)),
                 AppendOptions::from_record(Some(&joined)).unwrap(),
             )
             .await
             .unwrap();
         let unrelated = system
             .append(
-                SystemEvent::stage_running(StageId::new()),
+                SystemEvent::new(obzenflow_core::SystemId::new().into(), obzenflow_core::event::SystemPayload::PipelineLifecycle(obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent::Starting)),
                 Default::default(),
             )
             .await

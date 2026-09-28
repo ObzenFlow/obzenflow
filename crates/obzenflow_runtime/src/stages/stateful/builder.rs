@@ -19,7 +19,7 @@ use crate::supervised_base::{
 };
 
 use super::config::StatefulConfig;
-use super::fsm::{StatefulContext, StatefulState};
+use super::fsm::{StatefulContext, StatefulResources, StatefulState};
 use super::handle::StatefulHandle;
 use super::supervisor::StatefulSupervisor;
 
@@ -139,8 +139,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .emit_interval
             .or_else(|| handler.emit_interval_hint());
         let initial_state = handler.initial_state();
-        let context = StatefulContext {
-            handler: Arc::new(handler),
+        let resources = StatefulResources {
+            handler: Some(Arc::new(handler)),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             observers,
@@ -154,7 +154,6 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             effect_declarations: self.resources.effect_declarations.clone(),
             last_input_position: None,
             error_journal: self.resources.error_journal.clone(),
-            report_journal: self.resources.report_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
             lineage_policy: self.resources.lineage_policy,
@@ -166,9 +165,6 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                 crate::stages::common::control_strategies::ProcessingContext::default(),
             buffered_eof: None,
             terminal_envelope: None,
-            drain_requested_by_handle: false,
-            terminal_validated: false,
-            terminal_forwarded: false,
             terminal_eof_kind: None,
             last_consumed_envelope: None,
             instrumentation,
@@ -190,6 +186,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             catch_up_flip: None,
         };
 
+        let context = StatefulContext::new(resources);
+
         // Create supervisor (private - not exposed)
         let supervisor = StatefulSupervisor {
             name: format!("stateful_{}", self.config.stage_name),
@@ -207,7 +205,10 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.report_journal.clone(),
+            crate::supervised_base::with_external_events::stage_commands(
+                self.resources.data_journal.clone(),
+                self.resources.flow_context.clone(),
+            ),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

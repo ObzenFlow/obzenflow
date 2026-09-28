@@ -599,11 +599,10 @@ async fn test_system_event_parity() {
         as Arc<dyn Journal<SystemEvent> + Send + Sync>;
 
     let factory = SystemEventFactory::new(SystemId::new());
-    let stage = StageId::new();
     let events = vec![
-        factory.stage_running(stage),
-        factory.stage_draining(stage),
-        factory.stage_drained(stage),
+        factory.pipeline_running(),
+        factory.pipeline_draining(),
+        factory.pipeline_drained(),
     ];
 
     for journal in [&disk, &memory] {

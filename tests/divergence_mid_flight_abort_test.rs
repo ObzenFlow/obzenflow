@@ -22,11 +22,12 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::ContractResultStatusLabel;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::event::{ChainPayload, SupervisorRecord, SystemPayload};
+use obzenflow_core::event::{ChainPayload, SystemPayload};
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunSubstrateState};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_name::JournalName;
@@ -47,7 +48,6 @@ use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::supervised_base::SupervisorJournal;
 use obzenflow_runtime::testing::TestClock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -353,16 +353,6 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for CycleDepthFaultJour
         self.inner.reader_from(position).await
     }
 
-    async fn storage_report_reader_from(
-        &self,
-        position: u64,
-    ) -> Result<
-        Box<dyn obzenflow_core::journal::reader::JournalReportReader<ChainEvent>>,
-        JournalError,
-    > {
-        self.inner.report_reader_from(position).await
-    }
-
     async fn storage_read_last_n(
         &self,
         count: usize,
@@ -444,32 +434,20 @@ impl InlineSink for CountingSink {
     }
 }
 
-async fn committed_reports(journals: &[SupervisorJournal]) -> Result<Vec<SupervisorRecord>> {
-    let mut reports = Vec::new();
-    for journal in journals {
-        match journal {
-            SupervisorJournal::System(journal) => {
-                reports.extend(
-                    journal
-                        .read_all_unordered()
-                        .await?
-                        .into_iter()
-                        .map(SupervisorRecord::from),
-                );
-            }
-            SupervisorJournal::Stage { journal, context } => {
-                reports.extend(
-                    journal
-                        .read_all_unordered()
-                        .await?
-                        .into_iter()
-                        .filter(|row| row.writer_id().as_stage() == Some(&context.stage_id))
-                        .filter_map(SupervisorRecord::from_chain),
-                );
-            }
-        }
+async fn committed_facts(
+    journals: &[(obzenflow_core::StageId, Arc<dyn Journal<ChainEvent>>)],
+) -> Result<Vec<obzenflow_core::event::journal_record::ChainJournalRecord>> {
+    let mut facts = Vec::new();
+    for (stage, journal) in journals {
+        facts.extend(
+            journal
+                .read_all_unordered()
+                .await?
+                .into_iter()
+                .filter(|row| row.writer_id().as_stage() == Some(stage)),
+        );
     }
-    Ok(reports)
+    Ok(facts)
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -509,7 +487,8 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
     let handle = harness.into_inner();
-    let journals = handle.report_journals();
+    let journals = handle.stage_journals();
+    let pipeline = handle.system_journal().unwrap();
     let run = tokio::spawn(handle.run());
 
     // Drive paused time until the flow terminates (expected abort).
@@ -531,15 +510,16 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     }
 
     // Completion has joined the owners and settled their publications.
-    let snapshot = committed_reports(&journals).await?;
+    let snapshot = committed_facts(&journals).await?;
 
     assert!(snapshot.iter().any(|row| matches!(
         &row.payload,
-        SystemPayload::ContractResult { contract_name, status: ContractResultStatusLabel::Failed, cause, .. }
+        ChainPayload::Execution(ExecutionPayload::ContractResult { contract_name, status: ContractResultStatusLabel::Failed, cause, .. })
             if contract_name.as_str() == DivergenceContract::NAME && cause.as_deref() == Some("divergence")
     )), "expected a failed DivergenceContract ContractResult with cause=divergence");
 
-    let failed = snapshot
+    let pipeline_records = pipeline.read_all_unordered().await?;
+    let failed = pipeline_records
         .iter()
         .find(|row| {
             matches!(
@@ -553,14 +533,14 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     assert!(
         snapshot.iter().any(|row| matches!(
             &row.payload,
-            SystemPayload::ContractStatus {
+            ChainPayload::Execution(ExecutionPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { predicate, .. }),
                 ..
-            } if predicate == "signal_to_data_ratio"
+            }) if predicate == "signal_to_data_ratio"
         ) && CausalOrderingService::happened_before(
-            &row.journal().vector_clock,
-            &failed.journal().vector_clock
+            &row.envelope.provenance.journal.vector_clock,
+            &failed.envelope.provenance.journal.vector_clock
         )),
         "the pipeline failure must causally include the admitted divergence evidence"
     );
@@ -597,7 +577,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
     let handle = harness.into_inner();
-    let journals = handle.report_journals();
+    let journals = handle.stage_journals();
     let run = tokio::spawn(handle.run());
 
     for _ in 0..200 {
@@ -616,17 +596,17 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 
     let mut seen_transport_healthy_pre_eof = false;
 
-    let snapshot = committed_reports(&journals).await?;
+    let snapshot = committed_facts(&journals).await?;
 
     for env in &snapshot {
         match &env.payload {
-            SystemPayload::ContractResult {
+            ChainPayload::Execution(ExecutionPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
                 advertised_writer_seq,
                 ..
-            } if contract_name.as_str() == TransportContract::NAME => {
+            }) if contract_name.as_str() == TransportContract::NAME => {
                 if *status == ContractResultStatusLabel::Healthy
                     && cause.is_none()
                     && advertised_writer_seq.is_none()
@@ -683,7 +663,7 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
     let handle = harness.into_inner();
-    let journals = handle.report_journals();
+    let journals = handle.stage_journals();
     let run = tokio::spawn(handle.run());
 
     for _ in 0..200 {
@@ -699,19 +679,19 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     );
     run.await.expect("join handle")?;
 
-    let snapshot = committed_reports(&journals).await?;
+    let snapshot = committed_facts(&journals).await?;
 
     let mut seen_divergence_healthy = false;
     let mut seen_divergence_violation = false;
 
     for env in &snapshot {
         match &env.payload {
-            SystemPayload::ContractResult {
+            ChainPayload::Execution(ExecutionPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
                 ..
-            } if contract_name.as_str() == DivergenceContract::NAME => {
+            }) if contract_name.as_str() == DivergenceContract::NAME => {
                 if *status == ContractResultStatusLabel::Healthy && cause.is_none() {
                     seen_divergence_healthy = true;
                 }
@@ -721,11 +701,11 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
                     seen_divergence_violation = true;
                 }
             }
-            SystemPayload::ContractStatus {
+            ChainPayload::Execution(ExecutionPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { .. }),
                 ..
-            } => {
+            }) => {
                 seen_divergence_violation = true;
             }
             _ => {}
@@ -781,7 +761,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
     let handle = harness.into_inner();
-    let journals = handle.report_journals();
+    let journals = handle.stage_journals();
     let run = tokio::spawn(handle.run());
 
     use std::convert::Infallible;
@@ -803,29 +783,29 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
         anyhow::bail!("expected flow to abort due to cycle_depth divergence violation");
     }
 
-    let snapshot = committed_reports(&journals).await?;
+    let snapshot = committed_facts(&journals).await?;
     let mut seen_divergence_contract_result = false;
     let mut seen_cycle_depth_contract_status = false;
 
     for env in &snapshot {
         match &env.payload {
-            SystemPayload::ContractResult {
+            ChainPayload::Execution(ExecutionPayload::ContractResult {
                 contract_name,
                 status,
                 cause,
                 ..
-            } if contract_name.as_str() == DivergenceContract::NAME => {
+            }) if contract_name.as_str() == DivergenceContract::NAME => {
                 if *status == ContractResultStatusLabel::Failed
                     && cause.as_deref() == Some("divergence")
                 {
                     seen_divergence_contract_result = true;
                 }
             }
-            SystemPayload::ContractStatus {
+            ChainPayload::Execution(ExecutionPayload::ContractStatus {
                 pass: false,
                 reason: Some(EventViolationCause::Divergence { predicate, .. }),
                 ..
-            } if predicate == "cycle_depth" => {
+            }) if predicate == "cycle_depth" => {
                 seen_cycle_depth_contract_status = true;
             }
             _ => {}

@@ -299,7 +299,7 @@ pub(crate) async fn bind_managed_host(
                 Some(runtime_instance_id.clone()),
                 shutdown.subscribe(),
             )
-            .with_report_journals(flow_handle.report_journals())
+            .with_live_journals(flow_handle.stage_journals(), flow_handle.system_journals())
             .with_observation_interval(observation_interval),
         ))?;
     }
@@ -398,7 +398,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::composite::CompositeLifecycleProjection;
-    use obzenflow_core::event::StageLifecycleEvent;
+    use obzenflow_core::event::payloads::execution_payload::StageLifecycleFact;
     use obzenflow_topology::{StageSubgraphMembership, TopologyBuilder, TopologySubgraphInfo};
 
     struct TestEndpoint {
@@ -483,13 +483,19 @@ mod tests {
         let composite = CompositeId::new("ai_map_reduce:digest");
 
         projection
-            .apply(map, &StageLifecycleEvent::Running)
+            .apply(&StageLifecycleFact::Running { stage_id: map })
             .unwrap();
         projection
-            .apply(map, &StageLifecycleEvent::Completed { accounting: None })
+            .apply(&StageLifecycleFact::Completed {
+                stage_id: map,
+                accounting: None,
+            })
             .unwrap();
         projection
-            .apply(finish, &StageLifecycleEvent::Completed { accounting: None })
+            .apply(&StageLifecycleFact::Completed {
+                stage_id: finish,
+                accounting: None,
+            })
             .unwrap();
 
         assert_eq!(

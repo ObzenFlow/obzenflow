@@ -9,7 +9,7 @@ use crate::stages::common::handlers::SinkConsumeReport;
 use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, MiddlewareFact, RateLimiterFact,
+    CircuitBreakerFact, ExecutionPayload, RateLimiterFact,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -65,7 +65,7 @@ impl SinkDeliveryRejection {
 /// A closed, transient descriptor for middleware lifecycle evidence. It cannot
 /// carry delivery, data, progress, settlement, or terminal stage events.
 pub struct SinkPolicyEvidence {
-    lifecycle: MiddlewareFact,
+    lifecycle: ExecutionPayload,
 }
 
 impl fmt::Debug for SinkPolicyEvidence {
@@ -137,7 +137,7 @@ impl SinkPolicyEvidence {
             }
         }
         Ok(Self {
-            lifecycle: MiddlewareFact::CircuitBreaker(event),
+            lifecycle: ExecutionPayload::CircuitBreaker(event),
         })
     }
 
@@ -161,11 +161,11 @@ impl SinkPolicyEvidence {
             return Err(SinkPolicyEvidenceError::InvalidDiagnostic);
         }
         Ok(Self {
-            lifecycle: MiddlewareFact::RateLimiter(event),
+            lifecycle: ExecutionPayload::RateLimiter(event),
         })
     }
 
-    pub(crate) fn into_lifecycle(self) -> MiddlewareFact {
+    pub(crate) fn into_lifecycle(self) -> ExecutionPayload {
         self.lifecycle
     }
 }

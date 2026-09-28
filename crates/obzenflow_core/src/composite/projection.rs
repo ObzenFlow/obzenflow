@@ -4,7 +4,7 @@
 
 //! Combines member-stage lifecycle events into each composite's current status.
 
-use crate::event::StageLifecycleEvent;
+use crate::event::payloads::execution_payload::StageLifecycleFact;
 use crate::id::{CompositeId, RoleId, StageId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,22 +221,22 @@ impl CompositeState {
     fn apply(
         &mut self,
         stage: StageId,
-        event: &StageLifecycleEvent,
+        event: &StageLifecycleFact,
     ) -> Result<(), CompositeProjectionError> {
         if self.integrity_error.is_some() || !self.members.contains(&stage) {
             return Ok(());
         }
 
         match event {
-            StageLifecycleEvent::Running => {
+            StageLifecycleFact::Running { .. } => {
                 self.started = true;
                 Ok(())
             }
-            StageLifecycleEvent::Draining { .. } => Ok(()),
-            StageLifecycleEvent::Drained | StageLifecycleEvent::Completed { .. } => {
+            StageLifecycleFact::Draining { .. } => Ok(()),
+            StageLifecycleFact::Drained { .. } | StageLifecycleFact::Completed { .. } => {
                 self.record_terminal(stage, MemberTerminal::Completed)
             }
-            StageLifecycleEvent::Cancelled { reason, .. } => {
+            StageLifecycleFact::Cancelled { reason, .. } => {
                 let terminal = MemberTerminal::Cancelled {
                     reason: reason.clone(),
                 };
@@ -247,7 +247,7 @@ impl CompositeState {
                 }
                 Ok(())
             }
-            StageLifecycleEvent::Failed { error, .. } => {
+            StageLifecycleFact::Failed { error, .. } => {
                 let terminal = MemberTerminal::Failed {
                     error: error.clone(),
                 };
@@ -343,11 +343,8 @@ impl CompositeLifecycleProjection {
     }
 
     /// Apply events in journal order: the first recorded failure supplies the cause.
-    pub fn apply(
-        &mut self,
-        stage: StageId,
-        event: &StageLifecycleEvent,
-    ) -> Result<(), CompositeProjectionError> {
+    pub fn apply(&mut self, event: &StageLifecycleFact) -> Result<(), CompositeProjectionError> {
+        let stage = event.stage_id();
         let Some(composite_id) = self.composite_by_stage.get(&stage).cloned() else {
             return Ok(());
         };
@@ -396,19 +393,24 @@ mod tests {
         (projection, map, finish)
     }
 
-    fn completed() -> StageLifecycleEvent {
-        StageLifecycleEvent::Completed { accounting: None }
+    fn completed(stage_id: StageId) -> StageLifecycleFact {
+        StageLifecycleFact::Completed {
+            stage_id,
+            accounting: None,
+        }
     }
 
-    fn cancelled(reason: &str) -> StageLifecycleEvent {
-        StageLifecycleEvent::Cancelled {
+    fn cancelled(stage_id: StageId, reason: &str) -> StageLifecycleFact {
+        StageLifecycleFact::Cancelled {
+            stage_id,
             reason: reason.to_string(),
             accounting: None,
         }
     }
 
-    fn failed(error: &str) -> StageLifecycleEvent {
-        StageLifecycleEvent::Failed {
+    fn failed(stage_id: StageId, error: &str) -> StageLifecycleFact {
+        StageLifecycleFact::Failed {
+            stage_id,
             error: error.to_string(),
             recoverable: None,
             accounting: None,
@@ -426,14 +428,17 @@ mod tests {
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Waiting));
 
         projection
-            .apply(map, &StageLifecycleEvent::Running)
+            .apply(&StageLifecycleFact::Running { stage_id: map })
             .unwrap();
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Running));
 
-        projection.apply(map, &completed()).unwrap();
+        projection.apply(&completed(map)).unwrap();
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Running));
         projection
-            .apply(finish, &StageLifecycleEvent::Drained)
+            .apply(&StageLifecycleFact::Drained {
+                stage_id: finish,
+                events_processed: None,
+            })
             .unwrap();
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Completed));
     }
@@ -441,8 +446,8 @@ mod tests {
     #[test]
     fn first_failure_is_fail_fast_and_append_order_attributed() {
         let (mut first_map, map, finish) = projection();
-        first_map.apply(map, &failed("map failed")).unwrap();
-        first_map.apply(finish, &failed("finalize failed")).unwrap();
+        first_map.apply(&failed(map, "map failed")).unwrap();
+        first_map.apply(&failed(finish, "finalize failed")).unwrap();
         assert_eq!(
             first_map.status(&id()),
             Some(CompositeStatus::Failed {
@@ -453,9 +458,9 @@ mod tests {
 
         let (mut first_finish, map, finish) = projection();
         first_finish
-            .apply(finish, &failed("finalize failed"))
+            .apply(&failed(finish, "finalize failed"))
             .unwrap();
-        first_finish.apply(map, &failed("map failed")).unwrap();
+        first_finish.apply(&failed(map, "map failed")).unwrap();
         assert_eq!(
             first_finish.status(&id()),
             Some(CompositeStatus::Failed {
@@ -468,9 +473,9 @@ mod tests {
     #[test]
     fn cancellation_waits_for_all_members_and_keeps_first_reason() {
         let (mut projection, map, finish) = projection();
-        projection.apply(map, &cancelled("operator stop")).unwrap();
+        projection.apply(&cancelled(map, "operator stop")).unwrap();
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Waiting));
-        projection.apply(finish, &cancelled("timeout")).unwrap();
+        projection.apply(&cancelled(finish, "timeout")).unwrap();
         assert_eq!(
             projection.status(&id()),
             Some(CompositeStatus::Cancelled {
@@ -482,8 +487,8 @@ mod tests {
     #[test]
     fn failure_overrides_an_unresolved_cancellation() {
         let (mut projection, map, finish) = projection();
-        projection.apply(map, &cancelled("operator stop")).unwrap();
-        projection.apply(finish, &failed("boom")).unwrap();
+        projection.apply(&cancelled(map, "operator stop")).unwrap();
+        projection.apply(&failed(finish, "boom")).unwrap();
         assert!(matches!(
             projection.status(&id()),
             Some(CompositeStatus::Failed { at, error })
@@ -494,17 +499,17 @@ mod tests {
     #[test]
     fn exact_duplicate_terminal_is_idempotent() {
         let (mut projection, map, _finish) = projection();
-        projection.apply(map, &completed()).unwrap();
-        projection.apply(map, &completed()).unwrap();
+        projection.apply(&completed(map)).unwrap();
+        projection.apply(&completed(map)).unwrap();
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Waiting));
     }
 
     #[test]
     fn conflicting_terminal_makes_the_view_invalid() {
         let (mut projection, map, _finish) = projection();
-        projection.apply(map, &completed()).unwrap();
+        projection.apply(&completed(map)).unwrap();
         let error = projection
-            .apply(map, &cancelled("late stop"))
+            .apply(&cancelled(map, "late stop"))
             .expect_err("contradictory tape must fail integrity");
         assert!(matches!(
             error,
@@ -525,15 +530,15 @@ mod tests {
     fn same_ordered_history_rebuilds_identical_statuses() {
         let (first, map, finish) = projection();
         let history = [
-            (map, StageLifecycleEvent::Running),
-            (finish, StageLifecycleEvent::Running),
-            (map, cancelled("operator stop")),
-            (finish, completed()),
+            StageLifecycleFact::Running { stage_id: map },
+            StageLifecycleFact::Running { stage_id: finish },
+            cancelled(map, "operator stop"),
+            completed(finish),
         ];
 
         let replay = |mut projection: CompositeLifecycleProjection| {
-            for (stage, event) in &history {
-                projection.apply(*stage, event).unwrap();
+            for event in &history {
+                projection.apply(event).unwrap();
             }
             projection.statuses()
         };
@@ -545,7 +550,9 @@ mod tests {
     fn non_member_lifecycle_is_ignored() {
         let (mut projection, _map, _finish) = projection();
         projection
-            .apply(StageId::new(), &StageLifecycleEvent::Running)
+            .apply(&StageLifecycleFact::Running {
+                stage_id: StageId::new(),
+            })
             .unwrap();
         assert_eq!(projection.status(&id()), Some(CompositeStatus::Waiting));
     }

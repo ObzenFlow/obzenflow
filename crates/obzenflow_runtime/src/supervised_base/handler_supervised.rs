@@ -8,20 +8,66 @@
 //! such as source, transform, and sink supervisors.
 
 use super::base::{self, EventLoopDirective, Supervisor};
-use super::cleanup::HandlerSupervisedCleanup;
+use futures::future::BoxFuture;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
-use obzenflow_core::{ChainEvent, StageId};
-use obzenflow_fsm::{FsmAction, StateVariant};
+use obzenflow_core::ChainEvent;
+use obzenflow_fsm::{FsmAction, FsmError};
+use std::collections::VecDeque;
 use std::error::Error;
 use std::future::Future;
 use tokio::task::JoinHandle;
 
+/// Host obligations selected explicitly by a stage transition.
+#[derive(Clone, Debug)]
+pub enum SupervisorAction<E> {
+    Register,
+    CloseMailbox,
+    Cleanup,
+    SettlePublications,
+    Emit(E),
+}
+
+/// An operation owns everything it needs until it returns resources to its
+/// context. Polling a control command never drops this future. Forced task
+/// abortion remains a distinct task-owner operation.
+pub type OwnedAction<C, E> = BoxFuture<'static, ActionCompletion<C, E>>;
+pub type ActionCompletion<C, E> = Box<dyn FnOnce(&mut C) -> Result<Option<E>, FsmError> + Send>;
+
+pub enum ActionExecution<C, E> {
+    Completed,
+    Pending(OwnedAction<C, E>),
+}
+
+/// One processing turn retains the stage's operation resources while control
+/// events continue to reach its FSM. Completion returns both the resources and
+/// the resulting event to their owner; interruption never drops handler work.
+pub type OwnedDispatch<S> = BoxFuture<'static, DispatchCompletion<S>>;
+pub type DispatchCompletion<S> = Box<
+    dyn FnOnce(
+            &mut S,
+            &mut <S as Supervisor>::Context,
+        )
+            -> Result<EventLoopDirective<<S as Supervisor>::Event>, Box<dyn Error + Send + Sync>>
+        + Send,
+>;
+
+fn owned_unit<C: 'static, E: Send + 'static>(
+    future: BoxFuture<'static, Result<(), Box<dyn Error + Send + Sync>>>,
+) -> OwnedAction<C, E> {
+    Box::pin(async move {
+        let result = future
+            .await
+            .map_err(|error| FsmError::HandlerError(error.to_string()));
+        Box::new(move |_: &mut C| result.map(|()| None)) as ActionCompletion<C, E>
+    })
+}
+
 /// Trait for handler-supervised components
 /// This ensures they provide handler access while still going through FSM
 #[async_trait::async_trait]
-pub trait HandlerSupervised: Supervisor + HandlerSupervisedCleanup + Sync {
+pub trait HandlerSupervised: Supervisor + Sync {
     type Handler: Send + Sync;
 
     /// Dispatch state logic with access to handler
@@ -32,17 +78,77 @@ pub trait HandlerSupervised: Supervisor + HandlerSupervisedCleanup + Sync {
         context: &mut Self::Context,
     ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>>;
 
+    fn owned_dispatch(
+        &mut self,
+        _state: &Self::State,
+        _context: &mut Self::Context,
+    ) -> Option<OwnedDispatch<Self>>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    /// Concrete FSM states define achieved milestones and pending settlement.
+    fn lifecycle_phase(
+        &self,
+        _state: &Self::State,
+    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        Default::default()
+    }
+
+    fn accounting(
+        &self,
+        _context: &Self::Context,
+    ) -> obzenflow_core::event::provenance::ExecutionAccounting {
+        Default::default()
+    }
+
+    /// Called after the FSM assigns a state, before starting its operations.
+    fn after_transition(&mut self, _state: &Self::State, _context: &Self::Context) {}
+
+    fn supervisor_action(&self, _action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
+        None
+    }
+
+    /// Inline actions must finish before returning. An operation which needs
+    /// concurrent command handling transfers its resources to a Pending action.
+    async fn execute_action(
+        &mut self,
+        action: Self::Action,
+        context: &mut Self::Context,
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
+        action.execute(context).await?;
+        Ok(ActionExecution::Completed)
+    }
+
+    async fn execute_cleanup(
+        &mut self,
+        _context: &Self::Context,
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
+        Ok(ActionExecution::Completed)
+    }
+
+    async fn next_control(
+        &mut self,
+        _state: &Self::State,
+        _context: &mut Self::Context,
+    ) -> Option<Self::Event> {
+        std::future::pending().await
+    }
+
+    fn close_mailbox(
+        &mut self,
+        _state: &Self::State,
+    ) -> BoxFuture<'static, Result<(), Box<dyn Error + Send + Sync>>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Get the writer ID for this component
     fn writer_id(&self) -> WriterId;
 
-    /// Get the stage ID for this component
-    fn stage_id(&self) -> StageId;
-
-    /// Optional termination hook for components that need a final marker after the
-    /// FSM reaches a terminal state. Most stage supervisors rely on FSM-emitted
-    /// lifecycle events and therefore use the default no-op implementation.
-    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        Ok(())
+    fn supervision_mode(&self) -> SupervisionMode {
+        SupervisionMode::HandlerSupervised
     }
 
     /// Map an action error into a stage-specific failure event.
@@ -69,11 +175,10 @@ pub trait HandlerSupervised: Supervisor + HandlerSupervisedCleanup + Sync {
 /// Extension trait to add run functionality to any HandlerSupervised type
 #[async_trait::async_trait]
 pub trait HandlerSupervisedExt: HandlerSupervised {
-    /// Consume the supervisor and run its FSM to an orderly return.
-    ///
-    /// Resource settlement is part of this runner, including when registration,
-    /// transitions, failure actions or completion return an error. The supervisor
-    /// and its context remain owned here until cleanup finishes.
+    /// Execute the action plan returned by the FSM. A state change or a new nonempty plan replaces
+    /// unstarted actions; an already-started operation remains owned until its
+    /// completion has restored its resources. The FSM can therefore expose a
+    /// failure immediately while the previous operation is still settling.
     async fn run(
         mut self,
         initial_state: Self::State,
@@ -86,212 +191,135 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         Self::Context: 'static,
         Self::Action: 'static,
     {
-        // Keep fallible execution in a local scope so every orderly return reaches
-        // cleanup without exposing a borrowed runner or an alternate task path.
-        let result: Result<(), Box<dyn Error + Send + Sync>> = async {
-            let supervisor_name = self.name().to_string();
-            let supervisor_writer = self.writer_id();
-            let supervisor_stage = self.stage_id();
-
-            base::register(
-                &self,
-                &context,
-                supervisor_writer,
-                SupervisionMode::HandlerSupervised,
-            )
-            .await?;
-
-            // Build the state machine via the Supervisor API
-            let mut machine = self.build_state_machine(initial_state);
-            let mut loop_iteration: u64 = 0;
-
-            loop {
-                loop_iteration += 1;
-
-                // Get current state
-                let current_state = machine.state().clone();
-
-                tracing::debug!(
-                    target: "obzenflow_runtime::supervised_base::handler_supervised",
-                    iteration = loop_iteration,
-                    state = %current_state.variant_name(),
-                    "HandlerSupervised::run loop iteration start"
-                );
-
-                // Get directive from the supervisor's dispatch logic (with mutable context)
-                let directive = match self.dispatch_state(&current_state, &mut context).await {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::error!(
-                            supervisor = %supervisor_name,
-                            writer_id = ?supervisor_writer,
-                            stage_id = ?supervisor_stage,
-                            state = %current_state.variant_name(),
-                            error = %e,
-                            "dispatch_state returned error; driving FSM through failure path"
-                        );
-
-                        let failure_event = self.event_for_action_error(format!(
-                            "dispatch_state error in {}: {e}",
-                            current_state.variant_name()
-                        ));
-                        let failure_actions = machine
-                            .handle(failure_event, &mut context)
-                            .await
-                            .map_err(|fe| {
-                                format!(
-                                    "FSM error after dispatch_state failure (missing Error handler in state {}?): {fe}",
-                                    current_state.variant_name()
-                                )
-                            })?;
-
-                        tracing::info!(
-                            supervisor = %supervisor_name,
-                            writer_id = ?supervisor_writer,
-                            stage_id = ?supervisor_stage,
-                            iteration = loop_iteration,
-                            action_count = failure_actions.len(),
-                            "HandlerSupervised: executing failure-handling actions"
-                        );
-                        for (i, failure_action) in failure_actions.into_iter().enumerate() {
-                            tracing::info!(
-                                supervisor = %supervisor_name,
-                                writer_id = ?supervisor_writer,
-                                stage_id = ?supervisor_stage,
-                                iteration = loop_iteration,
-                                action_index = i,
-                                action = ?failure_action,
-                                "HandlerSupervised: executing failure-handling action"
-                            );
-                            failure_action.execute(&mut context).await.map_err(|e2| {
-                                format!("Action error during dispatch_state failure handling: {e2}")
-                            })?;
+        use crate::stages::common::stage_lifecycle::LifecycleResults;
+        let mut machine = self.build_state_machine(initial_state);
+        let mut actions = VecDeque::new();
+        let mut operation: Option<OwnedAction<Self::Context, Self::Event>> = None;
+        let mut dispatch: Option<OwnedDispatch<Self>> = None;
+        let mut publication_failure_delivered = false;
+        loop {
+            let state = machine.state().clone();
+            let publications = super::publication::PublicationScope::current();
+            let directive = if let Some(future) = operation.as_mut() {
+                tokio::select! {
+                    biased;
+                    error = async {
+                        match &publications {
+                            Some(scope) => scope.wait_for_failure().await,
+                            None => std::future::pending().await,
                         }
-
-                        continue;
+                    }, if !publication_failure_delivered => {
+                        publication_failure_delivered = true;
+                        EventLoopDirective::Transition(self.event_for_action_error(error.to_string()))
                     }
-                };
-
-                tracing::debug!(
-                    target: "obzenflow_runtime::supervised_base::handler_supervised",
-                    iteration = loop_iteration,
-                    state = %current_state.variant_name(),
-                    directive = ?directive,
-                    "HandlerSupervised::run dispatch_state returned directive"
-                );
-
-                match directive {
-                    EventLoopDirective::Continue => {
-                        // Yield to prevent busy loop when waiting for external events
-                        tokio::task::yield_now().await;
-                        continue;
-                    }
-
-                    EventLoopDirective::Transition(event) => {
-                        tracing::trace!(
-                            target: "flowip-080o",
-                            iteration = loop_iteration,
-                            event = ?event,
-                            "HandlerSupervised: handling FSM transition event"
-                        );
-                        let actions = machine
-                            .handle(event, &mut context)
-                            .await
-                            .map_err(|e| format!("FSM error: {e}"))?;
-
-                        tracing::trace!(
-                            target: "flowip-080o",
-                            iteration = loop_iteration,
-                            action_count = actions.len(),
-                            "HandlerSupervised: FSM returned actions, executing sequentially"
-                        );
-                        for (i, action) in actions.into_iter().enumerate() {
-                            tracing::trace!(
-                                target: "flowip-080o",
-                                iteration = loop_iteration,
-                                action_index = i,
-                                action = ?action,
-                                "HandlerSupervised: executing action"
-                            );
-                            if let Err(e) = action.execute(&mut context).await {
-                                tracing::error!(
-                                    target: "flowip-080o",
-                                    iteration = loop_iteration,
-                                    action_index = i,
-                                    error = %e,
-                                    "HandlerSupervised action failed; emitting failure event"
-                                );
-
-                                // Drive the FSM with a stage-specific failure event so that
-                                // it can transition into a Failed state and emit the
-                                // appropriate lifecycle events.
-                                let failure_event = self.event_for_action_error(format!("{e}"));
-                                let failure_actions = machine
-                                    .handle(failure_event, &mut context)
-                                    .await
-                                    .map_err(|fe| format!("FSM error after action failure: {fe}"))?;
-
-                                tracing::info!(
-                                    target: "flowip-080o",
-                                    iteration = loop_iteration,
-                                    action_count = failure_actions.len(),
-                                    "HandlerSupervised: executing failure-handling actions"
-                                );
-                                for (j, failure_action) in failure_actions.into_iter().enumerate() {
-                                    tracing::info!(
-                                        target: "flowip-080o",
-                                        iteration = loop_iteration,
-                                        action_index = j,
-                                        action = ?failure_action,
-                                        "HandlerSupervised: executing failure-handling action"
-                                    );
-                                    failure_action.execute(&mut context).await.map_err(|e2| {
-                                        format!("Action error during failure handling: {e2}")
-                                    })?;
-                                }
-
-                                // After executing failure-handling actions, break out of the
-                                // current action sequence. The next loop iteration will see
-                                // the new FSM state (typically Failed/Drained) and perform
-                                // the appropriate terminal behaviour.
-                                break;
-                            }
-                            tracing::trace!(
-                                target: "flowip-080o",
-                                iteration = loop_iteration,
-                                action_index = i,
-                                "HandlerSupervised: action completed"
-                            );
+                    Some(event) = self.next_control(&state, &mut context) => EventLoopDirective::Transition(event),
+                    complete = future => {
+                        operation = None;
+                        match complete(&mut context) {
+                            Ok(None) => continue,
+                            Ok(Some(event)) => EventLoopDirective::Transition(event),
+                            Err(error) => EventLoopDirective::Transition(self.event_for_action_error(error.to_string())),
                         }
-                        tracing::trace!(
-                            target: "flowip-080o",
-                            iteration = loop_iteration,
-                            "HandlerSupervised: all actions completed"
-                        );
-                    }
-
-                    EventLoopDirective::Terminate => {
-                        self.write_completion_event().await?;
-                        break;
                     }
                 }
+            } else if let Some(future) = dispatch.as_mut() {
+                tokio::select! {
+                    biased;
+                    error = async {
+                        match &publications {
+                            Some(scope) => scope.wait_for_failure().await,
+                            None => std::future::pending().await,
+                        }
+                    }, if !publication_failure_delivered => {
+                        publication_failure_delivered = true;
+                        EventLoopDirective::Transition(self.event_for_action_error(error.to_string()))
+                    }
+                    Some(event) = self.next_control(&state, &mut context) => EventLoopDirective::Transition(event),
+                    complete = future => {
+                        dispatch = None;
+                        match complete(&mut self, &mut context) {
+                            Ok(directive) => directive,
+                            Err(error) => EventLoopDirective::Transition(self.event_for_action_error(error.to_string())),
+                        }
+                    }
+                }
+            } else if let Some(action) = actions.pop_front() {
+                match self.supervisor_action(&action) {
+                    Some(SupervisorAction::Register) => {
+                        operation = Some(owned_unit(base::register(
+                            &self,
+                            &context,
+                            self.writer_id(),
+                            self.supervision_mode(),
+                        )));
+                        continue;
+                    }
+                    Some(SupervisorAction::CloseMailbox) => {
+                        operation = Some(owned_unit(self.close_mailbox(&state)));
+                        continue;
+                    }
+                    Some(SupervisorAction::Cleanup) => match self.execute_cleanup(&context).await {
+                        Ok(ActionExecution::Completed) => continue,
+                        Ok(ActionExecution::Pending(future)) => {
+                            operation = Some(future);
+                            continue;
+                        }
+                        Err(error) => EventLoopDirective::Transition(
+                            self.event_for_action_error(error.to_string()),
+                        ),
+                    },
+                    Some(SupervisorAction::SettlePublications) => {
+                        operation = Some(owned_unit(Box::pin(async move {
+                            if let Some(scope) = publications {
+                                scope.join().await?;
+                            }
+                            Ok(())
+                        })));
+                        continue;
+                    }
+                    Some(SupervisorAction::Emit(event)) => EventLoopDirective::Transition(event),
+                    None => match self.execute_action(action, &mut context).await {
+                        Ok(ActionExecution::Completed) => continue,
+                        Ok(ActionExecution::Pending(future)) => {
+                            operation = Some(future);
+                            continue;
+                        }
+                        Err(error) => EventLoopDirective::Transition(
+                            self.event_for_action_error(error.to_string()),
+                        ),
+                    },
+                }
+            } else if let Some(owned) = self.owned_dispatch(&state, &mut context) {
+                dispatch = Some(owned);
+                continue;
+            } else {
+                match self.dispatch_state(&state, &mut context).await {
+                    Ok(directive) => directive,
+                    Err(error) => EventLoopDirective::Transition(
+                        self.event_for_action_error(error.to_string()),
+                    ),
+                }
+            };
+            let event = match directive {
+                EventLoopDirective::Continue => {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                EventLoopDirective::Terminate => return Ok(()),
+                EventLoopDirective::Transition(event) => event,
+            };
+            let previous_state = machine.state().clone();
+            let selected = machine
+                .handle(event, &mut context)
+                .await
+                .map_err(|error| format!("FSM error: {error}"))?;
+            let state = machine.state().clone();
+            self.after_transition(&state, &context);
+            LifecycleResults::observe(&self.lifecycle_phase(&state), self.accounting(&context));
+            if state != previous_state || !selected.is_empty() {
+                actions = selected.into();
             }
-
-            Ok(())
         }
-        .await;
-
-        let cleanup = self.cleanup_after_run(&context).await;
-        if let Err(error) = &cleanup {
-            tracing::warn!(
-                supervisor = %self.name(),
-                stage_id = %self.stage_id(),
-                error = %error,
-                "supervisor cleanup evidence failed"
-            );
-        }
-        // Await cleanup even after runner failure and preserve the primary error.
-        result.and(cleanup)
     }
 
     /// Helper to spawn a task and return the handle

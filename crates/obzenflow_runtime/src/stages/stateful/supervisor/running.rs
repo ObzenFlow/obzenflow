@@ -37,7 +37,7 @@ use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::super::fsm::{PendingTransition, StatefulContext, StatefulEvent, StatefulState};
+use super::super::fsm::{PendingTransition, StatefulEvent, StatefulResources, StatefulState};
 use super::StatefulSupervisor;
 
 pub(super) async fn dispatch_accumulating<
@@ -45,7 +45,7 @@ pub(super) async fn dispatch_accumulating<
 >(
     sup: &mut StatefulSupervisor<H>,
     state: &StatefulState<H>,
-    ctx: &mut StatefulContext<H>,
+    ctx: &mut StatefulResources<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let loop_count = ctx
         .instrumentation
@@ -274,21 +274,19 @@ pub(super) async fn dispatch_accumulating<
                         ControlAction::Forward => {
                             if envelope.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    drop(
-                                        subscription
-                                            .check_contracts(&mut ctx.contract_state[..])
-                                            .await,
-                                    );
+                                    subscription
+                                        .check_contracts(&mut ctx.contract_state[..])
+                                        .await
+                                        .into_result()?;
                                     let _ = subscription.take_last_eof_outcome();
                                 }
                             }
-                            sup.forward_control_event(ctx, &envelope).await?;
+                            StatefulSupervisor::<H>::forward_control_event(ctx, &envelope).await?;
                             EventLoopDirective::Continue
                         }
                         ControlAction::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.authored());
                             ctx.terminal_envelope = Some(envelope.clone());
-                            ctx.drain_requested_by_handle = false;
                             EventLoopDirective::Transition(StatefulEvent::ReceivedEOF)
                         }
                         ControlAction::Suppress => EventLoopDirective::Continue,
@@ -381,7 +379,10 @@ pub(super) async fn dispatch_accumulating<
                             .fetch_add(1, Ordering::Relaxed);
                         ctx.events_since_last_heartbeat =
                             ctx.events_since_last_heartbeat.saturating_add(1);
-                        if let Err(error) = sup.emit_stateful_heartbeat_if_due(ctx, false).await {
+                        if let Err(error) =
+                            StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false)
+                                .await
+                        {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 error = ?error,
@@ -398,7 +399,11 @@ pub(super) async fn dispatch_accumulating<
 
                     run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
-                    let mut handler = (*ctx.handler).clone();
+                    let mut handler = (**ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup"))
+                    .clone();
                     let effect_context = stage_input_position.and_then(|input_seq| {
                         ctx.writer_id.map(|writer_id| EffectInvocationContext {
                             flow_id: ctx.flow_id,
@@ -560,7 +565,9 @@ pub(super) async fn dispatch_accumulating<
                     // Track accumulated events for observability heartbeats.
                     ctx.events_since_last_heartbeat =
                         ctx.events_since_last_heartbeat.saturating_add(1);
-                    if let Err(e) = sup.emit_stateful_heartbeat_if_due(ctx, false).await {
+                    if let Err(e) =
+                        StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false).await
+                    {
                         tracing::warn!(
                             stage_name = %ctx.stage_name,
                             error = ?e,
@@ -585,7 +592,7 @@ pub(super) async fn dispatch_accumulating<
                 }
                 _ => {
                     // Other content types: forward.
-                    sup.forward_control_event(ctx, &envelope).await?;
+                    StatefulSupervisor::<H>::forward_control_event(ctx, &envelope).await?;
                     EventLoopDirective::Continue
                 }
             };
@@ -618,6 +625,12 @@ pub(super) async fn dispatch_accumulating<
                                 cause = ?cause,
                                 "Contract violation detected during active processing"
                             );
+
+                            crate::messaging::upstream_subscription::ContractStatus::Violated {
+                                upstream,
+                                cause,
+                            }
+                            .into_result()?;
                         }
                         _ => {}
                     }
@@ -677,6 +690,12 @@ pub(super) async fn dispatch_accumulating<
                                 cause = ?cause,
                                 "Contract violation detected during stateful processing"
                             );
+
+                            crate::messaging::upstream_subscription::ContractStatus::Violated {
+                                upstream,
+                                cause,
+                            }
+                            .into_result()?;
                         }
                         _ => {}
                     }
@@ -688,7 +707,11 @@ pub(super) async fn dispatch_accumulating<
             if let (Some(baseline), Some(interval)) = (ctx.last_data_event_time, ctx.emit_interval)
             {
                 if baseline.elapsed() >= interval {
-                    let handler = (*ctx.handler).clone();
+                    let handler = (**ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup"))
+                    .clone();
                     if handler.should_emit(&mut ctx.current_state) {
                         directive = EventLoopDirective::Transition(StatefulEvent::ShouldEmit);
                     }
@@ -730,7 +753,7 @@ pub(super) async fn dispatch_emitting<
 >(
     sup: &mut StatefulSupervisor<H>,
     _state: &StatefulState<H>,
-    ctx: &mut StatefulContext<H>,
+    ctx: &mut StatefulResources<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
@@ -786,7 +809,10 @@ pub(super) async fn dispatch_emitting<
             }
         }
 
-        ctx.handler.outputs_committed(&mut ctx.current_state);
+        ctx.handler
+            .as_ref()
+            .expect("handler available before cleanup")
+            .outputs_committed(&mut ctx.current_state);
 
         if let Some(upstream) = ctx.pending_ack_upstream.take() {
             if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
@@ -814,7 +840,11 @@ pub(super) async fn dispatch_emitting<
     // Emit aggregated events. If downstream credits are exhausted, queue the output
     // events and complete the transition once they are fully written.
     let current_state = &mut ctx.current_state;
-    let handler = (*ctx.handler).clone();
+    let handler = (**ctx
+        .handler
+        .as_ref()
+        .expect("handler available before cleanup"))
+    .clone();
     let instrumentation = ctx.instrumentation.clone();
 
     let output_context =
@@ -931,7 +961,10 @@ pub(super) async fn dispatch_emitting<
             Ok(EventLoopDirective::Continue)
         }
         Ok(_) => {
-            ctx.handler.outputs_committed(&mut ctx.current_state);
+            ctx.handler
+                .as_ref()
+                .expect("handler available before cleanup")
+                .outputs_committed(&mut ctx.current_state);
             if let Some(upstream) = ctx.pending_ack_upstream.take() {
                 if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
                     reader.ack_consumed(1);

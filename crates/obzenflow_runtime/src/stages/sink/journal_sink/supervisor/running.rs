@@ -34,7 +34,6 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{
     DeliveryMethod, DeliveryPayload, DeliveryResult,
 };
-use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, MiddlewareFact};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::ChainPayload;
@@ -43,7 +42,6 @@ use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
     ChainEventFactory, SinkOperationFailed, SinkOperationPhase, StageFatalCode, StageFatalReason,
-    SystemEvent,
 };
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_fsm::StateVariant;
@@ -56,7 +54,7 @@ use super::super::boundary::{
     SinkDeliveryAdmission, SinkDeliveryAttemptOutcome, SinkDeliveryPermit, SinkDeliveryRejection,
     SinkPolicyEvidenceBatch,
 };
-use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
+use super::super::fsm::{JournalSinkEvent, JournalSinkResources, JournalSinkState};
 use super::super::journalled_delivery_event;
 use super::JournalSinkSupervisor;
 use obzenflow_core::MiddlewareExecutionScope;
@@ -67,7 +65,7 @@ pub(super) async fn dispatch_running<
 >(
     sup: &mut JournalSinkSupervisor<H>,
     state: &JournalSinkState<H>,
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let loop_count = ctx
         .instrumentation
@@ -174,6 +172,12 @@ pub(super) async fn dispatch_running<
                                 cause = ?cause,
                                 "Contract violation detected during sink processing"
                             );
+
+                            crate::messaging::upstream_subscription::ContractStatus::Violated {
+                                upstream,
+                                cause,
+                            }
+                            .into_result()?;
                         }
                         _ => {}
                     }
@@ -233,6 +237,12 @@ pub(super) async fn dispatch_running<
                             cause = ?cause,
                             "Contract violation detected during sink processing"
                         );
+
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        }
+                        .into_result()?;
                     }
                     _ => {}
                 }
@@ -263,7 +273,7 @@ pub(super) async fn dispatch_running<
 }
 
 async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &DeliveredRecord<ChainPayload>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
@@ -300,7 +310,7 @@ async fn dispatch_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 
 }
 
 async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &DeliveredRecord<ChainPayload>,
     signal: &FlowControlPayload,
@@ -400,11 +410,10 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
     match resolution {
         ControlAction::Forward => {
             if envelope.is_eof() {
-                drop(
-                    subscription
-                        .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
-                        .await,
-                );
+                subscription
+                    .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
+                    .await
+                    .into_result()?;
                 let _ = subscription.take_last_eof_outcome();
 
                 let upstream_readers = subscription.upstream_count();
@@ -457,11 +466,10 @@ async fn dispatch_control_event<H: UnifiedSinkHandler + std::fmt::Debug + Send +
         }
         ControlAction::ForwardAndDrain => {
             // Final EOF (all authoritative upstream EOFs observed).
-            drop(
-                subscription
-                    .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
-                    .await,
-            );
+            subscription
+                .check_contracts_diagnostics_only(&mut ctx.contract_state[..])
+                .await
+                .into_result()?;
             let _ = subscription.take_last_eof_outcome();
 
             if let Some(outcome) = last_eof_outcome {
@@ -621,7 +629,7 @@ fn prepare_receipt_plan(
 async fn record_protocol_fatal_and_transition<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     fatal: StageFatal,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
     parent: Option<&DeliveredRecord<ChainPayload>>,
@@ -651,7 +659,7 @@ async fn record_protocol_fatal_and_transition<
 async fn journal_sink_operation_failure<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     input: &ChainEvent,
     failed_receipt: &DeliveredRecord<ChainPayload>,
     phase: SinkOperationPhase,
@@ -707,7 +715,7 @@ async fn journal_sink_operation_failure<
 async fn journal_fresh_error_route<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     input: &ChainEvent,
     causal_parent: &DeliveredRecord<ChainPayload>,
     detail: String,
@@ -780,7 +788,7 @@ async fn journal_fresh_error_route<
 async fn journal_policy_evidence<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     parent: &DeliveredRecord<ChainPayload>,
     batch: SinkPolicyEvidenceBatch,
     scope: MiddlewareExecutionScope,
@@ -789,10 +797,7 @@ async fn journal_policy_evidence<
         .writer_id
         .unwrap_or_else(|| WriterId::from(ctx.stage_id));
     for evidence in batch.into_entries() {
-        let execution = match evidence.into_lifecycle() {
-            MiddlewareFact::CircuitBreaker(fact) => ExecutionPayload::CircuitBreaker(fact),
-            MiddlewareFact::RateLimiter(fact) => ExecutionPayload::RateLimiter(fact),
-        };
+        let execution = evidence.into_lifecycle();
         let mut event =
             ChainEventFactory::create_event(writer_id, ChainPayload::Execution(execution))
                 .with_flow_context(make_flow_context(
@@ -825,19 +830,31 @@ async fn journal_policy_evidence<
 async fn journal_poisoned_lifecycle<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     causal_event_id: obzenflow_core::EventId,
     detail: String,
 ) -> Result<obzenflow_core::EventId, Box<dyn std::error::Error + Send + Sync>> {
-    let event = SystemEvent::stage_failed_with_accounting_causal(
+    let event = ChainEventFactory::execution_event(
+        ctx.stage_id.into(),
+        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::StageLifecycle(
+            obzenflow_core::event::payloads::execution_payload::StageLifecycleFact::Failed {
+                stage_id: ctx.stage_id,
+                error: detail,
+                recoverable: Some(false),
+                accounting: Some(snapshot_stage_accounting(ctx.instrumentation.as_ref())),
+                causal_event_id: Some(causal_event_id),
+            },
+        ),
+    )
+    .with_flow_context(make_flow_context(
+        &ctx.flow_name,
+        &ctx.flow_id.to_string(),
+        &ctx.stage_name,
         ctx.stage_id,
-        detail,
-        false,
-        snapshot_stage_accounting(ctx.instrumentation.as_ref()),
-        causal_event_id,
-    );
+        obzenflow_core::event::context::StageType::Sink,
+    ));
     let written =
-        crate::supervised_base::publication::report(&ctx.report_journal, event, Default::default())
+        crate::supervised_base::publication::append(&ctx.data_journal, event, Default::default())
             .await?;
     ctx.failure_lifecycle_recorded = true;
     ctx.failure_causal_event_id = Some(causal_event_id);
@@ -845,7 +862,7 @@ async fn journal_poisoned_lifecycle<
 }
 
 async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static>(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &DeliveredRecord<ChainPayload>,
     stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
@@ -866,7 +883,12 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             writer_id,
             input_seq,
             lineage: ctx.lineage_policy,
-            stage_logic_version: ctx.handler.stage_logic_version().to_string(),
+            stage_logic_version: ctx
+                .handler
+                .as_ref()
+                .expect("handler available before cleanup")
+                .stage_logic_version()
+                .to_string(),
             data_journal: ctx.data_journal.clone(),
             flow_context: None,
             observers: Some(ctx.observers.clone()),
@@ -915,8 +937,15 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
                         );
                     }
                     Ok(SinkDeliveryAdmission::Admitted(permit)) => {
-                        let outcome =
-                            invoke_sink_once(&mut ctx.handler, input, effect_context, scope).await;
+                        let outcome = invoke_sink_once(
+                            ctx.handler
+                                .as_mut()
+                                .expect("handler available before cleanup"),
+                            input,
+                            effect_context,
+                            scope,
+                        )
+                        .await;
                         return Ok(SinkDispatchExecution::Attempted {
                             outcome,
                             permit: Some(permit),
@@ -931,7 +960,15 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
             }
         }
 
-        let outcome = invoke_sink_once(&mut ctx.handler, input, effect_context, scope).await;
+        let outcome = invoke_sink_once(
+            ctx.handler
+                .as_mut()
+                .expect("handler available before cleanup"),
+            input,
+            effect_context,
+            scope,
+        )
+        .await;
         Ok(SinkDispatchExecution::Attempted {
             outcome,
             permit: None,
@@ -1251,7 +1288,7 @@ async fn dispatch_data_event<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sy
 async fn journal_delivery_receipt<
     H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static,
 >(
-    ctx: &mut JournalSinkContext<H>,
+    ctx: &mut JournalSinkResources<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     parent_envelope: &DeliveredRecord<ChainPayload>,
     payload: DeliveryPayload,

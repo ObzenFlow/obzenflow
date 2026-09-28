@@ -20,7 +20,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 
 use super::config::JoinConfig;
-use super::fsm::{JoinContext, JoinState};
+use super::fsm::{JoinContext, JoinResources, JoinState};
 use super::handle::JoinHandle;
 use super::supervisor::JoinSupervisor;
 
@@ -176,8 +176,8 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_writer_id(WriterId::from(self.config.stage_id));
         let handler_state = handler.initial_state();
-        let context = JoinContext {
-            handler: Arc::new(handler),
+        let resources = JoinResources {
+            handler: Some(Arc::new(handler)),
             handler_state,
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
@@ -188,7 +188,6 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             reference_stage_id: self.config.reference_source_id,
             data_journal: self.resources.data_journal.clone(),
             error_journal: self.resources.error_journal.clone(),
-            report_journal: self.resources.report_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
             lineage_policy: self.resources.lineage_policy,
@@ -230,6 +229,8 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             catch_up_flip: None,
         };
 
+        let context = JoinContext::new(resources);
+
         // Create supervisor
         let supervisor = JoinSupervisor {
             name: format!("join_{}", self.config.stage_name),
@@ -248,7 +249,10 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.report_journal.clone(),
+            crate::supervised_base::with_external_events::stage_commands(
+                self.resources.data_journal.clone(),
+                self.resources.flow_context.clone(),
+            ),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

@@ -69,16 +69,6 @@ pub trait JournalStorage<T: JournalEvent>: Send + Sync {
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError>;
 
-    async fn storage_report_reader_from(
-        &self,
-        _position: u64,
-    ) -> Result<Box<dyn super::reader::JournalReportReader<T>>, JournalError> {
-        Err(JournalError::Implementation {
-            message: "Journal does not support selective supervision reads".into(),
-            source: "unsupported report reader".into(),
-        })
-    }
-
     async fn storage_committed_position(&self) -> Result<u64, JournalError> {
         Ok(self
             .storage_read_last_n(1)
@@ -180,12 +170,6 @@ impl<T: JournalEvent, S: JournalStorage<T> + ?Sized> Journal<T> for S {
     }
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         self.storage_reader_from(position).await
-    }
-    async fn report_reader_from(
-        &self,
-        position: u64,
-    ) -> Result<Box<dyn super::reader::JournalReportReader<T>>, JournalError> {
-        self.storage_report_reader_from(position).await
     }
     async fn read_last_n(
         &self,

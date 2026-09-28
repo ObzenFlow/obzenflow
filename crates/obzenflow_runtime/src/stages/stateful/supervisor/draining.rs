@@ -38,7 +38,7 @@ use std::time::Instant;
 
 use crate::messaging::PollResult;
 
-use super::super::fsm::{PendingTransition, StatefulContext, StatefulEvent, StatefulState};
+use super::super::fsm::{StatefulEvent, StatefulResources, StatefulState};
 use super::StatefulSupervisor;
 
 fn acknowledge_consumed_drain_input(
@@ -50,11 +50,14 @@ fn acknowledge_consumed_drain_input(
     }
 }
 
-fn terminal_kind<H>(ctx: &StatefulContext<H>) -> StatefulTerminationKind
+fn terminal_kind<H>(
+    ctx: &StatefulResources<H>,
+    drain_requested_by_handle: bool,
+) -> StatefulTerminationKind
 where
     H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    if ctx.drain_requested_by_handle {
+    if drain_requested_by_handle {
         return StatefulTerminationKind::BeginDrain;
     }
 
@@ -77,7 +80,7 @@ where
     }
 }
 
-fn terminal_primary_cause<H>(ctx: &StatefulContext<H>) -> Option<obzenflow_core::EventId>
+fn terminal_primary_cause<H>(ctx: &StatefulResources<H>) -> Option<obzenflow_core::EventId>
 where
     H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
@@ -96,7 +99,7 @@ pub(super) async fn dispatch_draining<
 >(
     sup: &mut StatefulSupervisor<H>,
     state: &StatefulState<H>,
-    ctx: &mut StatefulContext<H>,
+    ctx: &mut StatefulResources<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat.state.mark_draining();
@@ -149,22 +152,15 @@ pub(super) async fn dispatch_draining<
         }
     }
 
-    ctx.handler.outputs_committed(&mut ctx.current_state);
+    ctx.handler
+        .as_ref()
+        .expect("handler available before cleanup")
+        .outputs_committed(&mut ctx.current_state);
 
     if let Some(upstream) = ctx.pending_ack_upstream.take() {
         if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
             reader.ack_consumed(1);
         }
-    }
-
-    if ctx.pending_outputs.is_empty()
-        && matches!(
-            ctx.pending_transition,
-            Some(PendingTransition::DrainComplete)
-        )
-    {
-        ctx.pending_transition = None;
-        return Ok(EventLoopDirective::Transition(StatefulEvent::DrainComplete));
     }
 
     // Drain any remaining events from the subscription queue.
@@ -249,7 +245,10 @@ pub(super) async fn dispatch_draining<
                             .fetch_add(1, Ordering::Relaxed);
                         ctx.events_since_last_heartbeat =
                             ctx.events_since_last_heartbeat.saturating_add(1);
-                        if let Err(error) = sup.emit_stateful_heartbeat_if_due(ctx, false).await {
+                        if let Err(error) =
+                            StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false)
+                                .await
+                        {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 error = ?error,
@@ -262,7 +261,11 @@ pub(super) async fn dispatch_draining<
 
                     run_stateful_before_accumulate_observers(&ctx.observers, scope, &observer_ctx);
 
-                    let mut handler = (*ctx.handler).clone();
+                    let mut handler = (**ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup"))
+                    .clone();
                     let effect_context = stage_input_position.and_then(|input_seq| {
                         ctx.writer_id.map(|writer_id| EffectInvocationContext {
                             flow_id: ctx.flow_id,
@@ -410,7 +413,9 @@ pub(super) async fn dispatch_draining<
                     // Track accumulated events during drain for heartbeat visibility.
                     ctx.events_since_last_heartbeat =
                         ctx.events_since_last_heartbeat.saturating_add(1);
-                    if let Err(e) = sup.emit_stateful_heartbeat_if_due(ctx, false).await {
+                    if let Err(e) =
+                        StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, false).await
+                    {
                         tracing::warn!(
                             stage_name = %ctx.stage_name,
                             error = ?e,
@@ -635,7 +640,7 @@ pub(super) async fn dispatch_draining<
 
                     // Do not forward EOF again during draining: it will be sent after drain completes.
                     if !envelope.is_eof() {
-                        sup.forward_control_event(ctx, &envelope).await?;
+                        StatefulSupervisor::<H>::forward_control_event(ctx, &envelope).await?;
                     }
                 }
 
@@ -658,11 +663,10 @@ pub(super) async fn dispatch_draining<
             PollResult::NoEvents => {
                 // Queue is truly drained - no more events available.
                 // Do a final contract check before draining.
-                drop(
-                    subscription
-                        .check_contracts(&mut ctx.contract_state[..])
-                        .await,
-                );
+                subscription
+                    .check_contracts(&mut ctx.contract_state[..])
+                    .await
+                    .into_result()?;
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -682,90 +686,135 @@ pub(super) async fn dispatch_draining<
         }
     }
 
-    if !ctx.terminal_validated {
-        let kind = terminal_kind(ctx);
-        let validation = if matches!(
-            kind,
-            StatefulTerminationKind::PipelineAbort | StatefulTerminationKind::ForceShutdown
-        ) {
-            TerminalValidation::Clean
-        } else {
-            ctx.handler.validate_terminal(&ctx.current_state, kind)
-        };
+    Ok(EventLoopDirective::Transition(
+        StatefulEvent::DrainInputsCompleted,
+    ))
+}
 
-        match validation {
-            TerminalValidation::Clean => {}
-            TerminalValidation::Primary(fatal) => {
-                let writer_id = ctx.writer_id.ok_or_else(|| {
-                    "terminal validation has no stateful stage writer id".to_string()
-                })?;
-                record_stage_fatal(
-                    &fatal,
-                    StageFatalCommit {
-                        error_journal: &ctx.error_journal,
-                        writer_id,
-                        stage_id: ctx.stage_id,
-                        stage_key: &ctx.stage_name,
-                        input_position: None,
-                        parent: ctx.terminal_envelope.as_deref(),
-                        lineage: ctx.lineage_policy,
-                    },
-                )
-                .await?;
-                return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
-                    fatal.detail,
-                )));
+pub(super) async fn validate_terminal<
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut StatefulResources<H>,
+    drain_requested_by_handle: bool,
+) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    let kind = terminal_kind(ctx, drain_requested_by_handle);
+    let validation = if matches!(
+        kind,
+        StatefulTerminationKind::PipelineAbort | StatefulTerminationKind::ForceShutdown
+    ) {
+        TerminalValidation::Clean
+    } else {
+        ctx.handler
+            .as_ref()
+            .expect("handler available before cleanup")
+            .validate_terminal(&ctx.current_state, kind)
+    };
+
+    match validation {
+        TerminalValidation::Clean => {}
+        TerminalValidation::Primary(fatal) => {
+            let writer_id = ctx
+                .writer_id
+                .ok_or_else(|| "terminal validation has no stateful stage writer id".to_string())?;
+            record_stage_fatal(
+                &fatal,
+                StageFatalCommit {
+                    error_journal: &ctx.error_journal,
+                    writer_id,
+                    stage_id: ctx.stage_id,
+                    stage_key: &ctx.stage_name,
+                    input_position: None,
+                    parent: ctx.terminal_envelope.as_deref(),
+                    lineage: ctx.lineage_policy,
+                },
+            )
+            .await?;
+            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                fatal.detail,
+            )));
+        }
+        TerminalValidation::Secondary(mut fatal) => {
+            if fatal.primary_cause_event_id.is_none() {
+                fatal.primary_cause_event_id = terminal_primary_cause(ctx);
             }
-            TerminalValidation::Secondary(mut fatal) => {
-                if fatal.primary_cause_event_id.is_none() {
-                    fatal.primary_cause_event_id = terminal_primary_cause(ctx);
+            let result = match ctx.writer_id {
+                Some(writer_id) => {
+                    record_stage_fatal(
+                        &fatal,
+                        StageFatalCommit {
+                            error_journal: &ctx.error_journal,
+                            writer_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: &ctx.stage_name,
+                            input_position: None,
+                            parent: ctx.terminal_envelope.as_deref(),
+                            lineage: ctx.lineage_policy,
+                        },
+                    )
+                    .await
                 }
-                let result = match ctx.writer_id {
-                    Some(writer_id) => {
-                        record_stage_fatal(
-                            &fatal,
-                            StageFatalCommit {
-                                error_journal: &ctx.error_journal,
-                                writer_id,
-                                stage_id: ctx.stage_id,
-                                stage_key: &ctx.stage_name,
-                                input_position: None,
-                                parent: ctx.terminal_envelope.as_deref(),
-                                lineage: ctx.lineage_policy,
-                            },
-                        )
-                        .await
-                    }
-                    None => Err(
-                        "secondary terminal validation has no stateful stage writer id"
-                            .to_string()
-                            .into(),
-                    ),
-                };
-                if let Err(error) = result {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        error = %error,
-                        "suppressed secondary terminal-validation evidence append failure"
-                    );
-                }
+                None => Err(
+                    "secondary terminal validation has no stateful stage writer id"
+                        .to_string()
+                        .into(),
+                ),
+            };
+            if let Err(error) = result {
+                tracing::warn!(
+                    stage_name = %ctx.stage_name,
+                    error = %error,
+                    "suppressed secondary terminal-validation evidence append failure"
+                );
             }
         }
-        ctx.terminal_validated = true;
+    }
+    Ok(EventLoopDirective::Transition(
+        StatefulEvent::TerminalValidated,
+    ))
+}
+
+pub(super) async fn forward_terminal<
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut StatefulResources<H>,
+) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(envelope) = ctx.terminal_envelope.clone() {
+        StatefulSupervisor::<H>::forward_control_event(ctx, &envelope).await?;
+    }
+    Ok(EventLoopDirective::Transition(
+        StatefulEvent::TerminalForwarded,
+    ))
+}
+
+pub(super) async fn produce_final_output<
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut StatefulResources<H>,
+) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
     }
 
-    if !ctx.terminal_forwarded {
-        if let Some(envelope) = ctx.terminal_envelope.clone() {
-            sup.forward_control_event(ctx, &envelope).await?;
-        }
-        ctx.terminal_forwarded = true;
-    }
+    let flow_id = ctx.flow_id.to_string();
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &flow_id,
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Stateful,
+    );
+    // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
+    // scope each pending output now carries through the drain).
+    // Generation None: drain follows the stage frontier (FLOWIP-120n).
+    let observer_scope =
+        ctx.runtime_execution
+            .dispatch_scope(ctx.stage_id, ctx.last_input_position, None);
 
     // Flush any remaining accumulated events into a final heartbeat snapshot before emitting drain results.
     // For the final heartbeat we bypass the normal heartbeat interval threshold so short finite flows still
     // emit a snapshot.
     if ctx.events_since_last_heartbeat > 0 {
-        if let Err(e) = sup.emit_stateful_heartbeat_if_due(ctx, true).await {
+        if let Err(e) = StatefulSupervisor::<H>::emit_stateful_heartbeat_if_due(ctx, true).await {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
                 error = ?e,
@@ -786,14 +835,19 @@ pub(super) async fn dispatch_draining<
                 stage_name = %ctx.stage_name,
                 "terminal EOF is truncated; skipping end-of-input finalization"
             );
-            ctx.pending_transition = Some(PendingTransition::DrainComplete);
-            return Ok(EventLoopDirective::Continue);
+            return Ok(EventLoopDirective::Transition(
+                StatefulEvent::FinalOutputsPrepared,
+            ));
         }
     }
 
     // Call handler.drain() to emit final accumulated state.
     let final_state = ctx.current_state.clone();
-    let handler = (*ctx.handler).clone();
+    let handler = (**ctx
+        .handler
+        .as_ref()
+        .expect("handler available before cleanup"))
+    .clone();
     let instrumentation = ctx.instrumentation.clone();
     let output_context =
         ctx.writer_id
@@ -877,7 +931,7 @@ pub(super) async fn dispatch_draining<
                     );
 
                     if event.consumes_data_credit() {
-                        if let Some(subscription) = sup.subscription.as_mut() {
+                        if let Some(subscription) = ctx.subscription.as_mut() {
                             subscription.track_output_event();
                         }
                     }
@@ -902,8 +956,9 @@ pub(super) async fn dispatch_draining<
                 }
             }
 
-            ctx.pending_transition = Some(PendingTransition::DrainComplete);
-            Ok(EventLoopDirective::Continue)
+            Ok(EventLoopDirective::Transition(
+                StatefulEvent::FinalOutputsPrepared,
+            ))
         }
         Err(e) => {
             if let Some(handler_error) =
@@ -945,6 +1000,73 @@ pub(super) async fn dispatch_draining<
             )))
         }
     }
+}
+
+pub(super) async fn drain_final_output<
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &mut StatefulResources<H>,
+) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
+    }
+
+    let flow_id = ctx.flow_id.to_string();
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &flow_id,
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Stateful,
+    );
+    // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
+    // scope each pending output now carries through the drain).
+    // Generation None: drain follows the stage frontier (FLOWIP-120n).
+    let _observer_scope =
+        ctx.runtime_execution
+            .dispatch_scope(ctx.stage_id, ctx.last_input_position, None);
+
+    // Drain any pending stage outputs first (FLOWIP-086k).
+    while let Some(pending) = ctx.pending_outputs.pop_front() {
+        match drain_one_pending(
+            pending,
+            &flow_context,
+            ctx.stage_id,
+            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
+            &ctx.data_journal,
+            ctx.last_consumed_envelope.as_ref(),
+            &ctx.instrumentation,
+            &ctx.backpressure_writer,
+            &mut ctx.backpressure_pulse,
+            &mut ctx.backpressure_stall,
+            Some(&ctx.output_contract),
+            &mut ctx.pending_outputs,
+        )
+        .await?
+        {
+            DrainOutcome::Committed { was_data } => {
+                if was_data {
+                    if let Some(subscription) = ctx.subscription.as_mut() {
+                        subscription.track_output_event();
+                    }
+                }
+            }
+            DrainOutcome::BackedOff => return Ok(EventLoopDirective::Continue),
+        }
+    }
+
+    ctx.handler
+        .as_ref()
+        .expect("handler available before cleanup")
+        .outputs_committed(&mut ctx.current_state);
+
+    if let Some(upstream) = ctx.pending_ack_upstream.take() {
+        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+            reader.ack_consumed(1);
+        }
+    }
+
+    Ok(EventLoopDirective::Transition(StatefulEvent::DrainComplete))
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{CausalFrontier, ChainEventFactory, ChainPayload, SupervisorRecord};
+use obzenflow_core::event::{CausalFrontier, ChainEventFactory, ChainPayload};
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use std::path::PathBuf;
@@ -24,22 +24,7 @@ pub fn runtime() -> Runtime {
         .unwrap()
 }
 
-#[derive(Clone, Copy)]
-pub enum Backend {
-    Memory,
-    Disk,
-}
-
-impl Backend {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Memory => "memory",
-            Self::Disk => "disk",
-        }
-    }
-}
-
-pub fn report(stage: StageId) -> ChainEvent {
+pub fn running_fact(stage: StageId) -> ChainEvent {
     ChainEventFactory::create_with_context(
         stage.into(),
         ChainPayload::Execution(ExecutionPayload::StageLifecycle(
@@ -53,20 +38,17 @@ pub struct History {
     pub journals: Vec<Arc<dyn Journal<ChainEvent>>>,
     pub paths: Vec<PathBuf>,
     pub records: Vec<Vec<ChainJournalRecord>>,
-    pub reports: Vec<SupervisorRecord>,
-    pub total_records: usize,
     // Retain files until readers and definition-cache lookups have settled.
     pub _directory: tempfile::TempDir,
 }
 
 impl History {
-    /// `business` ordinary rows followed by `reports` owned lifecycle records.
+    /// `business` ordinary rows followed by `lifecycle_facts` owned lifecycle records.
     /// `group` controls actual physical atomic frames, never logical handoff size.
     pub async fn build(
-        backend: Backend,
         stages: &[StageId],
         business: usize,
-        reports: usize,
+        lifecycle_facts: usize,
         payload_bytes: usize,
         group: usize,
     ) -> Self {
@@ -77,23 +59,15 @@ impl History {
             journals: Vec::new(),
             paths: Vec::new(),
             records: Vec::new(),
-            reports: Vec::new(),
-            total_records: stages.len() * (business + reports),
             _directory: directory,
         };
         for stage in stages {
             let path = fixture._directory.path().join(format!("{stage}.log"));
-            let journal: Arc<dyn Journal<ChainEvent>> = match backend {
-                Backend::Memory => Arc::new(MemoryJournal::with_owner_in_run(
-                    JournalOwner::stage(*stage),
-                    run,
-                )),
-                Backend::Disk => Arc::new(
-                    DiskJournal::with_owner_in_run(path.clone(), JournalOwner::stage(*stage), run)
-                        .unwrap(),
-                ),
-            };
-            let mut events = Vec::with_capacity(business + reports);
+            let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
+                DiskJournal::with_owner_in_run(path.clone(), JournalOwner::stage(*stage), run)
+                    .unwrap(),
+            );
+            let mut events = Vec::with_capacity(business + lifecycle_facts);
             for index in 0..business {
                 events.push(ChainEventFactory::data_event(
                     (*stage).into(),
@@ -101,7 +75,7 @@ impl History {
                     serde_json::json!({"index": index, "body": "x".repeat(payload_bytes)}),
                 ));
             }
-            events.extend((0..reports).map(|_| report(*stage)));
+            events.extend((0..lifecycle_facts).map(|_| running_fact(*stage)));
             let mut written = Vec::new();
             for (index, chunk) in events.chunks(group).enumerate() {
                 if group == 1 {
@@ -124,22 +98,16 @@ impl History {
                     );
                 }
             }
-            assert_eq!(written.len(), business + reports);
+            assert_eq!(written.len(), business + lifecycle_facts);
             assert_eq!(
                 journal.committed_position().await.unwrap(),
                 written.len() as u64
             );
-            fixture.reports.extend(
-                written
-                    .iter()
-                    .cloned()
-                    .filter_map(SupervisorRecord::from_chain),
-            );
+
             fixture.journals.push(journal);
             fixture.paths.push(path);
             fixture.records.push(written);
         }
-        assert_eq!(fixture.reports.len(), stages.len() * reports);
         fixture
     }
 }
@@ -167,7 +135,7 @@ pub async fn causal_record(
     let stage = StageId::new();
     let journal = MemoryJournal::with_owner_in_run(JournalOwner::stage(stage), run);
     journal
-        .append(report(stage), Default::default())
+        .append(running_fact(stage), Default::default())
         .await
         .unwrap();
     let record = journal

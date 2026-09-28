@@ -12,9 +12,7 @@ use super::messages::{CompositeStatusPayloadV1, CompositeStatusWireV1, StudioMes
 #[cfg(test)]
 use obzenflow_core::composite::CompositeDefinition;
 use obzenflow_core::composite::{CompositeLifecycleProjection, CompositeStatus};
-use obzenflow_core::event::SupervisorRecord;
-#[cfg(test)]
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::web::SseFrame;
 use obzenflow_core::EventId;
 
@@ -66,22 +64,25 @@ impl CompositeLifecycleView {
 
     pub(super) fn observe(
         &mut self,
-        envelope: &SupervisorRecord,
+        envelope: &ChainJournalRecord,
     ) -> Option<CompositeStatusSnapshot> {
-        use obzenflow_core::event::SystemPayload;
+        use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+        use obzenflow_core::event::ChainPayload;
 
         self.as_of_event_id = Some(*envelope.id());
-        self.as_of_timestamp_ms = envelope.timestamp();
+        self.as_of_timestamp_ms = envelope.envelope.provenance.event.processing.event_time;
 
-        let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
+        let ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) = &envelope.payload
+        else {
             return None;
         };
-        let composite_id = self.projection.composite_for_stage(*stage_id)?.clone();
+        let stage_id = event.stage_id();
+        let composite_id = self.projection.composite_for_stage(stage_id)?.clone();
         let before = self
             .projection
             .status(&composite_id)
             .expect("indexed composite has projection state");
-        let apply_error = self.projection.apply(*stage_id, event).err();
+        let apply_error = self.projection.apply(event).err();
         let after = self
             .projection
             .status(&composite_id)
@@ -107,7 +108,7 @@ impl CompositeLifecycleView {
         snapshot.status = after;
         snapshot.revision = snapshot.revision.saturating_add(1);
         snapshot.as_of_event_id = Some(*envelope.id());
-        snapshot.timestamp_ms = envelope.timestamp();
+        snapshot.timestamp_ms = envelope.envelope.provenance.event.processing.event_time;
         Some(snapshot.clone())
     }
 
@@ -210,22 +211,20 @@ fn composite_status_payload(
 #[cfg(test)]
 mod composite_status_projection_tests {
     use super::*;
-    use obzenflow_core::event::{JournalRecord, StageLifecycleEvent, SystemPayload, WriterId};
-    use obzenflow_core::id::{CompositeId, RoleId, StageId, SystemId};
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, StageLifecycleFact,
+    };
+    use obzenflow_core::event::{ChainEventFactory, JournalRecord};
+    use obzenflow_core::id::{CompositeId, RoleId, StageId};
 
-    async fn envelope(stage: StageId, event: StageLifecycleEvent) -> SupervisorRecord {
-        let system_id = SystemId::new();
+    async fn envelope(event: StageLifecycleFact) -> ChainJournalRecord {
         JournalRecord::new(
-            obzenflow_core::event::JournalWriterId::from(obzenflow_core::id::JournalId::new()),
-            SystemEvent::new(
-                WriterId::from(system_id),
-                SystemPayload::StageLifecycle {
-                    stage_id: stage,
-                    event,
-                },
+            obzenflow_core::JournalWriterId::from(obzenflow_core::JournalId::new()),
+            ChainEventFactory::execution_event(
+                event.stage_id().into(),
+                ExecutionPayload::StageLifecycle(event),
             ),
         )
-        .into()
     }
 
     fn state(map: StageId, finish: StageId) -> CompositeLifecycleView {
@@ -244,7 +243,7 @@ mod composite_status_projection_tests {
         let finish = StageId::new();
         let mut state = state(map, finish);
 
-        let running_envelope = envelope(map, StageLifecycleEvent::Running).await;
+        let running_envelope = envelope(StageLifecycleFact::Running { stage_id: map }).await;
         let running = state
             .observe(&running_envelope)
             .expect("first running changes the view");
@@ -252,7 +251,7 @@ mod composite_status_projection_tests {
         assert_eq!(running.revision, 1);
         assert_eq!(running.as_of_event_id, Some(*running_envelope.id()));
 
-        let sibling_running = envelope(finish, StageLifecycleEvent::Running).await;
+        let sibling_running = envelope(StageLifecycleFact::Running { stage_id: finish }).await;
         assert!(state.observe(&sibling_running).is_none());
         let catch_up_snapshot = state.snapshots().pop().unwrap();
         assert_eq!(catch_up_snapshot.revision, 1);
@@ -261,11 +260,18 @@ mod composite_status_projection_tests {
             Some(*sibling_running.id())
         );
 
-        let map_completed =
-            envelope(map, StageLifecycleEvent::Completed { accounting: None }).await;
+        let map_completed = envelope(StageLifecycleFact::Completed {
+            stage_id: map,
+            accounting: None,
+        })
+        .await;
         assert!(state.observe(&map_completed).is_none());
 
-        let finish_completed = envelope(finish, StageLifecycleEvent::Drained).await;
+        let finish_completed = envelope(StageLifecycleFact::Drained {
+            stage_id: finish,
+            events_processed: None,
+        })
+        .await;
         let completed = state
             .observe(&finish_completed)
             .expect("all terminal changes the view");
@@ -287,16 +293,18 @@ mod composite_status_projection_tests {
         let finish = StageId::new();
         let mut state = state(map, finish);
 
-        let completed = envelope(map, StageLifecycleEvent::Completed { accounting: None }).await;
+        let completed = envelope(StageLifecycleFact::Completed {
+            stage_id: map,
+            accounting: None,
+        })
+        .await;
         assert!(state.observe(&completed).is_none());
 
-        let cancelled = envelope(
-            map,
-            StageLifecycleEvent::Cancelled {
-                reason: "late stop".to_string(),
-                accounting: None,
-            },
-        )
+        let cancelled = envelope(StageLifecycleFact::Cancelled {
+            stage_id: map,
+            reason: "late stop".to_string(),
+            accounting: None,
+        })
         .await;
         let invalid = state
             .observe(&cancelled)

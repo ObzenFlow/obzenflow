@@ -5,13 +5,12 @@
 //! Shared pipeline contexts, controlled journals, stages and runner fixtures.
 
 use crate::id_conversions::StageIdExt;
-use crate::messaging::SystemSubscription;
 use crate::metrics::observations::ObservationRegistry;
 use crate::pipeline::fsm::{PipelineContext, PipelineFsmEvent, PipelineFsmState};
 use crate::pipeline::supervisor::PipelineSupervisor;
-use crate::pipeline::{FlowStopMode, PipelineControl, PipelineState};
+use crate::pipeline::PipelineState;
 use crate::stages::common::stage_handle::{StageError, StageEvent, StageHandle};
-use crate::supervised_base::{ChannelBuilder, EventSender, StateWatcher, SupervisorHandle};
+use crate::supervised_base::{ChannelBuilder, StateWatcher, SupervisorHandle};
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
@@ -40,8 +39,10 @@ pub(in crate::pipeline) struct ControlledJournal<T: JournalEvent> {
     inner: Arc<dyn Journal<T>>,
     pub(in crate::pipeline) terminal_append: Option<Arc<TerminalAppendGate>>,
     pub(in crate::pipeline) metrics_ready_append: Option<Arc<TerminalAppendGate>>,
+    pub(in crate::pipeline) gate_event: Option<&'static str>,
+    pub(in crate::pipeline) gate: Option<Arc<TerminalAppendGate>>,
     pub(in crate::pipeline) fail_reader: Option<usize>,
-    reader_calls: AtomicUsize,
+    pub(in crate::pipeline) reader_calls: AtomicUsize,
 }
 
 impl<T: JournalEvent> ControlledJournal<T> {
@@ -51,6 +52,8 @@ impl<T: JournalEvent> ControlledJournal<T> {
             terminal_append: None,
             metrics_ready_append: None,
             fail_reader: None,
+            gate_event: None,
+            gate: None,
             reader_calls: AtomicUsize::new(0),
         }
     }
@@ -80,6 +83,15 @@ where
         event: T,
         options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        if self.gate_event == Some(event.event_type_name()) {
+            if let Some(gate) = &self.gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                if gate.fail {
+                    return Err(JournalError::Full);
+                }
+            }
+        }
         if event.event_type_name() == "system.metrics.ready" {
             if let Some(gate) = &self.metrics_ready_append {
                 gate.entered.notify_one();
@@ -113,6 +125,7 @@ where
     async fn storage_read_all_unordered(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.reader_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.read_all_unordered().await
     }
 
@@ -120,6 +133,7 @@ where
         &self,
         event_id: &obzenflow_core::EventId,
     ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
+        self.reader_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.read_event(event_id).await
     }
 
@@ -133,20 +147,10 @@ where
         self.inner.reader_from(position).await
     }
 
-    async fn storage_report_reader_from(
-        &self,
-        position: u64,
-    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
-    {
-        if self.fail_reader == Some(self.reader_calls.fetch_add(1, Ordering::Relaxed) + 1) {
-            return Err(JournalError::Full);
-        }
-        self.inner.report_reader_from(position).await
-    }
-
     async fn storage_read_metrics_tail(
         &self,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.reader_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.read_metrics_tail().await
     }
 
@@ -154,6 +158,7 @@ where
         &self,
         count: usize,
     ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
+        self.reader_calls.fetch_add(1, Ordering::Relaxed);
         self.inner.read_last_n(count).await
     }
 }
@@ -214,43 +219,10 @@ pub(in crate::pipeline) fn source_sink_topology_with_source(
     )
 }
 
-pub(in crate::pipeline) fn source_sink_topology() -> (Arc<obzenflow_topology::Topology>, StageId) {
-    let (topology, _source, sink) = source_sink_topology_with_source();
-    (topology, sink)
-}
-
-pub(in crate::pipeline) fn empty_topology() -> Arc<obzenflow_topology::Topology> {
-    Arc::new(
-        TopologyBuilder::new()
-            .build_unchecked()
-            .expect("empty topology"),
-    )
-}
-
-pub(in crate::pipeline) async fn system_subscription_with(
-    journal: &Arc<dyn Journal<SystemEvent>>,
-    events: impl IntoIterator<Item = SystemEvent>,
-) -> SystemSubscription<SystemEvent> {
-    for event in events {
-        journal
-            .append(event, Default::default())
-            .await
-            .expect("append event");
-    }
-    SystemSubscription::new(journal.reader().await.expect("reader"), "test".to_string())
-}
-
-pub(in crate::pipeline) async fn empty_system_subscription(
-    journal: &Arc<dyn Journal<SystemEvent>>,
-) -> SystemSubscription<SystemEvent> {
-    system_subscription_with(journal, std::iter::empty()).await
-}
-
 pub(in crate::pipeline) fn test_context(
     topology: Arc<obzenflow_topology::Topology>,
     system_id: SystemId,
     system_journal: Arc<dyn Journal<SystemEvent>>,
-    completion_subscription: Option<SystemSubscription<SystemEvent>>,
 ) -> PipelineContext {
     PipelineContext {
         observations: Arc::new(ObservationRegistry::default()),
@@ -263,37 +235,80 @@ pub(in crate::pipeline) fn test_context(
         system_journal: system_journal.clone(),
         stage_supervisors: HashMap::new(),
         source_supervisors: HashMap::new(),
-        completed_stages: Vec::new(),
-        running_stages: HashSet::new(),
-        completion_subscription: completion_subscription.map(|subscription| {
-            crate::supervised_base::report_reader::ReportReaders::from_system_reader(
-                *system_journal.id(),
-                subscription.into_reader(),
-            )
-        }),
+        completed_stages: HashSet::new(),
+        outstanding_milestones: HashSet::new(),
+        outstanding_children: HashSet::new(),
+        cleanup_deadline: None,
+        metrics_deadline: None,
         metrics_journals: None,
-        report_coverage: Default::default(),
         metrics_exporter: None,
         resources: Default::default(),
-        progress: Default::default(),
         stage_data_journals: Vec::new(),
         stage_error_journals: Vec::new(),
         backpressure_registry: None,
-        contract_status: HashMap::new(),
-        contract_pairs: HashMap::new(),
-        expected_contract_pairs: HashSet::new(),
-        expected_sources: Vec::new(),
         stage_lifecycle_metrics: HashMap::new(),
         flow_start_time: None,
-        last_system_event_id_seen: None,
         stop_intent: Default::default(),
         termination: Default::default(),
-        source_contract_strict: Default::default(),
         metrics_drain_timeout_ms: 5_000,
     }
 }
 
+#[derive(Clone, Default)]
+pub(in crate::pipeline) struct StageResults {
+    pub milestones: [bool; 3],
+    pub failure: Option<crate::stages::common::stage_handle::StageFailure>,
+    pub exit: Option<crate::stages::common::stage_lifecycle::LifecycleExit>,
+}
+#[derive(Clone)]
+pub(in crate::pipeline) struct StageSignals(pub Arc<tokio::sync::watch::Sender<StageResults>>);
+impl Default for StageSignals {
+    fn default() -> Self {
+        Self(Arc::new(
+            tokio::sync::watch::channel(StageResults::default()).0,
+        ))
+    }
+}
+impl StageSignals {
+    pub fn acknowledge(&self, milestone: crate::stages::common::stage_handle::StageMilestone) {
+        self.0
+            .send_modify(|result| result.milestones[milestone as usize] = true);
+    }
+    pub fn fail(&self, id: StageId, cause: &str) {
+        self.0.send_modify(|result| {
+            result
+                .failure
+                .get_or_insert(crate::stages::common::stage_handle::StageFailure {
+                    stage_id: id,
+                    cause: StageError::Other(cause.into()),
+                    snapshot: Default::default(),
+                });
+        });
+    }
+    pub fn complete(&self) {
+        self.0.send_modify(|result| result.exit = Some(crate::stages::common::stage_lifecycle::LifecycleExit::Completed(Default::default())));
+    }
+    fn cancel(&self) {
+        use crate::stages::common::stage_lifecycle::{LifecycleExit, LifecycleFailure};
+        self.0.send_modify(|result| {
+            result.exit.get_or_insert_with(|| match &result.failure {
+                Some(failure) => LifecycleExit::Failed(LifecycleFailure {
+                    cause: failure.cause.clone(),
+                    snapshot: failure.snapshot.clone(),
+                }),
+                None => LifecycleExit::Cancelled {
+                    reason: "fixture cancellation".into(),
+                    snapshot: Default::default(),
+                },
+            });
+        });
+    }
+}
+
 pub(in crate::pipeline) struct TestPipelineStageHandle {
+    pub(in crate::pipeline) signals: StageSignals,
+    pub(in crate::pipeline) acknowledge_commands: bool,
+
     pub(in crate::pipeline) stall_drain: bool,
     pub(in crate::pipeline) panic_on_start: bool,
     pub(in crate::pipeline) id: StageId,
@@ -326,6 +341,8 @@ impl TestPipelineStageHandle {
         stage_type: StageType,
     ) -> Arc<dyn StageHandle> {
         Arc::new(Self {
+            signals: Default::default(),
+            acknowledge_commands: true,
             stall_drain: false,
             panic_on_start: false,
             id,
@@ -333,46 +350,6 @@ impl TestPipelineStageHandle {
             stage_type,
             start_gate: None,
             shutdown_probe: None,
-        })
-    }
-
-    pub(in crate::pipeline) fn with_start_gate(
-        id: StageId,
-        name: impl Into<String>,
-        stage_type: StageType,
-        entered: oneshot::Sender<()>,
-        release: oneshot::Receiver<()>,
-        count: Arc<AtomicUsize>,
-    ) -> Arc<dyn StageHandle> {
-        Arc::new(Self {
-            stall_drain: false,
-            panic_on_start: false,
-            id,
-            name: name.into(),
-            stage_type,
-            start_gate: Some(StartGate {
-                entered: Mutex::new(Some(entered)),
-                release: tokio::sync::Mutex::new(Some(release)),
-                count,
-            }),
-            shutdown_probe: None,
-        })
-    }
-
-    pub(in crate::pipeline) fn with_stalled_completion(
-        id: StageId,
-        name: impl Into<String>,
-        stage_type: StageType,
-        shutdown_probe: ShutdownProbe,
-    ) -> Arc<dyn StageHandle> {
-        Arc::new(Self {
-            stall_drain: false,
-            panic_on_start: false,
-            id,
-            name: name.into(),
-            stage_type,
-            start_gate: None,
-            shutdown_probe: Some(shutdown_probe),
         })
     }
 }
@@ -392,10 +369,24 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     async fn initialize(&self) -> Result<(), StageError> {
+        if self.acknowledge_commands {
+            self.signals
+                .acknowledge(crate::stages::common::stage_handle::StageMilestone::Initialized);
+        }
         Ok(())
     }
 
     async fn ready(&self) -> Result<(), StageError> {
+        if self.acknowledge_commands {
+            self.signals
+                .acknowledge(crate::stages::common::stage_handle::StageMilestone::Ready);
+        }
+        if !matches!(
+            self.stage_type,
+            StageType::FiniteSource | StageType::InfiniteSource
+        ) {
+            self.start().await?;
+        }
         Ok(())
     }
 
@@ -418,6 +409,10 @@ impl StageHandle for TestPipelineStageHandle {
             !self.panic_on_start,
             "pipeline command panic after metrics start"
         );
+        if self.acknowledge_commands {
+            self.signals
+                .acknowledge(crate::stages::common::stage_handle::StageMilestone::Started);
+        }
         Ok(())
     }
 
@@ -429,6 +424,7 @@ impl StageHandle for TestPipelineStageHandle {
         if self.stall_drain {
             std::future::pending::<()>().await;
         }
+        self.signals.complete();
         Ok(())
     }
 
@@ -437,30 +433,81 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     fn is_drained(&self) -> bool {
-        false
+        self.signals.0.borrow().exit.is_some()
     }
 
     async fn force_shutdown(&self) -> Result<(), StageError> {
         if let Some(probe) = &self.shutdown_probe {
             probe.force_shutdown_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.signals.cancel();
         }
         Ok(())
     }
 
-    async fn wait_for_completion(&self) -> Result<(), StageError> {
+    async fn wait_for_milestone(
+        &self,
+        milestone: crate::stages::common::stage_handle::StageMilestone,
+    ) -> Result<crate::stages::common::stage_handle::StageAck, StageError> {
+        let mut results = self.signals.0.subscribe();
+        loop {
+            let snapshot = results.borrow().clone();
+            if snapshot.milestones[milestone as usize] {
+                return Ok(crate::stages::common::stage_handle::StageAck {
+                    stage_id: self.id,
+                    milestone,
+                    snapshot: Default::default(),
+                });
+            }
+            if let Some(failure) = snapshot.failure {
+                return Err(failure.cause);
+            }
+            if snapshot.exit.is_some() {
+                return Err(StageError::Aborted);
+            }
+            results.changed().await.unwrap();
+        }
+    }
+    async fn wait_for_failure(&self) -> Option<crate::stages::common::stage_handle::StageFailure> {
+        let mut results = self.signals.0.subscribe();
+        loop {
+            let snapshot = results.borrow().clone();
+            if snapshot.failure.is_some() {
+                return snapshot.failure;
+            }
+            if snapshot.exit.is_some() {
+                return None;
+            }
+            results.changed().await.unwrap();
+        }
+    }
+    async fn wait_for_completion(&self) -> crate::stages::common::stage_handle::StageExit {
+        let mut results = self.signals.0.subscribe();
         if let Some(probe) = &self.shutdown_probe {
             probe
                 .wait_for_completion_count
                 .fetch_add(1, Ordering::Relaxed);
-            let notified = probe.completed_notify.notified();
-            if !probe.completed.load(Ordering::Relaxed) {
-                notified.await;
-            }
-            if probe.request_abort_count.load(Ordering::Relaxed) > 0 {
-                return Err(StageError::Aborted);
-            }
         }
-        Ok(())
+        let outcome = loop {
+            if let Some(exit) = results.borrow().exit.clone() {
+                break exit;
+            }
+            if let Some(probe) = &self.shutdown_probe {
+                let notified = probe.completed_notify.notified();
+                if probe.completed.load(Ordering::Relaxed) {
+                    break crate::stages::common::stage_lifecycle::LifecycleExit::Completed(
+                        Default::default(),
+                    );
+                }
+                tokio::select! { _ = results.changed() => {}, _ = notified => {} }
+            } else {
+                results.changed().await.unwrap();
+            }
+        };
+        crate::stages::common::stage_handle::StageExit {
+            stage_id: self.id,
+            outcome,
+        }
     }
 
     async fn abort_and_join(&self) -> Result<(), StageError> {
@@ -471,6 +518,7 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     fn request_abort(&self) {
+        self.signals.cancel();
         if let Some(probe) = &self.shutdown_probe {
             if probe
                 .request_abort_count
@@ -483,36 +531,6 @@ impl StageHandle for TestPipelineStageHandle {
             probe.completed_notify.notify_waiters();
         }
     }
-}
-
-pub(in crate::pipeline) fn test_supervisor(
-    system_id: SystemId,
-    _journal: Arc<dyn Journal<SystemEvent>>,
-) -> SystemId {
-    system_id
-}
-
-pub(super) fn initial_fsm_state(state: &PipelineState) -> PipelineFsmState {
-    match state {
-        PipelineState::Created | PipelineState::Materializing => PipelineFsmState::Created,
-        PipelineState::Materialized => PipelineFsmState::AwaitingStageReadiness,
-        PipelineState::ReadyForRun => PipelineFsmState::ReadyForRun,
-        PipelineState::Running => PipelineFsmState::Running,
-        PipelineState::SourceCompleted => PipelineFsmState::SourceCompleted,
-        PipelineState::Draining => PipelineFsmState::Draining,
-        _ => PipelineFsmState::SettlingStages,
-    }
-}
-
-pub(in crate::pipeline) async fn ready_stage(ctx: &mut PipelineContext, id: StageId) {
-    ctx.stage_supervisors.insert(
-        id,
-        TestPipelineStageHandle::boxed(id, "sink", StageType::Sink),
-    );
-    ctx.system_journal
-        .append(SystemEvent::stage_running(id), Default::default())
-        .await
-        .unwrap();
 }
 
 pub(in crate::pipeline) async fn wait_for_state(
@@ -538,69 +556,40 @@ pub(in crate::pipeline) async fn wait_for_state(
 pub(in crate::pipeline) fn spawn_supervisor_loop(
     initial_state: PipelineState,
     system_id: SystemId,
-    mut context: PipelineContext,
+    context: PipelineContext,
     receiver: crate::supervised_base::EventReceiver<PipelineFsmEvent>,
     watcher: StateWatcher<PipelineState>,
 ) -> JoinHandle<Result<(), BoxError>> {
+    assert_eq!(
+        initial_state,
+        PipelineState::Created,
+        "lifecycle scenarios run through initialization"
+    );
+    let scope = context.resources.publications.clone();
+    let supervisor = PipelineSupervisor::new(
+        system_id,
+        receiver,
+        watcher.clone(),
+        context.resources.failure.clone(),
+        context.system_journal.clone(),
+    );
+    let task = crate::supervised_base::SupervisorTaskBuilder::new("test_pipeline")
+        .with_publications(scope)
+        .spawn_self_supervised(supervisor, PipelineFsmState::Created, context);
+    let (sender, _receiver, _) =
+        ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(initial_state);
+    let handle = crate::supervised_base::HandleBuilder::new()
+        .with_event_sender(sender)
+        .with_state_watcher(watcher)
+        .with_supervisor_task(task)
+        .build_standard()
+        .unwrap();
     tokio::spawn(async move {
-        if context.completion_subscription.is_none() {
-            context.completion_subscription = Some(
-                crate::supervised_base::report_reader::ReportReaders::from_system_reader(
-                    *context.system_journal.id(),
-                    context.system_journal.reader().await?,
-                ),
-            );
-        }
-        context.expected_sources = context.source_supervisors.keys().copied().collect();
-        if matches!(
-            initial_state,
-            PipelineState::Running | PipelineState::SourceCompleted | PipelineState::Draining
-        ) {
-            context
-                .flow_start_time
-                .get_or_insert_with(std::time::Instant::now);
-        }
-        let scope = context.resources.publications.clone();
-        let supervisor = PipelineSupervisor::new(
-            system_id,
-            receiver,
-            watcher.clone(),
-            context.resources.failure.clone(),
-        );
-        let (sender, _receiver, _) =
-            ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(initial_state.clone());
-        let task = crate::supervised_base::SupervisorTaskBuilder::new("test_pipeline")
-            .with_publications(scope)
-            .spawn_self_supervised(supervisor, initial_fsm_state(&initial_state), context);
-        let handle = crate::supervised_base::HandleBuilder::new()
-            .with_event_sender(sender)
-            .with_state_watcher(watcher)
-            .with_supervisor_task(task)
-            .build_standard()
-            .unwrap();
         handle
             .wait_for_completion()
             .await
             .map_err(|error| Box::new(error) as BoxError)
     })
-}
-
-pub(in crate::pipeline) async fn stop_and_join(
-    sender: &EventSender<PipelineFsmEvent>,
-    task: JoinHandle<Result<(), BoxError>>,
-) {
-    sender
-        .send(PipelineFsmEvent::from(PipelineControl::Stop {
-            mode: FlowStopMode::Cancel,
-        }))
-        .await
-        .expect("stop should send");
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), task)
-        .await
-        .expect("supervisor should stop")
-        .expect("supervisor task should join")
-        .expect("supervisor should return ok");
 }
 
 pub(in crate::pipeline) struct DiscardSnapshots;
@@ -618,6 +607,8 @@ pub(in crate::pipeline) fn owned_test_stage(
         id,
         name: "builder stage".into(),
         stage_type,
+        signals: Default::default(),
+        acknowledge_commands: true,
         stall_drain: false,
         panic_on_start: false,
         start_gate: None,
@@ -649,27 +640,21 @@ pub(in crate::pipeline) fn make_context(
         system_journal: system_journal.clone(),
         stage_supervisors: HashMap::new(),
         source_supervisors: HashMap::new(),
-        completed_stages: Vec::new(),
-        running_stages: HashSet::new(),
-        completion_subscription: None,
+        completed_stages: HashSet::new(),
+        outstanding_milestones: HashSet::new(),
+        outstanding_children: HashSet::new(),
+        cleanup_deadline: None,
+        metrics_deadline: None,
         metrics_exporter,
         metrics_journals: None,
-        report_coverage: Default::default(),
         resources: Default::default(),
-        progress: Default::default(),
         stage_data_journals,
         stage_error_journals: Vec::new(),
         backpressure_registry: None,
-        contract_status: HashMap::new(),
-        contract_pairs: HashMap::new(),
-        expected_contract_pairs: HashSet::new(),
-        expected_sources: Vec::new(),
         stage_lifecycle_metrics: HashMap::new(),
         flow_start_time: None,
-        last_system_event_id_seen: None,
         stop_intent: Default::default(),
         termination: Default::default(),
-        source_contract_strict: Default::default(),
         metrics_drain_timeout_ms: 5_000,
     }
 }

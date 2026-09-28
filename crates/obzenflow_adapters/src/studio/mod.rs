@@ -29,7 +29,8 @@ use obzenflow_core::composite::{
     CompositeDefinition, CompositeLifecycleProjection, CompositeProjectionError,
 };
 use obzenflow_core::event::observability::{ObservabilityContext, ObservationSource};
-use obzenflow_core::event::{PipelineLifecycleEvent, SupervisorRecord, SystemPayload};
+use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload};
+use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::{web::SseFrame, EventId};
 use obzenflow_runtime::metrics::observations::LatestObservationMap;
 use stages::StageLifecycleView;
@@ -101,27 +102,27 @@ impl StudioProjection {
     }
 
     /// Apply a past journal entry without producing messages.
-    pub fn rebuild(&mut self, envelope: &SupervisorRecord) {
+    pub fn rebuild(&mut self, envelope: &RunRecordData) {
         self.observe(envelope);
-        if let Some(packet) = envelope.observability() {
+        if let Some(packet) = record_observability(envelope) {
             self.project_retained_measurements(packet.clone());
         }
     }
 
     /// Apply a journal entry and return its messages. Only middleware snapshots
     /// use `timestamp_ms`; event messages keep their recorded timestamps.
-    pub fn project(&mut self, envelope: &SupervisorRecord, timestamp_ms: u64) -> Vec<SseFrame> {
+    pub fn project(&mut self, envelope: &RunRecordData, timestamp_ms: u64) -> Vec<SseFrame> {
         // `state_from` must describe the circuit breaker before this entry is applied.
         let mut frames = Vec::new();
         frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
         let composite = self.observe(envelope);
         frames.extend(composite.as_ref().and_then(composite_status_frame));
-        if let Some(packet) = envelope.observability() {
+        if let Some(packet) = record_observability(envelope) {
             frames.extend(self.project_retained_measurements(packet.clone()));
         }
         if matches!(
-            &envelope.payload,
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { .. })
+            envelope,
+            RunRecordData::System(record) if matches!(&record.payload, SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { .. }))
         ) {
             frames.extend(self.middleware_snapshot(timestamp_ms));
         }
@@ -146,28 +147,28 @@ impl StudioProjection {
 
     /// Fold facts immediately, retaining only the latest attached observation
     /// per key for subsequent SSE emission turns.
-    pub fn project_deferred(&mut self, envelope: &SupervisorRecord) -> Vec<SseFrame> {
+    pub fn project_deferred(&mut self, envelope: &RunRecordData) -> Vec<SseFrame> {
         let mut frames = Vec::new();
         frames.extend(facts::frame(envelope, &self.middleware, &self.aliases));
         let composite = self.observe(envelope);
         frames.extend(composite.as_ref().and_then(composite_status_frame));
         self.retain_latest_observations(envelope);
         if matches!(
-            &envelope.payload,
-            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { .. })
+            envelope,
+            RunRecordData::System(record) if matches!(&record.payload, SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running { .. }))
         ) {
             self.middleware_snapshot_pending = true;
         }
         frames
     }
 
-    pub fn rebuild_deferred(&mut self, envelope: &SupervisorRecord) {
+    pub fn rebuild_deferred(&mut self, envelope: &RunRecordData) {
         self.observe(envelope);
         self.retain_latest_observations(envelope);
     }
 
-    fn retain_latest_observations(&self, envelope: &SupervisorRecord) {
-        if let Some(packet) = envelope.observability() {
+    fn retain_latest_observations(&self, envelope: &RunRecordData) {
+        if let Some(packet) = record_observability(envelope) {
             let _ = self.latest_observations.select_recorded(packet.clone());
         }
     }
@@ -300,15 +301,25 @@ impl StudioProjection {
         matches!(self.flow_state, ObservedFlowState::Active)
     }
 
-    fn observe(&mut self, envelope: &SupervisorRecord) -> Option<CompositeStatusSnapshot> {
-        self.stages.observe(envelope);
-        let composite = self.composites.observe(envelope);
-        self.middleware.observe(envelope);
-        self.observe_pipeline(envelope);
-        composite
+    fn observe(&mut self, envelope: &RunRecordData) -> Option<CompositeStatusSnapshot> {
+        match envelope {
+            RunRecordData::Chain(record) => {
+                self.stages.observe(record);
+                let composite = self.composites.observe(record);
+                self.middleware.observe(record);
+                composite
+            }
+            RunRecordData::System(record) => {
+                self.observe_pipeline(record);
+                None
+            }
+        }
     }
 
-    fn observe_pipeline(&mut self, envelope: &SupervisorRecord) {
+    fn observe_pipeline(
+        &mut self,
+        envelope: &obzenflow_core::event::journal_record::SystemJournalRecord,
+    ) {
         let SystemPayload::PipelineLifecycle(event) = &envelope.payload else {
             return;
         };
@@ -326,6 +337,13 @@ impl StudioProjection {
             | PipelineLifecycleEvent::StopAdmitted { .. }
             | PipelineLifecycleEvent::NotStarted => ObservedFlowState::Inactive,
         };
+    }
+}
+
+fn record_observability(record: &RunRecordData) -> Option<&ObservabilityContext> {
+    match record {
+        RunRecordData::Chain(record) => record.envelope.observability.as_ref(),
+        RunRecordData::System(record) => record.envelope.observability.as_ref(),
     }
 }
 

@@ -2,66 +2,31 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Concrete pipeline resources. These capabilities do not select lifecycle
-//! work, publish semantic completion, or run an FSM.
+//! Concrete child observations, mailbox delivery and owned publications.
 
 use crate::metrics::MetricsHandle;
+use crate::pipeline::fsm::PipelineFsmEvent;
 use crate::stages::common::stage_handle::{StageError, StageHandle};
+use crate::supervised_base::publication::{BoxError, PublicationScope, SharedError};
 use crate::supervised_base::{BuilderError, HandleError, SupervisorHandle};
-use futures::{future::BoxFuture, FutureExt};
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
-use crate::supervised_base::publication::{
-    BoxError, PublicationScope, PublicationSettlement, SharedError,
-};
-use futures::stream::FuturesUnordered;
-use std::sync::OnceLock;
-
 pub(crate) type OperationalFailure = Arc<OnceLock<SharedError>>;
-type StageJoins = FuturesUnordered<BoxFuture<'static, Result<(), StageError>>>;
+pub(super) type Observations = Mutex<FuturesUnordered<BoxFuture<'static, PipelineFsmEvent>>>;
 
-#[derive(Default)]
-pub(super) enum ProducerTail {
-    #[default]
-    Uncaptured,
-    Reading(
-        Mutex<
-            BoxFuture<
-                'static,
-                Result<std::collections::HashMap<obzenflow_core::JournalId, u64>, BoxError>,
-            >,
-        >,
-    ),
-    Through(std::collections::HashMap<obzenflow_core::JournalId, u64>),
-    Reached,
-}
-
-impl ProducerTail {
-    pub(super) fn covered(
-        &self,
-        positions: &std::collections::HashMap<obzenflow_core::JournalId, u64>,
-    ) -> bool {
-        matches!(self, Self::Reached)
-            || matches!(self, Self::Through(targets) if targets.iter().all(|(journal, through)| positions.get(journal).copied().unwrap_or(0) >= *through))
-    }
-}
-
-/// Observations of concrete owners. No task is spawned to perform a join.
 pub(crate) struct PipelineResources {
     pub(super) publications: Arc<PublicationScope>,
-    pub(super) publication_settlement: Option<PublicationSettlement>,
+    pub(super) publication_results: Observations,
+    pub(super) acknowledgements: Observations,
+    pub(super) failures: Observations,
+    pub(super) exits: Observations,
     pub(super) delivery: StageDelivery,
-    pub(super) stage_joins: Option<Mutex<StageJoins>>,
-    pub(super) stages_joined: bool,
     pub(crate) metrics: Arc<MetricsOwner>,
     pub(super) prepared_metrics: Option<crate::metrics::builder::PreparedMetricsAggregator>,
     pub(super) metrics_join: Option<Mutex<BoxFuture<'static, Result<(), HandleError>>>>,
-    pub(super) metrics_joined: bool,
-    pub(super) producer_tail: ProducerTail,
-    pub(super) metrics_tail: ProducerTail,
-    pub(super) terminal_ack: Arc<OnceLock<std::time::Instant>>,
     pub(crate) failure: OperationalFailure,
 }
 
@@ -69,17 +34,14 @@ impl Default for PipelineResources {
     fn default() -> Self {
         Self {
             publications: PublicationScope::pipeline(),
-            publication_settlement: None,
-            delivery: StageDelivery::default(),
-            stage_joins: None,
-            stages_joined: false,
+            publication_results: Default::default(),
+            acknowledgements: Default::default(),
+            failures: Default::default(),
+            exits: Default::default(),
+            delivery: Default::default(),
             metrics: Arc::new(MetricsOwner::default()),
             prepared_metrics: None,
             metrics_join: None,
-            metrics_joined: false,
-            producer_tail: ProducerTail::Uncaptured,
-            metrics_tail: ProducerTail::Uncaptured,
-            terminal_ack: Arc::new(OnceLock::new()),
             failure: Arc::new(OnceLock::new()),
         }
     }
@@ -88,10 +50,6 @@ impl Default for PipelineResources {
 impl PipelineResources {
     pub(super) fn retain_failure(&self, error: BoxError) {
         let _ = self.failure.set(SharedError::from(error));
-    }
-
-    pub(super) fn refresh_publications(&mut self) {
-        self.publication_settlement = Some(self.publications.observe_accepted());
     }
 }
 
@@ -170,7 +128,10 @@ pub(super) enum StageCommand {
     Ready,
     Start,
     Drain,
+    Cancel,
 }
+
+type CommandDelivery = BoxFuture<'static, (obzenflow_core::StageId, Result<(), StageError>)>;
 
 /// A bounded sequence of commands already authorised by FSM actions.
 /// Dropping an unaccepted send cancels delivery, never the receiving task.
@@ -181,7 +142,7 @@ pub(super) struct StageDelivery {
         StageCommand,
         obzenflow_core::event::CausalFrontier,
     )>,
-    pending: Mutex<Option<BoxFuture<'static, Result<(), StageError>>>>,
+    pending: Mutex<Option<CommandDelivery>>,
 }
 
 impl StageDelivery {
@@ -214,16 +175,10 @@ impl StageDelivery {
         *self.pending.get_mut().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub(super) fn is_empty(&mut self) -> bool {
-        self.commands.is_empty()
-            && self
-                .pending
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_none()
-    }
-
-    pub(super) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(), StageError>>> {
+    pub(super) fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<(obzenflow_core::StageId, Result<(), StageError>)>> {
         let pending = self.pending.get_mut().unwrap_or_else(|e| e.into_inner());
         if pending.is_none() {
             let Some((handle, command, frontier)) = self.commands.pop_front() else {
@@ -231,20 +186,23 @@ impl StageDelivery {
             };
             *pending = Some(
                 crate::supervised_base::publication::with_snapshot(frontier, async move {
-                    match command {
+                    let stage_id = handle.stage_id();
+                    let result = match command {
+                        StageCommand::Cancel => handle.force_shutdown().await,
                         StageCommand::Initialize => handle.initialize().await,
                         StageCommand::Ready => handle.ready().await,
                         StageCommand::Start => handle.start().await,
                         StageCommand::Drain => {
                             if handle.is_drained() {
-                                return Ok(());
+                                return (stage_id, Ok(()));
                             }
                             match handle.begin_drain().await {
                                 Err(_) if handle.is_drained() => Ok(()),
                                 result => result,
                             }
                         }
-                    }
+                    };
+                    (stage_id, result)
                 })
                 .boxed(),
             );

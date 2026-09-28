@@ -4,10 +4,10 @@
 
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
 use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::{
-    ContractName, ContractResultStatusLabel, SystemFeedRole, SystemPayload,
+    ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
-use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{
     Count, DurationMs, EventType, JournalIndex, JournalPath, SeqNo,
     ViolationCause as EventViolationCause,
@@ -60,10 +60,39 @@ struct DirectFeedProgressEvidence {
     should_record_heartbeat: bool,
 }
 
+/// Apply a resolved edge policy before fan-in combines outcomes. Raw facts
+/// remain unchanged, including failures which are advisory for source edges.
+fn merge_edge_status(
+    status: &mut ContractStatus,
+    edge: ContractStatus,
+    advisory: &std::collections::HashSet<obzenflow_core::StageId>,
+) {
+    if let ContractStatus::Violated { upstream, cause } = &edge {
+        if advisory.contains(upstream) {
+            tracing::warn!(%upstream, ?cause, "source contract failure is advisory under configured warning policy");
+            return;
+        }
+    }
+    match (&*status, &edge) {
+        (ContractStatus::Violated { .. }, _) | (_, ContractStatus::Healthy) => {}
+        (_, ContractStatus::Violated { .. }) | (ContractStatus::Healthy, _) => *status = edge,
+        (ContractStatus::ProgressEmitted, ContractStatus::Stalled(_)) => *status = edge,
+        _ => {}
+    }
+}
+
 impl<T> UpstreamSubscription<T>
 where
     T: JournalEvent + 'static,
 {
+    pub(crate) fn with_advisory_contract_upstreams(
+        mut self,
+        upstreams: std::collections::HashSet<obzenflow_core::StageId>,
+    ) -> Self {
+        self.advisory_contract_upstreams = upstreams;
+        self
+    }
+
     fn direct_feed_contract_evidence_for_reader(
         &self,
         progress: &ReaderProgress,
@@ -159,16 +188,14 @@ where
             .collect()
     }
 
-    async fn emit_direct_feed_contract_system_events(
+    async fn emit_direct_feed_contract_facts(
         &self,
         tracker: &ContractTracker,
         upstream: obzenflow_core::StageId,
         reader: obzenflow_core::StageId,
         evidence: &[DirectFeedContractEvidence],
     ) -> bool {
-        let Some(report_journal) = &tracker.report_journal else {
-            return true;
-        };
+        let journal = &tracker.journal;
 
         let mut append_ok = true;
         for feed in evidence {
@@ -176,9 +203,9 @@ where
                 let (status_label, cause_label) =
                     contract_result_labels_for_emission(result, ContractResultStatusLabel::Pending);
 
-                let result_event = SystemEvent::new(
+                let result_event = ChainEventFactory::execution_event(
                     tracker.writer_id,
-                    SystemPayload::ContractResult {
+                    ExecutionPayload::ContractResult {
                         upstream,
                         reader,
                         selected_event_type: Some(feed.event_type.clone()),
@@ -190,8 +217,9 @@ where
                         advertised_writer_seq: Some(feed.advertised_writer_seq),
                     },
                 );
-                if let Err(e) = crate::supervised_base::publication::report(
-                    report_journal,
+                let result_event = tracker.with_owner_context(result_event);
+                if let Err(e) = crate::supervised_base::publication::append(
+                    journal,
                     result_event,
                     Default::default(),
                 )
@@ -212,9 +240,9 @@ where
                 }
             }
 
-            let status_event = SystemEvent::new(
+            let status_event = ChainEventFactory::execution_event(
                 tracker.writer_id,
-                SystemPayload::ContractStatus {
+                ExecutionPayload::ContractStatus {
                     upstream,
                     reader,
                     selected_event_type: Some(feed.event_type.clone()),
@@ -225,8 +253,9 @@ where
                     reason: feed.reason.clone(),
                 },
             );
-            if let Err(e) = crate::supervised_base::publication::report(
-                report_journal,
+            let status_event = tracker.with_owner_context(status_event);
+            if let Err(e) = crate::supervised_base::publication::append(
+                journal,
                 status_event,
                 Default::default(),
             )
@@ -299,15 +328,12 @@ where
     async fn emit_direct_feed_progress_contract_results(
         &mut self,
         writer_id: obzenflow_core::WriterId,
-        report_journal: Option<crate::supervised_base::SupervisorJournal>,
+        journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
+        flow_context: Option<obzenflow_core::event::provenance::FlowContext>,
         progress: &ReaderProgress,
         index: usize,
         reader_stage: obzenflow_core::StageId,
     ) {
-        let Some(report_journal) = report_journal else {
-            return;
-        };
-
         let evidence = self.direct_feed_progress_evidence_for_reader(progress, index, reader_stage);
         if evidence.is_empty() {
             return;
@@ -320,9 +346,9 @@ where
                 let (status_label, cause_label) =
                     contract_result_labels_for_emission(result, ContractResultStatusLabel::Healthy);
 
-                let result_event = SystemEvent::new(
+                let result_event = ChainEventFactory::execution_event(
                     writer_id,
-                    SystemPayload::ContractResult {
+                    ExecutionPayload::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
                         selected_event_type: Some(feed.event_type.clone()),
@@ -334,8 +360,12 @@ where
                         advertised_writer_seq: feed.advertised_writer_seq,
                     },
                 );
-                if let Err(e) = crate::supervised_base::publication::report(
-                    &report_journal,
+                let result_event = match &flow_context {
+                    Some(owner) => result_event.with_flow_context(owner.clone()),
+                    None => result_event,
+                };
+                if let Err(e) = crate::supervised_base::publication::append(
+                    &journal,
                     result_event,
                     Default::default(),
                 )
@@ -422,18 +452,20 @@ where
                 continue;
             }
 
+            let mut edge_status = ContractStatus::Healthy;
+
             // Continuous contract evaluation (FLOWIP-080r).
             //
             // We run `check_progress` independently of progress emission so that
             // divergence detection and other mid-flight predicates cannot starve
             // behind the `should_emit_progress` gating logic.
-            self.check_progress_contracts_for_reader(progress, index, &mut status)
+            self.check_progress_contracts_for_reader(progress, index, &mut edge_status)
                 .await;
 
             let should_emit_progress = self.should_emit_progress(progress, index, now);
 
             if should_emit_progress {
-                self.emit_progress_for_reader(progress, index, now, &mut status)
+                self.emit_progress_for_reader(progress, index, now, &mut edge_status)
                     .await;
 
                 // Check for EOF contract validation
@@ -441,13 +473,14 @@ where
                     && self.state.is_reader_eof(index)
                     && !progress.final_emitted
                 {
-                    self.verify_eof_contracts_for_reader(progress, index, &mut status)
+                    self.verify_eof_contracts_for_reader(progress, index, &mut edge_status)
                         .await;
                 }
             } else {
-                self.check_stall_for_reader(progress, index, now, &mut status)
+                self.check_stall_for_reader(progress, index, now, &mut edge_status)
                     .await;
             }
+            merge_edge_status(&mut status, edge_status, &self.advisory_contract_upstreams);
         }
 
         status
@@ -459,13 +492,14 @@ where
         index: usize,
         status: &mut ContractStatus,
     ) {
-        let Some((reader_stage, writer_id, report_journal)) =
+        let Some((reader_stage, writer_id, journal, flow_context)) =
             self.contract_tracker.as_ref().and_then(|tracker| {
                 tracker.reader_stage.map(|reader_stage| {
                     (
                         reader_stage,
                         tracker.writer_id,
-                        tracker.report_journal.clone(),
+                        tracker.journal.clone(),
+                        tracker.flow_context.clone(),
                     )
                 })
             })
@@ -487,7 +521,8 @@ where
         {
             self.emit_direct_feed_progress_contract_results(
                 writer_id,
-                report_journal,
+                journal,
+                flow_context,
                 progress,
                 index,
                 reader_stage,
@@ -529,12 +564,13 @@ where
         let results = chain_slot.check_progress_all(progress.stage_id, reader_stage);
         let results_only: Vec<ContractResult> = results.iter().map(|(_, r)| r.clone()).collect();
 
-        // Emit per-contract progress results to the system journal so SSE/UIs can
+        // Emit per-contract progress results to the consuming stage journal so SSE/UIs can
         // render mid-flight contract health (even when no violations are present).
         //
         // MetricsAggregator also observes ContractResult, so this provides a
         // lightweight heartbeat for long-running flows (e.g. prometheus_demo).
-        if let Some(report_journal) = &tracker.report_journal {
+        {
+            let journal = &tracker.journal;
             let mut emitted_any = false;
             for (contract_name, result) in &results {
                 // Only emit "healthy" heartbeats when we've observed additional
@@ -548,9 +584,9 @@ where
                 let (status_label, cause_label) =
                     contract_result_labels_for_emission(result, ContractResultStatusLabel::Healthy);
 
-                let result_event = SystemEvent::new(
+                let result_event = ChainEventFactory::execution_event(
                     tracker.writer_id,
-                    SystemPayload::ContractResult {
+                    ExecutionPayload::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
                         selected_event_type: selected_event_type.clone(),
@@ -562,8 +598,9 @@ where
                         advertised_writer_seq: progress.advertised_writer_seq,
                     },
                 );
-                if let Err(e) = crate::supervised_base::publication::report(
-                    report_journal,
+                let result_event = tracker.with_owner_context(result_event);
+                if let Err(e) = crate::supervised_base::publication::append(
+                    journal,
                     result_event,
                     Default::default(),
                 )
@@ -611,12 +648,13 @@ where
                     };
                 }
 
-                // Emit edge-level contract status to system journal so gating and SSE
+                // Emit edge-level contract status to the consuming stage journal so observers
                 // can react to the violation.
-                if let Some(report_journal) = &tracker.report_journal {
-                    let status_event = SystemEvent::new(
+                {
+                    let journal = &tracker.journal;
+                    let status_event = ChainEventFactory::execution_event(
                         tracker.writer_id,
-                        SystemPayload::ContractStatus {
+                        ExecutionPayload::ContractStatus {
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
@@ -627,8 +665,9 @@ where
                             reason: Some(cause.clone()),
                         },
                     );
-                    if let Err(e) = crate::supervised_base::publication::report(
-                        report_journal,
+                    let status_event = tracker.with_owner_context(status_event);
+                    if let Err(e) = crate::supervised_base::publication::append(
+                        journal,
                         status_event,
                         Default::default(),
                     )
@@ -754,19 +793,20 @@ where
             let results_only: Vec<ContractResult> =
                 results.iter().map(|(_, r)| r.clone()).collect();
 
-            // Emit per-contract verification results to the system journal so that
+            // Emit per-contract verification results to the consuming stage journal so that
             // MetricsAggregator can derive contract metrics without interfering with
             // pipeline gating (which uses ContractStatus + policies).
-            if let Some(report_journal) = &tracker.report_journal {
+            {
+                let journal = &tracker.journal;
                 for (contract_name, result) in &results {
                     let (status_label, cause_label) = contract_result_labels_for_emission(
                         result,
                         ContractResultStatusLabel::Pending,
                     );
 
-                    let result_event = SystemEvent::new(
+                    let result_event = ChainEventFactory::execution_event(
                         tracker.writer_id,
-                        SystemPayload::ContractResult {
+                        ExecutionPayload::ContractResult {
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
@@ -778,8 +818,9 @@ where
                             advertised_writer_seq: progress.advertised_writer_seq,
                         },
                     );
-                    if let Err(e) = crate::supervised_base::publication::report(
-                        report_journal,
+                    let result_event = tracker.with_owner_context(result_event);
+                    if let Err(e) = crate::supervised_base::publication::append(
+                        journal,
                         result_event,
                         Default::default(),
                     )
@@ -1005,12 +1046,12 @@ where
             }
         };
 
-        // Emit contract status to system journal (if available)
+        // Publish the consuming stage’s contract decision.
         let mut status_append_ok = true;
         if !direct_feed_evidence.is_empty() {
             if let Some(reader_stage) = tracker.reader_stage {
                 status_append_ok = self
-                    .emit_direct_feed_contract_system_events(
+                    .emit_direct_feed_contract_facts(
                         tracker,
                         progress.stage_id,
                         reader_stage,
@@ -1018,12 +1059,11 @@ where
                     )
                     .await;
             }
-        } else if let (Some(report_journal), Some(reader_stage)) =
-            (&tracker.report_journal, tracker.reader_stage)
-        {
-            let status_event = SystemEvent::new(
+        } else if let Some(reader_stage) = tracker.reader_stage {
+            let journal = &tracker.journal;
+            let status_event = ChainEventFactory::execution_event(
                 tracker.writer_id,
-                SystemPayload::ContractStatus {
+                ExecutionPayload::ContractStatus {
                     upstream: progress.stage_id,
                     reader: reader_stage,
                     selected_event_type: selected_event_type.clone(),
@@ -1034,8 +1074,9 @@ where
                     reason: status_reason,
                 },
             );
-            if let Err(e) = crate::supervised_base::publication::report(
-                report_journal,
+            let status_event = tracker.with_owner_context(status_event);
+            if let Err(e) = crate::supervised_base::publication::append(
+                journal,
                 status_event,
                 Default::default(),
             )
@@ -1129,7 +1170,7 @@ where
 
                 // IMPORTANT: A stall is a liveness signal, not a transport contract violation.
                 //
-                // Historically we emitted `SystemPayload::ContractStatus { pass: false, reason:
+                // Historically we emitted `ExecutionPayload::ContractStatus { pass: false, reason:
                 // reader_stalled }` here. PipelineSupervisor treats *any* ContractStatus failure
                 // as a gating contract violation and aborts the flow (including during drain),
                 // which has proven wildly non-actionable for long/variable-latency stages

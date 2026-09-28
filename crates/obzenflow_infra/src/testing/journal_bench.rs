@@ -137,24 +137,6 @@ impl FrameCorpus {
         )
     }
 
-    pub fn decode_selected_frame(
-        &self,
-        index: usize,
-        cold: bool,
-    ) -> Vec<obzenflow_core::event::journal_record::ChainJournalRecord> {
-        let frame = &self.frames[index];
-        let body = crate::journal::disk::codec::frame::validate(&frame.bytes).unwrap();
-        let mut decoder = if cold {
-            Decoder::cold(&self.path)
-        } else {
-            Decoder::new(&self.path)
-        };
-        decoder
-            .decode_selected::<ChainEvent>(body, frame.offset)
-            .unwrap()
-            .records
-    }
-
     /// Isolated dependency probe, not an admitted selective journal reader.
     /// A cold decoder must fetch referenced definitions from their real carrier.
     pub fn decode_frame(
@@ -224,34 +206,6 @@ impl DecodeCursor {
 
     pub fn finished(&self) -> bool {
         self.next == self.corpus.frames.len()
-    }
-
-    /// Selected decoding and binary continuity on the identical physical corpus.
-    pub fn decode_selected(&mut self, max_frames: usize) -> Result<(), Error> {
-        let end = self
-            .next
-            .saturating_add(max_frames)
-            .min(self.corpus.frames.len());
-        for frame in &self.corpus.frames[self.next..end] {
-            let body = crate::journal::disk::codec::frame::validate(&frame.bytes)
-                .map_err(crate::journal::disk::codec::frame::io_error)?;
-            let selected = self
-                .decoder
-                .decode_selected::<ChainEvent>(body, frame.offset)?;
-            self.admission.admit_range(
-                selected.routing.first,
-                selected.routing.previous,
-                selected.routing.last,
-            )?;
-            for record in selected.records {
-                self.work.records += 1;
-                self.work.sequence_sum += record.local_sequence();
-                std::hint::black_box(record);
-            }
-            self.work.frames += 1;
-        }
-        self.next = end;
-        Ok(())
     }
 
     pub fn work(&self) -> &DecodeWork {

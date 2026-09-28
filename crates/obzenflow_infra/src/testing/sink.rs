@@ -4,6 +4,8 @@
 
 //! Outward application certification for production sink connectors.
 
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+
 use crate::application::{CurrentRunLocator, FlowApplication};
 use crate::journal::DiskJournal;
 use async_trait::async_trait;
@@ -12,7 +14,6 @@ use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControl
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, StageFatalRecorded,
-    StageLifecycleEvent, SystemPayload,
 };
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{Journal, RunManifest, RUN_MANIFEST_FILENAME};
@@ -970,7 +971,7 @@ fn parse_current_manifest(raw: &str) -> Result<RunManifest, SinkConformanceFailu
 
 fn validate_sink_lifecycle_projection(
     manifest: &RunManifest,
-    reports: &[(EventId, SystemPayload)],
+    reports: &[(EventId, &StageLifecycleFact)],
 ) -> Result<(usize, usize), SinkConformanceFailure> {
     let mut completed_sink_count = 0;
     let mut failed_sink_count = 0;
@@ -983,26 +984,25 @@ fn validate_sink_lifecycle_projection(
             .iter()
             .enumerate()
             .filter_map(|(index, (_, payload))| match payload {
-                SystemPayload::StageLifecycle {
-                    stage_id,
-                    event: lifecycle,
-                } if stage_id.to_string() == stage.stage_id => Some((index, lifecycle)),
+                lifecycle if lifecycle.stage_id().to_string() == stage.stage_id => {
+                    Some((index, *lifecycle))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
         let running = lifecycle
             .iter()
-            .filter(|(_, event)| matches!(event, StageLifecycleEvent::Running))
+            .filter(|(_, event)| matches!(event, StageLifecycleFact::Running { .. }))
             .map(|(index, _)| *index)
             .collect::<Vec<_>>();
         let completed = lifecycle
             .iter()
-            .filter(|(_, event)| matches!(event, StageLifecycleEvent::Completed { .. }))
+            .filter(|(_, event)| matches!(event, StageLifecycleFact::Completed { .. }))
             .map(|(index, _)| *index)
             .collect::<Vec<_>>();
         let failed = lifecycle
             .iter()
-            .filter(|(_, event)| matches!(event, StageLifecycleEvent::Failed { .. }))
+            .filter(|(_, event)| matches!(event, StageLifecycleFact::Failed { .. }))
             .map(|(index, _)| *index)
             .collect::<Vec<_>>();
         if running.len() != 1 {
@@ -1164,15 +1164,12 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
             )?;
         }
     }
-    // Protected lifecycle reports share their owner's data journal. Keep this
-    // authored projection separate from business/delivery fact validation.
     let reports = chain_events
         .iter()
         .filter_map(|event| match &event.payload {
-            ChainPayload::Execution(payload) => payload
-                .clone()
-                .into_supervision_report()
-                .map(|report| (event.id, report)),
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(fact)) => {
+                Some((event.id, fact))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1193,13 +1190,10 @@ async fn project_run(run_dir: &Path) -> Result<SinkRunEvidence, SinkConformanceF
     let lifecycle_causes = reports
         .iter()
         .filter_map(|(id, payload)| match payload {
-            SystemPayload::StageLifecycle {
+            StageLifecycleFact::Failed {
                 stage_id,
-                event:
-                    StageLifecycleEvent::Failed {
-                        causal_event_id: Some(cause),
-                        ..
-                    },
+                causal_event_id: Some(cause),
+                ..
             } => Some((*id, *stage_id, *cause)),
             _ => None,
         })

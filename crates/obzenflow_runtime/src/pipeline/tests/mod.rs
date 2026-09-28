@@ -9,6 +9,7 @@
 //! Journal scenarios accept an outer factory and are individually invoked by Infra.
 
 pub(crate) mod admission;
+#[cfg(test)]
 pub(crate) mod fsm;
 pub(crate) mod metrics;
 pub(crate) mod shutdown;

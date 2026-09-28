@@ -7,16 +7,18 @@ use super::super::*;
 use super::stream::{collect_closing, frame_payload, frames};
 use crate::journal::MemoryJournal;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, MetricsCoordinationEvent, PipelineLifecycleEvent,
     SystemFeedRole,
 };
+use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::types::{EventType, SeqNo, WriterId};
-use obzenflow_core::event::SystemPayload;
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemPayload};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::JournalOwner;
-use obzenflow_core::{event::journal_record::SystemJournalRecord, StageId};
+use obzenflow_core::{event::journal_record::ChainJournalRecord, StageId};
 use obzenflow_topology::{
     BoundaryPortSpec, CompositePortRef, DirectedEdge, EdgeKind, PortDirection, StageInfo,
     StageType, Topology, TopologySubgraphInfo,
@@ -82,14 +84,13 @@ fn dual_composite_edge() -> (
     (topology, checkout, audit)
 }
 
-async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemJournalRecord {
-    let system_id = SystemId::new();
-    let journal = MemoryJournal::<SystemEvent>::with_owner(JournalOwner::system(system_id));
+async fn contract_result_envelope(upstream: StageId, reader: StageId) -> ChainJournalRecord {
+    let journal = MemoryJournal::<ChainEvent>::with_owner(JournalOwner::stage(reader));
     journal
         .append(
-            SystemEvent::new(
-                WriterId::from(system_id),
-                SystemPayload::ContractResult {
+            ChainEventFactory::execution_event(
+                WriterId::from(reader),
+                ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type: Some(EventType::from("checkout.completed.v1")),
@@ -100,7 +101,8 @@ async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemJ
                     reader_seq: Some(SeqNo(7)),
                     advertised_writer_seq: Some(SeqNo(9)),
                 },
-            ),
+            )
+            .with_flow_context(FlowContext::new("reader", reader)),
             Default::default(),
         )
         .await
@@ -168,11 +170,14 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
         )
         .await
         .unwrap();
-    let contract = journal
+    let stage_journal = Arc::new(MemoryJournal::<ChainEvent>::with_owner(
+        JournalOwner::stage(reader),
+    ));
+    let contract = stage_journal
         .append(
-            SystemEvent::new(
-                writer,
-                SystemPayload::ContractResult {
+            ChainEventFactory::execution_event(
+                WriterId::from(reader),
+                ExecutionPayload::ContractResult {
                     upstream,
                     reader,
                     selected_event_type: Some(EventType::from("checkout.completed.v1")),
@@ -183,7 +188,8 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                     reader_seq: Some(SeqNo(7)),
                     advertised_writer_seq: Some(SeqNo(9)),
                 },
-            ),
+            )
+            .with_flow_context(FlowContext::new("reader", reader)),
             Default::default(),
         )
         .await
@@ -201,19 +207,23 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
 
     let (closing, receiver) = watch::channel(false);
     let endpoint = StudioUpdatesEndpoint::new(
-        journal,
+        journal.clone(),
         StudioProjection::new(vec![], contract_boundary_aliases(&topology).unwrap()).unwrap(),
         None,
         receiver,
-    );
+    )
+    .with_live_journals(vec![(reader, stage_journal.clone())], vec![journal.clone()]);
     let body = collect_closing(&endpoint, closing, Some(&super::stream::cursor(&cursor))).await;
     let contract_frames = frames(&body, "contract_result");
     assert_eq!(contract_frames.len(), 1);
     let frame = contract_frames[0];
+    let checkpoint: std::collections::BTreeMap<String, u64> =
+        serde_json::from_str(frame.id.as_ref().unwrap().strip_prefix("jr1:").unwrap()).unwrap();
     assert_eq!(
-        frame.id.as_deref(),
-        Some(super::stream::cursor(&contract).as_str())
+        checkpoint[&stage_journal.id().to_string()],
+        contract.local_sequence()
     );
+    assert!(checkpoint[&journal.id().to_string()] >= cursor.local_sequence());
     assert_ne!(
         frame.id.as_deref(),
         Some(cursor.envelope.provenance.event.id.to_string().as_str())

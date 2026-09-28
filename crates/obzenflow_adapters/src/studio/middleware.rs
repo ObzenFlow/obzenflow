@@ -5,13 +5,13 @@
 //! Factual revisions and selected measurements are independent Studio updates.
 
 use super::messages::*;
+use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::observability::{ObservabilityContext, ObservationRecord};
 use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitState, MiddlewareFact, RateLimiterFact, RateLimiterMode,
+    CircuitBreakerFact, CircuitState, ExecutionPayload, RateLimiterFact, RateLimiterMode,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
-use obzenflow_core::event::SupervisorRecord;
-use obzenflow_core::event::SystemPayload;
+use obzenflow_core::event::ChainPayload;
 use obzenflow_core::{web::SseFrame, StageId};
 use std::collections::{BTreeSet, HashMap};
 
@@ -40,50 +40,48 @@ fn limiter_label(mode: RateLimiterMode) -> &'static str {
 }
 
 impl MiddlewareView {
-    pub(super) fn observe(&mut self, record: &SupervisorRecord) {
-        self.last_vector_clock = Some(record.journal().vector_clock.clone());
-        let SystemPayload::MiddlewareLifecycle {
-            stage_id,
-            stage_name,
-            flow_id,
-            flow_name,
-            origin,
-            middleware,
-        } = &record.payload
-        else {
+    pub(super) fn observe(&mut self, record: &ChainJournalRecord) {
+        self.last_vector_clock = Some(record.envelope.provenance.journal.vector_clock.clone());
+        let ChainPayload::Execution(middleware) = &record.payload else {
             return;
         };
-        if let Some(name) = stage_name {
-            self.stage_names.insert(*stage_id, name.clone());
+        if !matches!(
+            middleware,
+            ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_)
+        ) {
+            return;
         }
-        if self.flow_id.is_none() {
-            self.flow_id.clone_from(flow_id);
-        }
-        if self.flow_name.is_none() {
-            self.flow_name.clone_from(flow_name);
-        }
-        let revision = origin.seq.0;
-        match self.message(*stage_id, middleware) {
+        let context = &record.envelope.provenance.event.flow_context;
+        let stage_id = context.stage_id;
+        self.stage_names
+            .insert(stage_id, context.stage_name.clone());
+        self.flow_id.get_or_insert_with(|| context.flow_id.clone());
+        self.flow_name
+            .get_or_insert_with(|| context.flow_name.clone());
+        let revision = record.local_sequence();
+        match self.message(stage_id, middleware) {
             Some(MiddlewareUpdate::CircuitBreaker(CircuitBreakerUpdate::StateChange {
                 state_to,
                 ..
             })) => {
-                let entry = self.circuit_breakers.entry(*stage_id).or_default();
+                let entry = self.circuit_breakers.entry(stage_id).or_default();
                 if entry.revision.is_none_or(|previous| revision > previous) {
                     entry.state = Some(state_to.into());
                     entry.revision = Some(revision);
-                    entry.state_updated_at_ms = Some(record.timestamp());
+                    entry.state_updated_at_ms =
+                        Some(record.envelope.provenance.event.processing.event_time);
                 }
             }
             Some(MiddlewareUpdate::RateLimiter(RateLimiterUpdate::ModeChange {
                 mode_to, ..
             })) => {
                 let mode = mode_to.to_owned();
-                let entry = self.rate_limiters.entry(*stage_id).or_default();
+                let entry = self.rate_limiters.entry(stage_id).or_default();
                 if entry.revision.is_none_or(|previous| revision > previous) {
                     entry.mode = Some(mode);
                     entry.revision = Some(revision);
-                    entry.state_updated_at_ms = Some(record.timestamp());
+                    entry.state_updated_at_ms =
+                        Some(record.envelope.provenance.event.processing.event_time);
                 }
             }
             _ => {}
@@ -93,10 +91,10 @@ impl MiddlewareView {
     pub(super) fn message<'a>(
         &'a self,
         stage_id: StageId,
-        middleware: &'a MiddlewareFact,
+        middleware: &'a ExecutionPayload,
     ) -> Option<MiddlewareUpdate<'a>> {
         Some(match middleware {
-            MiddlewareFact::CircuitBreaker(event) => {
+            ExecutionPayload::CircuitBreaker(event) => {
                 let state_from = self
                     .circuit_breakers
                     .get(&stage_id)
@@ -159,7 +157,7 @@ impl MiddlewareView {
                     _ => return None,
                 })
             }
-            MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+            ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
                 mode_from,
                 mode_to,
                 limit_rate,

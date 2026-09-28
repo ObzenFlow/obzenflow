@@ -327,6 +327,7 @@ where
     /// When `with_contracts` is used, this vector is sized to match `readers`
     /// and each entry holds the policy stack for the corresponding edge.
     contract_policies: Vec<Option<ContractPolicyStack>>,
+    advisory_contract_upstreams: std::collections::HashSet<obzenflow_core::StageId>,
 
     /// Flow-scoped typed control-state provider used by lifecycle policies.
     control_plane: Arc<dyn ControlPlaneProvider>,

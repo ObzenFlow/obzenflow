@@ -20,7 +20,6 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorJournal;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the fan-out test. The JSON shape is shared, but each
@@ -222,12 +221,9 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *liveness_source.lock().unwrap() = Some(handle.observations());
         let stage_journals = handle
-            .report_journals()
+            .stage_journals()
             .into_iter()
-            .filter_map(|journal| match journal {
-                SupervisorJournal::Stage { journal, .. } => Some(journal),
-                SupervisorJournal::System(_) => None,
-            })
+            .map(|(_, journal)| journal)
             .collect();
         *stage_journals_slot_hook
             .lock()

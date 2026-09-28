@@ -111,7 +111,7 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
         ("ordinary_business_64", 256, 1, 0),
         ("large_business_64", 8192, 1, 0),
         ("mixed_group_64", 256, 64, 8),
-        ("report_group_64", 256, 64, 1),
+        ("execution_fact_group_64", 256, 64, 1),
     ] {
         let history = LazyCell::new(|| {
             runtime.block_on(fixtures::History::build(64, payload, group_size, every))
@@ -119,7 +119,7 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
         for op in ["prepare_encoding", "write_preencoded", "complete_append"] {
             let case = format!("{op}/{name}");
             let mut taken = false;
-            let input = serde_json::json!({"records":64,"business_payload_bytes":payload,"group_size":group_size,"report_every":every});
+            let input = serde_json::json!({"records":64,"business_payload_bytes":payload,"group_size":group_size,"execution_fact_every":every});
             group.bench_function(&case, |b| {
                 measure(
                     b,

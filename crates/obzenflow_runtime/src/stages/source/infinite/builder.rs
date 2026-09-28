@@ -102,7 +102,6 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
             error_journal: self.resources.error_journal.clone(),
-            report_journal: self.resources.report_journal.clone(),
             runtime_execution: self.resources.runtime_execution.clone(),
             bus: self.resources.message_bus.clone(),
             instrumentation,
@@ -119,8 +118,9 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
         // Create supervisor (private - not exposed)
         let supervisor = InfiniteSourceSupervisor {
             name: format!("infinite_source_{}", self.config.stage_name),
-            handler,
-            report_journal: self.resources.report_journal.clone(),
+            handler: Some(handler),
+            data_journal: self.resources.data_journal.clone(),
+            flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
             idle_backoff: crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
@@ -144,7 +144,10 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> SupervisorBuilder
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.report_journal.clone(),
+            crate::supervised_base::with_external_events::stage_commands(
+                self.resources.data_journal.clone(),
+                self.resources.flow_context.clone(),
+            ),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name).spawn_handler_supervised(
             supervisor_with_events,

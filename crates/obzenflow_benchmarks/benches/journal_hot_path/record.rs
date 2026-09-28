@@ -6,7 +6,6 @@ use super::{fixtures, measure, timed, Census, Sample};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::benchmark::validate_structure;
 use obzenflow_core::journal::limits::record_bytes;
-use obzenflow_runtime::supervised_base::report_reader::benchmark_retained_record_bytes;
 use std::cell::LazyCell;
 use tokio::runtime::Runtime;
 
@@ -14,24 +13,11 @@ fn operation(f: &fixtures::RecordFixture, operation: &str) -> Sample {
     let record = &f.record;
     let journal = &record.envelope.provenance.journal;
     match operation {
-        "canonical_bytes" | "retained_bytes" | "both_accounting_passes" => {
-            let expected = f.canonical_bytes;
-            let (counts, sample) = timed(|| match operation {
-                "canonical_bytes" => (record_bytes(record).unwrap(), expected),
-                "retained_bytes" => (expected, benchmark_retained_record_bytes(record).unwrap()),
-                _ => (
-                    record_bytes(record).unwrap(),
-                    benchmark_retained_record_bytes(record).unwrap(),
-                ),
-            });
-            assert_eq!(counts, (expected, expected));
-            let passes = if operation == "both_accounting_passes" {
-                2
-            } else {
-                1
-            };
-            sample.expect_work("record_accounting_serializations", passes);
-            sample.expect_work("structural_validations", passes);
+        "canonical_bytes" => {
+            let (bytes, sample) = timed(|| record_bytes(record).unwrap());
+            assert_eq!(bytes, f.canonical_bytes);
+            sample.expect_work("record_accounting_serializations", 1);
+            sample.expect_work("structural_validations", 1);
             sample
         }
         "structural_validation" => {
@@ -101,22 +87,6 @@ fn operation(f: &fixtures::RecordFixture, operation: &str) -> Sample {
             sample.expect_work("definition_carrier_reads", u64::from(cold));
             sample
         }
-        "complete_selected_frame_warm" | "complete_selected_frame_cold" => {
-            let cold = operation.ends_with("_cold");
-            let (rows, sample) = timed(|| f.corpus.decode_selected_frame(1, cold));
-            assert_eq!(rows.len(), 1);
-            assert_eq!(*rows[0].id(), *record.id());
-            if sample.is_census() {
-                assert_eq!(
-                    serde_json::to_value(&rows[0]).unwrap(),
-                    serde_json::to_value(record).unwrap()
-                );
-            }
-            sample.expect_work("payload_json_decodes", 1);
-            sample.expect_work("records_constructed", 1);
-            sample.expect_work("definition_carrier_reads", u64::from(cold));
-            sample
-        }
         _ => unreachable!(),
     }
 }
@@ -132,14 +102,7 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
         })
         .collect();
     for (name, operations) in [
-        (
-            "report_accounting",
-            &[
-                "canonical_bytes",
-                "retained_bytes",
-                "both_accounting_passes",
-            ][..],
-        ),
+        ("record_accounting", &["canonical_bytes"][..]),
         (
             "causal_record_work",
             &["structural_validation", "clock_clone", "clock_json_bytes"][..],
@@ -151,8 +114,6 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
                 "payload_json",
                 "compact_provenance_warm",
                 "compact_provenance_cold",
-                "complete_selected_frame_warm",
-                "complete_selected_frame_cold",
             ][..],
         ),
     ] {

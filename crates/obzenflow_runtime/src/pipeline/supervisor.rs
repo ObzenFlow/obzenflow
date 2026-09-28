@@ -2,39 +2,33 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Responsive inputs for the established self-supervised runner.
+//! Poll owned child results and publications. No child journal reader belongs
+//! to pipeline coordination.
 
-use super::fsm::{PipelineAction, PipelineContext, PipelineFsmEvent, PipelineFsmState};
-use super::resources::{OperationalFailure, ProducerTail};
+use super::fsm::{PipelineAction, PipelineContext, PipelineFsmEvent as E, PipelineFsmState as S};
+use super::resources::{Observations, OperationalFailure};
 use super::PipelineState;
-use crate::stages::common::stage_handle::StageError;
-use crate::supervised_base::report_reader::{ReportRead, ReportReaders};
+use crate::supervised_base::handler_supervised::SupervisorAction;
+use crate::supervised_base::publication::BoxError;
 use crate::supervised_base::{
     EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher,
 };
-use futures::{future::BoxFuture, Stream};
+use futures::Stream;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::id::SystemId;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-
-pub use super::fsm::context::ContractEdgeStatus;
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(crate) struct PipelineSupervisor {
     name: String,
     system_id: SystemId,
-    controls: EventReceiver<PipelineFsmEvent>,
+    controls: EventReceiver<E>,
+    journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>>,
     controls_open: bool,
     watcher: StateWatcher<PipelineState>,
-    subscription: Option<ReportReaders>,
-    capacity_wait: Mutex<Option<BoxFuture<'static, Result<(), BoxError>>>>,
-    input_cursor: RoundRobinCursor<SupervisorInput>,
-    resource_cursor: RoundRobinCursor<ResourceInput>,
+    next_input: usize,
     failure: OperationalFailure,
     failure_reported: bool,
 }
@@ -42,443 +36,158 @@ pub(crate) struct PipelineSupervisor {
 impl PipelineSupervisor {
     pub(crate) fn new(
         system_id: SystemId,
-        controls: EventReceiver<PipelineFsmEvent>,
+        controls: EventReceiver<E>,
         watcher: StateWatcher<PipelineState>,
         failure: OperationalFailure,
+        journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>>,
     ) -> Self {
         Self {
             name: "pipeline_supervisor".into(),
             system_id,
+            journal,
             controls,
             controls_open: true,
             watcher,
-            subscription: None,
-            capacity_wait: Mutex::new(None),
-            input_cursor: RoundRobinCursor::new(SupervisorInput::ORDER),
-            resource_cursor: RoundRobinCursor::new(ResourceInput::ORDER),
+            next_input: 0,
             failure,
             failure_reported: false,
         }
     }
-
-    fn attach_journal_subscription(&mut self, ctx: &mut PipelineContext) {
-        if self.subscription.is_none() {
-            self.subscription = ctx.completion_subscription.take();
+    fn poll_observation(observations: &mut Observations, cx: &mut Context<'_>) -> Poll<E> {
+        match Pin::new(observations.get_mut().unwrap_or_else(|e| e.into_inner())).poll_next(cx) {
+            Poll::Ready(Some(event)) => Poll::Ready(event),
+            _ => Poll::Pending,
         }
     }
-
     fn poll_dispatch(
         &mut self,
-        state: &PipelineFsmState,
+        state: &S,
         ctx: &mut PipelineContext,
         cx: &mut Context<'_>,
-        deadline_wait: Pin<&mut tokio::time::Sleep>,
-    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        // Deadlines, failures and completed settlement take priority over the
-        // ordinary inputs, which share the remaining dispatch turns fairly.
-        if let Poll::Ready(event) = Self::poll_deadline(state, ctx, cx, deadline_wait) {
-            return Poll::Ready(EventLoopDirective::Transition(event));
-        }
-        if let Some(event) = self.take_operational_failure(ctx) {
-            return Poll::Ready(EventLoopDirective::Transition(event));
-        }
-        if state.settlement_satisfied(ctx) {
-            return Poll::Ready(EventLoopDirective::Transition(
-                PipelineFsmEvent::PhysicalSettlementSatisfied,
-            ));
-        }
-        self.poll_inputs_round_robin(state, ctx, cx)
-    }
-
-    fn poll_deadline(
-        state: &PipelineFsmState,
-        ctx: &PipelineContext,
-        cx: &mut Context<'_>,
-        mut deadline_wait: Pin<&mut tokio::time::Sleep>,
-    ) -> Poll<PipelineFsmEvent> {
-        if let Some((at, deadline)) = state.next_deadline(ctx) {
-            if Instant::now() >= at {
-                return Poll::Ready(deadline.into());
-            }
-            deadline_wait.as_mut().reset(at.into());
-            let _ = deadline_wait.as_mut().poll(cx);
-        }
-        Poll::Pending
-    }
-
-    fn take_operational_failure(&mut self, ctx: &PipelineContext) -> Option<PipelineFsmEvent> {
+        mut deadline: Pin<&mut tokio::time::Sleep>,
+        allow_phase: bool,
+    ) -> Poll<E> {
         if let Some(error) = ctx.resources.publications.first_failure() {
             ctx.resources.retain_failure(Box::new(error));
         }
-        if self.failure_reported {
-            return None;
+        if !self.failure_reported {
+            if let Some(error) = self.failure.get() {
+                self.failure_reported = true;
+                return Poll::Ready(E::OperationalFailure {
+                    message: error.to_string(),
+                });
+            }
         }
-        let error = ctx.resources.failure.get()?;
-        self.failure_reported = true;
-        Some(PipelineFsmEvent::OperationalFailure {
-            message: error.to_string(),
-        })
-    }
-
-    fn poll_inputs_round_robin(
-        &mut self,
-        state: &PipelineFsmState,
-        ctx: &mut PipelineContext,
-        cx: &mut Context<'_>,
-    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        for input in self.input_cursor.polling_order() {
+        if let Some((at, event)) = state.next_deadline(ctx) {
+            if Instant::now() >= at {
+                return Poll::Ready(event.into());
+            }
+            deadline.as_mut().reset(at.into());
+            let _ = deadline.as_mut().poll(cx);
+        }
+        if allow_phase {
+            if state.phase_satisfied(ctx) {
+                return Poll::Ready(E::PhaseSatisfied);
+            }
+            if matches!(state, S::ReadyForRun) && !crate::bootstrap::startup_mode_manual() {
+                return Poll::Ready(E::Start);
+            }
+        }
+        // Fair polling prevents a busy command producer from starving physical
+        // termination or acknowledgements. Empty observation sets stay pending.
+        const INPUTS: usize = 7;
+        for offset in 0..INPUTS {
+            let input = (self.next_input + offset) % INPUTS;
             let result = match input {
-                SupervisorInput::Control => self.poll_control(cx),
-                SupervisorInput::Journal => self.poll_journal(ctx, cx),
-                SupervisorInput::CommandDelivery => self.poll_command_delivery(ctx, cx),
-                SupervisorInput::Resources => self.poll_resources_or_startup(state, ctx, cx),
+                0 if self.controls_open => {
+                    match std::pin::pin!(self.controls.recv()).as_mut().poll(cx) {
+                        Poll::Ready(Some(event)) => Poll::Ready(event),
+                        Poll::Ready(None) => {
+                            self.controls_open = false;
+                            Poll::Pending
+                        }
+                        Poll::Pending => Poll::Pending,
+                    }
+                }
+                1 => Self::poll_observation(&mut ctx.resources.failures, cx),
+                2 => Self::poll_observation(&mut ctx.resources.acknowledgements, cx),
+                3 => Self::poll_observation(&mut ctx.resources.exits, cx),
+                4 => Self::poll_observation(&mut ctx.resources.publication_results, cx),
+                5 => match ctx.resources.delivery.poll(cx) {
+                    Poll::Ready(Some((id, Err(error))))
+                        if ctx.outstanding_children.contains(&id)
+                            && !matches!(
+                                state,
+                                S::CancellingChildren | S::FailingChildren { .. }
+                            ) =>
+                    {
+                        Poll::Ready(E::OperationalFailure {
+                            message: error.to_string(),
+                        })
+                    }
+                    Poll::Ready(Some(_)) => Poll::Ready(E::ObservationEnded),
+                    _ => Poll::Pending,
+                },
+                6 => match &mut ctx.resources.metrics_join {
+                    Some(join) => match join
+                        .get_mut()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                        .poll(cx)
+                    {
+                        Poll::Ready(result) => {
+                            ctx.resources.metrics_join = None;
+                            match result {
+                                // The owner enforces the bounded final-refresh budget.
+                                Err(HandleError::SupervisorAborted)
+                                    if ctx.metrics_deadline.is_none() =>
+                                {
+                                    Poll::Ready(E::MetricsExited)
+                                }
+                                Err(error) => Poll::Ready(E::OperationalFailure {
+                                    message: error.to_string(),
+                                }),
+                                Ok(()) => Poll::Ready(E::MetricsExited),
+                            }
+                        }
+                        Poll::Pending => Poll::Pending,
+                    },
+                    None => Poll::Pending,
+                },
+                _ => Poll::Pending,
             };
             if result.is_ready() {
-                self.input_cursor.advance_after(input);
+                self.next_input = (input + 1) % INPUTS;
                 return result;
             }
         }
         Poll::Pending
-    }
-
-    fn poll_control(&mut self, cx: &mut Context<'_>) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        if !self.controls_open {
-            return Poll::Pending;
-        }
-        match std::pin::pin!(self.controls.recv()).as_mut().poll(cx) {
-            Poll::Ready(Some(event)) => Poll::Ready(EventLoopDirective::Transition(event)),
-            Poll::Ready(None) => {
-                self.controls_open = false;
-                Poll::Ready(EventLoopDirective::Continue)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_journal(
-        &mut self,
-        ctx: &mut PipelineContext,
-        cx: &mut Context<'_>,
-    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        if ctx.progress.journal_failed {
-            return Poll::Pending;
-        }
-        // Keep ordinary output headroom before admitting another report. The
-        // control and resource turns remain runnable while publication stalls.
-        let wait = self
-            .capacity_wait
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner());
-        if wait.is_none() && !ctx.resources.publications.has_capacity(4) {
-            *wait = Some(ctx.resources.publications.wait_for_capacity(4));
-        }
-        if let Some(pending) = wait {
-            match pending.as_mut().poll(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => {
-                    ctx.resources.retain_failure(error);
-                    *wait = None;
-                    return Poll::Ready(EventLoopDirective::Continue);
-                }
-                Poll::Ready(Ok(())) => {
-                    *wait = None;
-                }
-            }
-        }
-        let Some(readers) = &mut self.subscription else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) = readers.poll_next(cx) else {
-            return Poll::Pending;
-        };
-        Poll::Ready(match result {
-            Ok(ReportRead::Record(record)) => {
-                EventLoopDirective::Transition(PipelineFsmEvent::Journal(record))
-            }
-            Ok(ReportRead::Coverage { journal, through }) => {
-                ctx.report_coverage.insert(journal, through);
-                EventLoopDirective::Continue
-            }
-            Err(error) => {
-                ctx.progress.journal_failed = true;
-                ctx.resources.retain_failure(error);
-                EventLoopDirective::Continue
-            }
-        })
-    }
-
-    fn poll_command_delivery(
-        &mut self,
-        ctx: &mut PipelineContext,
-        cx: &mut Context<'_>,
-    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        let Poll::Ready(Some(result)) = ctx.resources.delivery.poll(cx) else {
-            return Poll::Pending;
-        };
-        if let Err(error) = result {
-            ctx.resources.retain_failure(Box::new(error));
-        }
-        Poll::Ready(EventLoopDirective::Continue)
-    }
-
-    fn poll_resources_or_startup(
-        &mut self,
-        state: &PipelineFsmState,
-        ctx: &mut PipelineContext,
-        cx: &mut Context<'_>,
-    ) -> Poll<EventLoopDirective<PipelineFsmEvent>> {
-        if self.poll_resource_completions(ctx, cx).is_ready() {
-            return Poll::Ready(EventLoopDirective::Continue);
-        }
-        // Startup shares the resource turn so busy controls cannot starve it.
-        // Owned resource progress is serviced before generating a startup event.
-        let event = match state {
-            PipelineFsmState::Created => PipelineFsmEvent::Bootstrap,
-            PipelineFsmState::ReadyForRun if !crate::bootstrap::startup_mode_manual() => {
-                PipelineFsmEvent::Start
-            }
-            _ => return Poll::Pending,
-        };
-        Poll::Ready(EventLoopDirective::Transition(event))
-    }
-
-    fn poll_resource_completions(
-        &mut self,
-        ctx: &mut PipelineContext,
-        cx: &mut Context<'_>,
-    ) -> Poll<()> {
-        for input in self.resource_cursor.polling_order() {
-            let result = match input {
-                ResourceInput::StageJoin => Self::poll_stage_join(ctx, cx),
-                ResourceInput::PublicationSettlement => Self::poll_publication_settlement(ctx, cx),
-                ResourceInput::ProducerTail => Self::poll_producer_tail(ctx, cx),
-                ResourceInput::MetricsTail => Self::poll_metrics_tail(ctx, cx),
-                ResourceInput::MetricsJoin => Self::poll_metrics_join(ctx, cx),
-            };
-            if result.is_ready() {
-                // A producer or our own append has settled. Check the existing
-                // journal again without extending a previous temporary-EOF wait.
-                self.resource_cursor.advance_after(input);
-                return result;
-            }
-        }
-        Poll::Pending
-    }
-
-    fn poll_stage_join(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(joins) = &mut ctx.resources.stage_joins else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) =
-            Pin::new(joins.get_mut().unwrap_or_else(|e| e.into_inner())).poll_next(cx)
-        else {
-            return Poll::Pending;
-        };
-        match result {
-            Some(Err(error))
-                if !(ctx.progress.stages_cancelled && matches!(error, StageError::Aborted)) =>
-            {
-                ctx.resources.retain_failure(Box::new(error));
-            }
-            None => {
-                ctx.resources.stage_joins = None;
-                ctx.resources.stages_joined = true;
-            }
-            Some(_) => {}
-        }
-        Poll::Ready(())
-    }
-
-    fn poll_publication_settlement(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(observation) = &mut ctx.resources.publication_settlement else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) = Pin::new(observation).poll(cx) else {
-            return Poll::Pending;
-        };
-        ctx.resources.publication_settlement = None;
-        if let Err(error) = result {
-            ctx.resources.retain_failure(Box::new(error));
-        }
-        Poll::Ready(())
-    }
-
-    fn poll_producer_tail(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
-        let ProducerTail::Reading(read) = &mut ctx.resources.producer_tail else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) = read
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-            .poll(cx)
-        else {
-            return Poll::Pending;
-        };
-        ctx.resources.producer_tail = match result {
-            Ok(targets)
-                if targets.iter().all(|(journal, through)| {
-                    ctx.report_coverage.get(journal).copied().unwrap_or(0) >= *through
-                }) =>
-            {
-                ProducerTail::Reached
-            }
-            Ok(targets) => ProducerTail::Through(targets),
-            Err(error) => {
-                ctx.progress.journal_failed = true;
-                ctx.resources.retain_failure(error);
-                ProducerTail::Reached
-            }
-        };
-        Poll::Ready(())
-    }
-
-    fn poll_metrics_tail(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
-        let ProducerTail::Reading(read) = &mut ctx.resources.metrics_tail else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) = read
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-            .poll(cx)
-        else {
-            return Poll::Pending;
-        };
-        ctx.resources.metrics_tail = match result {
-            Ok(targets)
-                if targets.iter().all(|(journal, through)| {
-                    ctx.report_coverage.get(journal).copied().unwrap_or(0) >= *through
-                }) =>
-            {
-                ProducerTail::Reached
-            }
-            Ok(targets) => ProducerTail::Through(targets),
-            Err(error) => {
-                ctx.progress.journal_failed = true;
-                ctx.resources.retain_failure(error);
-                ProducerTail::Reached
-            }
-        };
-        Poll::Ready(())
-    }
-
-    fn poll_metrics_join(ctx: &mut PipelineContext, cx: &mut Context<'_>) -> Poll<()> {
-        let Some(join) = &mut ctx.resources.metrics_join else {
-            return Poll::Pending;
-        };
-        let Poll::Ready(result) = join
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-            .poll(cx)
-        else {
-            return Poll::Pending;
-        };
-        ctx.resources.metrics_join = None;
-        ctx.resources.metrics_joined = true;
-        ctx.resources.metrics_tail = if let Some(metrics) = &ctx.metrics_journals {
-            let journal = metrics.coordination.clone();
-            ProducerTail::Reading(Mutex::new(Box::pin(async move {
-                Ok([(*journal.id(), journal.committed_position().await?)].into())
-            })))
-        } else {
-            ProducerTail::Reached
-        };
-        if let Err(error) = result {
-            if !(ctx.progress.metrics_cancelled && matches!(error, HandleError::SupervisorAborted))
-            {
-                ctx.resources.retain_failure(Box::new(error));
-            }
-        }
-        Poll::Ready(())
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SupervisorInput {
-    Control,
-    Journal,
-    CommandDelivery,
-    Resources,
-}
-
-impl SupervisorInput {
-    const ORDER: &'static [Self] = &[
-        Self::Control,
-        Self::Journal,
-        Self::CommandDelivery,
-        Self::Resources,
-    ];
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResourceInput {
-    StageJoin,
-    PublicationSettlement,
-    ProducerTail,
-    MetricsJoin,
-    MetricsTail,
-}
-
-impl ResourceInput {
-    const ORDER: &'static [Self] = &[
-        Self::StageJoin,
-        Self::PublicationSettlement,
-        Self::ProducerTail,
-        Self::MetricsJoin,
-        Self::MetricsTail,
-    ];
-}
-
-/// Visits each input once, starting after the last input that made progress.
-/// An entirely pending scan leaves the cursor unchanged.
-struct RoundRobinCursor<Input: 'static> {
-    order: &'static [Input],
-    next_index: usize,
-}
-
-impl<Input: Copy + PartialEq> RoundRobinCursor<Input> {
-    fn new(order: &'static [Input]) -> Self {
-        assert!(!order.is_empty(), "round-robin polling needs an input");
-        Self {
-            order,
-            next_index: 0,
-        }
-    }
-
-    fn polling_order(&self) -> impl Iterator<Item = Input> + 'static {
-        let (before_next, from_next) = self.order.split_at(self.next_index);
-        from_next.iter().chain(before_next).copied()
-    }
-
-    fn advance_after(&mut self, input: Input) {
-        let served_index = self
-            .order
-            .iter()
-            .position(|candidate| *candidate == input)
-            .expect("served input belongs to this round-robin cursor");
-        self.next_index = (served_index + 1) % self.order.len();
     }
 }
 
 impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
-    type State = PipelineFsmState;
-    type Event = PipelineFsmEvent;
+    type State = S;
+    type Event = E;
     type Context = PipelineContext;
     type Action = PipelineAction;
-
-    fn build_state_machine(&self, initial_state: Self::State) -> super::fsm::PipelineFsm {
-        super::fsm::build_pipeline_fsm_with_initial(initial_state)
+    fn build_state_machine(&self, state: S) -> super::fsm::PipelineFsm {
+        super::fsm::build_pipeline_fsm_with_initial(state)
     }
     fn supervisor_kind(
         &self,
     ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
         obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
     }
-
-    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
-        context.system_journal.clone().into()
+    fn registration(
+        &self,
+        context: &Self::Context,
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        crate::supervised_base::base::register_system(
+            context.system_journal.clone(),
+            self.system_id.into(),
+            descriptor,
+        )
     }
 
     fn name(&self) -> &str {
@@ -491,48 +200,93 @@ impl SelfSupervised for PipelineSupervisor {
     fn writer_id(&self) -> WriterId {
         self.system_id.into()
     }
-    fn event_for_action_error(&self, message: String) -> PipelineFsmEvent {
-        PipelineFsmEvent::OperationalFailure { message }
+    fn event_for_action_error(&self, message: String) -> E {
+        E::OperationalFailure { message }
     }
-
-    async fn after_transition(
-        &mut self,
-        state: &Self::State,
-        ctx: &PipelineContext,
-    ) -> Result<(), BoxError> {
-        // The shared runner routes an action error through the failure FSM
-        // before calling this hook. Do not report that same retained error a
-        // second time through dispatch; asynchronous owner failures still enter
-        // the first-failure check there.
+    fn supervisor_action(&self, action: &PipelineAction) -> Option<SupervisorAction<E>> {
+        if let PipelineAction::Host(action) = action {
+            Some(action.clone())
+        } else {
+            None
+        }
+    }
+    fn lifecycle_phase(&self, state: &S) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        use super::termination::ExecutionOutcome;
+        use crate::stages::common::stage_lifecycle::LifecyclePhase as L;
+        match state {
+            S::ReadyForRun => L::Ready,
+            S::Running => L::Active,
+            S::FailingChildren { cause } => L::Failing(cause.clone()),
+            S::CancellingChildren => L::Cancelling("Pipeline cancellation requested".into()),
+            S::Finished {
+                outcome: ExecutionOutcome::Failed(failure),
+            } => L::Failed(failure.reason.clone()),
+            S::Finished {
+                outcome: ExecutionOutcome::Cancelled { reason },
+            } => L::Cancelled(reason.clone()),
+            S::Finished { .. } => L::Completed,
+            _ => L::Other,
+        }
+    }
+    fn after_transition(&mut self, state: &S, ctx: &PipelineContext) {
         self.failure_reported |= ctx.resources.failure.get().is_some();
         let projection = state.public_state(ctx);
         if projection != self.watcher.current() {
             let _ = self.watcher.update(projection);
         }
-        Ok(())
     }
-
-    async fn write_completion_event(&self) -> Result<(), BoxError> {
-        // Settlement already happened in the FSM. This hook only returns the
-        // retained operational result through the established runner contract.
-        self.failure
-            .get()
-            .map_or(Ok(()), |error| Err(Box::new(error.clone()) as BoxError))
-    }
-
-    async fn dispatch_state(
-        &mut self,
-        state: &Self::State,
-        ctx: &mut PipelineContext,
-    ) -> Result<EventLoopDirective<Self::Event>, BoxError> {
-        if matches!(state, PipelineFsmState::Finished { .. }) {
-            return Ok(EventLoopDirective::Terminate);
-        }
-        self.attach_journal_subscription(ctx);
-        let mut deadline_wait = Box::pin(tokio::time::sleep(Duration::ZERO));
-        Ok(
-            std::future::poll_fn(|cx| self.poll_dispatch(state, ctx, cx, deadline_wait.as_mut()))
+    async fn next_control(&mut self, state: &S, ctx: &mut PipelineContext) -> Option<E> {
+        let mut deadline = Box::pin(tokio::time::sleep(Duration::ZERO));
+        Some(
+            std::future::poll_fn(|cx| self.poll_dispatch(state, ctx, cx, deadline.as_mut(), false))
                 .await,
         )
+    }
+    fn close_mailbox(
+        &mut self,
+        state: &S,
+    ) -> futures::future::BoxFuture<'static, Result<(), BoxError>> {
+        use obzenflow_fsm::StateVariant;
+        self.controls_open = false;
+        crate::supervised_base::with_external_events::record_terminal_commands(
+            &mut self.controls,
+            crate::supervised_base::with_external_events::system_commands(
+                self.journal.clone(),
+                self.system_id.into(),
+            ),
+            &self.name,
+            state.variant_name(),
+        )
+    }
+    async fn dispatch_state(
+        &mut self,
+        state: &S,
+        ctx: &mut PipelineContext,
+    ) -> Result<EventLoopDirective<E>, BoxError> {
+        if matches!(state, S::Created) {
+            return Ok(EventLoopDirective::Transition(E::Bootstrap));
+        }
+        if matches!(state, S::Finished { .. }) {
+            return Ok(EventLoopDirective::Terminate);
+        }
+        let mut deadline = Box::pin(tokio::time::sleep(Duration::ZERO));
+        let event =
+            std::future::poll_fn(|cx| self.poll_dispatch(state, ctx, cx, deadline.as_mut(), true))
+                .await;
+        Ok(EventLoopDirective::Transition(event))
+    }
+}
+
+impl crate::supervised_base::with_external_events::ExternalControlEvent for E {
+    fn discard_details(
+        &self,
+    ) -> (
+        obzenflow_core::event::CommandDiscardDisposition,
+        Option<String>,
+    ) {
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Abort { reason } | Self::OperationalFailure { message: reason } => Some(reason),
+            _ => None,
+        })
     }
 }

@@ -422,7 +422,8 @@ mod tests {
                 coordination: system_journal.clone(),
                 export: system_journal.clone(),
             }),
-            report_journals: vec![],
+            stage_journals: vec![],
+            system_journals: vec![],
             pipeline_reports: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
@@ -465,7 +466,8 @@ mod tests {
 
         let extras = FlowHandleExtras {
             metrics_journals: None,
-            report_journals: vec![],
+            stage_journals: vec![],
+            system_journals: vec![],
             pipeline_reports: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),

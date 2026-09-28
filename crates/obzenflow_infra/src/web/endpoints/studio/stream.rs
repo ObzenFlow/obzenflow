@@ -2,19 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Reads owned report histories independently for one Studio connection.
+//! Reads ordinary live journal histories independently for one Studio connection.
 //! Reconnect cursors record per-journal applied positions. Dropping the response
-//! releases all reader tasks, bounded handoffs, and saved projection state.
+//! releases its readers, pending reads, and saved projection state.
 
 use super::*;
+use futures::stream::BoxStream;
 use futures::Stream;
 use obzenflow_adapters::studio::{bootstrap, server_shutdown, StudioStreamError};
+use obzenflow_core::event::{ChainEvent, SystemEvent};
+use obzenflow_core::journal::read::RunRecordData;
+use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, JournalId};
-use obzenflow_runtime::supervised_base::{
-    report_reader::{ReportRead, ReportReaders},
-    SupervisorJournal,
-};
 use std::collections::BTreeMap;
+use std::task::{Context, Poll};
 use std::{
     collections::VecDeque,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -25,6 +26,193 @@ use tokio::time::Instant;
 const READ_QUANTUM: usize = 64;
 const TAIL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Each stream owns its ordinary reader and at most one issued operation.
+/// Issued I/O must settle even while the response is unpolled: a disk read can
+/// otherwise retain a writer lock until the client asks for another frame.
+struct LiveReaders {
+    entries: Vec<LiveReader>,
+    next: usize,
+}
+struct LiveReader {
+    id: JournalId,
+    owner: Option<obzenflow_core::WriterId>,
+    position: u64,
+    stream: BoxStream<'static, Result<ReadStep, ReaderError>>,
+    initial_complete: bool,
+    at_end: bool,
+}
+struct ReadStep {
+    record: Option<RunRecordData>,
+    initial_complete: bool,
+    at_end: bool,
+}
+enum ReaderError {
+    Open(JournalError),
+    Read(JournalError),
+}
+
+type ReaderResult = Result<
+    Option<(
+        JournalId,
+        u64,
+        Option<obzenflow_core::WriterId>,
+        RunRecordData,
+    )>,
+    ReaderError,
+>;
+
+struct ReadOperation<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for ReadOperation<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn live_reader<T: obzenflow_core::event::JournalEvent + 'static>(
+    journal: Arc<dyn Journal<T>>,
+    wrap: fn(obzenflow_core::JournalRecord<T::Payload>) -> RunRecordData,
+) -> LiveReader {
+    let id = *journal.id();
+    let owner = match journal.owner() {
+        Some(obzenflow_core::JournalOwner::Stage { stage_id }) => Some((*stage_id).into()),
+        Some(obzenflow_core::JournalOwner::System { system_id }) => Some((*system_id).into()),
+        None => None,
+    };
+    let stream = futures::stream::unfold(
+        (journal, None::<Box<dyn JournalReader<T>>>),
+        move |(journal, reader)| async move {
+            let opening = reader.is_none();
+            let operation_journal = journal.clone();
+            let mut operation = ReadOperation(tokio::spawn(async move {
+                let mut reader = match reader {
+                    Some(reader) => reader,
+                    None => match operation_journal.reader_from(0).await {
+                        Ok(reader) => {
+                            let opened = reader
+                                .initial_prefix_complete()
+                                .map(|initial_complete| ReadStep {
+                                    record: None,
+                                    initial_complete,
+                                    at_end: false,
+                                })
+                                .map_err(ReaderError::Read);
+                            return (opened, Some(reader));
+                        }
+                        Err(error) => return (Err(ReaderError::Open(error)), None),
+                    },
+                };
+                let result = match reader.next().await {
+                    Ok(record) => reader
+                        .initial_prefix_complete()
+                        .map(|initial_complete| ReadStep {
+                            record: record.map(wrap),
+                            initial_complete,
+                            at_end: reader.is_at_end(),
+                        })
+                        .map_err(ReaderError::Read),
+                    Err(error) => Err(ReaderError::Read(error)),
+                };
+                (result, Some(reader))
+            }));
+            let (result, reader) = match (&mut operation.0).await {
+                Ok(completed) => completed,
+                Err(error) => {
+                    let error = JournalError::Implementation {
+                        message: "Studio journal operation failed".into(),
+                        source: Box::new(error),
+                    };
+                    (
+                        Err(if opening {
+                            ReaderError::Open(error)
+                        } else {
+                            ReaderError::Read(error)
+                        }),
+                        None,
+                    )
+                }
+            };
+            Some((result, (journal, reader)))
+        },
+    );
+    LiveReader {
+        id,
+        owner,
+        position: 0,
+        stream: Box::pin(stream),
+        initial_complete: false,
+        at_end: false,
+    }
+}
+impl LiveReaders {
+    fn new(
+        stages: Vec<Arc<dyn Journal<ChainEvent>>>,
+        systems: Vec<Arc<dyn Journal<SystemEvent>>>,
+    ) -> Self {
+        let entries = stages
+            .into_iter()
+            .map(|journal| live_reader(journal, |record| RunRecordData::Chain(Box::new(record))))
+            .chain(systems.into_iter().map(|journal| {
+                live_reader(journal, |record| RunRecordData::System(Box::new(record)))
+            }))
+            .collect();
+        Self { entries, next: 0 }
+    }
+    fn contains(&self, journal: &JournalId) -> bool {
+        self.entries.iter().any(|reader| reader.id == *journal)
+    }
+    fn initial_prefix_complete(&self) -> bool {
+        self.entries.iter().all(|reader| reader.initial_complete)
+    }
+    fn is_at_end(&self) -> bool {
+        self.entries.iter().all(|reader| reader.at_end)
+    }
+    fn reconfirm_ends(&mut self) {
+        for reader in &mut self.entries {
+            reader.at_end = false;
+        }
+    }
+    fn poll_next(
+        &mut self,
+        cx: &mut Context<'_>,
+        resume: Option<&BTreeMap<JournalId, u64>>,
+    ) -> Poll<ReaderResult> {
+        let count = self.entries.len();
+        for offset in 0..count {
+            let index = (self.next + offset) % count;
+            let reader = &mut self.entries[index];
+            if reader.at_end
+                || resume.is_some_and(|positions| {
+                    reader.position >= positions.get(&reader.id).copied().unwrap_or(0)
+                })
+            {
+                continue;
+            }
+            match reader.stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(step))) => {
+                    reader.initial_complete = step.initial_complete;
+                    // A positive end hint following a record is not a completed tail read.
+                    reader.at_end = step.record.is_none() && step.at_end;
+                    if let Some(record) = step.record {
+                        let position = match &record {
+                            RunRecordData::Chain(record) => record.local_sequence(),
+                            RunRecordData::System(record) => record.local_sequence(),
+                        };
+                        reader.position = position;
+                        self.next = (index + 1) % count;
+                        return Poll::Ready(Ok(Some((reader.id, position, reader.owner, record))));
+                    }
+                    self.next = (index + 1) % count;
+                    return Poll::Ready(Ok(None));
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
+                Poll::Ready(None) => unreachable!("live journal streams remain open"),
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    }
+}
+
 enum Phase {
     Fresh,
     Resume(BTreeMap<JournalId, u64>),
@@ -33,7 +221,7 @@ enum Phase {
 }
 
 struct Connection {
-    readers: ReportReaders,
+    readers: LiveReaders,
     phase: Phase,
     projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
@@ -52,20 +240,15 @@ struct Connection {
 }
 
 pub(super) fn connection(
-    journals: Vec<SupervisorJournal>,
+    stage_journals: Vec<Arc<dyn Journal<ChainEvent>>>,
+    system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
     projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
     cursor: Option<&str>,
     observation_interval: Duration,
 ) -> impl Stream<Item = SseFrame> + Send + 'static {
-    let mut readers = ReportReaders::default();
-    for journal in journals {
-        match journal {
-            SupervisorJournal::Stage { journal, .. } => readers.stage(journal),
-            SupervisorJournal::System(journal) => readers.system(journal),
-        }
-    }
+    let readers = LiveReaders::new(stage_journals, system_journals);
     let mut pending = VecDeque::new();
     let mut checkpoint = BTreeMap::new();
     let phase = match cursor {
@@ -125,6 +308,20 @@ impl Connection {
                 return None;
             }
             if let Phase::Resume(positions) = &self.phase {
+                if self.readers.entries.iter().any(|reader| {
+                    reader.initial_complete
+                        && reader.position < positions.get(&reader.id).copied().unwrap_or(0)
+                }) {
+                    self.pending.push_back(
+                        StudioStreamError::InvalidCursor(
+                            "cursor exceeds a committed journal prefix".into(),
+                        )
+                        .frame(),
+                    );
+                    self.checkpoint = self.applied.clone();
+                    self.phase = Phase::Fresh;
+                    continue;
+                }
                 if positions.iter().all(|(journal, position)| {
                     self.applied.get(journal).copied().unwrap_or(0) >= *position
                 }) {
@@ -167,7 +364,7 @@ impl Connection {
             if self.read_since_observation
                 && self.next_observation.is_some_and(|at| at <= Instant::now())
             {
-                // Reader tasks retain their pending I/O independently of this
+                // Reader streams retain pending I/O independently of this
                 // optional yield. Skip missed slots; do not replay measurements.
                 self.pending.extend(self.projection.current_measurements());
                 self.next_observation = Some(Instant::now() + self.observation_interval);
@@ -180,21 +377,39 @@ impl Connection {
                 .map_or(Instant::now() + TAIL_INTERVAL, |at| {
                     at.min(Instant::now() + TAIL_INTERVAL)
                 });
-            let read = std::future::poll_fn(|cx| self.readers.poll_next(cx));
+            let positions = match &self.phase {
+                Phase::Resume(positions) => Some(positions),
+                _ => None,
+            };
+            let read = std::future::poll_fn(|cx| self.readers.poll_next(cx, positions));
             let result = tokio::select! {
                 result = read => Some(result),
                 _ = tokio::time::sleep_until(wake_at) => None,
             };
             match result {
-                Some(Ok(ReportRead::Record(envelope))) => {
+                Some(Ok(None)) => {
+                    self.physical_end = self.readers.is_at_end();
+                }
+                Some(Ok(Some((journal, position, owner, envelope)))) => {
                     self.physical_end = false;
                     scanned += 1;
                     self.records_scanned += 1;
-                    let journal = envelope.journal_id();
-                    let position = envelope.position();
                     self.applied.insert(journal, position);
                     let known = self.checkpoint.entry(journal).or_default();
                     *known = (*known).max(position);
+                    let owned = match &envelope {
+                        RunRecordData::Chain(record) => owner.is_some_and(|owner| {
+                            *record.writer_id() == owner
+                                && owner.as_stage()
+                                    == Some(&record.envelope.provenance.event.flow_context.stage_id)
+                        }),
+                        RunRecordData::System(record) => {
+                            owner.is_some_and(|owner| *record.writer_id() == owner)
+                        }
+                    };
+                    if !owned {
+                        continue;
+                    }
                     let frames = match &self.phase {
                         Phase::Fresh => {
                             self.projection.rebuild_deferred(&envelope);
@@ -213,20 +428,22 @@ impl Connection {
                     };
                     self.enqueue(frames);
                 }
-                Some(Ok(ReportRead::Coverage { journal, through })) => {
-                    self.applied.insert(journal, through);
-                    let known = self.checkpoint.entry(journal).or_default();
-                    *known = (*known).max(through);
-                    self.physical_end = self.readers.is_at_end();
-                }
                 Some(Err(error)) => {
                     self.phase = Phase::Closed;
-                    if matches!(error.downcast_ref::<obzenflow_runtime::supervised_base::report_reader::ReportReaderError>(), Some(obzenflow_runtime::supervised_base::report_reader::ReportReaderError::Open { .. })) {
-                        return Some(StudioStreamError::JournalOpen(error.to_string()).frame());
-                    }
-                    return Some(StudioStreamError::JournalRead(error.to_string()).frame());
+                    return Some(match error {
+                        ReaderError::Open(error) => {
+                            StudioStreamError::JournalOpen(error.to_string()).frame()
+                        }
+                        ReaderError::Read(error) => {
+                            StudioStreamError::JournalRead(error.to_string()).frame()
+                        }
+                    });
                 }
-                None => self.physical_end = self.readers.is_at_end(),
+                None => {
+                    self.physical_end = self.readers.is_at_end();
+                    // Recheck live tails on the next bounded polling turn.
+                    self.readers.reconfirm_ends();
+                }
             }
         }
     }

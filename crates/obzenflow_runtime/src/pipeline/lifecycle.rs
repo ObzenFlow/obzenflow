@@ -4,7 +4,6 @@
 
 //! Public pipeline lifecycle states, controls and submission outcomes.
 
-use obzenflow_core::StageId;
 use obzenflow_fsm::StateVariant;
 use std::time::Duration;
 
@@ -20,71 +19,68 @@ pub enum FlowStopMode {
     Graceful { timeout: Duration },
 }
 
-/// Latest public projection of the private pipeline FSM.
-///
-/// `Materialized` and `ReadyForRun` are intentionally separate. Materialized
-/// means the runtime objects exist and non-source stages have been told to
-/// start. ReadyForRun requires committed non-source `Running` facts and the
-/// pipeline's own readiness fact. The watcher may coalesce intermediate states;
-/// the system journal remains the durable lifecycle record.
+/// Exact public projection of the pipeline's pending and achieved phases.
+/// Handles may coalesce observations; acknowledgements retain achieved results.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PipelineState {
-    /// Initial state before stage resources have been created.
     Created,
-    /// Stage resources, subscriptions, and runtime wiring are being created.
-    Materializing,
-    /// Runtime wiring exists and non-source stages are starting.
-    ///
-    /// Sources must not start in this state. The materialized supervisor waits
-    /// here until every non-source stage has journalled `Running` and the
-    /// pipeline has consumed its committed `ReadyForRun` fact.
-    Materialized,
-    /// All non-source stages have reported `Running`.
-    ///
-    /// `Start` can be admitted here. This projection also covers authorised
-    /// source startup until the pipeline consumes the sources' `Running` facts.
-    /// Repeated controls are coalesced by the private FSM.
+    Registering,
+    InitializingStages,
+    StartingConsumers,
+    PublishingReady,
     ReadyForRun,
-    /// The pipeline has consumed the authorised sources' `Running` facts.
+    PublishingStart,
+    StartingSources,
+    PublishingRunning,
     Running,
-    /// Source stages have completed and the pipeline is moving toward drain.
-    SourceCompleted,
-    /// A journalled contract failure has requested abort; resources are settling.
-    AbortRequested {
-        reason: obzenflow_core::event::types::ViolationCause,
-        upstream: Option<StageId>,
-    },
-    /// Execution or finalisation is still settling.
     Draining,
-    /// The FSM has finished resource settlement without a selected failure.
+    CancellingChildren,
+    PublishingTerminal,
+    FinalisingMetrics,
+    PublishingFinalMarker,
     Drained,
+    FailingChildren {
+        cause: String,
+    },
+    Cancelled {
+        reason: String,
+    },
     Failed {
         reason: String,
         failure_cause: Option<obzenflow_core::event::types::ViolationCause>,
     },
 }
-
 impl StateVariant for PipelineState {
     fn variant_name(&self) -> &str {
         match self {
-            PipelineState::Created => "Created",
-            PipelineState::Materializing => "Materializing",
-            PipelineState::Materialized => "Materialized",
-            PipelineState::ReadyForRun => "ReadyForRun",
-            PipelineState::Running => "Running",
-            PipelineState::SourceCompleted => "SourceCompleted",
-            PipelineState::AbortRequested { .. } => "AbortRequested",
-            PipelineState::Draining => "Draining",
-            PipelineState::Drained => "Drained",
-            PipelineState::Failed { .. } => "Failed",
+            Self::Created => "Created",
+            Self::Registering => "Registering",
+            Self::InitializingStages => "InitializingStages",
+            Self::StartingConsumers => "StartingConsumers",
+            Self::PublishingReady => "PublishingReady",
+            Self::ReadyForRun => "ReadyForRun",
+            Self::PublishingStart => "PublishingStart",
+            Self::StartingSources => "StartingSources",
+            Self::PublishingRunning => "PublishingRunning",
+            Self::Running => "Running",
+            Self::Draining => "Draining",
+            Self::CancellingChildren => "CancellingChildren",
+            Self::PublishingTerminal => "PublishingTerminal",
+            Self::FinalisingMetrics => "FinalisingMetrics",
+            Self::PublishingFinalMarker => "PublishingFinalMarker",
+            Self::Drained => "Drained",
+            Self::FailingChildren { .. } => "FailingChildren",
+            Self::Cancelled { .. } => "Cancelled",
+            Self::Failed { .. } => "Failed",
         }
     }
 }
-
 impl PipelineState {
-    /// Terminal states: no further pipeline transitions occur.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, PipelineState::Drained | PipelineState::Failed { .. })
+        matches!(
+            self,
+            Self::Drained | Self::Cancelled { .. } | Self::Failed { .. }
+        )
     }
 }
 

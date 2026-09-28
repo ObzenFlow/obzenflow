@@ -7,6 +7,35 @@ use obzenflow_core::{ContractResult, StageId, ViolationCause};
 
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 
+/// Strictness mode for source at-least-once contracts.
+///
+/// This is a minimal, flow-wide toggle for how contract failures on
+/// *source* edges influence pipeline behaviour:
+/// - `Abort` (default): any failed source contract aborts the pipeline.
+/// - `Warn`: failures are logged and surfaced via contract events, but
+///   do not cause a pipeline abort. This is intended as a transitional
+///   mode until full contract strictness plumbing lands in 090d.
+///
+/// FLOWIP-010: build-resolved from `contracts.source_contract_strict_mode`
+/// and applied by the consuming child before aggregating edge outcomes; the registry rejects unknown tokens at
+/// startup (the old env coercion is gone).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SourceContractStrictMode {
+    #[default]
+    Abort,
+    Warn,
+}
+
+impl SourceContractStrictMode {
+    /// Parse the registry-validated token (`abort` or `warn`).
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "warn" => SourceContractStrictMode::Warn,
+            _ => SourceContractStrictMode::Abort,
+        }
+    }
+}
+
 /// Final decision for a single edge after applying policies to raw contract results.
 #[derive(Clone)]
 pub enum EdgeContractDecision {

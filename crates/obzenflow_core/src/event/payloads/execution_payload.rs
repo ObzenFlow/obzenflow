@@ -150,6 +150,19 @@ pub enum StageLifecycleFact {
     },
 }
 
+impl StageLifecycleFact {
+    pub fn stage_id(&self) -> StageId {
+        match self {
+            Self::Running { stage_id }
+            | Self::Draining { stage_id, .. }
+            | Self::Drained { stage_id, .. }
+            | Self::Completed { stage_id, .. }
+            | Self::Cancelled { stage_id, .. }
+            | Self::Failed { stage_id, .. } => *stage_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "metrics_event", rename_all = "snake_case")]
 pub enum MetricsCoordinationFact {
@@ -423,19 +436,6 @@ impl ExecutionPayload {
     }
 }
 
-/// System mirrors retain their nested middleware discriminator, but accept only
-/// the same protected decisions as the originating stage journal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(
-    tag = "middleware_event",
-    content = "details",
-    rename_all = "snake_case"
-)]
-pub enum MiddlewareFact {
-    CircuitBreaker(CircuitBreakerFact),
-    RateLimiter(RateLimiterFact),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CircuitBreakerOpenTrigger {
@@ -501,5 +501,59 @@ mod tests {
         assert!(missing_cooldown.to_string().contains("cooldown_ms"));
         opening_json["cooldown_ms"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<CircuitBreakerFact>(opening_json).is_err());
+    }
+    #[test]
+    fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
+        use crate::event::types::{EventType, SeqNo};
+        use serde_json::json;
+        let payload = ExecutionPayload::ContractResult {
+            upstream: StageId::new(),
+            reader: StageId::new(),
+            selected_event_type: Some(EventType::from("test.selected.v1")),
+            feed_role: Some(SystemFeedRole::Reference),
+            contract_name: ContractName::from("TransportContract"),
+            status: ContractResultStatusLabel::Healthy,
+            cause: None,
+            reader_seq: Some(SeqNo(3)),
+            advertised_writer_seq: Some(SeqNo(5)),
+        };
+
+        let serialized = serde_json::to_value(&payload).expect("execution fact should serialize");
+        assert_eq!(serialized["selected_event_type"], "test.selected.v1");
+        assert_eq!(serialized["feed_role"], "reference");
+        assert_eq!(serialized["contract_name"], "TransportContract");
+        assert_eq!(serialized["status"], "healthy");
+
+        let decoded: ExecutionPayload = serde_json::from_value(json!({
+            "execution_type": "contract_result",
+            "upstream": serialized["upstream"].clone(),
+            "reader": serialized["reader"].clone(),
+            "selected_event_type": "test.selected.v1",
+            "feed_role": "reference",
+            "contract_name": "TransportContract",
+            "status": "healthy",
+            "reader_seq": 3,
+            "advertised_writer_seq": 5
+        }))
+        .expect("string-label execution fact should deserialize");
+
+        match decoded {
+            ExecutionPayload::ContractResult {
+                selected_event_type,
+                feed_role,
+                contract_name,
+                status,
+                ..
+            } => {
+                assert_eq!(
+                    selected_event_type,
+                    Some(EventType::from("test.selected.v1"))
+                );
+                assert_eq!(feed_role, Some(SystemFeedRole::Reference));
+                assert_eq!(contract_name.as_str(), "TransportContract");
+                assert_eq!(status, ContractResultStatusLabel::Healthy);
+            }
+            other => panic!("expected ContractResult, got {other:?}"),
+        }
     }
 }

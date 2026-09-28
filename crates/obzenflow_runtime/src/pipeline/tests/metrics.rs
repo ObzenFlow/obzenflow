@@ -137,7 +137,7 @@ pub async fn dropping_pipeline_context_cancels_its_metrics_supervisor(
     let mut journals = make_journals();
     let journal = new_system_journal(&mut *journals, system_id);
     let (topology, _, _) = source_sink_topology_with_source();
-    let context = test_context(topology, system_id, journal, None);
+    let context = test_context(topology, system_id, journal);
     let (sender, _receiver, watcher) =
         ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
             .build(MetricsAggregatorState::Running);
@@ -281,14 +281,13 @@ pub async fn metrics_preparation_is_passive_and_cancellation_prevents_late_insta
         .is_empty());
 }
 
-pub async fn original_terminal_acknowledgement_expires_metrics_before_delayed_journal_consumption(
+pub async fn metrics_budget_starts_after_terminal_publication_without_readback(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
     use crate::metrics::{MetricsAggregatorEvent, MetricsAggregatorState};
     use crate::pipeline::supervisor::PipelineSupervisor;
     use crate::supervised_base::{ChannelBuilder, HandleBuilder, SelfSupervised};
     let mut ctx = make_fsm_context(make_journals);
-    ctx.metrics_drain_timeout_ms = 1;
     let (sender, _receiver, watcher) =
         ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
             .build(MetricsAggregatorState::Running);
@@ -296,30 +295,37 @@ pub async fn original_terminal_acknowledgement_expires_metrics_before_delayed_jo
         .spawn_for_test(
             std::future::pending::<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
         );
-    let metrics = HandleBuilder::new()
-        .with_event_sender(sender)
-        .with_state_watcher(watcher)
-        .with_supervisor_task(task)
-        .build_standard()
+    ctx.resources.metrics.install_for_test(
+        HandleBuilder::new()
+            .with_event_sender(sender)
+            .with_state_watcher(watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .unwrap(),
+    );
+    PipelineAction::FinaliseMetrics
+        .execute(&mut ctx)
+        .await
         .unwrap();
-    ctx.resources.metrics.install_for_test(metrics);
-    let ack = std::time::Instant::now() - std::time::Duration::from_secs(1);
-    ctx.resources.terminal_ack.set(ack).unwrap();
-    let (_sender, receiver, watcher) = ChannelBuilder::new().build(PipelineState::Draining);
+    let deadline = std::time::Instant::now() - Duration::from_secs(1);
+    ctx.metrics_deadline = Some(deadline);
+    let (_sender, receiver, watcher) =
+        ChannelBuilder::new().build(PipelineState::FinalisingMetrics);
     let mut supervisor = PipelineSupervisor::new(
         ctx.system_id,
         receiver,
         watcher,
         ctx.resources.failure.clone(),
+        ctx.system_journal.clone(),
     );
     assert!(matches!(
         supervisor
-            .dispatch_state(&PipelineFsmState::PublishingTerminal, &mut ctx)
+            .dispatch_state(&PipelineFsmState::FinalisingMetrics, &mut ctx)
             .await
             .unwrap(),
         crate::supervised_base::EventLoopDirective::Transition(PipelineFsmEvent::MetricsExpired)
     ));
-    assert_eq!(ctx.resources.terminal_ack.get(), Some(&ack));
+    assert_eq!(ctx.metrics_deadline, Some(deadline));
     ctx.resources.metrics.abort_and_join().await.unwrap();
 }
 
@@ -338,7 +344,7 @@ pub async fn drain_metrics_skips_when_metrics_not_started(
         Some(Arc::new(RecordingSnapshots::default())),
     );
 
-    PipelineAction::DrainMetrics
+    PipelineAction::FinaliseMetrics
         .execute(&mut ctx)
         .await
         .unwrap();
@@ -435,9 +441,9 @@ pub async fn late_metrics_bootstrap_selects_current_values_without_stage_eof(
     ctx.resources.prepared_metrics = crate::pipeline::metrics::prepare_metrics(&ctx)
         .await
         .unwrap();
-    PipelineAction::StartMetricsAggregator
-        .execute(&mut ctx)
-        .await
+    ctx.resources
+        .metrics
+        .start(ctx.resources.prepared_metrics.take().unwrap())
         .unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -500,9 +506,9 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
     ctx.resources.prepared_metrics = crate::pipeline::metrics::prepare_metrics(&ctx)
         .await
         .unwrap();
-    PipelineAction::StartMetricsAggregator
-        .execute(&mut ctx)
-        .await
+    ctx.resources
+        .metrics
+        .start(ctx.resources.prepared_metrics.take().unwrap())
         .unwrap();
     assert!(
         ctx.resources
@@ -514,49 +520,21 @@ pub async fn stage_cleanup_keeps_metrics_alive_until_the_terminal_fact(
         "expected metrics handle to be stored and running"
     );
 
-    PipelineAction::CancelStages {
-        contract_abort: false,
-    }
-    .execute(&mut ctx)
-    .await
-    .unwrap();
-
-    for _ in 0..128 {
-        PipelineAction::DrainMetrics
-            .execute(&mut ctx)
-            .await
-            .unwrap();
-    }
-    ctx.resources.publications.observe_accepted().await.unwrap();
-
+    PipelineAction::CancelChildren
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+    tokio::task::yield_now().await;
     assert!(
-        ctx.resources
-            .metrics
-            .handle()
-            .as_ref()
-            .unwrap()
-            .is_running(),
-        "stage cleanup must retain metrics for terminal catch-up"
+        ctx.resources.metrics.handle().unwrap().is_running(),
+        "child cleanup keeps metrics available until the terminal publication"
     );
-
-    let events = system_journal.read_causally_ordered().await.unwrap();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|envelope| matches!(
-                &envelope.payload,
-                SystemPayload::MetricsCoordination(MetricsCoordinationEvent::DrainRequested)
-            ))
-            .count(),
-        1,
-        "repeated failure cleanup must retain one drain admission"
-    );
-    assert!(!events.iter().any(|envelope| {
-        matches!(
-            &envelope.payload,
-            SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Drained)
-        )
-    }));
+    assert!(!system_journal
+        .read_all_unordered()
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type_name() == "system.metrics.drained"));
     system_journal
         .append(
             SystemEventFactory::new(system_id).pipeline_not_started(),

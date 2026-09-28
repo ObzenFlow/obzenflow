@@ -28,11 +28,12 @@ use obzenflow_adapters::middleware::{
     SourcePollOutcome,
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkOperationFailed, SinkOperationPhase, SinkWritePhase,
-    StageActivity, StageLifecycleEvent, SupervisorRecord, SystemPayload,
+    StageActivity,
 };
 use obzenflow_core::{JournalRecord, TypedPayload};
 use obzenflow_dsl::{async_source, flow, sink, source, transform, FlowBuildError, FlowDefinition};
@@ -955,21 +956,16 @@ async fn assert_operation_failure_lifecycle(
     );
 
     let data = read_stage_journal(run, "postgres", "data_journal_file").await;
-    let reports = data
-        .iter()
-        .cloned()
-        .filter_map(SupervisorRecord::from_chain)
-        .collect::<Vec<_>>();
-    let tied_failures = reports
+    let tied_failures = data
         .iter()
         .filter_map(|envelope| match &envelope.payload {
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event:
-                    StageLifecycleEvent::Failed {
-                        causal_event_id, ..
-                    },
-            } if *stage_id == operation.stage_id => *causal_event_id,
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Failed {
+                    stage_id,
+                    causal_event_id,
+                    ..
+                },
+            )) if *stage_id == operation.stage_id => *causal_event_id,
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -979,12 +975,9 @@ async fn assert_operation_failure_lifecycle(
         "the real connector failure is the sink lifecycle's exact durable cause"
     );
     assert!(
-        !reports.iter().any(|envelope| matches!(
+        !data.iter().any(|envelope| matches!(
             &envelope.payload,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Completed { .. },
-            } if *stage_id == operation.stage_id
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed { stage_id, ..  })) if *stage_id == operation.stage_id
         )),
         "a failed PostgreSQL lifecycle cannot claim completion"
     );

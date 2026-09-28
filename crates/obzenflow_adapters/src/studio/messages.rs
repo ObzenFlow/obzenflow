@@ -8,23 +8,31 @@ use super::contracts::ContractBoundaryAlias;
 use obzenflow_core::event::observability::{
     CaptureStamp, CircuitBreakerMeasurements, EdgeLivenessState, RateLimiterMeasurements,
 };
-use obzenflow_core::event::payloads::execution_payload::CircuitBreakerOpenTrigger;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerOpenTrigger, StageLifecycleFact,
+};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::system_payload::{
-    ContractName, ContractResultStatusLabel, MiddlewareEventOrigin, PipelineStopAdmission,
-    SystemFeedRole,
+    ContractName, ContractResultStatusLabel, PipelineStopAdmission, SystemFeedRole,
 };
 use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::types::{Count, DurationMs, EventType, SeqNo, ViolationCause};
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{
-    CommandDiscardDisposition, PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
+    CommandDiscardDisposition, PipelineLifecycleEvent, ReplayLifecycleEvent,
 };
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::metrics::FlowLifecycleMetricsSnapshot;
 use obzenflow_core::{web::SseFrame, EventId, StageId};
 use serde::{Serialize, Serializer};
 use std::path::PathBuf;
+
+#[derive(Serialize)]
+pub(super) struct MiddlewareEventOrigin {
+    pub event_id: EventId,
+    pub writer_key: String,
+    pub seq: SeqNo,
+}
 
 #[derive(Serialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
@@ -40,7 +48,7 @@ pub(super) enum StudioMessage<'a> {
         #[serde(serialize_with = "display")]
         stage_id: StageId,
         #[serde(flatten, with = "StageUpdate")]
-        event: &'a StageLifecycleEvent,
+        event: &'a StageLifecycleFact,
         #[serde(flatten)]
         at: Observation<'a>,
     },
@@ -95,7 +103,7 @@ pub(super) enum StudioMessage<'a> {
         flow_id: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_name: Option<&'a str>,
-        origin: &'a MiddlewareEventOrigin,
+        origin: MiddlewareEventOrigin,
         revision: SeqNo,
         #[serde(flatten)]
         update: MiddlewareUpdate<'a>,
@@ -250,30 +258,48 @@ pub(super) struct ContractEdge<'a> {
 // Core records `lifecycle_event: "running"`; Studio expects
 // `event_type: "stage_running"`. The Serde definitions below translate the names.
 #[derive(Serialize)]
-#[serde(remote = "StageLifecycleEvent", tag = "event_type")]
+#[serde(remote = "StageLifecycleFact", tag = "event_type")]
 enum StageUpdate {
     #[serde(rename = "stage_running")]
-    Running,
+    Running {
+        #[serde(skip)]
+        stage_id: StageId,
+    },
     #[serde(rename = "stage_draining")]
     Draining {
+        #[serde(skip)]
+        reason: Option<String>,
+        #[serde(skip)]
+        stage_id: StageId,
         #[serde(skip_serializing_if = "Option::is_none")]
         accounting: Option<ExecutionAccounting>,
     },
     #[serde(rename = "stage_drained")]
-    Drained,
+    Drained {
+        #[serde(skip)]
+        stage_id: StageId,
+        #[serde(skip)]
+        events_processed: Option<u64>,
+    },
     #[serde(rename = "stage_completed")]
     Completed {
+        #[serde(skip)]
+        stage_id: StageId,
         #[serde(skip_serializing_if = "Option::is_none")]
         accounting: Option<ExecutionAccounting>,
     },
     #[serde(rename = "stage_cancelled")]
     Cancelled {
+        #[serde(skip)]
+        stage_id: StageId,
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         accounting: Option<ExecutionAccounting>,
     },
     #[serde(rename = "stage_failed")]
     Failed {
+        #[serde(skip)]
+        stage_id: StageId,
         error: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         recoverable: Option<bool>,

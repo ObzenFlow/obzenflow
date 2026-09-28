@@ -7,7 +7,7 @@
 use super::*;
 #[cfg(test)]
 use crate::feed_plan::{FactVisibility, FeedRole, LogicalFeed, PayloadTypeDescriptor};
-use crate::pipeline::tests::support::{new_system_journal, ControlledJournal};
+use crate::pipeline::tests::support::new_system_journal;
 use obzenflow_core::journal::factory::FlowJournalFactory;
 #[cfg(test)]
 use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, StageType, TypeHintInfo};
@@ -94,17 +94,15 @@ fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
     assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
 }
 
-pub async fn subscription_preparation_failure_joins_every_supplied_stage(
+pub async fn metrics_preparation_failure_joins_every_supplied_stage(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
-    let fail_reader = 1;
     let system_id = SystemId::new();
     let mut journals = make_journals();
-    let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
-    journal.fail_reader = Some(fail_reader);
+    let journal = new_system_journal(&mut *journals, system_id);
     let (topology, source, sink) = source_sink_topology_with_source();
     let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
-    let result = crate::pipeline::PipelineBuilder::new(topology, Arc::new(journal), FlowId::new())
+    let result = crate::pipeline::PipelineBuilder::new(topology, journal, FlowId::new())
         .with_sources(vec![Box::new(owned_test_stage(
             source,
             CoreStageType::FiniteSource,
@@ -115,20 +113,12 @@ pub async fn subscription_preparation_failure_joins_every_supplied_stage(
             CoreStageType::Sink,
             Some(probes[1].clone()),
         ))])
-        .with_metrics_journals(crate::pipeline::tests::support::new_metrics_journals(
-            &mut *journals,
-        ))
         .with_metrics_exporter(Arc::new(DiscardSnapshots))
         .build()
         .await;
-    let flow = result.expect("reader opening belongs to its retained task");
-    let error = tokio::time::timeout(std::time::Duration::from_secs(2), flow.run())
-        .await
-        .unwrap()
-        .unwrap_err();
     assert!(
-        format!("{error:?}").contains("source: Full"),
-        "reader {fail_reader}: {error:?}"
+        result.is_err(),
+        "metrics preparation requires its owned journals"
     );
     for probe in probes {
         assert!(probe.request_abort_count.load(Ordering::Relaxed) >= 1);

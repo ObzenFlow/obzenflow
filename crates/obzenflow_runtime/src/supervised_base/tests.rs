@@ -11,7 +11,6 @@ use super::{
     SelfSupervisedWithExternalEvents, SupervisorHandle, SupervisorTaskBuilder,
 };
 use crate::stages::common::stage_handle::discarded_control_details;
-use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::CommandDiscardDisposition;
 use obzenflow_core::{StageId, SystemId, WriterId};
@@ -51,7 +50,6 @@ impl FsmContext for TestContext {}
 
 impl TestContext {
     fn assert_publication_owner(&self) {
-        self.system_journal.assert_registered();
         let current =
             PublicationScope::current().expect("the shared runner must install its owner");
         assert!(Arc::ptr_eq(&self.publications, &current));
@@ -113,7 +111,6 @@ fn build_test_machine(
 
 struct TestSelfSupervisor {
     name: String,
-    completion_writes: Arc<AtomicUsize>,
 }
 
 impl Supervisor for TestSelfSupervisor {
@@ -133,8 +130,14 @@ impl Supervisor for TestSelfSupervisor {
         SupervisorKind::Pipeline
     }
 
-    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
-        context.system_journal.clone().into()
+    fn registration(
+        &self,
+        context: &Self::Context,
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
+            context.system_journal.clone();
+        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
     }
 
     fn name(&self) -> &str {
@@ -160,12 +163,6 @@ impl SelfSupervised for TestSelfSupervisor {
         WriterId::from(SystemId::new_const(1))
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        assert!(PublicationScope::current().is_some());
-        self.completion_writes.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
     fn event_for_action_error(&self, msg: String) -> Self::Event {
         TestEvent::Error(msg)
     }
@@ -173,7 +170,6 @@ impl SelfSupervised for TestSelfSupervisor {
 
 struct TestHandlerSupervisor {
     name: String,
-    completion_writes: Arc<AtomicUsize>,
     stage_id: StageId,
 }
 
@@ -194,16 +190,20 @@ impl Supervisor for TestHandlerSupervisor {
         SupervisorKind::Transform
     }
 
-    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
-        context.system_journal.clone().into()
+    fn registration(
+        &self,
+        context: &Self::Context,
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
+            context.system_journal.clone();
+        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
     }
 
     fn name(&self) -> &str {
         &self.name
     }
 }
-
-impl HandlerSupervisedCleanup for TestHandlerSupervisor {}
 
 #[async_trait::async_trait]
 impl HandlerSupervised for TestHandlerSupervisor {
@@ -223,16 +223,6 @@ impl HandlerSupervised for TestHandlerSupervisor {
 
     fn writer_id(&self) -> WriterId {
         WriterId::from(self.stage_id)
-    }
-
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        assert!(PublicationScope::current().is_some());
-        self.completion_writes.fetch_add(1, Ordering::Relaxed);
-        Ok(())
     }
 
     fn event_for_action_error(&self, msg: String) -> Self::Event {
@@ -270,7 +260,6 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
 
     let supervisor = TestSelfSupervisor {
         name: "test-self-supervisor".to_string(),
-        completion_writes: completion_writes.clone(),
     };
     let ctx = TestContext {
         system_journal: Arc::new(
@@ -294,7 +283,7 @@ async fn dispatch_state_error_drives_fsm_failure_path_self_supervised() {
     let result = handle.wait_for_completion().await;
     assert!(result.is_ok());
     assert_eq!(failure_actions_executed.load(Ordering::Relaxed), 1);
-    assert_eq!(completion_writes.load(Ordering::Relaxed), 1);
+    assert_eq!(completion_writes.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -305,7 +294,6 @@ async fn dispatch_state_error_drives_fsm_failure_path_handler_supervised() {
 
     let supervisor = TestHandlerSupervisor {
         name: "test-handler-supervisor".to_string(),
-        completion_writes: completion_writes.clone(),
         stage_id: StageId::new_const(1),
     };
     let ctx = TestContext {
@@ -327,7 +315,7 @@ async fn dispatch_state_error_drives_fsm_failure_path_handler_supervised() {
     let result = handle.wait_for_completion().await;
     assert!(result.is_ok());
     assert_eq!(failure_actions_executed.load(Ordering::Relaxed), 1);
-    assert_eq!(completion_writes.load(Ordering::Relaxed), 1);
+    assert_eq!(completion_writes.load(Ordering::Relaxed), 0);
 }
 
 #[derive(Clone, Debug, PartialEq, StateVariant)]
@@ -397,15 +385,17 @@ impl Supervisor for ExternalEventTestSelfSupervisor {
         SupervisorKind::Pipeline
     }
 
-    fn report_journal(
+    fn registration(
         &self,
         _context: &Self::Context,
-    ) -> crate::supervised_base::SupervisorJournal {
-        Arc::new(
-            terminal_commands::TestJournal::default()
-                .with_owner(obzenflow_core::JournalOwner::system(SystemId::new_const(1))),
-        )
-        .into()
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
+            Arc::new(
+                terminal_commands::TestJournal::default()
+                    .with_owner(obzenflow_core::JournalOwner::system(SystemId::new_const(1))),
+            );
+        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
     }
 
     fn name(&self) -> &str {
@@ -454,10 +444,6 @@ impl SelfSupervised for ExternalEventTestSelfSupervisor {
         WriterId::from(SystemId::new_const(1))
     }
 
-    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        Ok(())
-    }
-
     fn event_for_action_error(&self, msg: String) -> Self::Event {
         ExternalEventTestEvent::Error(msg)
     }
@@ -486,11 +472,14 @@ impl Supervisor for ExternalEventTestHandlerSupervisor {
         SupervisorKind::Transform
     }
 
-    fn report_journal(
+    fn registration(
         &self,
         _context: &Self::Context,
-    ) -> crate::supervised_base::SupervisorJournal {
-        Arc::new(terminal_commands::TestJournal::default()).into()
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
+            Arc::new(terminal_commands::TestJournal::default());
+        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
     }
 
     fn name(&self) -> &str {
@@ -510,8 +499,6 @@ impl ExternalEventPolicy for ExternalEventTestHandlerSupervisor {
     }
 }
 
-impl HandlerSupervisedCleanup for ExternalEventTestHandlerSupervisor {}
-
 #[async_trait::async_trait]
 impl HandlerSupervised for ExternalEventTestHandlerSupervisor {
     type Handler = ();
@@ -527,14 +514,6 @@ impl HandlerSupervised for ExternalEventTestHandlerSupervisor {
 
     fn writer_id(&self) -> WriterId {
         WriterId::from(self.stage_id)
-    }
-
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        Ok(())
     }
 
     fn event_for_action_error(&self, msg: String) -> Self::Event {
@@ -564,7 +543,7 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         inner,
         receiver,
         watcher,
-        Arc::new(terminal_commands::TestJournal::default()).into(),
+        Arc::new(terminal_commands::TestJournal::default()),
     );
     let mut ctx = ExternalEventTestContext;
 
@@ -603,7 +582,10 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         inner,
         receiver,
         watcher,
-        (Arc::new(terminal_commands::TestJournal::default())).into(),
+        crate::supervised_base::with_external_events::system_commands(
+            Arc::new(terminal_commands::TestJournal::default()),
+            StageId::new_const(1).into(),
+        ),
     );
     let mut ctx = ExternalEventTestContext;
 
@@ -647,7 +629,7 @@ async fn with_external_events_defer_mode_preserves_commands_for_later_execution(
         inner,
         receiver,
         watcher,
-        Arc::new(terminal_commands::TestJournal::default()).into(),
+        Arc::new(terminal_commands::TestJournal::default()),
     );
     let mut ctx = ExternalEventTestContext;
 
@@ -671,4 +653,96 @@ async fn with_external_events_defer_mode_preserves_commands_for_later_execution(
         1,
         "poll mode must not delegate when an external event is ready"
     );
+}
+
+#[tokio::test]
+async fn deferred_commands_keep_payloads_and_causal_context_until_admission() {
+    use super::with_external_events::CommandMailbox;
+    use crate::supervised_base::publication;
+    use obzenflow_core::event::{CausalFrontier, ChainEventFactory};
+    let first = crate::testing::causal_fixture::committed_input(
+        obzenflow_core::JournalWriterId::new(),
+        ChainEventFactory::data_event(
+            StageId::new().into(),
+            "command.first",
+            serde_json::json!({}),
+        ),
+    );
+    let second = crate::testing::causal_fixture::committed_input(
+        obzenflow_core::JournalWriterId::new(),
+        ChainEventFactory::data_event(
+            StageId::new().into(),
+            "command.second",
+            serde_json::json!({}),
+        ),
+    );
+    let (sender, receiver, _) = ChannelBuilder::new().build(());
+    publication::with_snapshot(CausalFrontier::from_record(&first).unwrap(), async {
+        sender
+            .send(ExternalEventTestEvent::Error("first".into()))
+            .await
+    })
+    .await
+    .unwrap();
+    publication::with_snapshot(CausalFrontier::from_record(&second).unwrap(), async {
+        sender
+            .send(ExternalEventTestEvent::Error("second".into()))
+            .await
+    })
+    .await
+    .unwrap();
+    sender
+        .send(ExternalEventTestEvent::Initialize)
+        .await
+        .unwrap();
+    let mut mailbox = CommandMailbox::from(receiver);
+    let owner = PublicationScope::new();
+    owner
+        .enter(async {
+            assert_eq!(
+                mailbox
+                    .recv(|event| matches!(event, ExternalEventTestEvent::Initialize))
+                    .await,
+                Some(ExternalEventTestEvent::Initialize)
+            );
+            assert_eq!(
+                publication::capture()
+                    .clock()
+                    .get(&first.causal_coordinate()),
+                0
+            );
+            assert_eq!(
+                publication::capture()
+                    .clock()
+                    .get(&second.causal_coordinate()),
+                0
+            );
+            assert_eq!(
+                mailbox.recv(|_| true).await,
+                Some(ExternalEventTestEvent::Error("first".into()))
+            );
+            assert_eq!(
+                publication::capture()
+                    .clock()
+                    .get(&first.causal_coordinate()),
+                1
+            );
+            assert_eq!(
+                publication::capture()
+                    .clock()
+                    .get(&second.causal_coordinate()),
+                0
+            );
+            assert_eq!(
+                mailbox.recv(|_| true).await,
+                Some(ExternalEventTestEvent::Error("second".into()))
+            );
+            assert_eq!(
+                publication::capture()
+                    .clock()
+                    .get(&second.causal_coordinate()),
+                1
+            );
+        })
+        .await;
 }

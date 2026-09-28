@@ -328,14 +328,23 @@ impl HttpEndpoint for FlowControlEndpoint {
 fn state_diagnostic_label(state: &PipelineState) -> &'static str {
     match state {
         PipelineState::Created => "created",
-        PipelineState::Materializing => "materializing",
-        PipelineState::Materialized => "materialized",
+        PipelineState::Registering => "registering",
+        PipelineState::InitializingStages => "initializing_stages",
+        PipelineState::StartingConsumers => "starting_consumers",
+        PipelineState::PublishingReady => "publishing_ready",
         PipelineState::ReadyForRun => "ready_for_run",
+        PipelineState::PublishingStart => "publishing_start",
+        PipelineState::StartingSources => "starting_sources",
+        PipelineState::PublishingRunning => "publishing_running",
         PipelineState::Running => "running",
-        PipelineState::SourceCompleted => "source_completed",
-        PipelineState::AbortRequested { .. } => "abort_requested",
         PipelineState::Draining => "draining",
+        PipelineState::CancellingChildren => "cancelling_children",
+        PipelineState::PublishingTerminal => "publishing_terminal",
+        PipelineState::FinalisingMetrics => "finalising_metrics",
+        PipelineState::PublishingFinalMarker => "publishing_final_marker",
         PipelineState::Drained => "drained",
+        PipelineState::FailingChildren { .. } => "failing_children",
+        PipelineState::Cancelled { .. } => "cancelled",
         PipelineState::Failed { .. } => "failed",
     }
 }
@@ -343,7 +352,6 @@ fn state_diagnostic_label(state: &PipelineState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::types::ViolationCause;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -433,15 +441,14 @@ mod tests {
     async fn play_rejects_pre_ready_and_terminal_states_with_state_payload() {
         let cases = [
             (PipelineState::Created, "created"),
-            (PipelineState::Materializing, "materializing"),
-            (PipelineState::Materialized, "materialized"),
-            (PipelineState::SourceCompleted, "source_completed"),
+            (PipelineState::InitializingStages, "initializing_stages"),
+            (PipelineState::StartingConsumers, "starting_consumers"),
+            (PipelineState::CancellingChildren, "cancelling_children"),
             (
-                PipelineState::AbortRequested {
-                    reason: ViolationCause::Other("abort".to_string()),
-                    upstream: None,
+                PipelineState::FailingChildren {
+                    cause: "abort".to_string(),
                 },
-                "abort_requested",
+                "failing_children",
             ),
             (PipelineState::Draining, "draining"),
             (PipelineState::Drained, "drained"),
@@ -476,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn play_maps_submitted_runtime_outcome() {
         let target = TestFlowTarget::with_play_outcome(
-            PipelineState::Materialized,
+            PipelineState::StartingConsumers,
             FlowStartControlOutcome::Submitted {
                 observed_state: PipelineState::ReadyForRun,
             },
@@ -495,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn play_maps_already_running_runtime_outcome() {
         let target = TestFlowTarget::with_play_outcome(
-            PipelineState::Materialized,
+            PipelineState::StartingConsumers,
             FlowStartControlOutcome::AlreadyRunning {
                 state: PipelineState::Running,
             },
@@ -513,14 +520,14 @@ mod tests {
 
     #[tokio::test]
     async fn pause_rejects_with_current_state_payload() {
-        let target = TestFlowTarget::new(PipelineState::Materialized);
+        let target = TestFlowTarget::new(PipelineState::StartingConsumers);
         let endpoint = FlowControlEndpoint::new_for_target(target.clone());
 
         let (status, response) = post_control(&endpoint, "pause").await;
 
         assert_eq!(status, 200);
         assert_eq!(response.status, FlowControlStatus::Rejected);
-        assert_eq!(response.state.as_deref(), Some("materialized"));
+        assert_eq!(response.state.as_deref(), Some("starting_consumers"));
         assert_eq!(target.play_calls.load(Ordering::Relaxed), 0);
     }
 
