@@ -10,10 +10,13 @@ async fn abort_execution_for_test(flow: &FlowHandle) {
     let error = lifecycle::wait(flow)
         .await
         .expect_err("emergency cancellation retains the aborted result");
-    assert!(std::error::Error::source(&error)
-        .unwrap()
-        .to_string()
-        .contains("aborted"));
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("aborted"),
+        "emergency cancellation result: {error:?}"
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -243,7 +246,10 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     drop(listener);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// Keep the newly spawned pipeline parked until this fixture aborts it. A second
+// worker could run its FSM concurrently and legitimately select failure while
+// emergency teardown closes publication admission or aborts a child.
+#[tokio::test]
 async fn hosted_start_observes_runtime_exit_before_readiness() {
     for terminal_mode in ["exit", "park"] {
         let dir = tempfile::tempdir().unwrap();
@@ -261,9 +267,15 @@ async fn hosted_start_observes_runtime_exit_before_readiness() {
                     stages: { src = infinite_source!(IdlePayload => source); sink = sink!(IdlePayload => sink); },
                     topology: { src |> sink; }
                 }.build(context).await?;
+                assert!(!flow.current_state().is_terminal());
                 abort_execution_for_test(&flow).await;
                 assert!(!flow.is_running());
                 assert!(!flow.current_state().is_terminal());
+                let facts = flow.system_journal().unwrap().read_all_unordered().await.unwrap();
+                assert!(!facts.iter().any(|row| matches!(
+                    row.event_type_name(),
+                    "system.pipeline.starting" | "system.pipeline.running" | "system.pipeline.completed"
+                )));
                 Ok(flow)
             }),
             LaunchParams {

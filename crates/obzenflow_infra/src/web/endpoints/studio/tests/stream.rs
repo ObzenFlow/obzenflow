@@ -675,6 +675,8 @@ async fn terminal_projection_body(
 async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
     let left = StageId::new();
     let right = StageId::new();
+    // Independent child journals have no shared append order. This shutdown
+    // has one cause; Core separately tests retaining the first applied reason.
     let cancelled = terminal_projection_body(
         vec![
             StageLifecycleFact::Cancelled {
@@ -684,7 +686,7 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
             },
             StageLifecycleFact::Cancelled {
                 stage_id: right,
-                reason: "sibling stop".to_string(),
+                reason: "operator stop".to_string(),
                 accounting: None,
             },
         ],

@@ -571,7 +571,6 @@ pub(in crate::pipeline) fn spawn_supervisor_loop(
         receiver,
         watcher.clone(),
         context.resources.failure.clone(),
-        context.system_journal.clone(),
     );
     let task = crate::supervised_base::SupervisorTaskBuilder::new("test_pipeline")
         .with_publications(scope)

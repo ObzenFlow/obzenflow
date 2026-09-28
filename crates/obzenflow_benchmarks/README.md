@@ -84,7 +84,7 @@ when scanning. It does not represent full application throughput.
 | --- | --- |
 | Causal/accounting primitives | The actual production operation on admitted records; fixture creation excluded. Validation, accounting and decoding timings can overlap and must not be added together. |
 | Ordinary frame decoding | Production frame verification and reconstruction; preloaded frame cases exclude primary-file I/O. Warm/cold definition cases distinguish auxiliary carrier reads. |
-| Actual readers | Physical reading, dispatch and admission. Opening is excluded from reader-iteration controls and included in discovery cases. |
+| Actual readers | Physical reading, dispatch and admission. Opening is excluded from reader-iteration controls. |
 | Append attribution | Encoding, preencoded writes and complete appends are distinct controls with overlapping work. They are not additive phases. |
 
 Fresh cursors, frontiers, FSMs or destination journals isolate iterations.

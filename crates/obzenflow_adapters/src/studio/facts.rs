@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Converts system journal entries into the message types in `messages.rs`.
+//! Projects original owned journal facts into the messages in `messages.rs`.
 //! `stages.rs` also uses `stage_message` to build snapshots with the same JSON.
 
 use super::messages::{ContractEdge, MetricsUpdate, Observation, StudioMessage};
@@ -169,21 +169,6 @@ fn system_frame(envelope: &SystemJournalRecord) -> Option<SseFrame> {
             at,
         },
         SystemPayload::PipelineLifecycle(event) => StudioMessage::FlowLifecycle { event, at },
-        SystemPayload::SupervisorCommandDiscarded {
-            supervisor,
-            terminal_state,
-            command,
-            disposition,
-            error,
-        } => StudioMessage::SupervisorCommandDiscarded {
-            stage_id: envelope.writer_id().as_stage().map(|id| id.to_string()),
-            supervisor,
-            terminal_state,
-            command,
-            disposition: *disposition,
-            error: error.as_deref(),
-            at,
-        },
         SystemPayload::MetricsCoordination(MetricsCoordinationEvent::Exported { watermark }) => {
             StudioMessage::MetricsWatermark {
                 watermark,

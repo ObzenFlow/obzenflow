@@ -798,7 +798,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct NoopStateful;
 
-    impl crate::stages::common::handlers::StatefulHandler for NoopStateful {
+    impl crate::stages::common::handlers::stateful::traits::StatefulHandler for NoopStateful {
         type State = ();
 
         fn accumulate(&mut self, _: &mut (), _: ChainEvent) {}
@@ -831,7 +831,9 @@ mod tests {
                 // An owned processing turn holds the resources until its
                 // completion event. Control transitions cannot borrow them.
                 resources: None,
-                instrumentation: Arc::new(crate::metrics::instrumentation::StageInstrumentation::new()),
+                instrumentation: Arc::new(
+                    crate::metrics::instrumentation::StageInstrumentation::new(),
+                ),
                 drain_requested_by_handle: false,
             };
             let mut machine = supervisor.build_state_machine(StatefulState::Accumulating);

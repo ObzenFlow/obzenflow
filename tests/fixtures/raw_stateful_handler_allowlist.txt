@@ -7,3 +7,4 @@ structural_adapter|crates/obzenflow_runtime/src/stages/stateful/ai_map_reduce.rs
 test_harness|crates/obzenflow_infra/tests/stateful_emit_interval.rs|TimerEmitHandler
 test_harness|crates/obzenflow_infra/tests/stateful_emit_interval.rs|AlwaysEmitHandler
 test_harness|crates/obzenflow_infra/tests/replay_determinism.rs|SupervisorCountingHandler
+test_harness | crates/obzenflow_runtime/src/stages/stateful/supervisor/mod.rs | NoopStateful

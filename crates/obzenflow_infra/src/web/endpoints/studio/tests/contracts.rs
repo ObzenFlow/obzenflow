@@ -217,13 +217,10 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
     let contract_frames = frames(&body, "contract_result");
     assert_eq!(contract_frames.len(), 1);
     let frame = contract_frames[0];
-    let checkpoint: std::collections::BTreeMap<String, u64> =
+    let checkpoint: std::collections::BTreeMap<obzenflow_core::JournalId, u64> =
         serde_json::from_str(frame.id.as_ref().unwrap().strip_prefix("jr1:").unwrap()).unwrap();
-    assert_eq!(
-        checkpoint[&stage_journal.id().to_string()],
-        contract.local_sequence()
-    );
-    assert!(checkpoint[&journal.id().to_string()] >= cursor.local_sequence());
+    assert_eq!(checkpoint[stage_journal.id()], contract.local_sequence());
+    assert!(checkpoint[journal.id()] >= cursor.local_sequence());
     assert_ne!(
         frame.id.as_deref(),
         Some(cursor.envelope.provenance.event.id.to_string().as_str())

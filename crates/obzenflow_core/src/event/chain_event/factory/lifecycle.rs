@@ -3,9 +3,7 @@
 // https://obzenflow.dev
 
 use super::ChainEventFactory;
-use crate::event::payloads::execution_payload::{
-    ExecutionPayload, MetricsCoordinationFact, StageLifecycleFact,
-};
+use crate::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::{ChainEvent, ChainPayload};
 use crate::{StageId, WriterId};
@@ -75,28 +73,6 @@ impl ChainEventFactory {
                 recoverable,
                 accounting: None,
                 causal_event_id: None,
-            }),
-        )
-    }
-    pub fn metrics_ready(writer_id: WriterId) -> ChainEvent {
-        Self::execution_event(
-            writer_id,
-            ExecutionPayload::MetricsCoordination(MetricsCoordinationFact::Ready {
-                exporter_count: None,
-            }),
-        )
-    }
-    pub fn metrics_drain_requested(writer_id: WriterId) -> ChainEvent {
-        Self::execution_event(
-            writer_id,
-            ExecutionPayload::MetricsCoordination(MetricsCoordinationFact::DrainRequested),
-        )
-    }
-    pub fn metrics_drained(writer_id: WriterId) -> ChainEvent {
-        Self::execution_event(
-            writer_id,
-            ExecutionPayload::MetricsCoordination(MetricsCoordinationFact::Drained {
-                final_flush_count: None,
             }),
         )
     }

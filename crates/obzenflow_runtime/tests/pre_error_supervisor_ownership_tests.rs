@@ -15,8 +15,17 @@ const PRE_ERROR_GUARD: &str = "if matches!(event.processing.status, ProcessingSt
 const FATAL_BRANCH: &str = "if let Some(fatal) = err.as_fatal()";
 
 fn positions(source: &str, needle: &str) -> Vec<usize> {
+    // Resource ownership can introduce multiline handler access. Compare the
+    // same token spelling independently of rustfmt's line wrapping.
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    };
+    let source = compact(source);
+    let needle = compact(needle);
     source
-        .match_indices(needle)
+        .match_indices(&needle)
         .map(|(index, _)| index)
         .collect()
 }
@@ -102,13 +111,13 @@ fn stateful_running_and_draining_guard_before_cloning_the_handler() {
     assert_each_handler_call_has_an_immediately_preceding_guard(
         "stateful running",
         STATEFUL_RUNNING,
-        &["let mut handler = (*ctx.handler).clone()"],
+        &["let mut handler = (**ctx.handler.as_ref().expect(\"handler available before cleanup\")).clone()"],
         1,
     );
     assert_each_handler_call_has_an_immediately_preceding_guard(
         "stateful draining",
         STATEFUL_DRAINING,
-        &["let mut handler = (*ctx.handler).clone()"],
+        &["let mut handler = (**ctx.handler.as_ref().expect(\"handler available before cleanup\")).clone()"],
         1,
     );
 }
@@ -124,10 +133,7 @@ fn every_join_side_and_lifecycle_path_guards_before_handler_dispatch() {
         assert_each_handler_call_has_an_immediately_preceding_guard(
             label,
             source,
-            &[
-                "ctx.handler.process_reference",
-                "ctx.handler.process_stream",
-            ],
+            &[".process_reference(", ".process_stream("],
             expected_paths,
         );
     }
@@ -138,33 +144,29 @@ fn every_join_dispatch_position_promotes_fatal_to_stage_failure() {
     assert_each_handler_call_has_its_own_following_fatal_branch(
         "finite reference hydration",
         JOIN_HYDRATING,
-        &["ctx.handler.process_reference"],
+        &[".process_reference("],
         1,
     );
     assert_each_handler_call_has_its_own_following_fatal_branch(
         "finite stream enrichment",
         JOIN_ENRICHING,
-        &["ctx.handler.process_stream"],
+        &[".process_stream("],
         1,
     );
     assert_each_handler_call_has_its_own_following_fatal_branch(
         "live reference and stream",
         JOIN_LIVE,
-        &[
-            "ctx.handler.process_reference",
-            "ctx.handler.process_stream",
-        ],
+        &[".process_reference(", ".process_stream("],
         2,
     );
     assert_each_handler_call_has_its_own_following_fatal_branch(
         "draining input and terminal hooks",
         JOIN_DRAINING,
         &[
-            "ctx.handler.process_reference",
-            "ctx.handler.process_stream",
+            ".process_reference(",
+            ".process_stream(",
             "match handler.on_stream_eof(",
-            "match handler\n                .drain(",
-            "match handler\n                    .drain(",
+            "match handler.drain(",
         ],
         6,
     );

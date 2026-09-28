@@ -308,13 +308,35 @@ impl PipelineAction {
                         + std::time::Duration::from_millis(ctx.metrics_drain_timeout_ms),
                 );
                 if let Some(metrics) = ctx.resources.metrics.handle() {
+                    let journal = ctx.system_journal.clone();
+                    let event = SystemEventFactory::new(ctx.system_id).metrics_drain_requested();
+                    let requested = match ctx.resources.publications.enqueue(async move {
+                        publication::append_inline(&journal, event, Default::default()).await?;
+                        Ok(())
+                    }) {
+                        Ok(receipt) => Some(receipt),
+                        Err(error) => {
+                            ctx.resources.retain_failure(error);
+                            None
+                        }
+                    };
                     ctx.resources.metrics_join = Some(Mutex::new(
                         async move {
                             // Mailbox acceptance is separate from owned task completion.
-                            let _ = metrics
-                                .send_event(crate::metrics::MetricsAggregatorEvent::StartDraining)
-                                .await;
-                            metrics.wait_for_completion().await
+                            // The pipeline owns its request fact and commits it before
+                            // delivering the command with that causal context.
+                            let committed = match requested {
+                                Some(receipt) => receipt.await.is_ok(),
+                                None => false,
+                            };
+                            if committed {
+                                let _ = metrics
+                                    .send_event(
+                                        crate::metrics::MetricsAggregatorEvent::StartDraining,
+                                    )
+                                    .await;
+                            }
+                            metrics.wait_for_stage_exit().await
                         }
                         .boxed(),
                     ));

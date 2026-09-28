@@ -148,6 +148,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineFsmState) -> Pipe
             on PipelineFsmEvent::Abort => transitions::late_failure;
         }
         state PipelineFsmState::FinalisingMetrics {
+            on PipelineFsmEvent::MetricsExited => transitions::metrics_exited;
             on PipelineFsmEvent::PhaseSatisfied => transitions::metrics_settled;
             on PipelineFsmEvent::MetricsExpired => transitions::expire_metrics;
             on PipelineFsmEvent::ChildExited => transitions::child_exited;

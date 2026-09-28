@@ -7,6 +7,7 @@
 use crate::metrics::MetricsHandle;
 use crate::pipeline::fsm::PipelineFsmEvent;
 use crate::stages::common::stage_handle::{StageError, StageHandle};
+use crate::stages::common::stage_lifecycle::LifecycleExit;
 use crate::supervised_base::publication::{BoxError, PublicationScope, SharedError};
 use crate::supervised_base::{BuilderError, HandleError, SupervisorHandle};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt};
@@ -26,7 +27,7 @@ pub(crate) struct PipelineResources {
     pub(super) delivery: StageDelivery,
     pub(crate) metrics: Arc<MetricsOwner>,
     pub(super) prepared_metrics: Option<crate::metrics::builder::PreparedMetricsAggregator>,
-    pub(super) metrics_join: Option<Mutex<BoxFuture<'static, Result<(), HandleError>>>>,
+    pub(super) metrics_join: Option<Mutex<BoxFuture<'static, LifecycleExit>>>,
     pub(crate) failure: OperationalFailure,
 }
 

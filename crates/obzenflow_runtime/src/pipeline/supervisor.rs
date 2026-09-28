@@ -10,9 +10,7 @@ use super::resources::{Observations, OperationalFailure};
 use super::PipelineState;
 use crate::supervised_base::handler_supervised::SupervisorAction;
 use crate::supervised_base::publication::BoxError;
-use crate::supervised_base::{
-    EventLoopDirective, EventReceiver, HandleError, SelfSupervised, StateWatcher,
-};
+use crate::supervised_base::{EventLoopDirective, EventReceiver, SelfSupervised, StateWatcher};
 use futures::Stream;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::id::SystemId;
@@ -25,7 +23,6 @@ pub(crate) struct PipelineSupervisor {
     name: String,
     system_id: SystemId,
     controls: EventReceiver<E>,
-    journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>>,
     controls_open: bool,
     watcher: StateWatcher<PipelineState>,
     next_input: usize,
@@ -39,12 +36,10 @@ impl PipelineSupervisor {
         controls: EventReceiver<E>,
         watcher: StateWatcher<PipelineState>,
         failure: OperationalFailure,
-        journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>>,
     ) -> Self {
         Self {
             name: "pipeline_supervisor".into(),
             system_id,
-            journal,
             controls,
             controls_open: true,
             watcher,
@@ -137,18 +132,7 @@ impl PipelineSupervisor {
                     {
                         Poll::Ready(result) => {
                             ctx.resources.metrics_join = None;
-                            match result {
-                                // The owner enforces the bounded final-refresh budget.
-                                Err(HandleError::SupervisorAborted)
-                                    if ctx.metrics_deadline.is_none() =>
-                                {
-                                    Poll::Ready(E::MetricsExited)
-                                }
-                                Err(error) => Poll::Ready(E::OperationalFailure {
-                                    message: error.to_string(),
-                                }),
-                                Ok(()) => Poll::Ready(E::MetricsExited),
-                            }
+                            Poll::Ready(E::MetricsExited(result))
                         }
                         Poll::Pending => Poll::Pending,
                     },
@@ -244,19 +228,11 @@ impl SelfSupervised for PipelineSupervisor {
     }
     fn close_mailbox(
         &mut self,
-        state: &S,
+        _state: &S,
     ) -> futures::future::BoxFuture<'static, Result<(), BoxError>> {
-        use obzenflow_fsm::StateVariant;
         self.controls_open = false;
-        crate::supervised_base::with_external_events::record_terminal_commands(
-            &mut self.controls,
-            crate::supervised_base::with_external_events::system_commands(
-                self.journal.clone(),
-                self.system_id.into(),
-            ),
-            &self.name,
-            state.variant_name(),
-        )
+        drop(self.controls.close_and_take());
+        Box::pin(async { Ok(()) })
     }
     async fn dispatch_state(
         &mut self,

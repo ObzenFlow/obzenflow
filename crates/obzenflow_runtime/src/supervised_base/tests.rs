@@ -539,12 +539,7 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         name: "test-self-with-external-events".to_string(),
         dispatch_calls: dispatch_calls.clone(),
     };
-    let mut sup = SelfSupervisedWithExternalEvents::new(
-        inner,
-        receiver,
-        watcher,
-        Arc::new(terminal_commands::TestJournal::default()),
-    );
+    let mut sup = SelfSupervisedWithExternalEvents::new(inner, receiver, watcher);
     let mut ctx = ExternalEventTestContext;
 
     let created = sup
@@ -582,9 +577,12 @@ async fn with_external_events_disconnected_maps_to_error_event() {
         inner,
         receiver,
         watcher,
-        crate::supervised_base::with_external_events::system_commands(
+        crate::supervised_base::with_external_events::stage_commands(
             Arc::new(terminal_commands::TestJournal::default()),
-            StageId::new_const(1).into(),
+            obzenflow_core::event::provenance::FlowContext::new(
+                "external-events",
+                StageId::new_const(1),
+            ),
         ),
     );
     let mut ctx = ExternalEventTestContext;
@@ -625,12 +623,7 @@ async fn with_external_events_defer_mode_preserves_commands_for_later_execution(
         name: "test-self-defer-mode".to_string(),
         dispatch_calls: dispatch_calls.clone(),
     };
-    let mut sup = SelfSupervisedWithExternalEvents::new(
-        inner,
-        receiver,
-        watcher,
-        Arc::new(terminal_commands::TestJournal::default()),
-    );
+    let mut sup = SelfSupervisedWithExternalEvents::new(inner, receiver, watcher);
     let mut ctx = ExternalEventTestContext;
 
     let deferred = sup

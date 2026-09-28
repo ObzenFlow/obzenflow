@@ -450,7 +450,6 @@ impl PipelineBuilder {
             event_receiver,
             state_watcher.clone(),
             operational_failure.clone(),
-            self.system_journal.clone(),
         );
         let supervisor_task = SupervisorTaskBuilder::new("pipeline_supervisor")
             .with_publications(publications.clone())
@@ -488,7 +487,7 @@ impl PipelineBuilder {
                 stage_journals,
                 system_journals,
                 metrics_journals: self.metrics_journals.clone(),
-                pipeline_reports: Some(super::reports::PipelineReports {
+                ingress_refusals: Some(super::ingress::IngressRefusalWriter {
                     journal: self.system_journal.clone(),
                     owner: publications,
                     writer: system_id.into(),

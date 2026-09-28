@@ -131,11 +131,6 @@ pub enum MetricsAggregatorAction {
         journal_stage: StageId,
     },
 
-    /// Process system events from the system journal (FLOWIP-059b)
-    ProcessSystemRecord {
-        envelope: Box<obzenflow_core::event::journal_record::SystemJournalRecord>,
-    },
-
     /// Export metrics snapshot
     ExportMetrics,
 
@@ -1144,6 +1139,158 @@ impl MetricsStore {
     }
 }
 
+impl MetricsAggregatorResources {
+    /// Fold a borrowed original pipeline fact. Eligibility and ownership precede
+    /// causal observation; optional measurements retain their independent fold.
+    pub fn fold_system_record(
+        &mut self,
+        envelope: &JournalRecord<SystemPayload>,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
+        let ctx = self;
+        if let Some(packet) = &envelope.envelope.observability {
+            ctx.metrics_store
+                .observations
+                .latest()
+                .offer_recorded(packet);
+        }
+        let owner = ctx
+            .pipeline_writer
+            .or_else(|| match ctx.system_journal.owner() {
+                Some(obzenflow_core::JournalOwner::System { system_id }) => {
+                    Some((*system_id).into())
+                }
+                _ => None,
+            });
+        if owner != Some(*envelope.writer_id()) {
+            return Ok(());
+        }
+        use obzenflow_core::event::PipelineLifecycleEvent as P;
+        if !matches!(
+            &envelope.payload,
+            SystemPayload::PipelineLifecycle(
+                P::StopAdmitted { .. }
+                    | P::AllStagesCompleted { .. }
+                    | P::NotStarted
+                    | P::Completed { .. }
+                    | P::Cancelled { .. }
+                    | P::Failed { .. }
+                    | P::Drained
+            )
+        ) {
+            return Ok(());
+        }
+        crate::supervised_base::publication::observe_record(envelope)
+            .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+        tracing::trace!(
+            event_id = %envelope.id(),
+            event_type = envelope.payload.event_type(),
+            "Metrics aggregator selected pipeline lifecycle fact"
+        );
+        let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
+        // FLOWIP-059b: Process system journal events for lifecycle tracking
+        let store = &mut ctx.metrics_store;
+
+        // Retain positions of the selected pipeline facts. This projection does
+        // not claim coverage of ignored records or the complete journal history.
+        if let Some(system_id) = envelope.writer_id().as_system() {
+            let seq = envelope.local_sequence();
+            store.causal_watermark.clocks.insert(
+                obzenflow_core::event::CausalCoordinate::new(
+                    envelope.envelope.provenance.journal.journal_writer_id,
+                ),
+                seq,
+            );
+            let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
+            *entry = (*entry).max(seq);
+        }
+
+        match &envelope.payload {
+            SystemPayload::PipelineLifecycle(event)
+                if ctx
+                    .pipeline_writer
+                    .is_none_or(|writer| writer == *envelope.writer_id()) =>
+            {
+                // Track only essential pipeline events, with monotonic semantics:
+                // - "failed" is sticky and never regresses.
+                // - "completed" never regresses to "drained".
+                // - "drained" is only used when no explicit outcome was ever observed.
+                match event {
+                    obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { .. } => {
+                        if store.pipeline_state.is_empty() {
+                            store.pipeline_state = "stop_admitted".to_string();
+                        }
+                        tracing::info!("Pipeline: stop requested (metrics view)");
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
+                        ..
+                    } => {
+                        store.mark_known_stages_completed(known_stage_ids);
+                        if store.pipeline_state.is_empty() {
+                            store.pipeline_state = "all_stages_completed".to_string();
+                        }
+                        tracing::info!("Pipeline: all stages completed (metrics view)");
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::NotStarted => {
+                        if !store.pipeline_terminal() {
+                            store.pipeline_state = "not_started".into();
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
+                        if store.pipeline_state != "failed" {
+                            store.pipeline_state = "completed".to_string();
+                            tracing::info!("Pipeline: completed (metrics view)");
+                        } else {
+                            tracing::info!(
+                                "Pipeline: completed event observed after failed; \
+	                                         keeping failed as terminal state (metrics view)"
+                            );
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
+                        if store.pipeline_state != "failed" {
+                            store.pipeline_state = "cancelled".to_string();
+                            tracing::info!("Pipeline: cancelled (metrics view)");
+                        } else {
+                            tracing::info!(
+                                "Pipeline: cancelled event observed after failed; \
+	                                         keeping failed as terminal state (metrics view)"
+                            );
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+                        // Failure is always terminal and sticky.
+                        if store.pipeline_state != "failed" {
+                            store.pipeline_state = "failed".to_string();
+                            tracing::info!("Pipeline: failed (metrics view)");
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Drained => {
+                        // Drained is a termination marker only; do not override an
+                        // explicit completed/failed outcome.
+                        match store.pipeline_state.as_str() {
+                            "failed" | "completed" | "cancelled" | "not_started" => {
+                                tracing::info!(
+                                    "Pipeline: drained event observed after terminal outcome; \
+                                             keeping {} as terminal state (metrics view)",
+                                    store.pipeline_state
+                                );
+                            }
+                            _ => {
+                                store.pipeline_state = "drained".to_string();
+                                tracing::info!("Pipeline: drained (metrics view)");
+                            }
+                        }
+                    }
+                    _ => {} // Skip other pipeline events
+                }
+            }
+            _ => {} // Skip MetricsCoordination and other event types
+        }
+
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl FsmAction for MetricsAggregatorAction {
     type Context = MetricsAggregatorContext;
@@ -1187,125 +1334,6 @@ impl MetricsAggregatorAction {
                     Ok(())
                 }
 
-                MetricsAggregatorAction::ProcessSystemRecord { envelope } => {
-                    crate::supervised_base::publication::observe_record(envelope.as_ref())
-                        .map_err(|error| {
-                            obzenflow_fsm::FsmError::HandlerError(error.to_string())
-                        })?;
-                    tracing::trace!(
-                        event_id = %envelope.id(),
-                        event_type = envelope.payload.event_type(),
-                        "Metrics aggregator ProcessSystemRecord action"
-                    );
-                    let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
-                    // FLOWIP-059b: Process system journal events for lifecycle tracking
-                    let store = &mut ctx.metrics_store;
-                    if let Some(observation) = envelope.envelope.observability.as_ref() {
-                        store.observations.latest().offer_recorded(observation);
-                    }
-
-                    // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
-                    // system-originated metrics (pipeline + metrics writers) in addition to stage journals.
-                    if let Some(system_id) = envelope.writer_id().as_system() {
-                        let seq = envelope.local_sequence();
-                        store.causal_watermark.clocks.insert(
-                            obzenflow_core::event::CausalCoordinate::new(
-                                envelope.envelope.provenance.journal.journal_writer_id,
-                            ),
-                            seq,
-                        );
-                        let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
-                        *entry = (*entry).max(seq);
-                    }
-
-                    match &envelope.payload {
-                        SystemPayload::PipelineLifecycle(event)
-                            if ctx
-                                .pipeline_writer
-                                .is_none_or(|writer| writer == *envelope.writer_id()) =>
-                        {
-                            // Track only essential pipeline events, with monotonic semantics:
-                            // - "failed" is sticky and never regresses.
-                            // - "completed" never regresses to "drained".
-                            // - "drained" is only used when no explicit outcome was ever observed.
-                            match event {
-                            obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted {
-                                ..
-                            } => {
-                                if store.pipeline_state.is_empty() {
-                                    store.pipeline_state = "stop_admitted".to_string();
-                                }
-                                tracing::info!("Pipeline: stop requested (metrics view)");
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
-                                ..
-                            } => {
-                                store.mark_known_stages_completed(known_stage_ids);
-                                if store.pipeline_state.is_empty() {
-                                    store.pipeline_state = "all_stages_completed".to_string();
-                                }
-                                tracing::info!("Pipeline: all stages completed (metrics view)");
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::NotStarted => {
-                                if !store.pipeline_terminal() {
-                                    store.pipeline_state = "not_started".into();
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "completed".to_string();
-                                    tracing::info!("Pipeline: completed (metrics view)");
-                                } else {
-                                    tracing::info!(
-                                        "Pipeline: completed event observed after failed; \
-	                                         keeping failed as terminal state (metrics view)"
-                                    );
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "cancelled".to_string();
-                                    tracing::info!("Pipeline: cancelled (metrics view)");
-                                } else {
-                                    tracing::info!(
-                                        "Pipeline: cancelled event observed after failed; \
-	                                         keeping failed as terminal state (metrics view)"
-                                    );
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
-                                // Failure is always terminal and sticky.
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "failed".to_string();
-                                    tracing::info!("Pipeline: failed (metrics view)");
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Drained => {
-                                // Drained is a termination marker only; do not override an
-                                // explicit completed/failed outcome.
-                                match store.pipeline_state.as_str() {
-                                    "failed" | "completed" | "cancelled" | "not_started" => {
-                                        tracing::info!(
-                                            "Pipeline: drained event observed after terminal outcome; \
-                                             keeping {} as terminal state (metrics view)",
-                                            store.pipeline_state
-                                        );
-                                    }
-                                    _ => {
-                                        store.pipeline_state = "drained".to_string();
-                                        tracing::info!("Pipeline: drained (metrics view)");
-                                    }
-                                }
-                            }
-                            _ => {} // Skip other pipeline events
-                        }
-                        }
-                        _ => {} // Skip MetricsCoordination and other event types
-                    }
-
-                    Ok(())
-                }
-
                 MetricsAggregatorAction::UpdateMetrics {
                     events,
                     journal_kind,
@@ -1329,20 +1357,39 @@ impl MetricsAggregatorAction {
                             continue;
                         }
                         let stage_id = *journal_stage;
+                        let fact_selected = match &envelope.payload {
+                            ChainPayload::Execution(ExecutionPayload::StageLifecycle(fact)) => {
+                                if fact.stage_id() != stage_id {
+                                    continue;
+                                }
+                                true
+                            }
+                            ChainPayload::Execution(ExecutionPayload::ContractResult {
+                                reader,
+                                ..
+                            }) => {
+                                if *reader != stage_id {
+                                    continue;
+                                }
+                                true
+                            }
+                            ChainPayload::Execution(
+                                ExecutionPayload::HttpPullState(_)
+                                | ExecutionPayload::CircuitBreaker(_),
+                            ) => *journal_kind == MetricsJournalKind::Data,
+                            _ => false,
+                        };
+                        // Runtime accounting is a separate factual fold; a business
+                        // row without it contributes no causal input just by being buffered.
+                        if !fact_selected && event.runtime.is_none() {
+                            continue;
+                        }
+                        crate::supervised_base::publication::observe_record(envelope).map_err(
+                            |error| obzenflow_fsm::FsmError::HandlerError(error.to_string()),
+                        )?;
                         match &envelope.payload {
                             ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) => {
                                 use obzenflow_core::event::payloads::execution_payload::StageLifecycleFact;
-                                let fact_stage = match event {
-                                    StageLifecycleFact::Running { stage_id }
-                                    | StageLifecycleFact::Draining { stage_id, .. }
-                                    | StageLifecycleFact::Drained { stage_id, .. }
-                                    | StageLifecycleFact::Completed { stage_id, .. }
-                                    | StageLifecycleFact::Cancelled { stage_id, .. }
-                                    | StageLifecycleFact::Failed { stage_id, .. } => *stage_id,
-                                };
-                                if fact_stage != stage_id {
-                                    continue;
-                                }
                                 let accounting = match event {
                                     StageLifecycleFact::Draining { accounting, .. }
                                     | StageLifecycleFact::Completed { accounting, .. }
@@ -1410,22 +1457,6 @@ impl MetricsAggregatorAction {
                                 }
                             }
                             _ => {}
-                        }
-                        // Only factual carriers selected for this stage advance its
-                        // causal input. Offering an optional packet above cannot.
-                        if event.runtime.is_some()
-                            || !selected
-                            || (*journal_kind == MetricsJournalKind::Data
-                                && envelope.local_sequence()
-                                    > store
-                                        .stage_vector_clocks
-                                        .get(&stage_id)
-                                        .copied()
-                                        .unwrap_or(0))
-                        {
-                            crate::supervised_base::publication::observe_record(envelope).map_err(
-                                |error| obzenflow_fsm::FsmError::HandlerError(error.to_string()),
-                            )?;
                         }
                         if let Some(runtime) = &event.runtime {
                             store.retain_accounting(stage_id, &runtime.accounting);
@@ -1506,11 +1537,7 @@ impl MetricsAggregatorAction {
                     // Older accounting carriers may precede a newer lifecycle value.
                     // Applying oldest first leaves each lifecycle at its newest state.
                     for record in buffer_snapshot.system_records.iter().rev() {
-                        MetricsAggregatorAction::ProcessSystemRecord {
-                            envelope: Box::new(record.clone()),
-                        }
-                        .execute_resources(ctx)
-                        .await?;
+                        ctx.fold_system_record(record)?;
                     }
                     ctx.refresh_measurements();
                     ctx.metrics_exporter

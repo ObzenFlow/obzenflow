@@ -9,7 +9,7 @@ use super::builder::{EventReceiver, ReceivedCommand, StateWatcher};
 use super::handler_supervised::HandlerSupervised;
 use super::{publication, EventLoopDirective};
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, SystemPayload, WriterId};
+use obzenflow_core::event::{CommandDiscardDisposition, WriterId};
 use obzenflow_fsm::{EventVariant, StateMachine, StateVariant};
 use std::collections::VecDeque;
 use std::error::Error;
@@ -86,38 +86,9 @@ pub(crate) fn stage_commands(
     })
 }
 
-pub(crate) fn system_commands(
-    journal: std::sync::Arc<dyn obzenflow_core::Journal<SystemEvent>>,
-    writer: WriterId,
-) -> CommandRecorder {
-    Box::new(move |discarded| {
-        let journal = journal.clone();
-        Box::pin(async move {
-            let DiscardedCommand {
-                supervisor,
-                terminal_state,
-                command,
-                disposition,
-                error,
-            } = discarded;
-            let event = SystemEvent::new(
-                writer,
-                SystemPayload::SupervisorCommandDiscarded {
-                    supervisor,
-                    terminal_state,
-                    command,
-                    disposition,
-                    error,
-                },
-            );
-            publication::append_inline(&journal, event, Default::default()).await?;
-            Ok(())
-        })
-    })
-}
-
 /// The closed queue is retained in one owned publication. Cancelling a waiter
 /// cannot lose commands, and deferred commands retain causality until disposal.
+#[cfg(test)]
 pub(crate) fn record_terminal_commands<E: ExternalControlEvent + Send + 'static>(
     external_events: &mut EventReceiver<E>,
     publish: CommandRecorder,
@@ -190,6 +161,14 @@ impl<E> From<EventReceiver<E>> for CommandMailbox<E> {
 }
 
 impl<E> CommandMailbox<E> {
+    /// The owner explicitly disposes queued internal commands at termination.
+    /// Stage mailboxes use close_and_record when a canonical disposition fact
+    /// is part of their contract.
+    pub(crate) fn close(&mut self) {
+        drop(self.receiver.close_and_take());
+        self.deferred.clear();
+    }
+
     fn ready(&mut self, admits: &impl Fn(&E) -> bool) -> Option<ReceivedCommand<E>> {
         let index = self
             .deferred
@@ -480,7 +459,6 @@ where
     external_events: EventReceiver<S::Event>,
     state_watcher: StateWatcher<S::State>,
     last_state: Option<S::State>,
-    system_journal: std::sync::Arc<dyn obzenflow_core::Journal<SystemEvent>>,
 }
 
 #[cfg(test)]
@@ -492,14 +470,12 @@ where
         inner: S,
         external_events: EventReceiver<S::Event>,
         state_watcher: StateWatcher<S::State>,
-        system_journal: std::sync::Arc<dyn obzenflow_core::Journal<SystemEvent>>,
     ) -> Self {
         Self {
             inner,
             external_events,
             state_watcher,
             last_state: None,
-            system_journal,
         }
     }
 }
@@ -560,14 +536,7 @@ where
 
         match <S as ExternalEventPolicy>::external_event_mode(state) {
             ExternalEventMode::CloseAndRecord => {
-                let writer_id = self.inner.writer_id();
-                record_terminal_commands(
-                    &mut self.external_events,
-                    system_commands(self.system_journal.clone(), writer_id),
-                    self.inner.name(),
-                    state.variant_name(),
-                )
-                .await?;
+                drop(self.external_events.close_and_take());
             }
             ExternalEventMode::Defer => {}
             ExternalEventMode::Block => match self.external_events.recv().await {

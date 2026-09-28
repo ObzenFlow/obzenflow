@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Component baselines for the remaining journal and parent hot paths.
+//! Component baselines for ordinary journal operations.
 mod append;
 mod dispatch;
 mod fixtures;

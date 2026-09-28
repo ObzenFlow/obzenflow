@@ -189,3 +189,8 @@ async fn metrics_manual_export_uses_the_live_control_receiver() {
 async fn metrics_exports_settle_accepted_requests_in_their_own_journal() {
     metrics_backends(obzenflow_runtime::testing::metrics::metrics_exports_settle_accepted_requests_in_their_own_journal).await;
 }
+
+#[tokio::test]
+async fn metrics_folds_check_eligibility_before_causal_incorporation() {
+    metrics_backends(obzenflow_runtime::testing::metrics::metrics_folds_check_eligibility_before_causal_incorporation).await;
+}

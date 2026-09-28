@@ -4,15 +4,12 @@
 
 //! System orchestration payloads and their descriptors.
 
-use crate::event::payloads::flow_control_payload::EofKind;
-use crate::event::types::{Count, DurationMs};
+use crate::event::types::DurationMs;
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, StageKey};
 use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
-use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::metrics::FlowLifecycleMetricsSnapshot;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Contract label carried by canonical execution facts.
@@ -104,17 +101,6 @@ pub enum SystemPayload {
     /// The envelope's writer identifies the registered supervisor instance.
     SupervisorRegistered {
         descriptor: super::supervisor_descriptor::SupervisorDescriptor,
-    },
-    /// A terminal supervisor closed its mailbox without executing this accepted
-    /// command. The envelope's writer identifies the system supervisor. This
-    /// records the disposition without replacing the existing terminal outcome.
-    SupervisorCommandDiscarded {
-        supervisor: String,
-        terminal_state: String,
-        command: String,
-        disposition: CommandDiscardDisposition,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
     },
     /// Pipeline lifecycle events
     #[serde(rename = "pipeline_lifecycle")]
@@ -269,36 +255,6 @@ pub enum PipelineCancellationCause {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "replay_event", rename_all = "snake_case")]
-pub enum ReplayLifecycleEvent {
-    Started {
-        archive_path: PathBuf,
-        archive_flow_id: String,
-        archive_status: ArchiveStatus,
-        archive_status_derivation: StatusDerivation,
-        allow_incomplete: bool,
-        source_stages: Vec<String>,
-    },
-    Completed {
-        replayed_count: Count,
-        skipped_count: Count,
-        duration_ms: DurationMs,
-        /// The terminal EOF kind synthesized at exhaustion (FLOWIP-095k).
-        /// `None` on the resume handoff, which synthesizes no terminal EOF.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        synthesized_eof_kind: Option<EofKind>,
-    },
-    /// Resume handoff (FLOWIP-120n): the source finished its catch-up and
-    /// continues live at `generation`. The transition announcement the
-    /// presentation layer surfaces.
-    ResumedLive {
-        archive_flow_id: String,
-        replayed_count: Count,
-        generation: u64,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "metrics_event", rename_all = "snake_case")]
 pub enum MetricsCoordinationEvent {
     Ready,
@@ -319,9 +275,6 @@ impl SystemPayload {
     pub fn event_type(&self) -> &'static str {
         match self {
             SystemPayload::SupervisorRegistered { .. } => "system.supervisor.registered",
-            SystemPayload::SupervisorCommandDiscarded { .. } => {
-                "system.supervisor.command_discarded"
-            }
             SystemPayload::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
                 PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",

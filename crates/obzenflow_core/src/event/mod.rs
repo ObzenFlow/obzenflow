@@ -59,7 +59,7 @@ pub use payloads::stage_fatal_payload::{
 };
 pub use payloads::system_payload::{
     CommandDiscardDisposition, MetricsCoordinationEvent, PipelineCancellationCause,
-    PipelineLifecycleEvent, PipelineStopAdmission, ReplayLifecycleEvent, SystemPayload,
+    PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload,
 };
 pub use system_event::{SystemEvent, SystemEventFactory};
 pub use types::{
@@ -69,3 +69,5 @@ pub use types::{
 pub use utils::EventFilter;
 
 pub use payloads::chain_payload::EventKind;
+
+pub use payloads::execution_payload::ReplayLifecycleEvent;

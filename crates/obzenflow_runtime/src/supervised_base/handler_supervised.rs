@@ -53,17 +53,6 @@ pub type DispatchCompletion<S> = Box<
         + Send,
 >;
 
-fn owned_unit<C: 'static, E: Send + 'static>(
-    future: BoxFuture<'static, Result<(), Box<dyn Error + Send + Sync>>>,
-) -> OwnedAction<C, E> {
-    Box::pin(async move {
-        let result = future
-            .await
-            .map_err(|error| FsmError::HandlerError(error.to_string()));
-        Box::new(move |_: &mut C| result.map(|()| None)) as ActionCompletion<C, E>
-    })
-}
-
 /// Trait for handler-supervised components
 /// This ensures they provide handler access while still going through FSM
 #[async_trait::async_trait]
@@ -192,6 +181,18 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         Self::Action: 'static,
     {
         use crate::stages::common::stage_lifecycle::LifecycleResults;
+
+        fn owned_unit<C: 'static, E: Send + 'static>(
+            future: BoxFuture<'static, Result<(), Box<dyn Error + Send + Sync>>>,
+        ) -> OwnedAction<C, E> {
+            Box::pin(async move {
+                let result = future
+                    .await
+                    .map_err(|error| FsmError::HandlerError(error.to_string()));
+                Box::new(move |_: &mut C| result.map(|()| None)) as ActionCompletion<C, E>
+            })
+        }
+
         let mut machine = self.build_state_machine(initial_state);
         let mut actions = VecDeque::new();
         let mut operation: Option<OwnedAction<Self::Context, Self::Event>> = None;

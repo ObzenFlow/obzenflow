@@ -316,7 +316,6 @@ pub async fn metrics_budget_starts_after_terminal_publication_without_readback(
         receiver,
         watcher,
         ctx.resources.failure.clone(),
-        ctx.system_journal.clone(),
     );
     assert!(matches!(
         supervisor

@@ -657,7 +657,7 @@ mod tests {
             metrics_journals: None,
             stage_journals: vec![],
             system_journals: vec![],
-            pipeline_reports: None,
+            ingress_refusals: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 

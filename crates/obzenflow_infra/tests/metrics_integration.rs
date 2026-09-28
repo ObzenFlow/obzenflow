@@ -258,16 +258,12 @@ async fn ingress_refusal_facts_do_not_invent_latest_value_totals() {
         refusal(IngressRefusalReason::RateLimited, 1, 1),
         refusal(IngressRefusalReason::Validation, 3, 2),
     ] {
-        let envelope = Box::new(
-            ctx.system_journal
-                .append(event, Default::default())
-                .await
-                .unwrap(),
-        );
-        MetricsAggregatorAction::ProcessSystemRecord { envelope }
-            .execute(&mut ctx)
+        let envelope = ctx
+            .system_journal
+            .append(event, Default::default())
             .await
             .unwrap();
+        ctx.fold_system_record(&envelope).unwrap();
     }
 
     MetricsAggregatorAction::ExportMetrics

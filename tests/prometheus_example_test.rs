@@ -620,7 +620,10 @@ interval_ms = 250
                     && event.writer_id == WriterId::from(event.flow_context.stage_id)
                     && event.flow_context.stage_name == "high_volume_source"
                 {
-                    assert_eq!(runtime.fsm_state, "Drained");
+                    assert_eq!(
+                        runtime.fsm_state, "Finalising",
+                        "the source is still settling its terminal publications when it authors EOF"
+                    );
                 }
             }
             let mut content = serde_json::to_value(&event.payload).unwrap();

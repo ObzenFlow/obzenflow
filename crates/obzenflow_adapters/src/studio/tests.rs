@@ -565,16 +565,17 @@ fn discarded_commands_remain_visible_as_journal_backed_studio_facts() {
         let stage_id = StageId::new();
         let envelope = stored_record(
             JournalWriterId::from(JournalId::new()),
-            SystemEvent::new(
+            ChainEventFactory::execution_event(
                 WriterId::from(stage_id),
-                SystemPayload::SupervisorCommandDiscarded {
+                ExecutionPayload::SupervisorCommandDiscarded {
                     supervisor: "transform_orders".into(),
                     terminal_state: "Drained".into(),
                     command: command.into(),
                     disposition,
                     error: error.map(str::to_owned),
                 },
-            ),
+            )
+            .with_flow_context(FlowContext::new("transform_orders", stage_id)),
         );
         let mut expected = json!({
             "stage_id": stage_id.to_string(),

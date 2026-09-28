@@ -5,8 +5,12 @@
 use super::*;
 use crate::stages::common::stage_handle::STOP_REASON_USER_STOP;
 use crate::supervised_base::with_external_events::record_terminal_commands;
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::{CommandDiscardDisposition, JournalRecord, SystemEvent, SystemPayload};
+use obzenflow_core::event::{
+    ChainEvent, ChainPayload, CommandDiscardDisposition, JournalEvent, JournalRecord, SystemEvent,
+    SystemPayload,
+};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::{AppendOptions, Journal, JournalError, JournalReader};
 use obzenflow_core::{EventId, JournalId};
@@ -15,17 +19,17 @@ use std::error::Error;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 
-pub(super) struct TestJournal {
+pub(super) struct TestJournal<T: JournalEvent = SystemEvent> {
     id: JournalId,
     pub(super) owner: Option<JournalOwner>,
-    records: Mutex<Vec<JournalRecord<SystemPayload>>>,
+    records: Mutex<Vec<JournalRecord<T::Payload>>>,
     attempts: AtomicUsize,
     first_append_gate: Option<(Arc<Notify>, Arc<Notify>)>,
     fail: bool,
     allow_registration: bool,
 }
 
-impl Default for TestJournal {
+impl<T: JournalEvent> Default for TestJournal<T> {
     fn default() -> Self {
         Self {
             id: JournalId::new(),
@@ -39,7 +43,7 @@ impl Default for TestJournal {
     }
 }
 
-impl TestJournal {
+impl<T: JournalEvent> TestJournal<T> {
     pub(super) fn with_owner(mut self, owner: JournalOwner) -> Self {
         self.owner = Some(owner);
         self
@@ -53,14 +57,12 @@ impl TestJournal {
 
     pub(super) fn assert_registered(&self) {
         assert!(
-            matches!(
-                self.records
-                    .lock()
-                    .unwrap()
-                    .first()
-                    .map(|record| &record.payload),
-                Some(SystemPayload::SupervisorRegistered { .. })
-            ),
+            self.records.lock().unwrap().first().is_some_and(|record| {
+                matches!(
+                    record.event_type_name(),
+                    "execution.supervisor.registered" | "system.supervisor.registered"
+                )
+            }),
             "registration must precede FSM dispatch and actions"
         );
     }
@@ -105,7 +107,7 @@ async fn self_supervised_runner_does_not_invent_registration_actions() {
 }
 
 #[async_trait::async_trait]
-impl obzenflow_core::journal::JournalStorage<SystemEvent> for TestJournal {
+impl<T: JournalEvent + 'static> obzenflow_core::journal::JournalStorage<T> for TestJournal<T> {
     fn storage_id(&self) -> &JournalId {
         &self.id
     }
@@ -116,9 +118,9 @@ impl obzenflow_core::journal::JournalStorage<SystemEvent> for TestJournal {
 
     async fn storage_append(
         &self,
-        event: SystemEvent,
-        mut options: AppendOptions<SystemEvent>,
-    ) -> Result<JournalRecord<SystemPayload>, JournalError> {
+        event: T,
+        mut options: AppendOptions<T>,
+    ) -> Result<JournalRecord<T::Payload>, JournalError> {
         let event = options.capture.prepare(0, event);
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         if attempt == 0 {
@@ -129,7 +131,10 @@ impl obzenflow_core::journal::JournalStorage<SystemEvent> for TestJournal {
         }
         if self.fail
             && !(self.allow_registration
-                && matches!(&event.payload, SystemPayload::SupervisorRegistered { .. }))
+                && matches!(
+                    event.event_type_name(),
+                    "execution.supervisor.registered" | "system.supervisor.registered"
+                ))
         {
             return Err(JournalError::Full);
         }
@@ -141,14 +146,14 @@ impl obzenflow_core::journal::JournalStorage<SystemEvent> for TestJournal {
 
     async fn storage_read_all_unordered(
         &self,
-    ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(self.records.lock().unwrap().clone())
     }
 
     async fn storage_read_event(
         &self,
         id: &EventId,
-    ) -> Result<Option<JournalRecord<SystemPayload>>, JournalError> {
+    ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
         Ok(self
             .records
             .lock()
@@ -161,14 +166,14 @@ impl obzenflow_core::journal::JournalStorage<SystemEvent> for TestJournal {
     async fn storage_reader_from(
         &self,
         _position: u64,
-    ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
+    ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         unreachable!("terminal mailbox tests read committed records directly")
     }
 
     async fn storage_read_last_n(
         &self,
         count: usize,
-    ) -> Result<Vec<JournalRecord<SystemPayload>>, JournalError> {
+    ) -> Result<Vec<JournalRecord<T::Payload>>, JournalError> {
         Ok(self
             .records
             .lock()
@@ -217,9 +222,12 @@ async fn terminal_mailbox_records_each_command_once_and_rejects_later_sends() {
             inner,
             receiver,
             watcher,
-            crate::supervised_base::with_external_events::system_commands(
+            crate::supervised_base::with_external_events::stage_commands(
                 journal.clone(),
-                StageId::new_const(1).into(),
+                obzenflow_core::event::provenance::FlowContext::new(
+                    "terminal-worker",
+                    StageId::new_const(1),
+                ),
             ),
         );
         let mut context = ExternalEventTestContext;
@@ -260,15 +268,15 @@ async fn terminal_mailbox_records_each_command_once_and_rejects_later_sends() {
             assert_eq!(*record.writer_id(), WriterId::from(stage_id));
             assert_eq!(
                 record.envelope.provenance.event.event_type,
-                "system.supervisor.command_discarded"
+                "execution.supervisor.command_discarded"
             );
-            let SystemPayload::SupervisorCommandDiscarded {
+            let ChainPayload::Execution(ExecutionPayload::SupervisorCommandDiscarded {
                 supervisor,
                 terminal_state,
                 command,
                 disposition,
                 error,
-            } = &record.payload
+            }) = &record.payload
             else {
                 panic!("expected a command disposition fact");
             };
@@ -303,9 +311,12 @@ async fn terminal_mailbox_retains_the_whole_queue_when_recording_waiter_is_cance
         owner
             .enter(record_terminal_commands(
                 &mut receiver,
-                crate::supervised_base::with_external_events::system_commands(
+                crate::supervised_base::with_external_events::stage_commands(
                     target,
-                    WriterId::from(StageId::new_const(1)),
+                    obzenflow_core::event::provenance::FlowContext::new(
+                        "terminal-worker",
+                        StageId::new_const(1),
+                    ),
                 ),
                 "worker",
                 "Drained",
@@ -329,7 +340,7 @@ struct CompletionContext {
     entered: Arc<Notify>,
     release: Arc<Notify>,
     fail_action: bool,
-    journal: Arc<TestJournal>,
+    journal: Arc<TestJournal<ChainEvent>>,
 }
 impl FsmContext for CompletionContext {}
 
@@ -440,9 +451,15 @@ impl Supervisor for CompletionSupervisor {
         context: &Self::Context,
         descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
     ) -> crate::supervised_base::base::Registration {
-        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
-            context.journal.clone();
-        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
+        let journal: Arc<dyn Journal<ChainEvent>> = context.journal.clone();
+        crate::supervised_base::base::register_stage(
+            journal,
+            obzenflow_core::event::provenance::FlowContext::new(
+                "terminal-worker",
+                StageId::new_const(1),
+            ),
+            descriptor,
+        )
     }
     fn name(&self) -> &str {
         "completion-worker"
@@ -542,9 +559,12 @@ fn spawn_completion(
         CompletionSupervisor,
         receiver,
         watcher.clone(),
-        crate::supervised_base::with_external_events::system_commands(
+        crate::supervised_base::with_external_events::stage_commands(
             context.journal.clone(),
-            StageId::new_const(1).into(),
+            obzenflow_core::event::provenance::FlowContext::new(
+                "terminal-worker",
+                StageId::new_const(1),
+            ),
         ),
     );
     let task = SupervisorTaskBuilder::new("completion-worker").spawn_handler_supervised(
@@ -606,10 +626,10 @@ async fn terminal_mailbox_preserves_commands_and_failure_during_owned_completion
         assert_eq!(records.len(), 2);
         assert!(matches!(
             &records[0].payload,
-            SystemPayload::SupervisorRegistered { .. }
+            ChainPayload::Execution(ExecutionPayload::SupervisorRegistered { .. })
         ));
         assert!(
-            matches!(&records[1].payload, SystemPayload::SupervisorCommandDiscarded { command, disposition: CommandDiscardDisposition::ObsoleteControl, .. } if command == "Initialize")
+            matches!(&records[1].payload, ChainPayload::Execution(ExecutionPayload::SupervisorCommandDiscarded { command, disposition: CommandDiscardDisposition::ObsoleteControl, .. }) if command == "Initialize")
         );
     }
 }
@@ -650,7 +670,7 @@ async fn terminal_mailbox_journal_failure_is_retained_by_supervisor_join() {
     assert_eq!(records.len(), 1);
     assert!(matches!(
         &records[0].payload,
-        SystemPayload::SupervisorRegistered { .. }
+        ChainPayload::Execution(ExecutionPayload::SupervisorRegistered { .. })
     ));
 }
 

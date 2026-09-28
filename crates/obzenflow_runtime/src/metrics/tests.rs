@@ -719,3 +719,158 @@ pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
         .unwrap();
     assert_eq!(end.event_type_name(), "system.metrics.shutdown");
 }
+
+pub async fn metrics_folds_check_eligibility_before_causal_incorporation(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    use super::fsm::MetricsJournalKind;
+    use crate::supervised_base::publication::{capture, with_snapshot};
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, StageLifecycleFact,
+    };
+    use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
+    use obzenflow_core::event::{CausalFrontier, ChainPayload, SystemPayload};
+
+    let stage = StageId::new();
+    let foreign = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "eligible");
+    let (mut ctx, system, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let pipeline = SystemId::new();
+    ctx.pipeline_writer = Some(pipeline.into());
+    let owner = FlowContext::new("eligible", stage);
+    let mut ignored = Vec::new();
+    for event in [
+        ChainEventFactory::data_event(stage.into(), "ordinary.business", serde_json::json!({})),
+        ChainEventFactory::stage_running(foreign.into(), stage),
+        ChainEventFactory::stage_running(stage.into(), foreign),
+    ] {
+        ignored.push(
+            data.append(event.with_flow_context(owner.clone()), Default::default())
+                .await
+                .unwrap(),
+        );
+    }
+    // A buffer tag and even apparently intact serialized provenance grant no
+    // authority. Ignored business records must not attempt causal admission.
+    ignored[0] = serde_json::from_value(serde_json::to_value(&ignored[0]).unwrap()).unwrap();
+    let wrong_pipeline = system
+        .append(
+            SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let unused_system = system
+        .append(
+            SystemEventFactory::new(pipeline).metrics_ready(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    with_snapshot(CausalFrontier::default(), async {
+        Action::UpdateMetrics {
+            events: ignored.into(),
+            journal_kind: MetricsJournalKind::Data,
+            journal_stage: stage,
+        }
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+        ctx.fold_system_record(&wrong_pipeline).unwrap();
+        ctx.fold_system_record(&unused_system).unwrap();
+        assert_eq!(capture(), CausalFrontier::default());
+        assert!(ctx.metrics_store.stage_vector_clocks.is_empty());
+        assert!(ctx.metrics_store.system_vector_clocks.is_empty());
+        assert!(ctx.metrics_store.pipeline_state.is_empty());
+        assert!(ctx.metrics_store.last_event_id.is_none());
+    })
+    .await;
+
+    let completed = data
+        .append(
+            ChainEventFactory::stage_completed(
+                stage.into(),
+                stage,
+                ExecutionAccounting {
+                    events_processed_total: 7,
+                    ..Default::default()
+                },
+            )
+            .with_flow_context(owner),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    with_snapshot(CausalFrontier::default(), async {
+        Action::UpdateMetrics {
+            events: vec![completed.clone()].into(),
+            journal_kind: MetricsJournalKind::Data,
+            journal_stage: stage,
+        }
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+        assert_eq!(capture(), CausalFrontier::from_record(&completed).unwrap());
+        assert_eq!(
+            ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+            Some(7)
+        );
+
+        let reconstructed =
+            serde_json::from_value(serde_json::to_value(&completed).unwrap()).unwrap();
+        let mut mutated = completed.clone();
+        let ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+            StageLifecycleFact::Completed {
+                accounting: Some(accounting),
+                ..
+            },
+        )) = &mut mutated.payload
+        else {
+            unreachable!()
+        };
+        accounting.events_processed_total = 999;
+        for rejected in [reconstructed, mutated] {
+            assert!(Action::UpdateMetrics {
+                events: vec![rejected].into(),
+                journal_kind: MetricsJournalKind::Data,
+                journal_stage: stage,
+            }
+            .execute(&mut ctx)
+            .await
+            .is_err());
+            assert_eq!(
+                ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+                Some(7),
+                "unadmitted data cannot mutate the projection before failing"
+            );
+        }
+    })
+    .await;
+
+    let not_started = system
+        .append(
+            SystemEventFactory::new(pipeline).pipeline_not_started(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    with_snapshot(CausalFrontier::default(), async {
+        ctx.fold_system_record(&not_started).unwrap();
+        assert_eq!(
+            capture(),
+            CausalFrontier::from_record(&not_started).unwrap()
+        );
+        assert_eq!(ctx.metrics_store.pipeline_state, "not_started");
+        let reconstructed =
+            serde_json::from_value(serde_json::to_value(&not_started).unwrap()).unwrap();
+        let mut mutated = not_started.clone();
+        mutated.payload = SystemPayload::PipelineLifecycle(
+            obzenflow_core::event::PipelineLifecycleEvent::Drained,
+        );
+        for rejected in [reconstructed, mutated] {
+            assert!(ctx.fold_system_record(&rejected).is_err());
+            assert_eq!(ctx.metrics_store.pipeline_state, "not_started");
+        }
+    })
+    .await;
+}

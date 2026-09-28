@@ -77,7 +77,7 @@ pub(super) fn unhandled<'a>(
             | E::StartPublished
             | E::RunningPublished
             | E::TerminalPublished
-            | E::MetricsExited => Ok(()),
+            | E::MetricsExited(_) => Ok(()),
             _ => Err(invalid_input(state, event)),
         }
     })
@@ -413,6 +413,28 @@ pub(super) fn late_failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> De
         ),
         S::FinalisingMetrics => change(state.clone(), vec![A::CancelMetrics]),
         _ => change(state.clone(), vec![]),
+    })
+}
+pub(super) fn metrics_exited<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
+    Box::pin(async move {
+        let E::MetricsExited(exit) = event else {
+            return Err(invalid_input(state, event));
+        };
+        // The child's settled result includes its accepted final publications.
+        // Incorporate that result before selecting the pipeline's final marker.
+        publication::incorporate(&exit.snapshot().causal_context)
+            .map_err(|error| FsmError::HandlerError(error.to_string()))?;
+        match exit {
+            LifecycleExit::Completed(_) => {}
+            LifecycleExit::Cancelled { .. } if ctx.metrics_deadline.is_none() => {}
+            _ => {
+                let message = exit.result().unwrap_err().to_string();
+                ctx.resources
+                    .retain_failure(Box::new(std::io::Error::other(message.clone())));
+                ctx.termination.fail(message, None);
+            }
+        }
+        Ok(change(state.clone(), vec![]))
     })
 }
 pub(super) fn metrics_settled<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {

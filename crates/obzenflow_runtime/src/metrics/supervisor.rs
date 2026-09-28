@@ -191,18 +191,11 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     }
     fn close_mailbox(
         &mut self,
-        state: &MetricsAggregatorState,
+        _state: &MetricsAggregatorState,
     ) -> futures::future::BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>
     {
-        use obzenflow_fsm::StateVariant;
-        self.control.close_and_record(
-            crate::supervised_base::with_external_events::system_commands(
-                self.system_journal.clone(),
-                self.writer_id(),
-            ),
-            &self.name,
-            state.variant_name(),
-        )
+        self.control.close();
+        Box::pin(async { Ok(()) })
     }
     async fn dispatch_state(
         &mut self,

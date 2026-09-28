@@ -49,7 +49,7 @@ enum Action {
 }
 
 struct Context {
-    journal: Arc<terminal_commands::TestJournal>,
+    journal: Arc<terminal_commands::TestJournal<obzenflow_core::ChainEvent>>,
     publications: Arc<PublicationScope>,
     probe: Arc<CleanupProbe>,
     work_fails: bool,
@@ -178,9 +178,13 @@ impl Supervisor for CleanupSupervisor {
         context: &Context,
         descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
     ) -> crate::supervised_base::base::Registration {
-        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::event::SystemEvent>> =
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>> =
             context.journal.clone();
-        crate::supervised_base::base::register_system(journal, self.writer_id(), descriptor)
+        crate::supervised_base::base::register_stage(
+            journal,
+            obzenflow_core::event::provenance::FlowContext::new("cleanup", self.stage_id),
+            descriptor,
+        )
     }
 }
 
@@ -268,10 +272,11 @@ impl HandlerSupervised for CleanupSupervisor {
 
 fn spawn(
     supervisor: CleanupSupervisor,
-    mut journal: terminal_commands::TestJournal,
+    mut journal: terminal_commands::TestJournal<obzenflow_core::ChainEvent>,
     wrapped: bool,
 ) -> StandardHandle<Event, State> {
     journal.owner = Some(obzenflow_core::JournalOwner::stage(supervisor.stage_id));
+    let stage_id = supervisor.stage_id;
     let publications = PublicationScope::new();
     let context = Context {
         journal: Arc::new(journal),
@@ -285,9 +290,9 @@ fn spawn(
             supervisor,
             receiver,
             watcher.clone(),
-            crate::supervised_base::with_external_events::system_commands(
+            crate::supervised_base::with_external_events::stage_commands(
                 context.journal.clone(),
-                StageId::new_const(1).into(),
+                obzenflow_core::event::provenance::FlowContext::new("cleanup", stage_id),
             ),
         );
         SupervisorTaskBuilder::new("cleanup-supervisor")
