@@ -17,7 +17,8 @@ use obzenflow_core::id::SystemId;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub(crate) struct PipelineSupervisor {
     name: String,
@@ -77,7 +78,7 @@ impl PipelineSupervisor {
             if Instant::now() >= at {
                 return Poll::Ready(event.into());
             }
-            deadline.as_mut().reset(at.into());
+            deadline.as_mut().reset(at);
             let _ = deadline.as_mut().poll(cx);
         }
         if allow_phase {

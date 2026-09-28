@@ -3,6 +3,8 @@ nextest-version = { required = "0.9.91" }
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 1 }
 retries = 0
+# Keep the failing phase output beside the final CI summary as well.
+failure-output = "immediate-final"
 
 # Start the recently failing archive proof immediately. All these expensive
 # proofs own temporary journals; Prometheus listeners use allocated ports.

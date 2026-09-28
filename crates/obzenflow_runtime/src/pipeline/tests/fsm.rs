@@ -32,10 +32,10 @@ fn stop_intent_cancel_sets_defaults() {
 fn stop_intent_graceful_sets_deadline() {
     let mut intent = StopIntent::default();
     let timeout = Duration::from_secs(3);
-    let before = std::time::Instant::now();
+    let before = tokio::time::Instant::now();
 
     let _ = intent.apply_request(FlowStopMode::Graceful { timeout }, None);
-    let after = std::time::Instant::now();
+    let after = tokio::time::Instant::now();
 
     assert!(intent.requested);
     assert!(matches!(
@@ -49,6 +49,36 @@ fn stop_intent_graceful_sets_deadline() {
         .expect("graceful stop should set a deadline");
     assert!(deadline >= before + timeout);
     assert!(deadline <= after + timeout);
+}
+
+#[tokio::test(start_paused = true)]
+async fn graceful_stop_timeout_follows_the_runtime_clock() {
+    // Earlier source waits may have advanced the runtime well beyond wall time.
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    let mut intent = StopIntent::default();
+    intent.apply_request(
+        FlowStopMode::Graceful {
+            timeout: Duration::from_secs(10),
+        },
+        None,
+    );
+    let deadline = intent.deadline;
+
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert!(!intent.timeout_due());
+    assert!(matches!(
+        intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.into())),
+        StopRequestOutcome::Ignored
+    ));
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(intent.timeout_due());
+    assert!(matches!(
+        intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.into())),
+        StopRequestOutcome::Applied { .. }
+    ));
+    assert_eq!(intent.deadline, deadline);
+    assert_eq!(intent.reason.as_deref(), Some(STOP_REASON_TIMEOUT));
 }
 
 #[test]

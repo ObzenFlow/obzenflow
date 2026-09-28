@@ -183,7 +183,7 @@ fn rewrite<T: JournalEvent>(
         offset += consumed as u64;
         let group = frame.group_id().map(str::to_owned);
         let mut records = frame.into_records();
-        let expanded = records
+        let mut expanded = records
             .iter()
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
@@ -192,18 +192,18 @@ fn rewrite<T: JournalEvent>(
             *ordinal += records.len();
             continue;
         }
-        for record in &mut records {
-            let protected = serde_json::to_value(&record.envelope.provenance)?;
-            let payload = serde_json::to_value(&record.payload)?;
+        // Keep the original full-record oracle, changing only the attachment
+        // the caller explicitly asked to remove. Reuse it for the roundtrip
+        // check instead of repeatedly serialising provenance and payloads.
+        for (record, expected) in records.iter_mut().zip(&mut expanded) {
             if !keep(*ordinal) {
                 *removed += usize::from(record.envelope.observability.take().is_some());
+                expected["envelope"]
+                    .as_object_mut()
+                    .expect("journal record envelope is an object")
+                    .remove("observability");
             }
             *ordinal += 1;
-            assert_eq!(
-                serde_json::to_value(&record.envelope.provenance)?,
-                protected
-            );
-            assert_eq!(serde_json::to_value(&record.payload)?, payload);
         }
         let encoded = codec::prepare(&records, group.as_deref(), path, DefinitionStore::default())?;
         // Independently decode and compare every field, including observations.
@@ -214,8 +214,8 @@ fn rewrite<T: JournalEvent>(
             )?
             .into_records();
         assert_eq!(records.len(), decoded.len());
-        for (before, after) in records.iter().zip(decoded) {
-            assert_eq!(serde_json::to_value(before)?, serde_json::to_value(after)?);
+        for (expected, after) in expanded.iter().zip(decoded) {
+            assert_eq!(expected, &serde_json::to_value(after)?);
         }
         output.extend(encoded.bytes);
     }

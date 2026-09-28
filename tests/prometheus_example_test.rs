@@ -458,6 +458,8 @@ fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
     let mut runs = Vec::new();
     let mut storage = Vec::new();
     for (hosted, periodic) in [(false, false), (true, false), (false, true)] {
+        let started = std::time::Instant::now();
+        println!("Prometheus archive proof: hosted={hosted}, periodic={periodic}; starting");
         let directory = root.join(if periodic {
             "periodic"
         } else if hosted {
@@ -499,6 +501,10 @@ interval_ms = 250
             .with_log_level(LogLevel::Error)
             .run_blocking(prometheus_demo::flow_definition(1_000, journals.clone()))
             .expect("the finite example must complete in either host mode");
+        println!(
+            "Prometheus archive proof: flow settled after {:?}",
+            started.elapsed()
+        );
         let archives: Vec<_> = std::fs::read_dir(journals.join("flows"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -508,12 +514,15 @@ interval_ms = 250
         let export = directory.join("export.jsonl");
         obzenflow_infra::journal::disk::inspect::export_jsonl(&archives[0], Some(&export)).unwrap();
         let jsonl = std::fs::read_to_string(export).unwrap();
-        let packets = jsonl
+        // Decode the original export once for all structural checks and the
+        // complete preservation oracle; the typed business projection follows.
+        let rows: Vec<Value> = jsonl
             .lines()
-            .filter(|line| {
-                serde_json::from_str::<Value>(line).unwrap()["envelope"]["observability"]
-                    .is_object()
-            })
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let packets = rows
+            .iter()
+            .filter(|row| row["envelope"]["observability"].is_object())
             .count();
         let bytes: u64 = std::fs::read_dir(&archives[0])
             .unwrap()
@@ -522,19 +531,29 @@ interval_ms = 250
             .map(|path| std::fs::metadata(path).unwrap().len())
             .sum();
         storage.push((packets, bytes));
-        let terminal: Vec<_> = jsonl
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter_map(|row| row["payload"]["pipeline_event"].as_str().map(str::to_owned))
-            .filter(|state| matches!(state.as_str(), "completed" | "cancelled" | "failed"))
+        let terminal: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row["payload"]["pipeline_event"].as_str())
+            .filter(|state| matches!(*state, "completed" | "cancelled" | "failed"))
             .collect();
         assert_eq!(terminal, ["completed"]);
-        let protected = exported_jsonl::protected_records(&jsonl);
+        let protected: Vec<_> = rows
+            .into_iter()
+            .map(exported_jsonl::without_observations)
+            .collect();
+        println!(
+            "Prometheus archive proof: original export checked after {:?}",
+            started.elapsed()
+        );
         for retain_some in [true, false] {
             assert!(
                 exported_jsonl::omit_observations(&archives[0], |index| retain_some
                     && index % 3 == 0)
                     > 0
+            );
+            println!(
+                "Prometheus archive proof: retain_some={retain_some} rewrite complete after {:?}",
+                started.elapsed()
             );
             let omitted = directory.join(format!("omitted-{retain_some}.jsonl"));
             obzenflow_infra::journal::disk::inspect::export_jsonl(&archives[0], Some(&omitted))
@@ -542,6 +561,10 @@ interval_ms = 250
             assert_eq!(
                 exported_jsonl::protected_records(&std::fs::read_to_string(omitted).unwrap()),
                 protected
+            );
+            println!(
+                "Prometheus archive proof: retain_some={retain_some} export verified after {:?}",
+                started.elapsed()
             );
         }
 
@@ -686,6 +709,7 @@ interval_ms = 250
             "this pure example uses sink receipts and must not invent effect invocations"
         );
         runs.push((projection, data_types, deliveries, errors));
+        println!("Prometheus archive proof: hosted={hosted}, periodic={periodic}; assertions passed after {:?}", started.elapsed());
     }
     assert_eq!(
         runs[0], runs[1],

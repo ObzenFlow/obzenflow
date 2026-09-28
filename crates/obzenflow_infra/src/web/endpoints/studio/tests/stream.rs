@@ -1408,6 +1408,8 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::stages::SourceError;
 
+    let started = std::time::Instant::now();
+
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct Item(usize);
     impl TypedPayload for Item {
@@ -1499,11 +1501,19 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .await
         .expect("source finishes while Studio is unread")
         .unwrap();
+    println!(
+        "Studio middleware proof: flow settled after {:?}",
+        started.elapsed()
+    );
     closing.send(true).unwrap();
     let body: Vec<_> = tokio::time::timeout(Duration::from_secs(2), stream.collect())
         .await
         .unwrap();
     let changes = frames(&body, "middleware_lifecycle");
+    println!(
+        "Studio middleware proof: unread stream drained after {:?}",
+        started.elapsed()
+    );
     let payloads: Vec<_> = changes.iter().map(|frame| frame_payload(frame)).collect();
     let breaker_states: Vec<_> = payloads
         .iter()
@@ -1559,6 +1569,10 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         })
         .collect();
     assert_eq!(ids, recorded);
+    println!(
+        "Studio middleware proof: journal transitions checked after {:?}",
+        started.elapsed()
+    );
     assert!(
         journal
             .read_all_unordered()
@@ -1575,6 +1589,10 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         resumed_endpoint.with_live_journals(stage_journals.clone(), system_journals.clone());
     let resumed =
         collect_closing(&resumed_endpoint, resumed_closing, changes[0].id.as_deref()).await;
+    println!(
+        "Studio middleware proof: reconnect drained after {:?}",
+        started.elapsed()
+    );
     assert_eq!(
         frames(&resumed, "middleware_lifecycle")
             .iter()
@@ -1595,6 +1613,10 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     assert_eq!(middleware.len(), 1);
     assert_eq!(middleware[0]["circuit_breaker"]["state"], "closed");
     assert_eq!(middleware[0]["rate_limiter"]["mode"], "limiting");
+    println!(
+        "Studio middleware proof: fresh snapshot checked after {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

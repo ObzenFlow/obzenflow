@@ -205,7 +205,7 @@ fn fail_children(ctx: &mut C, message: String) -> Change {
         .reason
         .clone();
     ctx.cleanup_deadline
-        .get_or_insert_with(|| std::time::Instant::now() + super::context::stop_drain_timeout());
+        .get_or_insert_with(|| tokio::time::Instant::now() + super::context::stop_drain_timeout());
     change(S::FailingChildren { cause }, vec![A::CancelChildren])
 }
 pub(super) fn failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
@@ -305,7 +305,7 @@ pub(super) fn stop<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'
         ));
         if cancel {
             ctx.cleanup_deadline = Some(
-                std::time::Instant::now()
+                tokio::time::Instant::now()
                     + if matches!(event, E::GracefulStopExpired) {
                         std::time::Duration::ZERO
                     } else {

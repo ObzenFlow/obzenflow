@@ -307,7 +307,7 @@ pub async fn metrics_budget_starts_after_terminal_publication_without_readback(
         .execute(&mut ctx)
         .await
         .unwrap();
-    let deadline = std::time::Instant::now() - Duration::from_secs(1);
+    let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
     ctx.metrics_deadline = Some(deadline);
     let (_sender, receiver, watcher) =
         ChannelBuilder::new().build(PipelineState::FinalisingMetrics);

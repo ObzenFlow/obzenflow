@@ -18,6 +18,7 @@ use obzenflow_fsm::FsmContext;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// The single reducer for handle requests, raw events and Runtime timeouts.
 #[derive(Clone, Debug, Default)]
@@ -25,7 +26,7 @@ pub(crate) struct StopIntent {
     pub(crate) requested: bool,
     pub(crate) mode: Option<FlowStopMode>,
     pub(crate) reason: Option<String>,
-    pub(crate) deadline: Option<std::time::Instant>,
+    pub(crate) deadline: Option<Instant>,
 }
 
 pub(crate) enum StopRequestOutcome {
@@ -41,7 +42,7 @@ impl StopIntent {
         matches!(self.mode, Some(FlowStopMode::Graceful { .. }))
             && self
                 .deadline
-                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+                .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     pub(crate) fn apply_request(
@@ -64,7 +65,7 @@ impl StopIntent {
         if timeout && (!matches!(mode, FlowStopMode::Cancel) || !self.timeout_due()) {
             return StopRequestOutcome::Ignored;
         }
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         self.requested = true;
         self.reason = Some(reason.unwrap_or_else(|| STOP_REASON_USER_STOP.to_string()));
         self.mode = Some(mode.clone());
@@ -117,8 +118,9 @@ pub(crate) struct PipelineContext {
     pub(crate) flow_start_time: Option<std::time::Instant>,
     pub(crate) stop_intent: StopIntent,
     pub(crate) termination: TerminationState,
-    pub(crate) cleanup_deadline: Option<std::time::Instant>,
-    pub(crate) metrics_deadline: Option<std::time::Instant>,
+    // Scheduling deadlines must use the same clock as the supervisor's Tokio timer.
+    pub(crate) cleanup_deadline: Option<Instant>,
+    pub(crate) metrics_deadline: Option<Instant>,
     pub(crate) metrics_drain_timeout_ms: u64,
 }
 

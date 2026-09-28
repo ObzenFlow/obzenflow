@@ -304,7 +304,7 @@ impl PipelineAction {
             )?,
             Self::FinaliseMetrics => {
                 ctx.metrics_deadline = Some(
-                    std::time::Instant::now()
+                    tokio::time::Instant::now()
                         + std::time::Duration::from_millis(ctx.metrics_drain_timeout_ms),
                 );
                 if let Some(metrics) = ctx.resources.metrics.handle() {

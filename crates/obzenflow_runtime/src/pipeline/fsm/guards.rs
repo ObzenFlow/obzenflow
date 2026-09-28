@@ -4,7 +4,7 @@
 
 use super::{PipelineContext, PipelineDeadline, PipelineFsmEvent, PipelineFsmState};
 use obzenflow_fsm::{EventVariant, FsmError, StateVariant};
-use std::time::Instant;
+use tokio::time::Instant;
 
 impl PipelineFsmState {
     pub(crate) fn phase_satisfied(&self, ctx: &PipelineContext) -> bool {
