@@ -723,6 +723,7 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
 
 struct ScriptedReader {
     pending_read: Option<Arc<PendingOpen>>,
+    pending_read_from: usize,
     reads: Arc<AtomicUsize>,
     events: Vec<SystemJournalRecord>,
     position: usize,
@@ -740,7 +741,11 @@ impl Drop for ScriptedReader {
 impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ScriptedReader {
     async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        if let Some(probe) = &self.pending_read {
+        if let Some(probe) = self
+            .pending_read
+            .as_ref()
+            .filter(|_| self.position >= self.pending_read_from)
+        {
             let _guard = PendingOpenGuard(probe.clone());
             probe.entered.notify_one();
             probe.release.notified().await;
@@ -801,6 +806,7 @@ async fn dropping_studio_response_cancels_pending_journal_open() {
 
 pub(crate) struct ScriptedJournal {
     pending_read: Option<Arc<PendingOpen>>,
+    pending_read_from: usize,
     pub(crate) reads: Arc<AtomicUsize>,
     pub(crate) opens: Arc<AtomicUsize>,
     inner: MemoryJournal<SystemEvent>,
@@ -817,6 +823,7 @@ impl ScriptedJournal {
             reads: Arc::new(AtomicUsize::new(0)),
             opens: Arc::new(AtomicUsize::new(0)),
             pending_read: None,
+            pending_read_from: 0,
             inner: MemoryJournal::with_owner(JournalOwner::system(system_id)),
             fail_at: None,
             fail_open: false,
@@ -838,6 +845,7 @@ impl ScriptedJournal {
         }
         let reader = Box::new(ScriptedReader {
             pending_read: self.pending_read.clone(),
+            pending_read_from: self.pending_read_from,
             reads: self.reads.clone(),
             events: self.inner.read_all_unordered().await?,
             position: position as usize,
@@ -1999,4 +2007,39 @@ async fn an_issued_read_settles_while_the_client_stops_polling() {
         .await
         .expect("a paused client cannot retain a settled read's resources");
     drop(body);
+}
+
+#[tokio::test]
+async fn ready_records_are_delivered_before_a_later_pending_read_settles() {
+    let system = SystemId::new();
+    let mut journal = ScriptedJournal::new(system);
+    let probe = Arc::new(PendingOpen::default());
+    journal.pending_read = Some(probe.clone());
+    journal.pending_read_from = 1;
+    let record = append(
+        &journal,
+        system.into(),
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
+            stage_count: Some(1),
+        }),
+    )
+    .await;
+    let reader_dropped = journal.reader_dropped.clone();
+    let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
+    let mut body = open(&endpoint, Some("jr1:{}")).await;
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .expect("a pending tail read cannot withhold the preceding committed record")
+        .unwrap();
+    assert_eq!(frame.event.as_deref(), Some("flow_lifecycle"));
+    assert_eq!(frame.id, Some(cursor(&record)));
+    tokio::select! {
+        _ = body.next() => panic!("the pending tail cannot produce another frame"),
+        _ = probe.entered.notified() => {}
+    }
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
+        .await
+        .expect("response drop cancels the pending read after an emitted record");
+    assert!(reader_dropped.load(Ordering::SeqCst));
 }

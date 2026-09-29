@@ -238,10 +238,17 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
     application.abort();
     assert!(application.await.unwrap_err().is_cancelled());
     let completed = tokio::time::timeout(Duration::from_secs(2), lifecycle::wait(&flow)).await;
-    abort_execution_for_test(&flow).await;
+    // Cleanup is only needed if application drop failed to stop the flow. A
+    // settled cancellation can retain a concurrent initialization/publication
+    // failure, so a second explicit abort must not demand a different result.
+    if completed.is_err() {
+        drop(lifecycle::guard_execution(&flow));
+        let _ = lifecycle::wait(&flow).await;
+    }
     assert!(completed
         .expect("built flow must be cancelled during host preparation")
         .is_err());
+    assert!(!flow.is_running());
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("host listener released");
     drop(listener);
 }

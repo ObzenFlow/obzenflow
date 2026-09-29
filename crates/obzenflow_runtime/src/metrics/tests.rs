@@ -762,6 +762,48 @@ pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
     assert_eq!(end.event_type_name(), "system.metrics.shutdown");
 }
 
+pub async fn metrics_drain_during_export_settles_before_final_refresh(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    let (mut ctx, _, exports) = context(&mut *factory, vec![], vec![]).await;
+    ctx.export_interval = Duration::from_secs(60);
+    let export_journal = ObservedJournal::new(ctx.journals.export.clone());
+    let gate = Arc::new(Gate::default());
+    *export_journal.append_gate.lock().unwrap() = Some(gate.clone());
+    ctx.journals.export = export_journal;
+    let journals = ctx.journals.clone();
+    let (task, control) = run(ctx);
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .expect("first export reaches its pending journal append");
+    control.send(Event::StartDraining).await.unwrap();
+    until(|| task.current_state() == State::DrainingExport).await;
+    assert_eq!(exports.0.lock().unwrap().len(), 1);
+    assert_eq!(journals.export.committed_position().await.unwrap(), 0);
+
+    // Completing the accepted export changes state again before any queued
+    // drain action can run. The final refresh must still begin after settlement.
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), task.wait_for_completion())
+        .await
+        .expect("drain completes after the accepted export settles")
+        .unwrap();
+    assert!(matches!(task.current_state(), State::Drained { .. }));
+    assert_eq!(exports.0.lock().unwrap().len(), 2);
+    assert_eq!(journals.export.committed_position().await.unwrap(), 2);
+    let rows = journals.coordination.read_all_unordered().await.unwrap();
+    let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
+    assert_eq!(
+        names,
+        [
+            "system.supervisor.registered",
+            "system.metrics.ready",
+            "system.metrics.drained",
+            "system.metrics.shutdown",
+        ]
+    );
+}
+
 pub async fn metrics_folds_check_eligibility_before_causal_incorporation(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {

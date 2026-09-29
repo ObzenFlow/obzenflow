@@ -1667,12 +1667,15 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
         }
         state S::Exporting {
             on E::ExportCompleted => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Running, actions: vec![] }) }) };
-            on E::StartDraining => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::DrainingExport, actions: vec![A::BeginFinalRefresh] }) }) };
+            on E::StartDraining => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::DrainingExport, actions: vec![] }) }) };
             on E::Error => metrics_failed;
             on E::Cancel => metrics_cancelled;
         }
         state S::DrainingExport {
-            on E::ExportCompleted => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Draining, actions: vec![] }) }) };
+            // The active export owns its resources until completion, which
+            // replaces queued actions. Start the refresh here; the action keeps
+            // an existing deadline when later exports complete during draining.
+            on E::ExportCompleted => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Draining, actions: vec![A::BeginFinalRefresh] }) }) };
             on E::Error => metrics_failed;
             on E::Cancel => metrics_cancelled;
         }

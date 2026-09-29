@@ -10,10 +10,10 @@ use super::*;
 use futures::stream::BoxStream;
 use futures::Stream;
 use obzenflow_adapters::studio::{bootstrap, server_shutdown, StudioStreamError};
-use obzenflow_core::event::{ChainEvent, SystemEvent};
+use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use obzenflow_core::journal::read::RunRecordData;
 use obzenflow_core::journal::{JournalError, JournalReader};
-use obzenflow_core::{web::SseFrame, JournalId};
+use obzenflow_core::{web::SseFrame, JournalId, JournalOwner, JournalRecord, WriterId};
 use std::collections::BTreeMap;
 use std::task::{Context, Poll};
 use std::{
@@ -21,12 +21,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 const READ_QUANTUM: usize = 64;
 const TAIL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Each stream owns its ordinary reader and at most one issued operation.
+/// Each stream owns its ordinary reader and at most one bounded read batch.
 /// Issued I/O must settle even while the response is unpolled: a disk read can
 /// otherwise retain a writer lock until the client asks for another frame.
 struct LiveReaders {
@@ -35,7 +37,7 @@ struct LiveReaders {
 }
 struct LiveReader {
     id: JournalId,
-    owner: Option<obzenflow_core::WriterId>,
+    owner: Option<WriterId>,
     position: u64,
     stream: BoxStream<'static, Result<ReadStep, ReaderError>>,
     initial_complete: bool,
@@ -51,56 +53,53 @@ enum ReaderError {
     Read(JournalError),
 }
 
-type ReaderResult = Result<
-    Option<(
-        JournalId,
-        u64,
-        Option<obzenflow_core::WriterId>,
-        RunRecordData,
-    )>,
-    ReaderError,
->;
+type ReaderResult = Result<Option<(JournalId, u64, Option<WriterId>, RunRecordData)>, ReaderError>;
 
-struct ReadOperation<T>(tokio::task::JoinHandle<T>);
+struct ReadOperation<T>(JoinHandle<T>);
 impl<T> Drop for ReadOperation<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
 }
 
-fn live_reader<T: obzenflow_core::event::JournalEvent + 'static>(
-    journal: Arc<dyn Journal<T>>,
-    wrap: fn(obzenflow_core::JournalRecord<T::Payload>) -> RunRecordData,
-) -> LiveReader {
-    let id = *journal.id();
-    let owner = match journal.owner() {
-        Some(obzenflow_core::JournalOwner::Stage { stage_id }) => Some((*stage_id).into()),
-        Some(obzenflow_core::JournalOwner::System { system_id }) => Some((*system_id).into()),
-        None => None,
-    };
-    let stream = futures::stream::unfold(
-        (journal, None::<Box<dyn JournalReader<T>>>),
-        move |(journal, reader)| async move {
-            let opening = reader.is_none();
-            let operation_journal = journal.clone();
-            let mut operation = ReadOperation(tokio::spawn(async move {
-                let mut reader = match reader {
-                    Some(reader) => reader,
-                    None => match operation_journal.reader_from(0).await {
-                        Ok(reader) => {
-                            let opened = reader
-                                .initial_prefix_complete()
-                                .map(|initial_complete| ReadStep {
-                                    record: None,
-                                    initial_complete,
-                                    at_end: false,
-                                })
-                                .map_err(ReaderError::Read);
-                            return (opened, Some(reader));
+struct ReadBatch<T: JournalEvent> {
+    operation: ReadOperation<Option<Box<dyn JournalReader<T>>>>,
+    results: mpsc::Receiver<Result<ReadStep, ReaderError>>,
+    opening: bool,
+}
+
+impl<T: JournalEvent + 'static> ReadBatch<T> {
+    fn start(
+        journal: Arc<dyn Journal<T>>,
+        reader: Option<Box<dyn JournalReader<T>>>,
+        wrap: fn(JournalRecord<T::Payload>) -> RunRecordData,
+    ) -> Self {
+        let opening = reader.is_none();
+        let (results, receiver) = mpsc::channel(READ_QUANTUM);
+        let operation = ReadOperation(tokio::spawn(async move {
+            let mut reader = match reader {
+                Some(reader) => reader,
+                None => {
+                    let reader = match journal.reader_from(0).await {
+                        Ok(reader) => reader,
+                        Err(error) => {
+                            let _ = results.send(Err(ReaderError::Open(error))).await;
+                            return None;
                         }
-                        Err(error) => return (Err(ReaderError::Open(error)), None),
-                    },
-                };
+                    };
+                    let opened = reader
+                        .initial_prefix_complete()
+                        .map(|initial_complete| ReadStep {
+                            record: None,
+                            initial_complete,
+                            at_end: false,
+                        })
+                        .map_err(ReaderError::Read);
+                    let _ = results.send(opened).await;
+                    return Some(reader);
+                }
+            };
+            for _ in 0..READ_QUANTUM {
                 let result = match reader.next().await {
                     Ok(record) => reader
                         .initial_prefix_complete()
@@ -112,26 +111,59 @@ fn live_reader<T: obzenflow_core::event::JournalEvent + 'static>(
                         .map_err(ReaderError::Read),
                     Err(error) => Err(ReaderError::Read(error)),
                 };
-                (result, Some(reader))
-            }));
-            let (result, reader) = match (&mut operation.0).await {
-                Ok(completed) => completed,
-                Err(error) => {
-                    let error = JournalError::Implementation {
-                        message: "Studio journal operation failed".into(),
-                        source: Box::new(error),
-                    };
-                    (
-                        Err(if opening {
+                let has_record = result.as_ref().is_ok_and(|step| step.record.is_some());
+                // Deliver each settled record immediately. A later pending read
+                // must not hold earlier facts until the whole batch completes.
+                if results.send(result).await.is_err() || !has_record {
+                    break;
+                }
+            }
+            Some(reader)
+        }));
+        Self {
+            operation,
+            results: receiver,
+            opening,
+        }
+    }
+}
+
+fn live_reader<T: JournalEvent + 'static>(
+    journal: Arc<dyn Journal<T>>,
+    wrap: fn(JournalRecord<T::Payload>) -> RunRecordData,
+) -> LiveReader {
+    let id = *journal.id();
+    let owner = match journal.owner() {
+        Some(JournalOwner::Stage { stage_id }) => Some((*stage_id).into()),
+        Some(JournalOwner::System { system_id }) => Some((*system_id).into()),
+        None => None,
+    };
+    let stream = futures::stream::unfold(
+        (journal, None, None::<ReadBatch<T>>),
+        move |(journal, mut reader, mut batch)| async move {
+            loop {
+                let active = batch
+                    .get_or_insert_with(|| ReadBatch::start(journal.clone(), reader.take(), wrap));
+                if let Some(result) = active.results.recv().await {
+                    return Some((result, (journal, reader, batch)));
+                }
+                let mut finished = batch.take().expect("read batch is active");
+                match (&mut finished.operation.0).await {
+                    Ok(completed) => reader = completed,
+                    Err(error) => {
+                        let error = JournalError::Implementation {
+                            message: "Studio journal operation failed".into(),
+                            source: Box::new(error),
+                        };
+                        let error = if finished.opening {
                             ReaderError::Open(error)
                         } else {
                             ReaderError::Read(error)
-                        }),
-                        None,
-                    )
+                        };
+                        return Some((Err(error), (journal, None, None)));
+                    }
                 }
-            };
-            Some((result, (journal, reader)))
+            }
         },
     );
     LiveReader {

@@ -9,7 +9,7 @@
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::FlowId;
 use obzenflow_infra::journal::MemoryJournalFactory;
-use obzenflow_runtime::testing::pipeline;
+use obzenflow_runtime::testing::{metrics, pipeline};
 
 fn journals() -> Box<dyn FlowJournalFactory> {
     Box::new(MemoryJournalFactory::new(FlowId::new()))
@@ -198,6 +198,11 @@ async fn metrics_manual_export_uses_the_live_control_receiver() {
 #[tokio::test]
 async fn metrics_exports_settle_accepted_requests_in_their_own_journal() {
     metrics_backends(obzenflow_runtime::testing::metrics::metrics_exports_settle_accepted_requests_in_their_own_journal).await;
+}
+
+#[tokio::test]
+async fn metrics_drain_during_export_settles_before_final_refresh() {
+    metrics_backends(metrics::metrics_drain_during_export_settles_before_final_refresh).await;
 }
 
 #[tokio::test]
