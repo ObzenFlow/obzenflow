@@ -8,6 +8,7 @@ use super::*;
 use crate::__private::lifecycle;
 use crate::metrics::observations::ObservationRegistry;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
+use crate::stages::common::stage_lifecycle::{LifecyclePhase, LifecycleResults};
 use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
 use obzenflow_core::event::observability::NoObservations;
 use std::error::Error;
@@ -103,11 +104,7 @@ fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
     let published = extras.published_outcome.clone();
     let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("flow-test")
         .spawn_for_test(move || async move {
-            crate::stages::common::stage_lifecycle::LifecycleResults::observe(
-                &crate::stages::common::stage_lifecycle::LifecyclePhase::Ready,
-                Default::default(),
-                None,
-            );
+            LifecycleResults::observe(&LifecyclePhase::Ready, Default::default(), None);
             match event_receiver.recv().await {
                 Some(PipelineFsmEvent::Start) => {
                     use super::super::termination::{
@@ -165,7 +162,6 @@ fn flow_handle_for_start_admission(
 
     let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("flow-admission-test")
         .spawn_for_test(move || async move {
-            use crate::stages::common::stage_lifecycle::{LifecyclePhase, LifecycleResults};
             match initial_state {
                 PipelineState::ReadyForRun => {
                     LifecycleResults::observe(&LifecyclePhase::Ready, Default::default(), None)

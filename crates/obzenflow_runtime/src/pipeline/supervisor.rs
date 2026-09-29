@@ -8,12 +8,18 @@
 use super::fsm::{PipelineAction, PipelineContext, PipelineFsmEvent as E, PipelineFsmState as S};
 use super::resources::{Observations, OperationalFailure};
 use super::PipelineState;
+use crate::stages::common::stage_handle::discarded_control_details;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::supervised_base::base::{self, Registration, Supervisor};
 use crate::supervised_base::handler_supervised::{ActionExecution, SupervisorAction};
 use crate::supervised_base::publication::BoxError;
+use crate::supervised_base::with_external_events::ExternalControlEvent;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, SelfSupervised, StateWatcher};
 use futures::{FutureExt, Stream};
-use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
-use obzenflow_core::event::WriterId;
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisionMode, SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::{CommandDiscardDisposition, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_fsm::{FsmAction, FsmError};
 use std::future::Future;
@@ -152,7 +158,7 @@ impl PipelineSupervisor {
     }
 }
 
-impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
+impl Supervisor for PipelineSupervisor {
     type State = S;
     type Event = E;
     type Context = PipelineContext;
@@ -160,17 +166,15 @@ impl crate::supervised_base::base::Supervisor for PipelineSupervisor {
     fn build_state_machine(&self, state: S) -> super::fsm::PipelineFsm {
         super::fsm::build_pipeline_fsm_with_initial(state)
     }
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::Pipeline
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::Pipeline
     }
     fn registration(
         &self,
         context: &Self::Context,
-        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
-    ) -> crate::supervised_base::base::Registration {
-        crate::supervised_base::base::register_system(
+        descriptor: SupervisorDescriptor,
+    ) -> Registration {
+        base::register_system(
             context.system_journal.clone(),
             self.system_id.into(),
             descriptor,
@@ -203,12 +207,8 @@ impl SelfSupervised for PipelineSupervisor {
         ctx: &mut PipelineContext,
     ) -> Result<ActionExecution<PipelineContext, E>, FsmError> {
         if matches!(action, PipelineAction::Register) {
-            let registration = crate::supervised_base::base::register(
-                self,
-                ctx,
-                self.writer_id(),
-                SupervisionMode::SelfSupervised,
-            );
+            let registration =
+                base::register(self, ctx, self.writer_id(), SupervisionMode::SelfSupervised);
             // Admit registration before any later pipeline publication. Its
             // receipt gates startup, while child cancellation and deadlines
             // remain independent of the blocked journal operation.
@@ -237,7 +237,7 @@ impl SelfSupervised for PipelineSupervisor {
         }
         Ok(ActionExecution::Completed)
     }
-    fn lifecycle_phase(&self, state: &S) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+    fn lifecycle_phase(&self, state: &S) -> LifecyclePhase {
         use super::termination::ExecutionOutcome;
         use crate::stages::common::stage_lifecycle::LifecyclePhase as L;
         match state {
@@ -296,14 +296,9 @@ impl SelfSupervised for PipelineSupervisor {
     }
 }
 
-impl crate::supervised_base::with_external_events::ExternalControlEvent for E {
-    fn discard_details(
-        &self,
-    ) -> (
-        obzenflow_core::event::CommandDiscardDisposition,
-        Option<String>,
-    ) {
-        crate::stages::common::stage_handle::discarded_control_details(match self {
+impl ExternalControlEvent for E {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
+        discarded_control_details(match self {
             Self::Abort { reason } | Self::OperationalFailure { message: reason } => Some(reason),
             _ => None,
         })

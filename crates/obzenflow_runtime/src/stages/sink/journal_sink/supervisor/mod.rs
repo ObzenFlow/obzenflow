@@ -6,13 +6,22 @@
 
 use super::fsm::{JournalSinkAction, JournalSinkContext, JournalSinkEvent, JournalSinkState};
 use crate::messaging::UpstreamSubscription;
+use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::stages::common::handlers::UnifiedSinkHandler;
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::handler_supervised::SupervisorAction;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::supervised_base::base::{self, Registration, Supervisor};
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, DispatchCompletion, OwnedDispatch, SupervisorAction,
+};
 use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
-use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
@@ -275,8 +284,8 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> Supervisor
     fn registration(
         &self,
         context: &Self::Context,
-        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
-    ) -> crate::supervised_base::base::Registration {
+        descriptor: SupervisorDescriptor,
+    ) -> Registration {
         let Some(context) = context.resources.as_ref() else {
             return Box::pin(async {
                 Err(
@@ -285,14 +294,14 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> Supervisor
                 )
             });
         };
-        crate::supervised_base::base::register_stage(
+        base::register_stage(
             context.data_journal.clone(),
-            crate::stages::common::supervision::flow_context_factory::make_flow_context(
+            make_flow_context(
                 &context.flow_name,
                 &context.flow_id.to_string(),
                 &context.stage_name,
                 context.stage_id,
-                obzenflow_core::event::context::StageType::Sink,
+                StageType::Sink,
             ),
             descriptor,
         )
@@ -309,18 +318,12 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
 {
     type Handler = H;
 
-    fn lifecycle_phase(
-        &self,
-        state: &Self::State,
-    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+    fn lifecycle_phase(&self, state: &Self::State) -> LifecyclePhase {
         state.lifecycle_phase()
     }
 
-    fn accounting(
-        &self,
-        context: &Self::Context,
-    ) -> obzenflow_core::event::provenance::ExecutionAccounting {
-        crate::metrics::instrumentation::snapshot_stage_accounting(&context.instrumentation)
+    fn accounting(&self, context: &Self::Context) -> ExecutionAccounting {
+        snapshot_stage_accounting(&context.instrumentation)
     }
 
     fn after_transition(&mut self, state: &Self::State, context: &Self::Context) {
@@ -329,10 +332,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
             .transition_to_state(state.variant_name());
     }
 
-    fn supervisor_action(
-        &self,
-        action: &Self::Action,
-    ) -> Option<crate::supervised_base::handler_supervised::SupervisorAction<Self::Event>> {
+    fn supervisor_action(&self, action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
         match action {
             JournalSinkAction::Host(action) => Some(action.clone()),
             _ => None,
@@ -343,11 +343,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
         &mut self,
         action: Self::Action,
         context: &mut Self::Context,
-    ) -> Result<
-        crate::supervised_base::handler_supervised::ActionExecution<Self::Context, Self::Event>,
-        FsmError,
-    > {
-        use crate::supervised_base::handler_supervised::{ActionCompletion, ActionExecution};
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
         let mut resources = context.resources.take().ok_or_else(|| {
             FsmError::HandlerError("sink operation already owns resources".into())
         })?;
@@ -376,7 +372,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Option<crate::supervised_base::handler_supervised::OwnedDispatch<Self>> {
+    ) -> Option<OwnedDispatch<Self>> {
         if !matches!(
             state,
             JournalSinkState::Running | JournalSinkState::Draining
@@ -398,7 +394,7 @@ impl<H: UnifiedSinkHandler + Debug + Send + Sync + 'static> HandlerSupervised
                 owner.subscription = worker.subscription;
                 context.resources = owned_context.resources;
                 result
-            }) as crate::supervised_base::handler_supervised::DispatchCompletion<Self>
+            }) as DispatchCompletion<Self>
         }))
     }
 

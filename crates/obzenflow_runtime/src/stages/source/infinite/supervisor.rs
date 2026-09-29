@@ -9,8 +9,10 @@ use super::fsm::{
     InfiniteSourceEvent, InfiniteSourceState,
 };
 use crate::execution::{SourceExecutionPhase, SourceReplayExhaustion};
+use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::replay::ReplayDriver;
 use crate::stages::common::handlers::UnifiedInfiniteSourceHandler;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::observer::SourcePollObserverOutcome;
 use crate::stages::source::replay_lifecycle::{ReplayCompletionFacts, ReplayCompletionGuard};
@@ -24,8 +26,10 @@ use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
     SourcePollResult, SourceReaderInitContext,
 };
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::handler_supervised::SupervisorAction;
+use crate::supervised_base::base::{self, Registration, Supervisor};
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, DispatchCompletion, OwnedDispatch, SupervisorAction,
+};
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{
     publication, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
@@ -33,10 +37,13 @@ use crate::supervised_base::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
-use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
 use obzenflow_core::event::types::Count;
 use obzenflow_core::event::{ChainEventFactory, ReplayLifecycleEvent};
-use obzenflow_core::{MiddlewareExecutionScope, StageId, StageKey, WriterId};
+use obzenflow_core::{ChainEvent, Journal, MiddlewareExecutionScope, StageId, StageKey, WriterId};
 use obzenflow_fsm::{fsm, EventVariant, FsmError, StateMachine, StateVariant, Transition};
 use std::error::Error;
 use std::sync::atomic::Ordering;
@@ -54,9 +61,8 @@ pub(crate) struct InfiniteSourceSupervisor<H: UnifiedInfiniteSourceHandler + Sen
     pub(crate) handler: Option<H>,
 
     /// System journal for lifecycle events
-    pub(crate) data_journal:
-        std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
-    pub(crate) flow_context: obzenflow_core::event::provenance::FlowContext,
+    pub(crate) data_journal: Arc<dyn Journal<ChainEvent>>,
+    pub(crate) flow_context: FlowContext,
 
     /// Stage ID
     pub(crate) stage_id: StageId,
@@ -327,9 +333,9 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> Supervisor
     fn registration(
         &self,
         _context: &Self::Context,
-        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
-    ) -> crate::supervised_base::base::Registration {
-        crate::supervised_base::base::register_stage(
+        descriptor: SupervisorDescriptor,
+    ) -> Registration {
+        base::register_stage(
             self.data_journal.clone(),
             self.flow_context.clone(),
             descriptor,
@@ -347,18 +353,12 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
 {
     type Handler = H;
 
-    fn lifecycle_phase(
-        &self,
-        state: &Self::State,
-    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+    fn lifecycle_phase(&self, state: &Self::State) -> LifecyclePhase {
         state.lifecycle_phase()
     }
 
-    fn accounting(
-        &self,
-        context: &Self::Context,
-    ) -> obzenflow_core::event::provenance::ExecutionAccounting {
-        crate::metrics::instrumentation::snapshot_stage_accounting(&context.instrumentation)
+    fn accounting(&self, context: &Self::Context) -> ExecutionAccounting {
+        snapshot_stage_accounting(&context.instrumentation)
     }
 
     fn after_transition(&mut self, state: &Self::State, context: &Self::Context) {
@@ -367,10 +367,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
             .transition_to_state(state.variant_name());
     }
 
-    fn supervisor_action(
-        &self,
-        action: &Self::Action,
-    ) -> Option<crate::supervised_base::handler_supervised::SupervisorAction<Self::Event>> {
+    fn supervisor_action(&self, action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
         match action {
             InfiniteSourceAction::Host(action) => Some(action.clone()),
             _ => None,
@@ -381,11 +378,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         &mut self,
         action: Self::Action,
         context: &mut Self::Context,
-    ) -> Result<
-        crate::supervised_base::handler_supervised::ActionExecution<Self::Context, Self::Event>,
-        FsmError,
-    > {
-        use crate::supervised_base::handler_supervised::{ActionCompletion, ActionExecution};
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
         let mut resources = context.resources.take().ok_or_else(|| {
             FsmError::HandlerError("source operation already owns resources".into())
         })?;
@@ -401,13 +394,10 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
     async fn execute_cleanup(
         &mut self,
         _context: &Self::Context,
-    ) -> Result<
-        crate::supervised_base::handler_supervised::ActionExecution<Self::Context, Self::Event>,
-        FsmError,
-    > {
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
         self.handler.take();
         self.replay_driver.take();
-        Ok(crate::supervised_base::handler_supervised::ActionExecution::Completed)
+        Ok(ActionExecution::Completed)
     }
 
     fn writer_id(&self) -> WriterId {
@@ -422,7 +412,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Option<crate::supervised_base::handler_supervised::OwnedDispatch<Self>> {
+    ) -> Option<OwnedDispatch<Self>> {
         if !matches!(
             state,
             InfiniteSourceState::AcquiringInput
@@ -465,7 +455,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
                 owner.pending_boundary_begin_drain = worker.pending_boundary_begin_drain;
                 context.resources = owned_context.resources;
                 result
-            }) as crate::supervised_base::handler_supervised::DispatchCompletion<Self>
+            }) as DispatchCompletion<Self>
         }))
     }
 

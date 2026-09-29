@@ -14,8 +14,8 @@ use super::{
 use crate::pipeline::metrics::compute_flow_lifecycle_metrics;
 use crate::pipeline::termination::ExecutionOutcome;
 use crate::pipeline::FlowStopMode;
-use crate::stages::common::stage_handle::{StageMilestone, STOP_REASON_TIMEOUT};
-use crate::stages::common::stage_lifecycle::LifecycleExit;
+use crate::stages::common::stage_handle::{StageError, StageMilestone, STOP_REASON_TIMEOUT};
+use crate::stages::common::stage_lifecycle::{LifecycleExit, StageSnapshot};
 use crate::supervised_base::handler_supervised::SupervisorAction as H;
 use crate::supervised_base::publication;
 use futures::future::BoxFuture;
@@ -23,7 +23,9 @@ use obzenflow_core::event::types::{DurationMs, ViolationCause};
 use obzenflow_core::event::{
     PipelineCancellationCause, PipelineStopAdmission, SystemEvent, SystemEventFactory,
 };
+use obzenflow_core::StageId;
 use obzenflow_fsm::{FsmError, Transition};
+use obzenflow_topology::StageType;
 
 pub(super) type Change = Transition<S, A>;
 pub(super) type Decision<'a> = BoxFuture<'a, Result<Change, FsmError>>;
@@ -45,11 +47,7 @@ fn publish(event: SystemEvent, step: PublicationStep) -> A {
         step,
     }
 }
-fn observe(
-    ctx: &mut C,
-    stage: obzenflow_core::StageId,
-    snapshot: &crate::stages::common::stage_lifecycle::StageSnapshot,
-) -> Result<(), FsmError> {
+fn observe(ctx: &mut C, stage: StageId, snapshot: &StageSnapshot) -> Result<(), FsmError> {
     publication::incorporate(&snapshot.causal_context)
         .map_err(|error| FsmError::HandlerError(error.to_string()))?;
     ctx.stage_lifecycle_metrics
@@ -213,10 +211,7 @@ pub(super) fn failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decisio
             E::ChildFailed(failure) => {
                 observe(ctx, failure.stage_id, &failure.snapshot)?;
                 if matches!(state, S::CancellingChildren | S::FailingChildren { .. })
-                    && matches!(
-                        failure.cause,
-                        crate::stages::common::stage_handle::StageError::Aborted
-                    )
+                    && matches!(failure.cause, StageError::Aborted)
                 {
                     return Ok(change(state.clone(), vec![]));
                 }
@@ -353,12 +348,10 @@ fn selected_outcome(ctx: &C) -> ExecutionOutcome {
     }
     if matches!(ctx.stop_intent.mode, Some(FlowStopMode::Cancel))
         || (ctx.stop_intent.requested
-            && ctx.topology.stages().any(|stage| {
-                matches!(
-                    stage.stage_type,
-                    obzenflow_topology::StageType::InfiniteSource
-                )
-            }))
+            && ctx
+                .topology
+                .stages()
+                .any(|stage| matches!(stage.stage_type, StageType::InfiniteSource)))
     {
         ExecutionOutcome::Cancelled {
             reason: ctx.stop_intent.reason_label(),

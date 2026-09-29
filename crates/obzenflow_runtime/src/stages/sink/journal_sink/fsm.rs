@@ -8,43 +8,48 @@
 //! They have a unique "Flushing" state that ensures all buffered
 //! data is written before shutdown.
 
-use crate::stages::common::stage_handle::{
-    FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
-};
-
+use super::journalled_delivery_event;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
-use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
-use crate::messaging::DeliveredRecord;
-use crate::messaging::UpstreamSubscription;
+use crate::execution::RuntimeExecution;
+use crate::message_bus::FsmMessageBus;
+use crate::messaging::upstream_subscription::{
+    ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
+};
+use crate::messaging::{DeliveredRecord, UpstreamSubscription};
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::control_strategies::SignalGate;
+use crate::stages::common::control_strategies::{ProcessingContext, SignalGate};
 use crate::stages::common::handler_error::{HandlerError, StageFatal};
-use crate::stages::common::handlers::UnifiedSinkHandler;
+use crate::stages::common::handlers::{SinkLifecycleReport, UnifiedSinkHandler};
 use crate::stages::common::heartbeat::HeartbeatHandle;
+use crate::stages::common::stage_handle::{
+    discarded_control_details, FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+};
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::observer::{StageLifecyclePhase, StageObserverBundle};
 use crate::stages::resources_builder::BoundSubscriptionFactory;
+use crate::stages::sink::{record_sink_lifecycle_operation_failure, SinkLifecycleFailureCommit};
+use crate::supervised_base::handler_supervised::SupervisorAction;
+use crate::supervised_base::publication::{self, BoxError};
+use crate::supervised_base::with_external_events::ExternalControlEvent;
+use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainPayload, SinkOperationPhase};
-use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
-use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
+use obzenflow_core::event::{ChainPayload, CommandDiscardDisposition, SinkOperationPhase};
+use obzenflow_core::journal::{AppendOptions, Journal};
+use obzenflow_core::{ChainEvent, EventId, FlowId, ReaderGeneration, StageId, WriterId};
+use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, FsmError, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
-
-use super::journalled_delivery_event;
-use crate::stages::sink::{record_sink_lifecycle_operation_failure, SinkLifecycleFailureCommit};
 
 // ============================================================================
 // FSM States
@@ -195,7 +200,7 @@ impl<H> JournalSinkState<H> {
         }
     }
 
-    pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+    pub(crate) fn lifecycle_phase(&self) -> LifecyclePhase {
         use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
         match self {
             Self::Initializing => Phase::Initializing,
@@ -295,16 +300,9 @@ impl<H> std::fmt::Debug for JournalSinkEvent<H> {
     }
 }
 
-impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::ExternalControlEvent
-    for JournalSinkEvent<H>
-{
-    fn discard_details(
-        &self,
-    ) -> (
-        obzenflow_core::event::CommandDiscardDisposition,
-        Option<String>,
-    ) {
-        crate::stages::common::stage_handle::discarded_control_details(match self {
+impl<H: Send + Sync + 'static> ExternalControlEvent for JournalSinkEvent<H> {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
+        discarded_control_details(match self {
             Self::Error(message) => Some(message.as_str()),
             Self::InitializationCompleted
             | Self::ActivationCompleted
@@ -351,7 +349,7 @@ impl<H: Send + Sync + 'static> EventVariant for JournalSinkEvent<H> {
 
 /// Actions that journal sink FSM transitions can emit
 pub enum JournalSinkAction<H> {
-    Host(crate::supervised_base::handler_supervised::SupervisorAction<JournalSinkEvent<H>>),
+    Host(SupervisorAction<JournalSinkEvent<H>>),
     /// Allocate resources needed by the sink
     /// - Register writer ID with journal
     /// - Create subscription to upstream stages
@@ -439,7 +437,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     pub handler: Option<H>,
 
     /// This sink's stage ID
-    pub stage_id: obzenflow_core::StageId,
+    pub stage_id: StageId,
 
     /// Human-readable stage name for logging
     pub stage_name: String,
@@ -450,8 +448,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     pub receipt_destination: String,
 
     /// Connector-described method used for runtime-authored failure receipts.
-    pub default_delivery_method:
-        Option<obzenflow_core::event::payloads::delivery_payload::DeliveryMethod>,
+    pub default_delivery_method: Option<DeliveryMethod>,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -466,7 +463,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     pub effect_history: Option<Arc<EffectHistory>>,
 
     /// Runtime execution strategy (FLOWIP-120r).
-    pub runtime_execution: crate::execution::RuntimeExecution,
+    pub runtime_execution: RuntimeExecution,
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
@@ -480,13 +477,13 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// System journal for writing lifecycle events
 
     /// Message bus for pipeline communication
-    pub bus: Arc<crate::message_bus::FsmMessageBus>,
+    pub bus: Arc<FsmMessageBus>,
 
     /// Writer ID for this sink (initialized during setup)
     pub writer_id: Option<WriterId>,
 
     /// FLOWIP-010 §7: build-resolved lineage policy from stage resources.
-    pub lineage_policy: obzenflow_core::config::LineagePolicy,
+    pub lineage_policy: LineagePolicy,
 
     /// Subscription to upstream events
     pub subscription: Option<UpstreamSubscription<ChainEvent>>,
@@ -517,7 +514,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     pub observers: StageObserverBundle,
 
     /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
-    pub processing_context: crate::stages::common::control_strategies::ProcessingContext,
+    pub processing_context: ProcessingContext,
 
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
@@ -531,7 +528,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
     /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
     /// flipped at, making the flip idempotent per generation across both
     /// triggers (watermark and authored EOF).
-    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
+    pub(crate) catch_up_flip: Option<ReaderGeneration>,
 
     /// Set once a failed transition has durable lifecycle evidence. Failure
     /// cleanup must never invoke another connector lifecycle method.
@@ -539,7 +536,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
 
     /// Final chain-event cause used by the correctness-bearing failed
     /// lifecycle append for sink protocol and operation failures.
-    pub(crate) failure_causal_event_id: Option<obzenflow_core::EventId>,
+    pub(crate) failure_causal_event_id: Option<EventId>,
 }
 
 /// Transition data remains available while an operation owns the sink resources.
@@ -557,13 +554,9 @@ impl<H: UnifiedSinkHandler> JournalSinkContext<H> {
         }
     }
 
-    pub(crate) fn resources_mut(
-        &mut self,
-    ) -> Result<&mut JournalSinkResources<H>, obzenflow_fsm::FsmError> {
+    pub(crate) fn resources_mut(&mut self) -> Result<&mut JournalSinkResources<H>, FsmError> {
         self.resources.as_mut().ok_or_else(|| {
-            obzenflow_fsm::FsmError::HandlerError(
-                "sink resources belong to a pending operation".into(),
-            )
+            FsmError::HandlerError("sink resources belong to a pending operation".into())
         })
     }
 }
@@ -578,10 +571,10 @@ impl<H: UnifiedSinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
 impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> {
     type Context = JournalSinkContext<H>;
 
-    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+    async fn execute(&self, ctx: &mut Self::Context) -> Result<(), FsmError> {
         self.execute_resources(ctx.resources_mut()?)
             .await
-            .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))
+            .map_err(|error| FsmError::HandlerError(error.to_string()))
     }
 }
 
@@ -589,9 +582,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
     pub(crate) async fn execute_resources(
         &self,
         ctx: &mut JournalSinkResources<H>,
-    ) -> Result<(), crate::supervised_base::publication::BoxError> {
+    ) -> Result<(), BoxError> {
         match self {
-            JournalSinkAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
+            JournalSinkAction::Host(_) => Err(FsmError::HandlerError(
                 "host action requires the supervised runner".into(),
             )
             .into()),
@@ -619,9 +612,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     })
                     .await
                     .map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to create subscription: {e}"
-                        ))
+                        FsmError::HandlerError(format!("Failed to create subscription: {e}"))
                     })?
                     .with_contract_flow_context(make_flow_context(
                         &ctx.flow_name,
@@ -639,7 +630,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     let history = EffectHistory::load(archive, &ctx.stage_name)
                         .await
                         .map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
+                            FsmError::HandlerError(format!(
                                 "Failed to load effect history for '{}': {e}",
                                 ctx.stage_name
                             ))
@@ -648,10 +639,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     // prefix cursor miss fails loud and a live-tail miss runs.
                     if let Some(control) = ctx.runtime_execution.resume_control() {
                         if let Some(max) = history.max_recorded_input_seq() {
-                            control.record_effect_high_water(
-                                ctx.stage_id,
-                                crate::messaging::upstream_subscription::StageInputPosition(max),
-                            );
+                            control.record_effect_high_water(ctx.stage_id, StageInputPosition(max));
                         }
                     }
                     ctx.effect_history = Some(Arc::new(history));
@@ -668,12 +656,12 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
             JournalSinkAction::PublishRunning => {
                 lifecycle_actions::publish_running(
                     &ctx.data_journal,
-                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                    make_flow_context(
                         &ctx.flow_name,
                         &ctx.flow_id.to_string(),
                         &ctx.stage_name,
                         ctx.stage_id,
-                        obzenflow_core::event::context::StageType::Sink,
+                        StageType::Sink,
                     ),
                 )
                 .await?;
@@ -705,12 +693,12 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
 
                 lifecycle_actions::send_completion(
                     &ctx.data_journal,
-                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                    make_flow_context(
                         &ctx.flow_name,
                         &ctx.flow_id.to_string(),
                         &ctx.stage_name,
                         ctx.stage_id,
-                        obzenflow_core::event::context::StageType::Sink,
+                        StageType::Sink,
                     ),
                     ctx.instrumentation.as_ref(),
                 )
@@ -814,7 +802,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                     )
                                 })
                             else {
-                                return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                                return Err(FsmError::HandlerError(format!(
                                     "FlushBuffers: commit receipt parent {} is not pending",
                                     commit.parent_event_id
                                 ))
@@ -823,7 +811,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             prepared_commits.push((parent_envelope, commit.payload.clone()));
                         }
                         report.commit_settlements().map_err(|error| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
+                            FsmError::HandlerError(format!(
                                 "FlushBuffers: settlement validation changed before commit: {error}"
                             ))
                         })?;
@@ -835,9 +823,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 "sink: FlushBuffers action - flush returned audit payload, writing delivery"
                             );
                             let writer_id = ctx.writer_id.ok_or_else(|| {
-                                obzenflow_fsm::FsmError::HandlerError(
-                                    "writer_id not initialised".to_string(),
-                                )
+                                FsmError::HandlerError("writer_id not initialised".to_string())
                             })?;
 
                             let flow_ctx = FlowContext {
@@ -856,7 +842,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             .with_flow_context(flow_ctx);
                             let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                            crate::supervised_base::publication::append(
+                            publication::append(
                                 &ctx.data_journal,
                                 evt,
                                 AppendOptions::default().with_capture(
@@ -865,7 +851,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             )
                             .await
                             .map_err(|e| {
-                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                FsmError::HandlerError(format!(
                                     "Failed to write delivery receipt: {e}"
                                 ))
                             })?;
@@ -893,7 +879,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             )
                             .await
                             .map_err(|error| {
-                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                FsmError::HandlerError(format!(
                                     "Failed to record sink flush failure: {error}"
                                 ))
                             })?;
@@ -904,10 +890,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         if let Some(fatal) = e.as_fatal() {
                             record_sink_lifecycle_fatal(ctx, fatal, "flush").await?;
                         }
-                        return Err(obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to flush: {e:?}"
-                        ))
-                        .into());
+                        return Err(
+                            FsmError::HandlerError(format!("Failed to flush: {e:?}")).into()
+                        );
                     }
                 }
                 tracing::trace!(
@@ -989,7 +974,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 )
                                 .await
                                 .map_err(|record_error| {
-                                    obzenflow_fsm::FsmError::HandlerError(format!(
+                                    FsmError::HandlerError(format!(
                                         "Failed to record sink drain failure: {record_error}"
                                     ))
                                 })?;
@@ -999,7 +984,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             if let Some(fatal) = error.as_fatal() {
                                 record_sink_lifecycle_fatal(ctx, fatal, "drain").await?;
                             }
-                            return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                            return Err(FsmError::HandlerError(format!(
                                 "Failed to drain handler: {error:?}"
                             )));
                         }
@@ -1021,7 +1006,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 )
                             })
                         else {
-                            return Err(obzenflow_fsm::FsmError::HandlerError(format!(
+                            return Err(FsmError::HandlerError(format!(
                                 "DrainWriter: commit receipt parent {} is not pending",
                                 commit.parent_event_id
                             )));
@@ -1029,7 +1014,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         prepared_commits.push((parent_envelope, commit.payload.clone()));
                     }
                     drain_result.commit_settlements().map_err(|error| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
+                        FsmError::HandlerError(format!(
                             "DrainWriter: settlement validation changed before commit: {error}"
                         ))
                     })?;
@@ -1040,7 +1025,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             "sink: DrainWriter action - drain returned audit payload, writing delivery"
                         );
                         let writer_id = ctx.writer_id.ok_or_else(|| {
-                            obzenflow_fsm::FsmError::HandlerError(
+                            FsmError::HandlerError(
                                 "writer_id not initialised".to_string(),
                             )
                         })?;
@@ -1058,8 +1043,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 .with_flow_context(flow_ctx);
                         let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
-                        crate::supervised_base::publication::append(&ctx.data_journal, evt, AppendOptions::default().with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
-                            obzenflow_fsm::FsmError::HandlerError(format!(
+                        publication::append(&ctx.data_journal, evt, AppendOptions::default().with_capture(ctx.instrumentation.journal_capture(None, vec![(0, false)]))).await.map_err(|e| {
+                            FsmError::HandlerError(format!(
                                 "Failed to write delivery receipt: {e}"
                             ))
                         })?;
@@ -1077,7 +1062,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         stage_name = %stage_name,
                         "sink: DrainWriter action - COMPLETE"
                     );
-                    Ok::<(), obzenflow_fsm::FsmError>(())
+                    Ok::<(), FsmError>(())
                 }
                 .await?;
                 Ok(())
@@ -1102,9 +1087,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
 }
 
 fn apply_terminal_eof_audit_gate(
-    mut report: crate::stages::common::handlers::SinkLifecycleReport,
+    mut report: SinkLifecycleReport,
     terminal_eof_kind: Option<EofKind>,
-) -> crate::stages::common::handlers::SinkLifecycleReport {
+) -> SinkLifecycleReport {
     if matches!(
         terminal_eof_kind.unwrap_or(EofKind::Natural),
         EofKind::Truncated
@@ -1118,9 +1103,9 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
     ctx: &JournalSinkResources<H>,
     fatal: &StageFatal,
     phase: &str,
-) -> Result<(), obzenflow_fsm::FsmError> {
+) -> Result<(), FsmError> {
     let writer_id = ctx.writer_id.ok_or_else(|| {
-        obzenflow_fsm::FsmError::HandlerError(format!("fatal sink {phase} has no stage writer id"))
+        FsmError::HandlerError(format!("fatal sink {phase} has no stage writer id"))
     })?;
     record_stage_fatal(
         fatal,
@@ -1137,9 +1122,7 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
     .await
     .map(|_| ())
     .map_err(|error| {
-        obzenflow_fsm::FsmError::HandlerError(format!(
-            "Failed to record fatal sink {phase}: {error}"
-        ))
+        FsmError::HandlerError(format!("Failed to record fatal sink {phase}: {error}"))
     })
 }
 
@@ -1147,10 +1130,10 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkResources<H>,
     parent_envelope: &DeliveredRecord<ChainPayload>,
     payload: DeliveryPayload,
-) -> Result<(), obzenflow_fsm::FsmError> {
-    let writer_id = ctx.writer_id.ok_or_else(|| {
-        obzenflow_fsm::FsmError::HandlerError("writer_id not initialised".to_string())
-    })?;
+) -> Result<(), FsmError> {
+    let writer_id = ctx
+        .writer_id
+        .ok_or_else(|| FsmError::HandlerError("writer_id not initialised".to_string()))?;
     let flow_ctx = FlowContext {
         flow_name: ctx.flow_name.clone(),
         flow_id: ctx.flow_id.to_string(),
@@ -1168,7 +1151,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .with_cycle_state_from(&parent_envelope.authored());
     let evt = evt
         .try_with_composite_activations(parent_envelope.composite_activations().to_vec())
-        .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+        .map_err(|error| FsmError::HandlerError(error.to_string()))?;
 
     let data_journal = ctx.data_journal.clone();
     let instrumentation = ctx.instrumentation.clone();
@@ -1177,7 +1160,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         .subscription
         .as_mut()
         .map(|subscription| subscription.take_receipt_settlement(&mut ctx.contract_state));
-    let settlement = crate::supervised_base::publication::commit(async move {
+    let settlement = publication::commit(async move {
         let event = super::with_committed_receipt_snapshot(evt, &instrumentation);
         let written = data_journal
             .append(
@@ -1195,7 +1178,7 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         Ok(settlement)
     })
     .await
-    .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+    .map_err(|error| FsmError::HandlerError(error.to_string()))?;
     if let (Some(subscription), Some(settlement)) = (ctx.subscription.as_mut(), settlement) {
         subscription.restore_receipt_settlement(&mut ctx.contract_state, settlement);
     }
@@ -1208,11 +1191,16 @@ mod tests {
     use super::{
         apply_terminal_eof_audit_gate, JournalSinkContext, JournalSinkEvent, JournalSinkState,
     };
-    use crate::stages::common::handlers::{CommitReceipt, SinkLifecycleReport};
+    use crate::execution::{RuntimeExecution, RuntimeMode};
+    use crate::message_bus::FsmMessageBus;
+    use crate::stages::common::handler_error::HandlerError;
+    use crate::stages::common::handlers::{CommitReceipt, SinkHandler, SinkLifecycleReport};
+    use crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE;
     use crate::stages::sink::journal_sink::supervisor::JournalSinkSupervisor;
     use crate::stages::source::finite::fsm::tests::TestJournal;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+    use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::EventId;
 
     struct AuditSink(Arc<Probe>);
@@ -1237,11 +1225,8 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::stages::common::handlers::SinkHandler for AuditSink {
-        async fn consume(
-            &mut self,
-            _event: obzenflow_core::ChainEvent,
-        ) -> Result<DeliveryPayload, crate::stages::common::handler_error::HandlerError> {
+    impl SinkHandler for AuditSink {
+        async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
             self.0.consumes.fetch_add(1, Ordering::SeqCst);
             self.0.consuming.notify_one();
             if self.0.block_consume.load(Ordering::SeqCst) {
@@ -1250,10 +1235,7 @@ mod tests {
             Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
         }
 
-        async fn flush(
-            &mut self,
-        ) -> Result<Option<DeliveryPayload>, crate::stages::common::handler_error::HandlerError>
-        {
+        async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
             self.0.flushes.fetch_add(1, Ordering::SeqCst);
             self.0.flushing.notify_one();
             if self.0.block_flush.load(Ordering::SeqCst) {
@@ -1262,10 +1244,7 @@ mod tests {
             Ok(Some(DeliveryPayload::success(DeliveryMethod::Noop, None)))
         }
 
-        async fn drain(
-            &mut self,
-        ) -> Result<Option<DeliveryPayload>, crate::stages::common::handler_error::HandlerError>
-        {
+        async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
             self.0.drains.fetch_add(1, Ordering::SeqCst);
             Ok(None)
         }
@@ -1331,13 +1310,10 @@ mod tests {
             data_journal: data.clone(),
             error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
             effect_history: None,
-            runtime_execution: crate::execution::RuntimeExecution::new(
-                crate::execution::RuntimeMode::Live,
-                None,
-            ),
+            runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports: Default::default(),
             effect_declarations: Vec::new(),
-            bus: Arc::new(crate::message_bus::FsmMessageBus::new()),
+            bus: Arc::new(FsmMessageBus::new()),
             writer_id: None,
             lineage_policy: Default::default(),
             subscription: None,
@@ -1507,9 +1483,7 @@ mod tests {
         );
         fixture
             .handle
-            .send_event(JournalSinkEvent::Error(
-                crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE.into(),
-            ))
+            .send_event(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.into()))
             .await
             .unwrap();
         assert!(fixture
@@ -1570,7 +1544,7 @@ mod tests {
         fixture
             .upstream
             .append(
-                obzenflow_core::event::ChainEventFactory::data_event(
+                ChainEventFactory::data_event(
                     fixture.upstream_id.into(),
                     "audit.input",
                     serde_json::json!({"item": 1}),
@@ -1605,9 +1579,7 @@ mod tests {
             .is_none());
         fixture
             .handle
-            .send_event(JournalSinkEvent::Error(
-                crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE.into(),
-            ))
+            .send_event(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.into()))
             .await
             .unwrap();
         release.notify_one();
@@ -1642,8 +1614,7 @@ mod tests {
         let probe = Arc::new(Probe::default());
         probe.block_flush.store(true, Ordering::SeqCst);
         let fixture = fixture(probe.clone());
-        let mut eof =
-            obzenflow_core::event::ChainEventFactory::eof_event(fixture.upstream_id.into(), true);
+        let mut eof = ChainEventFactory::eof_event(fixture.upstream_id.into(), true);
         let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
             &mut eof.payload
         else {
@@ -1688,9 +1659,7 @@ mod tests {
             .unwrap();
         fixture
             .handle
-            .send_event(JournalSinkEvent::Error(
-                crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE.into(),
-            ))
+            .send_event(JournalSinkEvent::Error(FORCE_SHUTDOWN_MESSAGE.into()))
             .await
             .unwrap();
         assert!(fixture

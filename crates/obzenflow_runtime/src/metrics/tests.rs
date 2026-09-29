@@ -18,7 +18,7 @@ use obzenflow_core::event::observability::ObservationSource;
 use obzenflow_core::event::{ChainEventFactory, JournalEvent, SystemEvent, SystemEventFactory};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
-use obzenflow_core::journal::{AppendOptions, JournalError, JournalReader};
+use obzenflow_core::journal::{AppendOptions, JournalError, JournalReader, JournalStorage};
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{
     ChainEvent, EventId, Journal, JournalId, JournalOwner, JournalRecord, StageId, SystemId,
@@ -51,28 +51,38 @@ impl Drop for Reading {
 struct ObservedJournal<T: JournalEvent> {
     inner: Arc<dyn Journal<T>>,
     probe: Arc<Probe>,
+    append_gate: Mutex<Option<Arc<Gate>>>,
 }
 impl<T: JournalEvent> ObservedJournal<T> {
     fn new(inner: Arc<dyn Journal<T>>) -> Arc<Self> {
         Arc::new(Self {
             inner,
             probe: Arc::default(),
+            append_gate: Mutex::default(),
         })
     }
 }
 #[async_trait]
-impl<T: JournalEvent> obzenflow_core::journal::JournalStorage<T> for ObservedJournal<T> {
+impl<T: JournalEvent> JournalStorage<T> for ObservedJournal<T> {
     fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
     fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
+    async fn storage_committed_position(&self) -> Result<u64, JournalError> {
+        self.inner.committed_position().await
+    }
     async fn storage_append(
         &self,
         event: T,
         options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let gate = self.append_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.inner.append(event, options).await
     }
     async fn storage_append_group(
@@ -677,17 +687,49 @@ pub async fn metrics_manual_export_uses_the_live_control_receiver(
 pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
+    async fn wait_for_exports(journal: &dyn Journal<SystemEvent>, expected: usize) {
+        let committed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let position = journal.committed_position().await.unwrap();
+                if position >= expected as u64 {
+                    break position;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("accepted exports must commit their receipts");
+        assert_eq!(committed, expected as u64);
+    }
+
     let (mut ctx, pipeline, exports) = context(&mut *factory, vec![], vec![]).await;
     ctx.export_interval = Duration::from_secs(60);
+    let export_journal = ObservedJournal::new(ctx.journals.export.clone());
+    ctx.journals.export = export_journal.clone();
     let journals = ctx.journals.clone();
     let (task, control) = run(ctx);
-    until(|| !exports.0.lock().unwrap().is_empty()).await;
+    wait_for_exports(journals.export.as_ref(), 1).await;
     for volume in [1, 100, 1000] {
         let baseline = exports.0.lock().unwrap().len();
-        for _ in 0..volume {
+        let gate = Arc::new(Gate::default());
+        *export_journal.append_gate.lock().unwrap() = Some(gate.clone());
+        control.send(Event::ExportMetrics).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .unwrap();
+        // A visible snapshot precedes its receipt. Hold the append here so
+        // the test cannot mistake the callback for journal settlement.
+        assert_eq!(exports.0.lock().unwrap().len(), baseline + 1);
+        assert_eq!(
+            journals.export.committed_position().await.unwrap(),
+            baseline as u64
+        );
+        gate.release.notify_one();
+        for _ in 1..volume {
             control.send(Event::ExportMetrics).await.unwrap();
         }
-        until(|| exports.0.lock().unwrap().len() == baseline + volume).await;
+        wait_for_exports(journals.export.as_ref(), baseline + volume).await;
+        assert_eq!(exports.0.lock().unwrap().len(), baseline + volume);
         assert_eq!(
             journals.coordination.committed_position().await.unwrap(),
             2,

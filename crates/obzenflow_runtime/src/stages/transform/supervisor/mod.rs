@@ -20,17 +20,24 @@ use super::fsm::{
 };
 use crate::messaging::DeliveredRecord;
 use crate::messaging::UpstreamSubscription;
+use crate::metrics::instrumentation::snapshot_stage_accounting;
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::handler_supervised::SupervisorAction;
+use crate::supervised_base::base::{self, Registration, Supervisor};
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, DispatchCompletion, OwnedDispatch, SupervisorAction,
+};
 use crate::supervised_base::{
     publication, EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
-use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainPayload;
 use obzenflow_core::journal::{AppendOptions, Journal};
@@ -251,8 +258,8 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
     fn registration(
         &self,
         context: &Self::Context,
-        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
-    ) -> crate::supervised_base::base::Registration {
+        descriptor: SupervisorDescriptor,
+    ) -> Registration {
         let Some(context) = context.resources.as_ref() else {
             return Box::pin(async {
                 Err(
@@ -261,14 +268,14 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Supervi
                 )
             });
         };
-        crate::supervised_base::base::register_stage(
+        base::register_stage(
             context.data_journal.clone(),
-            crate::stages::common::supervision::flow_context_factory::make_flow_context(
+            make_flow_context(
                 &context.flow_name,
                 &context.flow_id.to_string(),
                 &context.stage_name,
                 context.stage_id,
-                obzenflow_core::event::context::StageType::Transform,
+                StageType::Transform,
             ),
             descriptor,
         )
@@ -285,18 +292,12 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
 {
     type Handler = H;
 
-    fn lifecycle_phase(
-        &self,
-        state: &Self::State,
-    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+    fn lifecycle_phase(&self, state: &Self::State) -> LifecyclePhase {
         state.lifecycle_phase()
     }
 
-    fn accounting(
-        &self,
-        context: &Self::Context,
-    ) -> obzenflow_core::event::provenance::ExecutionAccounting {
-        crate::metrics::instrumentation::snapshot_stage_accounting(&context.instrumentation)
+    fn accounting(&self, context: &Self::Context) -> ExecutionAccounting {
+        snapshot_stage_accounting(&context.instrumentation)
     }
 
     fn after_transition(&mut self, state: &Self::State, context: &Self::Context) {
@@ -305,10 +306,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
             .transition_to_state(state.variant_name());
     }
 
-    fn supervisor_action(
-        &self,
-        action: &Self::Action,
-    ) -> Option<crate::supervised_base::handler_supervised::SupervisorAction<Self::Event>> {
+    fn supervisor_action(&self, action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
         match action {
             TransformAction::Host(action) => Some(action.clone()),
             _ => None,
@@ -319,11 +317,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
         &mut self,
         action: Self::Action,
         context: &mut Self::Context,
-    ) -> Result<
-        crate::supervised_base::handler_supervised::ActionExecution<Self::Context, Self::Event>,
-        FsmError,
-    > {
-        use crate::supervised_base::handler_supervised::{ActionCompletion, ActionExecution};
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
         let mut resources = context.resources.take().ok_or_else(|| {
             FsmError::HandlerError("transform operation already owns resources".into())
         })?;
@@ -352,7 +346,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Option<crate::supervised_base::handler_supervised::OwnedDispatch<Self>> {
+    ) -> Option<OwnedDispatch<Self>> {
         if !matches!(state, TransformState::Running | TransformState::Draining) {
             return None;
         }
@@ -374,7 +368,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
                 owner.cycle_guard = worker.cycle_guard;
                 context.resources = owned_context.resources;
                 result
-            }) as crate::supervised_base::handler_supervised::DispatchCompletion<Self>
+            }) as DispatchCompletion<Self>
         }))
     }
 

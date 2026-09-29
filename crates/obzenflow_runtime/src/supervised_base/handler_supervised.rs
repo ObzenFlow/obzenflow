@@ -10,8 +10,10 @@
 use super::base::{self, EventLoopDirective, Supervisor};
 use super::publication::BoxError;
 use crate::stages::common::stage_handle::StageError;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use futures::future::BoxFuture;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
+use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::ChainEvent;
@@ -81,17 +83,11 @@ pub trait HandlerSupervised: Supervisor + Sync {
     }
 
     /// Concrete FSM states define achieved milestones and pending settlement.
-    fn lifecycle_phase(
-        &self,
-        _state: &Self::State,
-    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+    fn lifecycle_phase(&self, _state: &Self::State) -> LifecyclePhase {
         Default::default()
     }
 
-    fn accounting(
-        &self,
-        _context: &Self::Context,
-    ) -> obzenflow_core::event::provenance::ExecutionAccounting {
+    fn accounting(&self, _context: &Self::Context) -> ExecutionAccounting {
         Default::default()
     }
 

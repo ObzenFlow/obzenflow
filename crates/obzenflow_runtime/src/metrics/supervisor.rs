@@ -8,17 +8,26 @@
 //! Owned tail readers overwrite buffers; publication never waits for refresh I/O.
 
 use super::buffer::TailReaders;
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::with_external_events::CommandMailbox;
+use crate::stages::common::stage_handle::discarded_control_details;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::supervised_base::base::{self, Registration, Supervisor};
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, SupervisorAction,
+};
+use crate::supervised_base::with_external_events::{CommandMailbox, ExternalControlEvent};
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
-use obzenflow_core::event::{SystemEvent, WriterId};
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
+use obzenflow_fsm::{FsmError, StateMachine};
 use std::sync::Arc;
 
 use super::fsm::{
-    MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
-    MetricsAggregatorState,
+    build_metrics_aggregator_fsm, MetricsAggregatorAction, MetricsAggregatorContext,
+    MetricsAggregatorEvent, MetricsAggregatorState,
 };
 
 /// The supervisor that manages the metrics aggregator
@@ -50,27 +59,21 @@ impl Supervisor for MetricsAggregatorSupervisor {
     fn build_state_machine(
         &self,
         _initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         // Reuse the typed DSL FSM defined in metrics/fsm.rs.
-        crate::metrics::fsm::build_metrics_aggregator_fsm()
+        build_metrics_aggregator_fsm()
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::MetricsAggregator
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::MetricsAggregator
     }
 
     fn registration(
         &self,
         _context: &Self::Context,
-        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
-    ) -> crate::supervised_base::base::Registration {
-        crate::supervised_base::base::register_system(
-            self.system_journal.clone(),
-            self.writer_id(),
-            descriptor,
-        )
+        descriptor: SupervisorDescriptor,
+    ) -> Registration {
+        base::register_system(self.system_journal.clone(), self.writer_id(), descriptor)
     }
 
     fn name(&self) -> &str {
@@ -90,19 +93,15 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     fn supervisor_action(
         &self,
         action: &MetricsAggregatorAction,
-    ) -> Option<crate::supervised_base::handler_supervised::SupervisorAction<MetricsAggregatorEvent>>
-    {
+    ) -> Option<SupervisorAction<MetricsAggregatorEvent>> {
         if let MetricsAggregatorAction::Host(action) = action {
             Some(action.clone())
         } else {
             None
         }
     }
-    fn lifecycle_phase(
-        &self,
-        state: &MetricsAggregatorState,
-    ) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
-        use crate::stages::common::stage_lifecycle::LifecyclePhase as L;
+    fn lifecycle_phase(&self, state: &MetricsAggregatorState) -> LifecyclePhase {
+        use LifecyclePhase as L;
         match state {
             MetricsAggregatorState::Initializing => L::Initializing,
             MetricsAggregatorState::Starting => L::Initialized,
@@ -130,14 +129,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
         &mut self,
         action: MetricsAggregatorAction,
         ctx: &mut MetricsAggregatorContext,
-    ) -> Result<
-        crate::supervised_base::handler_supervised::ActionExecution<
-            MetricsAggregatorContext,
-            MetricsAggregatorEvent,
-        >,
-        obzenflow_fsm::FsmError,
-    > {
-        use crate::supervised_base::handler_supervised::{ActionCompletion, ActionExecution};
+    ) -> Result<ActionExecution<MetricsAggregatorContext, MetricsAggregatorEvent>, FsmError> {
         if matches!(action, MetricsAggregatorAction::BeginFinalRefresh) {
             self.final_refresh
                 .get_or_insert_with(tokio::time::Instant::now);
@@ -165,14 +157,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
     async fn execute_cleanup(
         &mut self,
         _ctx: &MetricsAggregatorContext,
-    ) -> Result<
-        crate::supervised_base::handler_supervised::ActionExecution<
-            MetricsAggregatorContext,
-            MetricsAggregatorEvent,
-        >,
-        obzenflow_fsm::FsmError,
-    > {
-        use crate::supervised_base::handler_supervised::{ActionCompletion, ActionExecution};
+    ) -> Result<ActionExecution<MetricsAggregatorContext, MetricsAggregatorEvent>, FsmError> {
         let readers = self.readers.take();
         Ok(ActionExecution::Pending(Box::pin(async move {
             if let Some(mut readers) = readers {
@@ -269,14 +254,9 @@ fn defer_command(state: &MetricsAggregatorState, event: &MetricsAggregatorEvent)
         && matches!(event, E::StartDraining | E::ExportMetrics))
         || (matches!(state, S::Exporting | S::DrainingExport) && matches!(event, E::ExportMetrics))
 }
-impl crate::supervised_base::with_external_events::ExternalControlEvent for MetricsAggregatorEvent {
-    fn discard_details(
-        &self,
-    ) -> (
-        obzenflow_core::event::CommandDiscardDisposition,
-        Option<String>,
-    ) {
-        crate::stages::common::stage_handle::discarded_control_details(match self {
+impl ExternalControlEvent for MetricsAggregatorEvent {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
+        discarded_control_details(match self {
             Self::Error(error) => Some(error),
             _ => None,
         })

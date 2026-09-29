@@ -5,6 +5,7 @@
 //! Retained results of child FSM transitions. Observation never drives a child.
 
 use super::stage_handle::StageError;
+use crate::supervised_base::publication;
 use obzenflow_core::event::provenance::ExecutionAccounting;
 use obzenflow_core::event::CausalFrontier;
 use std::sync::Arc;
@@ -150,7 +151,7 @@ impl LifecycleResults {
     ) {
         let snapshot = StageSnapshot {
             accounting,
-            causal_context: crate::supervised_base::publication::capture(),
+            causal_context: publication::capture(),
         };
         let _ = CURRENT.try_with(|owner| {
             owner.tx.send_modify(|results| {
