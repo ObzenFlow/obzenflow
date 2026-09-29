@@ -12,9 +12,7 @@ use obzenflow_adapters::sources::{
 };
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::{
-    ChainEvent, ChainPayload, ReplayLifecycleEvent, SupervisorRecord, SystemPayload,
-};
+use obzenflow_core::event::{ChainEvent, ChainPayload, ReplayLifecycleEvent};
 use obzenflow_core::http_client::Url;
 use obzenflow_core::journal::read::{RunJournalKind, RunRecordData};
 use obzenflow_core::{StageId, TypedPayload};
@@ -244,8 +242,8 @@ fn counted_client_after_resume_marker(
                 }
                 if let RunRecordData::Chain(row) = record.record {
                     if matches!(
-                        SupervisorRecord::from_chain(*row).map(|report| report.payload),
-                        Some(SystemPayload::ReplayLifecycle(
+                        row.payload,
+                        ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ReplayLifecycle(
                             ReplayLifecycleEvent::ResumedLive { .. }
                         ))
                     ) {

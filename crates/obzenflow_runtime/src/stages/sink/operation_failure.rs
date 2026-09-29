@@ -9,7 +9,7 @@ use crate::stages::common::handlers::SinkOperationError;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::provenance::FlowContext;
 use obzenflow_core::event::{
-    ChainEventFactory, ChainPayload, SinkOperationFailed, SinkOperationPhase, SystemEvent,
+    ChainEventFactory, ChainPayload, SinkOperationFailed, SinkOperationPhase,
 };
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventId, JournalRecord, StageId, TypedPayload, WriterId};
@@ -25,7 +25,7 @@ pub struct SinkLifecycleFailureCommit<'a> {
     pub phase: SinkOperationPhase,
     pub error: &'a SinkOperationError,
     pub error_journal: &'a Arc<dyn Journal<ChainEvent>>,
-    pub report_journal: &'a crate::supervised_base::SupervisorJournal,
+    pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
     pub instrumentation: &'a Arc<StageInstrumentation>,
 }
 
@@ -68,7 +68,8 @@ pub async fn record_sink_lifecycle_operation_failure(
     .mark_as_error(commit.error.detail(), commit.error.kind())
     .with_runtime_provenance(commit.instrumentation.snapshot());
     let error_journal = commit.error_journal.clone();
-    let report_journal = commit.report_journal.clone();
+    let data_journal = commit.data_journal.clone();
+    let flow_context = event.flow_context.clone();
     let instrumentation = commit.instrumentation.clone();
     let stage_id = commit.stage_id;
     let detail = commit.error.detail();
@@ -80,15 +81,21 @@ pub async fn record_sink_lifecycle_operation_failure(
             None,
         )
         .await?;
-        let lifecycle = SystemEvent::stage_failed_with_accounting_causal(
-            stage_id,
-            detail,
-            false,
-            snapshot_stage_accounting(&instrumentation),
-            operation.envelope.provenance.event.id,
-        );
-        let lifecycle = crate::supervised_base::publication::report_inline(
-            &report_journal,
+        let lifecycle = ChainEventFactory::execution_event(
+            stage_id.into(),
+            obzenflow_core::event::payloads::execution_payload::ExecutionPayload::StageLifecycle(
+                obzenflow_core::event::payloads::execution_payload::StageLifecycleFact::Failed {
+                    stage_id,
+                    error: detail,
+                    recoverable: Some(false),
+                    accounting: Some(snapshot_stage_accounting(&instrumentation)),
+                    causal_event_id: Some(*operation.id()),
+                },
+            ),
+        )
+        .with_flow_context(flow_context);
+        let lifecycle = crate::supervised_base::publication::append_inline(
+            &data_journal,
             lifecycle,
             Default::default(),
         )

@@ -5,73 +5,65 @@
 //! Keeps each stage's latest status and any final metrics for Studio's initial
 //! display, including stages that finished before the browser connected.
 
-use obzenflow_core::event::SupervisorRecord;
-use obzenflow_core::web::SseFrame;
-use obzenflow_core::StageId;
+use obzenflow_core::event::journal_record::ChainJournalRecord;
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_core::event::ChainPayload;
+use obzenflow_core::{web::SseFrame, StageId};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Default)]
 pub(super) struct StageLifecycleView {
-    latest_by_stage: BTreeMap<StageId, SupervisorRecord>,
+    latest_by_stage: BTreeMap<StageId, ChainJournalRecord>,
 }
 
 impl StageLifecycleView {
-    pub(super) fn observe(&mut self, envelope: &SupervisorRecord) {
-        use obzenflow_core::event::payloads::system_payload::StageLifecycleEvent;
-        use obzenflow_core::event::SystemPayload;
-
-        let SystemPayload::StageLifecycle { stage_id, event } = &envelope.payload else {
+    pub(super) fn observe(&mut self, record: &ChainJournalRecord) {
+        let ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) = &record.payload
+        else {
             return;
         };
-
-        // A stage can report the same outcome again without metrics. Preserve the
-        // earlier totals so a newly connected browser still sees them.
-        let should_replace = match (self.latest_by_stage.get(stage_id), event) {
-            (None, _) => true,
-            (Some(prev), StageLifecycleEvent::Completed { accounting: None }) => !matches!(
-                prev.payload,
-                SystemPayload::StageLifecycle {
-                    event: StageLifecycleEvent::Completed {
-                        accounting: Some(_)
-                    },
-                    ..
-                }
-            ),
+        let stage_id = event.stage_id();
+        let previous =
+            self.latest_by_stage
+                .get(&stage_id)
+                .and_then(|previous| match &previous.payload {
+                    ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) => Some(event),
+                    _ => None,
+                });
+        // A repeated outcome lacking accounting cannot erase settled totals.
+        let keep = matches!(
+            (previous, event),
             (
-                Some(prev),
-                StageLifecycleEvent::Cancelled {
-                    accounting: None, ..
-                },
-            ) => !matches!(
-                prev.payload,
-                SystemPayload::StageLifecycle {
-                    event: StageLifecycleEvent::Cancelled {
-                        accounting: Some(_),
-                        ..
-                    },
+                Some(StageLifecycleFact::Completed {
+                    accounting: Some(_),
+                    ..
+                }),
+                StageLifecycleFact::Completed {
+                    accounting: None,
                     ..
                 }
-            ),
-            (
-                Some(prev),
-                StageLifecycleEvent::Failed {
-                    accounting: None, ..
-                },
-            ) => !matches!(
-                prev.payload,
-                SystemPayload::StageLifecycle {
-                    event: StageLifecycleEvent::Failed {
-                        accounting: Some(_),
-                        ..
-                    },
+            ) | (
+                Some(StageLifecycleFact::Cancelled {
+                    accounting: Some(_),
+                    ..
+                }),
+                StageLifecycleFact::Cancelled {
+                    accounting: None,
                     ..
                 }
-            ),
-            _ => true,
-        };
-
-        if should_replace {
-            self.latest_by_stage.insert(*stage_id, envelope.clone());
+            ) | (
+                Some(StageLifecycleFact::Failed {
+                    accounting: Some(_),
+                    ..
+                }),
+                StageLifecycleFact::Failed {
+                    accounting: None,
+                    ..
+                }
+            )
+        );
+        if !keep {
+            self.latest_by_stage.insert(stage_id, record.clone());
         }
     }
 

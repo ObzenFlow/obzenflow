@@ -9,7 +9,7 @@ use crate::event::observability::{
     RuntimeObservability, RuntimeSnapshot,
 };
 use crate::event::payloads::execution_payload::ExecutionPayload;
-use crate::event::payloads::system_payload::StageLifecycleEvent;
+use crate::event::payloads::system_payload::PipelineLifecycleEvent;
 use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::provenance::{AuthoredProvenance, ProcessingProvenance};
 use crate::event::provenance::{ChainEventProvenance, SystemEventProvenance};
@@ -266,16 +266,13 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
                     id: EventId::new(),
                     writer_id,
                     event_kind: EventKind::System,
-                    event_type: "system.stage.running".into(),
+                    event_type: "system.pipeline.starting".into(),
                     timestamp: 10,
                 },
             },
             observability: None,
         },
-        SystemPayload::StageLifecycle {
-            stage_id: StageId::new(),
-            event: StageLifecycleEvent::Running,
-        },
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
         JournalProvenance {
             run_id: crate::FlowId::new(),
             previous: None,
@@ -290,8 +287,8 @@ fn system_records_keep_typed_discriminants_and_separate_creation_and_append_time
     )
     .unwrap();
     let json = serde_json::to_value(record).unwrap();
-    assert_eq!(json["payload"]["system_event_type"], "stage_lifecycle");
-    assert_eq!(json["payload"]["lifecycle_event"], "running");
+    assert_eq!(json["payload"]["system_event_type"], "pipeline_lifecycle");
+    assert_eq!(json["payload"]["pipeline_event"], "starting");
     assert_eq!(json["envelope"]["provenance"]["event"]["timestamp"], 10);
     assert!(json["envelope"]["provenance"]["event"]
         .get("flow_context")

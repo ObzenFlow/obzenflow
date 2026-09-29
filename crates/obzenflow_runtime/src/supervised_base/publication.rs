@@ -95,6 +95,7 @@ type Completion = Shared<BoxFuture<'static, Result<(), SharedError>>>;
 
 /// An observation of the publications accepted at capture time. It neither
 /// closes admission nor owns a new task. Every captured join is observed.
+#[cfg(test)]
 pub(crate) type PublicationSettlement = Shared<BoxFuture<'static, Result<(), SharedError>>>;
 
 struct Operation {
@@ -121,6 +122,7 @@ struct State {
 /// One scope per supervisor, retained by its standard handle through joining.
 pub(crate) struct PublicationScope {
     state: Mutex<State>,
+    failure_changed: tokio::sync::Notify,
     slots: Arc<Semaphore>,
     control_slots: Arc<Semaphore>,
     host_slots: Arc<Semaphore>,
@@ -155,6 +157,7 @@ impl PublicationScope {
     fn with_ordering(ordered: bool, control_capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             ordered,
+            failure_changed: tokio::sync::Notify::new(),
             state: Mutex::new(State {
                 admission: Admission::Open,
                 next_id: 0,
@@ -171,26 +174,6 @@ impl PublicationScope {
 
     pub(crate) fn current() -> Option<Arc<Self>> {
         CURRENT.try_with(|context| context.scope.clone()).ok()
-    }
-
-    pub(crate) fn has_capacity(&self, count: usize) -> bool {
-        self.slots.available_permits() >= count
-    }
-
-    pub(crate) fn wait_for_capacity(
-        self: &Arc<Self>,
-        count: u32,
-    ) -> BoxFuture<'static, Result<(), BoxError>> {
-        let slots = self.slots.clone();
-        async move {
-            let permit = slots
-                .acquire_many_owned(count)
-                .await
-                .map_err(|_| Box::new(AdmissionClosed) as BoxError)?;
-            drop(permit);
-            Ok(())
-        }
-        .boxed()
     }
 
     /// Incorporated inputs only. Prefetch and optional telemetry never call this.
@@ -262,6 +245,19 @@ impl PublicationScope {
         state.failure.clone()
     }
 
+    pub(crate) async fn wait_for_failure(&self) -> SharedError {
+        loop {
+            let changed = self.failure_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(error) = self.first_failure() {
+                return error;
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn observe_accepted(&self) -> PublicationSettlement {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Self::reap(&mut state);
@@ -289,6 +285,7 @@ impl PublicationScope {
             state.admission = Admission::Poisoned;
         }
         state.failure.get_or_insert(error.clone());
+        self.failure_changed.notify_waiters();
         Box::new(error)
     }
 
@@ -478,6 +475,7 @@ impl PublicationScope {
                         state.admission = Admission::Poisoned;
                     }
                     state.failure.get_or_insert(error.clone());
+                    scope.failure_changed.notify_waiters();
                 }
                 let _ = receipt_tx.send(result);
                 let _ = done_tx.send(frontier.lock().unwrap_or_else(|e| e.into_inner()).clone());
@@ -593,30 +591,6 @@ pub(crate) fn commit_in_with_frontier<T: Send + 'static>(
         }
     }
     commit(with_snapshot(frontier, operation))
-}
-
-/// Raw stage/control publications also cross the execution scope. More complex
-/// consumers enclose this append and their accounting in one `commit` operation.
-pub(crate) fn report(
-    journal: &super::SupervisorJournal,
-    event: obzenflow_core::event::SystemEvent,
-    options: AppendOptions<obzenflow_core::event::SystemEvent>,
-) -> BoxFuture<'static, Result<super::SupervisorRecord, BoxError>> {
-    let journal = journal.clone();
-    commit(async move {
-        journal
-            .append_inline(event, options)
-            .await
-            .map_err(Into::into)
-    })
-}
-
-pub(crate) async fn report_inline(
-    journal: &super::SupervisorJournal,
-    event: obzenflow_core::event::SystemEvent,
-    options: AppendOptions<obzenflow_core::event::SystemEvent>,
-) -> Result<super::SupervisorRecord, JournalError> {
-    journal.append_inline(event, options).await
 }
 
 pub(crate) fn append<T: JournalEvent + 'static>(

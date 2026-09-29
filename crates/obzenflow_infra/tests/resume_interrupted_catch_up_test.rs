@@ -527,10 +527,9 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
 
     let (_r0, r1) = record_and_interrupt(&journal_base).await?;
 
-    // Synthesize the torn-before-watermark archive: a SIGINT that lands
-    // before source exhaustion leaves the re-admitted prefix (possibly
-    // partial) and no watermark. Stripping the watermark row from R1's source
-    // journal reproduces exactly that shape deterministically.
+    // A stop before exhaustion leaves a committed prefix without a watermark.
+    // Truncate at that boundary, including subsequent lifecycle facts. Removing
+    // only the watermark from the middle would leave broken predecessor links.
     let r1_manifest = manifest(&r1);
     let src_journal_file = &r1_manifest
         .stages
@@ -538,15 +537,29 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
         .expect("manifest names the src stage")
         .data_journal_file;
     let src_journal_path = r1.join(src_journal_file);
+    let before = replay_testkit::read_stage_envelopes_appended(&r1, "src").await;
+    let watermark_index = before
+        .iter()
+        .position(|record| record.event_type() == "control.catch_up_complete")
+        .expect("source crossed its recorded catch-up boundary");
+    let reached_boundary = std::cell::Cell::new(false);
     let removed = obzenflow_infra::testing::journal::retain_archive_frames(&r1, |path, records| {
-        path != src_journal_path
-            || !records.iter().any(|record| {
-                record.pointer("/envelope/provenance/event/event_type")
-                    == Some(&json!("control.catch_up_complete"))
-            })
+        if path != src_journal_path {
+            return true;
+        }
+        if records.iter().any(|record| {
+            record.pointer("/envelope/provenance/event/event_type")
+                == Some(&json!("control.catch_up_complete"))
+        }) {
+            reached_boundary.set(true);
+        }
+        !reached_boundary.get()
     })
     .map_err(anyhow::Error::from_boxed)?;
-    assert_eq!(removed, 1, "the watermark row must have been stripped");
+    assert_eq!(removed, before.len() - watermark_index);
+    let retained = replay_testkit::read_stage_envelopes_appended(&r1, "src").await;
+    assert_eq!(retained.len(), watermark_index);
+    assert_eq!(resume_rows(&retained), ticks(1..=RECORDED));
 
     // Resume the torn archive. No generation-1 boundary is recorded anywhere,
     // so the resume must enter generation 1 again and extend the prefix.

@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::StageId;
-use obzenflow_runtime::stages::common::stage_handle::{StageError, StageEvent, StageHandle};
+use obzenflow_runtime::stages::common::stage_handle::{
+    StageAck, StageError, StageEvent, StageFailure, StageHandle, StageMilestone,
+};
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use std::sync::Arc;
 
@@ -23,11 +25,25 @@ pub struct StageHandleAdapter<H, E, S> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageStatus {
     Created,
+    Initializing,
     Ready,
+    Starting,
+    AcquiringInput,
     Running,
     Draining,
+    Flushing,
+    DrainingWriter,
+    CheckingContracts,
+    ValidatingTerminal,
+    ForwardingTerminal,
+    ProducingFinalOutput,
+    DrainingFinalOutput,
+    Finalising,
     Drained,
+    Failing,
     Failed,
+    Cancelling,
+    Cancelled,
 }
 
 impl<H, E, S> StageHandleAdapter<H, E, S>
@@ -73,16 +89,6 @@ where
 
     fn stage_type(&self) -> StageType {
         self.stage_type
-    }
-
-    fn publish_pipeline_control(
-        &self,
-        journal: Arc<dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>>,
-        event: obzenflow_core::event::ChainEvent,
-    ) -> Result<(), StageError> {
-        self.inner
-            .publish_pipeline_control(journal, event)
-            .map_err(|error| StageError::Execution(Arc::from(error)))
     }
 
     async fn initialize(&self) -> Result<(), StageError> {
@@ -151,11 +157,27 @@ where
             .map_err(|e| StageError::EventSendFailed(format!("Failed to force shutdown: {e:?}")))
     }
 
-    async fn wait_for_completion(&self) -> Result<(), StageError> {
+    async fn wait_for_milestone(&self, milestone: StageMilestone) -> Result<StageAck, StageError> {
         self.inner
-            .wait_for_completion()
+            .wait_for_milestone(milestone)
             .await
-            .map_err(stage_execution_error)
+            .map(|result| StageAck::from_result(self.stage_id, result))
+    }
+
+    async fn wait_for_failure(&self) -> Option<StageFailure> {
+        self.inner
+            .wait_for_failure()
+            .await
+            .map(|result| StageFailure::from_result(self.stage_id, result))
+    }
+
+    async fn wait_for_completion(
+        &self,
+    ) -> obzenflow_runtime::stages::common::stage_handle::StageExit {
+        obzenflow_runtime::stages::common::stage_handle::StageExit {
+            stage_id: self.stage_id,
+            outcome: self.inner.wait_for_stage_exit().await,
+        }
     }
 
     async fn abort_and_join(&self) -> Result<(), StageError> {

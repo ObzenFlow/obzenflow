@@ -19,7 +19,7 @@ use std::time::Instant;
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::fsm::{
-    JoinContext, JoinEvent, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
 
 pub(super) async fn dispatch_hydrating<
@@ -27,7 +27,7 @@ pub(super) async fn dispatch_hydrating<
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
 
@@ -286,13 +286,17 @@ pub(super) async fn dispatch_hydrating<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
-                    let result = ctx.handler.process_reference(
-                        &mut ctx.handler_state,
-                        event.clone(),
-                        reference_stage_id,
-                        writer_id,
-                        scope,
-                    );
+                    let result = ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup")
+                        .process_reference(
+                            &mut ctx.handler_state,
+                            event.clone(),
+                            reference_stage_id,
+                            writer_id,
+                            scope,
+                        );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
                     }
@@ -397,14 +401,14 @@ pub(super) async fn dispatch_hydrating<
                 }
             };
 
-            drop(
-                subscription
-                    .maybe_check_contracts_tick(
-                        &mut ctx.reference_contract_state[..],
-                        &mut ctx.reference_last_contract_check,
-                    )
-                    .await,
-            );
+            subscription
+                .maybe_check_contracts_tick(
+                    &mut ctx.reference_contract_state[..],
+                    &mut ctx.reference_last_contract_check,
+                )
+                .await
+                .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+                .into_result()?;
 
             Ok(directive)
         }
@@ -448,6 +452,12 @@ pub(super) async fn dispatch_hydrating<
                             cause = ?cause,
                             "Reference contract violation during join loading"
                         );
+
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        }
+                        .into_result()?;
                     }
                     _ => {}
                 }

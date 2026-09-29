@@ -14,9 +14,7 @@ pub mod envelope;
 pub mod journal_event;
 pub mod journal_record;
 pub mod observability;
-pub mod supervisor_record;
 pub mod system_event;
-pub use supervisor_record::SupervisorRecord;
 pub mod types;
 pub mod vector_clock;
 
@@ -61,8 +59,7 @@ pub use payloads::stage_fatal_payload::{
 };
 pub use payloads::system_payload::{
     CommandDiscardDisposition, MetricsCoordinationEvent, PipelineCancellationCause,
-    PipelineLifecycleEvent, PipelineStopAdmission, ReplayLifecycleEvent, StageLifecycleEvent,
-    SystemPayload,
+    PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload,
 };
 pub use system_event::{SystemEvent, SystemEventFactory};
 pub use types::{
@@ -72,3 +69,5 @@ pub use types::{
 pub use utils::EventFilter;
 
 pub use payloads::chain_payload::EventKind;
+
+pub use payloads::execution_payload::ReplayLifecycleEvent;

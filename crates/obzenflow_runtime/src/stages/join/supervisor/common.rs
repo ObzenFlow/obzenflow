@@ -14,7 +14,7 @@ use crate::stages::common::supervision::catch_up::{
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::common::supervision::stage_fatal::{record_stage_fatal, StageFatalCommit};
-use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinSubscriptionSide, PendingTransition};
+use crate::stages::join::fsm::{JoinEvent, JoinResources, JoinSubscriptionSide, PendingTransition};
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
@@ -38,7 +38,7 @@ pub(super) fn ensure_subscriptions<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) {
     if sup.reference_subscription.is_none() {
         sup.reference_subscription = ctx.reference_subscription.take();
@@ -54,7 +54,7 @@ pub(super) fn ensure_subscriptions<
 async fn join_flip<H: UnifiedJoinHandler>(
     reference: Option<&UpstreamSubscription<ChainEvent>>,
     stream: Option<&UpstreamSubscription<ChainEvent>>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     target: obzenflow_core::ReaderGeneration,
 ) -> CatchUpDisposition {
     let side_caught_up = |side: Option<&UpstreamSubscription<ChainEvent>>| {
@@ -94,7 +94,7 @@ async fn join_flip<H: UnifiedJoinHandler>(
 pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
     reference: Option<&UpstreamSubscription<ChainEvent>>,
     stream: Option<&UpstreamSubscription<ChainEvent>>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     announced: obzenflow_core::ReaderGeneration,
 ) -> crate::supervised_base::EventLoopDirective<JoinEvent<H>> {
     match join_flip(reference, stream, ctx, announced).await {
@@ -112,7 +112,7 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
 pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
     reference: Option<&UpstreamSubscription<ChainEvent>>,
     stream: Option<&UpstreamSubscription<ChainEvent>>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Option<crate::supervised_base::EventLoopDirective<JoinEvent<H>>> {
     let side_max = |side: Option<&UpstreamSubscription<ChainEvent>>| {
         side.map(|subscription| subscription.max_reader_generation())
@@ -132,7 +132,7 @@ pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
 }
 
 pub(super) async fn forward_control_to_journal<H: UnifiedJoinHandler>(
-    ctx: &JoinContext<H>,
+    ctx: &JoinResources<H>,
     envelope: &DeliveredRecord<ChainPayload>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     forward_control_event(
@@ -147,7 +147,7 @@ pub(super) async fn forward_control_to_journal<H: UnifiedJoinHandler>(
 }
 
 pub(super) async fn record_join_stage_fatal<H: UnifiedJoinHandler>(
-    ctx: &JoinContext<H>,
+    ctx: &JoinResources<H>,
     fatal: &StageFatal,
     parent: Option<&DeliveredRecord<ChainPayload>>,
     input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
@@ -175,7 +175,7 @@ pub(super) async fn flush_pending_outputs<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<FlushOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
@@ -232,7 +232,7 @@ pub(super) async fn flush_pending_outputs<
 }
 
 pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
-    ctx: &JoinContext<H>,
+    ctx: &JoinResources<H>,
     scope: obzenflow_core::MiddlewareExecutionScope,
     _input: &ChainEvent,
     delivery: Option<&JoinDeliverySnapshot>,
@@ -261,7 +261,7 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
 }
 
 pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
-    ctx: &JoinContext<H>,
+    ctx: &JoinResources<H>,
     scope: obzenflow_core::MiddlewareExecutionScope,
     _input: Option<&ChainEvent>,
     delivery: Option<&JoinDeliverySnapshot>,
@@ -322,7 +322,7 @@ pub(super) fn signal_snapshot(
 }
 
 pub(super) fn observe_reference_envelope<H: UnifiedJoinHandler>(
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     envelope: &DeliveredRecord<ChainPayload>,
 ) {
     // Conservative interim for FLOWIP-071h: merge all reference-side ancestry into one
@@ -337,7 +337,7 @@ fn track_output_event_for_pending_source<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &JoinContext<H>,
+    ctx: &JoinResources<H>,
 ) {
     match ctx.pending_subscription_ack.map(|ack| ack.side) {
         Some(JoinSubscriptionSide::Reference) => {
@@ -370,8 +370,10 @@ pub(super) enum FlushOutcome {
     DrainCompleteReady,
 }
 
-pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sync + 'static>(
-    ctx: &mut JoinContext<H>,
+pub(in crate::stages::join) async fn emit_join_heartbeat_if_due<
+    H: UnifiedJoinHandler + Send + Sync + 'static,
+>(
+    ctx: &mut JoinResources<H>,
     stage_id: StageId,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let interval = ctx.heartbeat_interval;

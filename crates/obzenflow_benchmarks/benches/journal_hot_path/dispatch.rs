@@ -5,7 +5,6 @@
 use super::{fixtures, measure, Census, Meter, Sample};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::benchmark::{add, Counter};
-use obzenflow_core::journal::reader::ReportScanItem;
 use std::cell::LazyCell;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -15,7 +14,6 @@ fn controlled(
     history: &fixtures::History,
     readers: usize,
     quantum: usize,
-    selected: bool,
 ) -> Sample {
     let cursors: Vec<_> = (0..readers).map(|_| history.corpus.cursor()).collect();
     let meter = Meter::start();
@@ -28,19 +26,11 @@ fn controlled(
                     let mut first = None;
                     while !cursor.finished() {
                         if quantum == 0 {
-                            if selected {
-                                cursor.decode_selected(64).unwrap();
-                            } else {
-                                cursor.decode(64, true).unwrap();
-                            }
+                            cursor.decode(64, true).unwrap();
                         } else {
                             add(Counter::DecodeBlockingJobs, 1);
                             cursor = tokio::task::spawn_blocking(move || {
-                                if selected {
-                                    cursor.decode_selected(quantum).unwrap();
-                                } else {
-                                    cursor.decode(quantum, true).unwrap();
-                                }
+                                cursor.decode(quantum, true).unwrap();
                                 cursor
                             })
                             .await
@@ -84,27 +74,11 @@ fn controlled(
     sample
 }
 
-fn actual(
-    runtime: &Runtime,
-    history: &fixtures::History,
-    readers: usize,
-    selected: bool,
-) -> Sample {
+fn actual(runtime: &Runtime, history: &fixtures::History, readers: usize) -> Sample {
     let full = runtime.block_on(async {
         let mut opened = Vec::new();
-        if !selected {
-            for _ in 0..readers {
-                opened.push(history.journal.reader().await.unwrap());
-            }
-        }
-        opened
-    });
-    let reports = runtime.block_on(async {
-        let mut opened = Vec::new();
-        if selected {
-            for _ in 0..readers {
-                opened.push(history.journal.report_reader_from(0).await.unwrap());
-            }
+        for _ in 0..readers {
+            opened.push(history.journal.reader().await.unwrap());
         }
         opened
     });
@@ -123,29 +97,6 @@ fn actual(
                         }
                         ids.push(*row.id());
                     }
-                    (ids, first)
-                });
-            }
-            for mut reader in reports {
-                tasks.spawn(async move {
-                    let mut ids = Vec::with_capacity(64);
-                    let mut first = Duration::ZERO;
-                    loop {
-                        match reader.next_report(Default::default()).await.unwrap().item {
-                            ReportScanItem::Record(row) => {
-                                if ids.is_empty() {
-                                    first = start.elapsed();
-                                }
-                                ids.push(*row.id());
-                            }
-                            ReportScanItem::Progress => {}
-                            ReportScanItem::Tail { committed_end } => {
-                                assert!(committed_end);
-                                break;
-                            }
-                        }
-                    }
-                    assert_eq!(reader.position(), 64);
                     (ids, first)
                 });
             }
@@ -171,8 +122,8 @@ fn actual(
         (readers * history.corpus.encoded_bytes()) as u64,
     );
     sample.observations = serde_json::json!({
-        "first_report_ns":results.iter().map(|(_,t)|t.as_nanos() as u64).min(),
-        "last_reader_first_report_ns":results.iter().map(|(_,t)|t.as_nanos() as u64).max(),
+        "first_record_ns":results.iter().map(|(_,t)|t.as_nanos() as u64).min(),
+        "last_reader_first_record_ns":results.iter().map(|(_,t)|t.as_nanos() as u64).max(),
     });
     sample
 }
@@ -182,8 +133,8 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
     let mut group = c.benchmark_group("reader_dispatch");
     for readers in [1, 8, 32] {
         group.throughput(Throughput::Elements((64 * readers) as u64));
-        for selected in [false, true] {
-            let kind = if selected { "selected" } else { "full" };
+        {
+            let kind = "full";
             for quantum in [0, 1, 8, 64, usize::MAX] {
                 let boundary = match quantum {
                     0 => "inline".into(),
@@ -202,9 +153,9 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
                         &input,
                         || {
                             if quantum == usize::MAX {
-                                actual(runtime, &history, readers, selected)
+                                actual(runtime, &history, readers)
                             } else {
-                                controlled(runtime, &history, readers, quantum, selected)
+                                controlled(runtime, &history, readers, quantum)
                             }
                         },
                     )

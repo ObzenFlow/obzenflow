@@ -8,65 +8,151 @@
 //! such as the metrics aggregator and pipeline supervisor.
 
 use super::base::{EventLoopDirective, Supervisor};
+use super::handler_supervised::{
+    ActionExecution, HandlerSupervised, HandlerSupervisedExt, SupervisorAction,
+};
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use futures::future::BoxFuture;
 use obzenflow_core::event::WriterId;
-use obzenflow_fsm::{FsmAction, StateVariant};
+use obzenflow_fsm::{FsmAction, FsmError};
+use std::error::Error;
 
-/// Trait that self-supervised components MUST implement
-/// This ensures they provide all required functionality
-///
-/// By implementing SelfSupervised, you get:
-/// - Enforced implementation of build_state_machine()
-/// - Enforced implementation of dispatch_state()
-/// - Free run() method via SelfSupervisedExt
-/// - No way to bypass the supervised pattern
+type BoxError = Box<dyn Error + Send + Sync>;
+
+/// Self-contained supervisors select the same explicit host obligations as
+/// handler stages. Both families use one operation-owning runner.
 #[async_trait::async_trait]
 pub trait SelfSupervised: Supervisor + Sync {
-    /// Run the state dispatch logic for the current state
-    /// Returns a directive indicating what to do next
     async fn dispatch_state(
         &mut self,
         state: &Self::State,
         context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>>;
-
-    /// Get the writer ID for this component
+    ) -> Result<EventLoopDirective<Self::Event>, BoxError>;
     fn writer_id(&self) -> WriterId;
-
-    /// Optional termination hook for components that need a final marker after the
-    /// FSM reaches a terminal state.
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
-    }
-
-    /// Map an action error into a supervisor-specific failure event.
-    ///
-    /// This is used by the supervision loop to ensure that any action
-    /// failure drives the FSM through an explicit failure path instead
-    /// of terminating the task with an opaque error.
     fn event_for_action_error(&self, msg: String) -> Self::Event;
-
-    /// Hook called after a successful FSM transition and its actions complete.
-    ///
-    /// Supervisors that publish observer state can use this to avoid a one-loop
-    /// lag between the FSM state and external handles.
-    async fn after_transition(
+    fn after_transition(&mut self, _state: &Self::State, _context: &Self::Context) {}
+    fn lifecycle_phase(&self, _state: &Self::State) -> LifecyclePhase {
+        LifecyclePhase::Other
+    }
+    fn supervisor_action(&self, _action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
+        None
+    }
+    async fn execute_action(
+        &mut self,
+        action: Self::Action,
+        context: &mut Self::Context,
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
+        action.execute(context).await?;
+        Ok(ActionExecution::Completed)
+    }
+    async fn execute_cleanup(
+        &mut self,
+        _context: &Self::Context,
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
+        Ok(ActionExecution::Completed)
+    }
+    async fn next_control(
         &mut self,
         _state: &Self::State,
-        _context: &Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
+        _context: &mut Self::Context,
+    ) -> Option<Self::Event> {
+        std::future::pending().await
+    }
+    fn close_mailbox(&mut self, _state: &Self::State) -> BoxFuture<'static, Result<(), BoxError>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
-/// Extension trait to add run functionality to any SelfSupervised type
+/// Delegation only: the concrete supervisor retains its FSM, commands and
+/// resources. This adapter adds no lifecycle decision or task.
+struct SelfRunner<S>(S);
+
+impl<S: SelfSupervised> Supervisor for SelfRunner<S> {
+    type State = S::State;
+    type Event = S::Event;
+    type Context = S::Context;
+    type Action = S::Action;
+    fn build_state_machine(
+        &self,
+        state: Self::State,
+    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+        self.0.build_state_machine(state)
+    }
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn supervisor_kind(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
+        self.0.supervisor_kind()
+    }
+    fn registration(
+        &self,
+        context: &Self::Context,
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        self.0.registration(context, descriptor)
+    }
+}
+
 #[async_trait::async_trait]
-pub trait SelfSupervisedExt: SelfSupervised {
-    /// Run the supervision loop
-    async fn run(
-        mut self,
-        initial_state: Self::State,
-        context: Self::Context,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+impl<S: SelfSupervised + Send> HandlerSupervised for SelfRunner<S> {
+    type Handler = ();
+    fn writer_id(&self) -> WriterId {
+        self.0.writer_id()
+    }
+    fn supervision_mode(
+        &self,
+    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode {
+        obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode::SelfSupervised
+    }
+    fn event_for_action_error(&self, message: String) -> Self::Event {
+        self.0.event_for_action_error(message)
+    }
+    fn lifecycle_phase(&self, state: &Self::State) -> LifecyclePhase {
+        self.0.lifecycle_phase(state)
+    }
+    fn after_transition(&mut self, state: &Self::State, context: &Self::Context) {
+        self.0.after_transition(state, context);
+    }
+    fn supervisor_action(&self, action: &Self::Action) -> Option<SupervisorAction<Self::Event>> {
+        self.0.supervisor_action(action)
+    }
+    async fn execute_action(
+        &mut self,
+        action: Self::Action,
+        context: &mut Self::Context,
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
+        self.0.execute_action(action, context).await
+    }
+    async fn execute_cleanup(
+        &mut self,
+        context: &Self::Context,
+    ) -> Result<ActionExecution<Self::Context, Self::Event>, FsmError> {
+        self.0.execute_cleanup(context).await
+    }
+    async fn next_control(
+        &mut self,
+        state: &Self::State,
+        context: &mut Self::Context,
+    ) -> Option<Self::Event> {
+        self.0.next_control(state, context).await
+    }
+    fn close_mailbox(&mut self, state: &Self::State) -> BoxFuture<'static, Result<(), BoxError>> {
+        self.0.close_mailbox(state)
+    }
+    async fn dispatch_state(
+        &mut self,
+        state: &Self::State,
+        context: &mut Self::Context,
+    ) -> Result<EventLoopDirective<Self::Event>, BoxError> {
+        self.0.dispatch_state(state, context).await
+    }
+}
+
+#[async_trait::async_trait]
+pub trait SelfSupervisedExt: SelfSupervised + Send {
+    async fn run(self, initial_state: Self::State, context: Self::Context) -> Result<(), BoxError>
     where
         Self: Sized,
         Self::State: Send + Sync + 'static,
@@ -74,236 +160,7 @@ pub trait SelfSupervisedExt: SelfSupervised {
         Self::Context: 'static,
         Self::Action: 'static,
     {
-        let supervisor_name = self.name().to_string();
-        let supervisor_writer = self.writer_id();
-        super::base::register(
-            &self,
-            &context,
-            supervisor_writer,
-            obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode::SelfSupervised,
-        )
-        .await?;
-        tracing::info!(
-            supervisor = %supervisor_name,
-            writer_id = ?supervisor_writer,
-            "SelfSupervised::run() starting with initial state: {:?}",
-            initial_state
-        );
-        let mut context = context;
-
-        // Build the state machine via the Supervisor API
-        tracing::debug!(
-            supervisor = %supervisor_name,
-            "Building FSM via Supervisor::build_state_machine"
-        );
-        let mut machine = self.build_state_machine(initial_state);
-
-        let mut iteration = 0;
-        loop {
-            iteration += 1;
-
-            // Get current state
-            let current_state = machine.state().clone();
-            // tracing::debug!("Loop iteration {}: Current state: {:?}", iteration, current_state);
-
-            // Get directive from the supervisor's dispatch logic, with full access to context
-            tracing::trace!("Calling dispatch_state for state: {:?}", current_state);
-            let directive = match self.dispatch_state(&current_state, &mut context).await {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::error!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        state = %current_state.variant_name(),
-                        error = %e,
-                        "dispatch_state returned error; driving FSM through failure path"
-                    );
-
-                    let failure_event = self.event_for_action_error(format!(
-                        "dispatch_state error in {}: {e}",
-                        current_state.variant_name()
-                    ));
-                    let failure_actions = machine
-                        .handle(failure_event, &mut context)
-                        .await
-                        .map_err(|fe| format!("FSM error after dispatch_state failure: {fe}"))?;
-
-                    tracing::debug!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        iteration,
-                        failure_action_count = failure_actions.len(),
-                        "Loop iteration {}: Executing {} failure-handling actions",
-                        iteration,
-                        failure_actions.len()
-                    );
-                    for (i, failure_action) in failure_actions.into_iter().enumerate() {
-                        tracing::debug!(
-                            supervisor = %supervisor_name,
-                            writer_id = ?supervisor_writer,
-                            iteration,
-                            failure_action_index = i,
-                            action = ?failure_action,
-                            "Executing failure-handling action"
-                        );
-                        failure_action.execute(&mut context).await.map_err(|e2| {
-                            format!("Action error during dispatch_state failure handling: {e2}")
-                        })?;
-                    }
-
-                    let new_state = machine.state().clone();
-                    self.after_transition(&new_state, &context).await?;
-
-                    continue;
-                }
-            };
-            tracing::debug!(
-                supervisor = %supervisor_name,
-                writer_id = ?supervisor_writer,
-                "Loop iteration {}: dispatch_state returned: {:?}",
-                iteration,
-                directive
-            );
-
-            match directive {
-                EventLoopDirective::Continue => {
-                    tracing::trace!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        "Loop iteration {}: Got Continue directive, continuing loop",
-                        iteration
-                    );
-                    // Yield to prevent busy loop when waiting for external events
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-
-                EventLoopDirective::Transition(event) => {
-                    tracing::debug!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        "Loop iteration {}: Transitioning with event: {:?}",
-                        iteration,
-                        event
-                    );
-                    let actions = machine
-                        .handle(event, &mut context)
-                        .await
-                        .map_err(|e| format!("FSM error: {e}"))?;
-
-                    tracing::debug!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        "Loop iteration {}: Got {} actions to execute",
-                        iteration,
-                        actions.len()
-                    );
-                    let mut failure_transition_handled = false;
-                    for (i, action) in actions.iter().enumerate() {
-                        tracing::debug!(
-                            supervisor = %supervisor_name,
-                            writer_id = ?supervisor_writer,
-                            "Loop iteration {}: Executing action {}/{}: {:?}",
-                            iteration,
-                            i + 1,
-                            actions.len(),
-                            action
-                        );
-                        if let Err(e) = action.execute(&mut context).await {
-                            tracing::error!(
-                                supervisor = %supervisor_name,
-                                writer_id = ?supervisor_writer,
-                                iteration,
-                                action_index = i,
-                                error = %e,
-                                "SelfSupervised action failed; emitting failure event"
-                            );
-
-                            // Drive the FSM with a supervisor-specific failure event so
-                            // that it can transition into a Failed state and emit the
-                            // appropriate lifecycle / coordination events.
-                            let failure_event = self.event_for_action_error(format!("{e}"));
-                            let failure_actions = machine
-                                .handle(failure_event, &mut context)
-                                .await
-                                .map_err(|fe| format!("FSM error after action failure: {fe}"))?;
-
-                            tracing::debug!(
-                                supervisor = %supervisor_name,
-                                writer_id = ?supervisor_writer,
-                                iteration,
-                                failure_action_count = failure_actions.len(),
-                                "Loop iteration {}: Executing {} failure-handling actions",
-                                iteration,
-                                failure_actions.len()
-                            );
-                            for (j, failure_action) in failure_actions.iter().enumerate() {
-                                tracing::debug!(
-                                    supervisor = %supervisor_name,
-                                    writer_id = ?supervisor_writer,
-                                    iteration,
-                                    failure_action_index = j,
-                                    action = ?failure_action,
-                                    "Executing failure-handling action"
-                                );
-                                failure_action.execute(&mut context).await.map_err(|e2| {
-                                    format!("Action error during failure handling: {e2}")
-                                })?;
-                            }
-
-                            let new_state = machine.state().clone();
-                            self.after_transition(&new_state, &context).await?;
-                            failure_transition_handled = true;
-
-                            // After executing failure-handling actions, break out of the
-                            // current action sequence. The next loop iteration will see
-                            // the new FSM state (typically Failed/Drained) and perform
-                            // the appropriate terminal behaviour.
-                            break;
-                        }
-                        tracing::debug!(
-                            supervisor = %supervisor_name,
-                            writer_id = ?supervisor_writer,
-                            "Loop iteration {}: Action {}/{} completed",
-                            iteration,
-                            i + 1,
-                            actions.len()
-                        );
-                    }
-                    if !failure_transition_handled {
-                        tracing::debug!(
-                            supervisor = %supervisor_name,
-                            writer_id = ?supervisor_writer,
-                            "Loop iteration {}: Transition complete, new state: {:?}",
-                            iteration,
-                            machine.state()
-                        );
-                        let new_state = machine.state().clone();
-                        self.after_transition(&new_state, &context).await?;
-                    }
-                }
-
-                EventLoopDirective::Terminate => {
-                    tracing::info!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        "Loop iteration {}: Got Terminate directive",
-                        iteration
-                    );
-                    self.write_completion_event().await?;
-                    break;
-                }
-            }
-        }
-
-        tracing::info!(
-            supervisor = %supervisor_name,
-            writer_id = ?supervisor_writer,
-            "SelfSupervised::run() completed"
-        );
-        Ok(())
+        HandlerSupervisedExt::run(SelfRunner(self), initial_state, context).await
     }
 }
-
-// Blanket implementation - any type that implements SelfSupervised gets run() for free
-impl<T: SelfSupervised> SelfSupervisedExt for T {}
+impl<T: SelfSupervised + Send> SelfSupervisedExt for T {}

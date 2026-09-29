@@ -10,15 +10,11 @@
 
 pub(crate) mod base;
 pub mod builder;
-pub(crate) mod cleanup;
 pub mod handle;
 pub mod handler_supervised;
 pub(crate) mod idle_backoff;
 pub(crate) mod publication;
-mod report;
 #[doc(hidden)]
-pub mod report_reader;
-pub use report::{SupervisorJournal, SupervisorRecord};
 pub mod self_supervised;
 pub(crate) mod with_external_events;
 

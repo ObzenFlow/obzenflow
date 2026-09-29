@@ -2,25 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Canonical pipeline FSM construction and transition table.
-//!
-//! Each live phase observes the original journal through its named decision.
-//! Internal bootstrap, deadlines and settlement inputs have explicit admission.
-//! Only stale caller controls use the selective unhandled policy.
+//! One transition table for pipeline lifecycle authority.
 
 mod actions;
 pub(super) mod context;
 mod guards;
-mod journal;
 mod model;
 mod transitions;
-
 pub(crate) use actions::PipelineAction;
 pub(crate) use context::PipelineContext;
-pub(crate) use model::{PipelineDeadline, PipelineFsmEvent, PipelineFsmState};
-
+pub(crate) use model::{PipelineDeadline, PipelineFsmEvent, PipelineFsmState, PublicationStep};
 use obzenflow_fsm::{fsm, StateMachine};
-
 pub(crate) type PipelineFsm =
     StateMachine<PipelineFsmState, PipelineFsmEvent, PipelineContext, PipelineAction>;
 
@@ -31,110 +23,145 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineFsmState) -> Pipe
         context: PipelineContext;
         action: PipelineAction;
         initial: initial;
-
         unhandled => transitions::unhandled;
         state PipelineFsmState::Created {
             on PipelineFsmEvent::Bootstrap => transitions::bootstrap;
-            on PipelineFsmEvent::GracefulStop => transitions::stop_before_start;
-            on PipelineFsmEvent::Cancel => transitions::stop_before_start;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::created;
         }
-        state PipelineFsmState::Materializing {
-            on PipelineFsmEvent::PhysicalSettlementSatisfied => transitions::initialisation_delivered;
-            on PipelineFsmEvent::GracefulStop => transitions::stop_before_start;
-            on PipelineFsmEvent::Cancel => transitions::stop_before_start;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::materializing;
+        state PipelineFsmState::Registering {
+            on PipelineFsmEvent::RegistrationCompleted => transitions::registered;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
-        state PipelineFsmState::AwaitingStageReadiness {
-            on PipelineFsmEvent::GracefulStop => transitions::stop_before_start;
-            on PipelineFsmEvent::Cancel => transitions::stop_before_start;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::awaiting_readiness;
+        state PipelineFsmState::InitializingStages {
+            on PipelineFsmEvent::ChildAcknowledged => transitions::acknowledge;
+            on PipelineFsmEvent::PhaseSatisfied => transitions::initialized;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
+        }
+        state PipelineFsmState::StartingConsumers {
+            on PipelineFsmEvent::ChildAcknowledged => transitions::acknowledge;
+            on PipelineFsmEvent::MetricsReady => transitions::metrics_ready;
+            on PipelineFsmEvent::PhaseSatisfied => transitions::consumers_started;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
+        }
+        state PipelineFsmState::PublishingReady {
+            on PipelineFsmEvent::ReadyPublished => transitions::ready_published;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
         state PipelineFsmState::ReadyForRun {
             on PipelineFsmEvent::Start => transitions::start;
-            on PipelineFsmEvent::GracefulStop => transitions::stop_before_start;
-            on PipelineFsmEvent::Cancel => transitions::stop_before_start;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::ready_for_run;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
+        }
+        state PipelineFsmState::PublishingStart {
+            on PipelineFsmEvent::StartPublished => transitions::start_published;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
         state PipelineFsmState::StartingSources {
-            on PipelineFsmEvent::GracefulStop => transitions::begin_graceful_drain;
-            on PipelineFsmEvent::Cancel => transitions::cancel_and_settle;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::starting_sources;
+            on PipelineFsmEvent::ChildAcknowledged => transitions::acknowledge;
+            on PipelineFsmEvent::PhaseSatisfied => transitions::sources_started;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
+        }
+        state PipelineFsmState::PublishingRunning {
+            on PipelineFsmEvent::RunningPublished => transitions::running_published;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
         state PipelineFsmState::Running {
-            on PipelineFsmEvent::GracefulStop => transitions::begin_graceful_drain;
-            on PipelineFsmEvent::Cancel => transitions::cancel_and_settle;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::running;
-        }
-        state PipelineFsmState::SourceCompleted {
-            on PipelineFsmEvent::GracefulStop => transitions::begin_graceful_drain;
-            on PipelineFsmEvent::Cancel => transitions::cancel_and_settle;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::source_completed;
+            on PipelineFsmEvent::PhaseSatisfied => transitions::sources_completed;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
         state PipelineFsmState::Draining {
-            on PipelineFsmEvent::GracefulStop => transitions::begin_graceful_drain;
-            on PipelineFsmEvent::Cancel => transitions::cancel_and_settle;
-            on PipelineFsmEvent::GracefulStopExpired => transitions::cancel_and_settle;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::draining;
+            on PipelineFsmEvent::PhaseSatisfied => transitions::children_settled;
+            on PipelineFsmEvent::GracefulStopExpired => transitions::stop;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
-        state PipelineFsmState::SettlingStages {
-            on PipelineFsmEvent::PhysicalSettlementSatisfied => transitions::stage_owners_settled;
-            on PipelineFsmEvent::GracefulStop => transitions::stop_during_settlement;
-            on PipelineFsmEvent::Cancel => transitions::stop_during_settlement;
-            on PipelineFsmEvent::GracefulStopExpired => transitions::stop_during_settlement;
-            on PipelineFsmEvent::StageCleanupExpired => transitions::expire_stage_cleanup;
-            on PipelineFsmEvent::Abort => transitions::failure_before_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_before_terminal;
-            on PipelineFsmEvent::Journal => journal::settling_stages;
+        state PipelineFsmState::CancellingChildren {
+            on PipelineFsmEvent::PhaseSatisfied => transitions::children_settled;
+            on PipelineFsmEvent::StageCleanupExpired => transitions::expire_children;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
+            on PipelineFsmEvent::GracefulStop => transitions::stop;
+            on PipelineFsmEvent::Cancel => transitions::stop;
         }
-        state PipelineFsmState::CatchingUpProducers {
-            on PipelineFsmEvent::PhysicalSettlementSatisfied => transitions::producer_tail_reached;
-            on PipelineFsmEvent::GracefulStop => transitions::stop_during_settlement;
-            on PipelineFsmEvent::Cancel => transitions::stop_during_settlement;
-            on PipelineFsmEvent::GracefulStopExpired => transitions::stop_during_settlement;
-            on PipelineFsmEvent::Abort => transitions::failure_during_catchup;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_during_catchup;
-            on PipelineFsmEvent::Journal => journal::catching_up_producers;
+        state PipelineFsmState::FailingChildren {
+            on PipelineFsmEvent::PhaseSatisfied => transitions::children_settled;
+            on PipelineFsmEvent::StageCleanupExpired => transitions::expire_children;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::failure;
+            on PipelineFsmEvent::Abort => transitions::failure;
         }
         state PipelineFsmState::PublishingTerminal {
-            on PipelineFsmEvent::GracefulStop => transitions::stop_during_settlement;
-            on PipelineFsmEvent::Cancel => transitions::stop_during_settlement;
-            on PipelineFsmEvent::GracefulStopExpired => transitions::stop_during_settlement;
-            on PipelineFsmEvent::MetricsExpired => transitions::expire_metrics;
-            on PipelineFsmEvent::Abort => transitions::failure_after_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_after_terminal;
-            on PipelineFsmEvent::Journal => journal::publishing_terminal;
+            on PipelineFsmEvent::TerminalPublished => transitions::terminal_published;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::late_failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::late_failure;
+            on PipelineFsmEvent::Abort => transitions::late_failure;
         }
         state PipelineFsmState::FinalisingMetrics {
-            on PipelineFsmEvent::PhysicalSettlementSatisfied => transitions::metrics_owner_settled;
-            on PipelineFsmEvent::GracefulStop => transitions::stop_during_settlement;
-            on PipelineFsmEvent::Cancel => transitions::stop_during_settlement;
-            on PipelineFsmEvent::GracefulStopExpired => transitions::stop_during_settlement;
+            on PipelineFsmEvent::MetricsExited => transitions::metrics_exited;
+            on PipelineFsmEvent::PhaseSatisfied => transitions::metrics_settled;
             on PipelineFsmEvent::MetricsExpired => transitions::expire_metrics;
-            on PipelineFsmEvent::Abort => transitions::failure_after_terminal;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_after_terminal;
-            on PipelineFsmEvent::Journal => journal::finalising_metrics;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::late_failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::late_failure;
+            on PipelineFsmEvent::Abort => transitions::late_failure;
         }
         state PipelineFsmState::PublishingFinalMarker {
-            on PipelineFsmEvent::PhysicalSettlementSatisfied => transitions::final_marker_settled;
-            on PipelineFsmEvent::OperationalFailure => transitions::failure_after_terminal;
-            on PipelineFsmEvent::Journal => journal::publishing_final_marker;
+            on PipelineFsmEvent::FinalisationCompleted => transitions::finish;
+            on PipelineFsmEvent::ChildExited => transitions::child_exited;
+            on PipelineFsmEvent::ChildFailed => transitions::late_failure;
+            on PipelineFsmEvent::OperationalFailure => transitions::late_failure;
+            on PipelineFsmEvent::Abort => transitions::late_failure;
         }
         state PipelineFsmState::Finished {
         }

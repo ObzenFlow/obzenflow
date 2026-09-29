@@ -7,8 +7,6 @@
 mod causal;
 mod decode;
 mod fixtures;
-mod parent;
-mod reports;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::Duration;
@@ -19,6 +17,6 @@ criterion_group! {
         .sample_size(20)
         .warm_up_time(Duration::from_millis(300))
         .measurement_time(Duration::from_secs(1));
-    targets = causal::bench, decode::bench, reports::bench, parent::bench
+    targets = causal::bench, decode::bench
 }
 criterion_main!(components);

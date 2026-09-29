@@ -11,13 +11,13 @@ use obzenflow_core::Journal;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct PipelineReports {
+pub struct IngressRefusalWriter {
     pub(crate) journal: Arc<dyn Journal<SystemEvent>>,
     pub(crate) owner: Arc<PublicationScope>,
     pub(crate) writer: WriterId,
 }
 
-impl PipelineReports {
+impl IngressRefusalWriter {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn for_test(journal: Arc<dyn Journal<SystemEvent>>) -> Self {

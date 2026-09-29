@@ -8,17 +8,26 @@
 //! Owned tail readers overwrite buffers; publication never waits for refresh I/O.
 
 use super::buffer::TailReaders;
-use crate::supervised_base::base::Supervisor;
-use crate::supervised_base::builder::EventReceiver;
+use crate::stages::common::stage_handle::discarded_control_details;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
+use crate::supervised_base::base::{self, Registration, Supervisor};
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, SupervisorAction,
+};
+use crate::supervised_base::with_external_events::{CommandMailbox, ExternalControlEvent};
 use crate::supervised_base::{EventLoopDirective, SelfSupervised, StateWatcher};
-use obzenflow_core::event::{SystemEvent, SystemPayload, WriterId};
+use obzenflow_core::event::payloads::supervisor_descriptor::{
+    SupervisorDescriptor, SupervisorKind,
+};
+use obzenflow_core::event::{CommandDiscardDisposition, SystemEvent, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
+use obzenflow_fsm::{FsmError, StateMachine};
 use std::sync::Arc;
 
 use super::fsm::{
-    MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
-    MetricsAggregatorState,
+    build_metrics_aggregator_fsm, MetricsAggregatorAction, MetricsAggregatorContext,
+    MetricsAggregatorEvent, MetricsAggregatorState,
 };
 
 /// The supervisor that manages the metrics aggregator
@@ -32,7 +41,7 @@ pub(crate) struct MetricsAggregatorSupervisor {
     /// System ID for metrics writer
     pub(crate) system_id: SystemId,
 
-    pub(crate) control: EventReceiver<MetricsAggregatorEvent>,
+    pub(crate) control: CommandMailbox<MetricsAggregatorEvent>,
     pub(crate) readers: Option<TailReaders>,
     pub(crate) final_refresh: Option<tokio::time::Instant>,
 
@@ -50,22 +59,21 @@ impl Supervisor for MetricsAggregatorSupervisor {
     fn build_state_machine(
         &self,
         _initial_state: Self::State,
-    ) -> obzenflow_fsm::StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
+    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
         // Reuse the typed DSL FSM defined in metrics/fsm.rs.
-        crate::metrics::fsm::build_metrics_aggregator_fsm()
+        build_metrics_aggregator_fsm()
     }
 
-    fn supervisor_kind(
-        &self,
-    ) -> obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind {
-        obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind::MetricsAggregator
+    fn supervisor_kind(&self) -> SupervisorKind {
+        SupervisorKind::MetricsAggregator
     }
 
-    fn report_journal(
+    fn registration(
         &self,
         _context: &Self::Context,
-    ) -> crate::supervised_base::SupervisorJournal {
-        self.system_journal.clone().into()
+        descriptor: SupervisorDescriptor,
+    ) -> Registration {
+        base::register_system(self.system_journal.clone(), self.writer_id(), descriptor)
     }
 
     fn name(&self) -> &str {
@@ -73,111 +81,150 @@ impl Supervisor for MetricsAggregatorSupervisor {
     }
 }
 
-// Metrics dispatch and lifecycle hooks for the shared self-supervised runner.
+// Every lifecycle operation is selected by the metrics FSM.
 #[async_trait::async_trait]
 impl SelfSupervised for MetricsAggregatorSupervisor {
     fn writer_id(&self) -> WriterId {
-        WriterId::from(self.system_id)
+        self.system_id.into()
     }
-
     fn event_for_action_error(&self, msg: String) -> MetricsAggregatorEvent {
         MetricsAggregatorEvent::Error(msg)
     }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = obzenflow_core::event::SystemEvent::new(
-            self.writer_id(),
-            SystemPayload::MetricsCoordination(
-                obzenflow_core::event::MetricsCoordinationEvent::Shutdown,
-            ),
-        );
-
-        if let Err(e) = crate::supervised_base::publication::append(
-            &self.system_journal,
-            event,
-            Default::default(),
-        )
-        .await
-        {
-            tracing::error!(
-                journal_error = %e,
-                "Failed to write metrics shutdown event; continuing without system journal entry"
-            );
+    fn supervisor_action(
+        &self,
+        action: &MetricsAggregatorAction,
+    ) -> Option<SupervisorAction<MetricsAggregatorEvent>> {
+        if let MetricsAggregatorAction::Host(action) = action {
+            Some(action.clone())
+        } else {
+            None
         }
-        Ok(())
     }
-
+    fn lifecycle_phase(&self, state: &MetricsAggregatorState) -> LifecyclePhase {
+        use LifecyclePhase as L;
+        match state {
+            MetricsAggregatorState::Initializing => L::Initializing,
+            MetricsAggregatorState::Starting => L::Initialized,
+            MetricsAggregatorState::Running => L::Active,
+            MetricsAggregatorState::Finalising => L::Finalising,
+            MetricsAggregatorState::Failing { error } => L::Failing(error.clone()),
+            MetricsAggregatorState::Cancelling { reason } => L::Cancelling(reason.clone()),
+            MetricsAggregatorState::Drained { .. } => L::Completed,
+            MetricsAggregatorState::Failed { error } => L::Failed(error.clone()),
+            MetricsAggregatorState::Cancelled { reason } => L::Cancelled(reason.clone()),
+            _ => L::Other,
+        }
+    }
+    fn after_transition(
+        &mut self,
+        state: &MetricsAggregatorState,
+        _ctx: &MetricsAggregatorContext,
+    ) {
+        if self.last_state.as_ref() != Some(state) {
+            let _ = self.state_watcher.update(state.clone());
+            self.last_state = Some(state.clone());
+        }
+    }
+    async fn execute_action(
+        &mut self,
+        action: MetricsAggregatorAction,
+        ctx: &mut MetricsAggregatorContext,
+    ) -> Result<ActionExecution<MetricsAggregatorContext, MetricsAggregatorEvent>, FsmError> {
+        if matches!(action, MetricsAggregatorAction::BeginFinalRefresh) {
+            self.final_refresh
+                .get_or_insert_with(tokio::time::Instant::now);
+            return Ok(ActionExecution::Completed);
+        }
+        let exported = matches!(action, MetricsAggregatorAction::ExportMetrics);
+        if matches!(action, MetricsAggregatorAction::StartReaders) {
+            self.readers = Some(TailReaders::start(ctx));
+            return Ok(ActionExecution::Completed);
+        }
+        let mut resources = ctx
+            .resources
+            .take()
+            .expect("previous metrics operation settled");
+        Ok(ActionExecution::Pending(Box::pin(async move {
+            let result = action.execute_resources(&mut resources).await;
+            Box::new(move |ctx: &mut MetricsAggregatorContext| {
+                ctx.resources = Some(resources);
+                result
+                    .map(|()| exported.then_some(MetricsAggregatorEvent::ExportCompleted))
+                    .map_err(Into::into)
+            }) as ActionCompletion<MetricsAggregatorContext, MetricsAggregatorEvent>
+        })))
+    }
+    async fn execute_cleanup(
+        &mut self,
+        _ctx: &MetricsAggregatorContext,
+    ) -> Result<ActionExecution<MetricsAggregatorContext, MetricsAggregatorEvent>, FsmError> {
+        let readers = self.readers.take();
+        Ok(ActionExecution::Pending(Box::pin(async move {
+            if let Some(mut readers) = readers {
+                readers.stop().await;
+            }
+            Box::new(|_: &mut MetricsAggregatorContext| Ok(None))
+                as ActionCompletion<MetricsAggregatorContext, MetricsAggregatorEvent>
+        })))
+    }
+    async fn next_control(
+        &mut self,
+        state: &MetricsAggregatorState,
+        _ctx: &mut MetricsAggregatorContext,
+    ) -> Option<MetricsAggregatorEvent> {
+        self.control
+            .recv(|event| !defer_command(state, event))
+            .await
+    }
+    fn close_mailbox(
+        &mut self,
+        _state: &MetricsAggregatorState,
+    ) -> futures::future::BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>
+    {
+        self.control.close();
+        Box::pin(async { Ok(()) })
+    }
     async fn dispatch_state(
         &mut self,
-        state: &Self::State,
+        state: &MetricsAggregatorState,
         ctx: &mut MetricsAggregatorContext,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn std::error::Error + Send + Sync>> {
-        // Update state for external observers only when it changes (FLOWIP-086i).
-        if self.last_state.as_ref() != Some(state) {
-            let new_state = state.clone();
-            let _ = self.state_watcher.update(new_state.clone());
-            self.last_state = Some(new_state);
+    ) -> Result<EventLoopDirective<MetricsAggregatorEvent>, Box<dyn std::error::Error + Send + Sync>>
+    {
+        use MetricsAggregatorEvent as E;
+        use MetricsAggregatorState as S;
+        if matches!(state, S::Created) {
+            return Ok(EventLoopDirective::Transition(E::Initialize));
         }
-
+        if matches!(
+            state,
+            S::Drained { .. } | S::Failed { .. } | S::Cancelled { .. }
+        ) {
+            return Ok(EventLoopDirective::Terminate);
+        }
+        if let Ok(event) = self.control.try_recv(|event| !defer_command(state, event)) {
+            return Ok(EventLoopDirective::Transition(event));
+        }
         match state {
-            MetricsAggregatorState::Initializing => {
-                self.readers = Some(TailReaders::start(ctx));
-                // Publish ready event to system journal
-                // Metrics aggregator creates SystemEvent directly
-                let event = obzenflow_core::event::SystemEvent::new(
-                    WriterId::from(self.system_id),
-                    SystemPayload::MetricsCoordination(
-                        obzenflow_core::event::MetricsCoordinationEvent::Ready,
-                    ),
-                );
-
-                crate::supervised_base::publication::append(
-                    &self.system_journal,
-                    event,
-                    Default::default(),
-                )
-                .await
-                .map(|_| ())
-                .map_err(|e| format!("Failed to write ready event: {e}"))?;
-
-                tracing::info!("Metrics aggregator published ready event");
-
-                // Transition to Running
-                Ok(EventLoopDirective::Transition(
-                    MetricsAggregatorEvent::StartRunning,
-                ))
-            }
-
-            MetricsAggregatorState::Running | MetricsAggregatorState::Draining => {
+            S::Running | S::Draining => {
                 use tokio::time::{Duration, Instant};
                 let buffer = ctx.metrics_store.buffer.clone();
-                let terminal = buffer.terminal(ctx.pipeline_writer);
-                if terminal && matches!(state, MetricsAggregatorState::Running) {
-                    self.final_refresh = Some(Instant::now());
-                    return Ok(EventLoopDirective::Transition(
-                        MetricsAggregatorEvent::StartDraining,
-                    ));
+                if buffer.terminal(ctx.pipeline_writer) && matches!(state, S::Running) {
+                    return Ok(EventLoopDirective::Transition(E::StartDraining));
                 }
                 let mut wake_at = ctx
                     .metrics_store
                     .next_export_at
                     .unwrap_or_else(Instant::now);
-                if terminal {
-                    let since = *self.final_refresh.get_or_insert_with(Instant::now);
-                    // One current refresh opportunity, independent of journal length.
-                    // An unavailable journal retains its buffer and cannot become a
-                    // historical-drain barrier. Periodic exports remain eligible.
+                if matches!(state, S::Draining) {
+                    let since = self
+                        .final_refresh
+                        .expect("drain transition starts the bounded refresh opportunity");
                     let deadline = since + ctx.export_interval.min(Duration::from_millis(250));
                     if buffer
                         .refreshed_since(since, self.readers.as_ref().map_or(0, TailReaders::len))
                         || Instant::now() >= deadline
                     {
-                        if let Some(readers) = &mut self.readers {
-                            readers.stop().await;
-                        }
-                        return Ok(EventLoopDirective::Transition(
-                            MetricsAggregatorEvent::FlowTerminal,
-                        ));
+                        return Ok(EventLoopDirective::Transition(E::FlowTerminal));
                     }
                     wake_at = wake_at.min(deadline);
                 }
@@ -186,30 +233,33 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     .next_export_at
                     .is_none_or(|at| at <= Instant::now())
                 {
-                    return Ok(EventLoopDirective::Transition(
-                        MetricsAggregatorEvent::ExportMetrics,
-                    ));
+                    return Ok(EventLoopDirective::Transition(E::ExportMetrics));
                 }
                 tokio::select! {
                     _ = tokio::time::sleep_until(wake_at) => {},
                     _ = buffer.updated.notified() => {},
-                    Some(event) = self.control.recv() => return Ok(EventLoopDirective::Transition(event)),
+                    Some(event) = self.control.recv(|event| !defer_command(state, event)) => return Ok(EventLoopDirective::Transition(event)),
                 }
                 Ok(EventLoopDirective::Continue)
             }
-
-            MetricsAggregatorState::Drained { .. } => {
-                // Terminal state
-                tracing::info!("Metrics aggregator drained, terminating");
-                Ok(EventLoopDirective::Terminate)
-            }
-
-            MetricsAggregatorState::Failed { error } => {
-                // Terminal state - error occurred
-                tracing::error!("Metrics aggregator failed: {}", error);
-                Ok(EventLoopDirective::Terminate)
-            }
+            _ => Ok(EventLoopDirective::Continue),
         }
+    }
+}
+
+fn defer_command(state: &MetricsAggregatorState, event: &MetricsAggregatorEvent) -> bool {
+    use MetricsAggregatorEvent as E;
+    use MetricsAggregatorState as S;
+    (matches!(state, S::Initializing | S::Starting)
+        && matches!(event, E::StartDraining | E::ExportMetrics))
+        || (matches!(state, S::Exporting | S::DrainingExport) && matches!(event, E::ExportMetrics))
+}
+impl ExternalControlEvent for MetricsAggregatorEvent {
+    fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
+        discarded_control_details(match self {
+            Self::Error(error) => Some(error),
+            _ => None,
+        })
     }
 }
 
@@ -346,14 +396,14 @@ mod tests {
             name: "metrics_aggregator".to_string(),
             system_journal: system_journal.clone(),
             system_id,
-            control: _event_receiver,
+            control: _event_receiver.into(),
             readers: None,
             final_refresh: None,
             state_watcher: state_watcher.clone(),
             last_state: Some(MetricsAggregatorState::Initializing),
         };
 
-        let ctx = MetricsAggregatorContext {
+        let ctx = crate::metrics::fsm::MetricsAggregatorResources {
             journals: super::super::builder::MetricsJournals {
                 system_id,
                 coordination: system_journal.clone(),
@@ -371,9 +421,10 @@ mod tests {
             system_id,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
-        };
+        }
+        .into();
 
-        let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Initializing, ctx).await;
+        let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Created, ctx).await;
 
         assert!(
             matches!(

@@ -11,7 +11,7 @@
 //!
 //! Despite those patches, demos like `payment_gateway_resilience_demo` and
 //! `hn_ai_digest_demo` still intermittently aborted with:
-//! `SystemPayload::ContractStatus { pass: false, reason: Other(\"reader_stalled\") }`.
+//! `ExecutionPayload::ContractStatus { pass: false, reason: Other(\"reader_stalled\") }`.
 //!
 //! That is fundamentally wrong: a stall is a liveness signal, not a transport
 //! contract violation. Emitting it as `ContractStatus(pass=false)` poisons the
@@ -21,10 +21,10 @@
 
 use std::sync::Arc;
 
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
-use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo};
-use obzenflow_core::event::{ChainEvent, ChainPayload, SystemPayload};
+use obzenflow_core::event::{ChainEvent, ChainPayload};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
@@ -34,7 +34,7 @@ use obzenflow_runtime::messaging::upstream_subscription::{
 };
 
 #[tokio::test]
-async fn stall_detection_does_not_emit_system_contract_failure() {
+async fn stall_detection_does_not_emit_contract_failure() {
     let upstream_stage = StageId::new();
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(MemoryJournal::with_owner(
         JournalOwner::stage(upstream_stage),
@@ -51,8 +51,6 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
 
     let contract_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage_id)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage_id)));
 
     let config = ContractConfig {
         progress_min_events: Count(100),
@@ -66,7 +64,6 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         writer_id,
         contract_journal: contract_journal.clone(),
         config,
-        report_journal: Some(system_journal.clone().into()),
         reader_stage: Some(stage_id),
         control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
@@ -100,17 +97,13 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         "expected ReaderStalled flow control evidence in contract journal"
     );
 
-    // But stall must NOT be emitted as a system ContractStatus failure, since
-    // that is interpreted as a hard contract violation by PipelineSupervisor.
-    let system_events = system_journal
-        .read_causally_ordered()
-        .await
-        .expect("read system journal");
+    // The consumer's contract evidence must not label a liveness stall as an
+    // integrity failure. Only the child applies the configured contract policy.
     assert!(
-        !system_events.iter().any(|env| matches!(
-            &env.payload,
-            SystemPayload::ContractStatus { pass: false, .. }
+        !contract_events.iter().any(|env| matches!(
+            env.payload,
+            ChainPayload::Execution(ExecutionPayload::ContractStatus { pass: false, .. })
         )),
-        "stall detection must not emit ContractStatus(pass=false) into system journal"
+        "stall detection must not emit a failed contract fact"
     );
 }

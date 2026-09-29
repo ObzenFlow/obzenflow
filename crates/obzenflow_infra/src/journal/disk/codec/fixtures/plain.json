@@ -75,10 +75,10 @@
             }
           ]
         },
+        "previous": null,
         "timestamp": "2037-01-02T03:04:05.123456789Z",
         "journal_group_id": null,
-        "journal_group_member": null,
-        "previous": null
+        "journal_group_member": null
       }
     }
   },
@@ -90,7 +90,7 @@
         "provenance": [
           null,
           true,
-          "\ud83d\ude42\n\u0000"
+          "🙂\n\u0000"
         ]
       }
     },

@@ -62,7 +62,7 @@ fn make_empty_context(
     exporter: Arc<RecordingExporter>,
     stage_id: StageId,
 ) -> MetricsAggregatorContext {
-    MetricsAggregatorContext {
+    obzenflow_runtime::metrics::fsm::MetricsAggregatorResources {
         journals: obzenflow_runtime::metrics::builder::MetricsJournals {
             system_id,
             coordination: Arc::new(obzenflow_infra::journal::MemoryJournal::with_owner(
@@ -86,6 +86,7 @@ fn make_empty_context(
         stage_metadata: single_stage_metadata(stage_id),
         composite_boundaries: Vec::new(),
     }
+    .into()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -189,27 +190,35 @@ async fn running_state_exports_the_buffer() {
     let mut ctx = make_empty_context(system_id, system_journal, exporter, stage_id);
     let mut fsm = build_metrics_aggregator_fsm();
 
-    // Move FSM to Running.
-    let actions = fsm
-        .handle(MetricsAggregatorEvent::StartRunning, &mut ctx)
+    // The transition table acknowledges initialization and startup separately.
+    fsm.handle(MetricsAggregatorEvent::Initialize, &mut ctx)
         .await
         .unwrap();
-    for action in actions {
-        action.execute(&mut ctx).await.unwrap();
-    }
+    assert!(matches!(fsm.state(), MetricsAggregatorState::Initializing));
+    fsm.handle(MetricsAggregatorEvent::InitializationCompleted, &mut ctx)
+        .await
+        .unwrap();
+    assert!(matches!(fsm.state(), MetricsAggregatorState::Starting));
+    fsm.handle(MetricsAggregatorEvent::StartRunning, &mut ctx)
+        .await
+        .unwrap();
     assert!(matches!(fsm.state(), MetricsAggregatorState::Running));
 
     let actions = fsm
         .handle(MetricsAggregatorEvent::ExportMetrics, &mut ctx)
         .await
         .unwrap();
+    assert!(matches!(fsm.state(), MetricsAggregatorState::Exporting));
     for action in actions {
         action.execute(&mut ctx).await.unwrap();
     }
 
+    fsm.handle(MetricsAggregatorEvent::ExportCompleted, &mut ctx)
+        .await
+        .unwrap();
     assert!(
         matches!(fsm.state(), MetricsAggregatorState::Running),
-        "expected FSM to remain in Running after export"
+        "export completion returns the FSM to Running"
     );
 }
 
@@ -249,17 +258,12 @@ async fn ingress_refusal_facts_do_not_invent_latest_value_totals() {
         refusal(IngressRefusalReason::RateLimited, 1, 1),
         refusal(IngressRefusalReason::Validation, 3, 2),
     ] {
-        let envelope = Box::new(
-            ctx.system_journal
-                .append(event, Default::default())
-                .await
-                .unwrap()
-                .into(),
-        );
-        MetricsAggregatorAction::ProcessReport { envelope }
-            .execute(&mut ctx)
+        let envelope = ctx
+            .system_journal
+            .append(event, Default::default())
             .await
             .unwrap();
+        ctx.fold_system_record(&envelope).unwrap();
     }
 
     MetricsAggregatorAction::ExportMetrics

@@ -40,7 +40,7 @@ pub fn running(stage: StageId) -> ChainEvent {
     )
 }
 
-pub fn report(stage: StageId, payload_bytes: usize) -> ChainEvent {
+pub fn execution_fact(stage: StageId, payload_bytes: usize) -> ChainEvent {
     execution(
         stage,
         ExecutionPayload::SourceCleanupFailed {
@@ -142,7 +142,10 @@ impl RecordFixture {
                 .unwrap();
         }
         let record = journal
-            .append(report(stage, d.payload), AppendOptions::new(advanced))
+            .append(
+                execution_fact(stage, d.payload),
+                AppendOptions::new(advanced),
+            )
             .await
             .unwrap();
         let metadata = &record.envelope.provenance.journal;
@@ -173,7 +176,12 @@ pub struct History {
     pub _directory: tempfile::TempDir,
 }
 impl History {
-    pub async fn build(count: usize, payload: usize, group: usize, report_every: usize) -> Self {
+    pub async fn build(
+        count: usize,
+        payload: usize,
+        group: usize,
+        execution_fact_every: usize,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.log");
         let stage = StageId::new();
@@ -183,7 +191,7 @@ impl History {
         );
         let events: Vec<_> = (0..count)
             .map(|i| {
-                if report_every > 0 && i % report_every == 0 {
+                if execution_fact_every > 0 && i % execution_fact_every == 0 {
                     running(stage)
                 } else {
                     business(stage, payload)

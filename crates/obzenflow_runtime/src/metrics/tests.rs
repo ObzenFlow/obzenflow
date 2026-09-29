@@ -18,7 +18,7 @@ use obzenflow_core::event::observability::ObservationSource;
 use obzenflow_core::event::{ChainEventFactory, JournalEvent, SystemEvent, SystemEventFactory};
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::journal::journal_name::JournalName;
-use obzenflow_core::journal::{AppendOptions, JournalError, JournalReader};
+use obzenflow_core::journal::{AppendOptions, JournalError, JournalReader, JournalStorage};
 use obzenflow_core::metrics::{AppMetricsSnapshot, InfraMetricsSnapshot, MetricsSnapshotExporter};
 use obzenflow_core::{
     ChainEvent, EventId, Journal, JournalId, JournalOwner, JournalRecord, StageId, SystemId,
@@ -51,28 +51,38 @@ impl Drop for Reading {
 struct ObservedJournal<T: JournalEvent> {
     inner: Arc<dyn Journal<T>>,
     probe: Arc<Probe>,
+    append_gate: Mutex<Option<Arc<Gate>>>,
 }
 impl<T: JournalEvent> ObservedJournal<T> {
     fn new(inner: Arc<dyn Journal<T>>) -> Arc<Self> {
         Arc::new(Self {
             inner,
             probe: Arc::default(),
+            append_gate: Mutex::default(),
         })
     }
 }
 #[async_trait]
-impl<T: JournalEvent> obzenflow_core::journal::JournalStorage<T> for ObservedJournal<T> {
+impl<T: JournalEvent> JournalStorage<T> for ObservedJournal<T> {
     fn storage_id(&self) -> &JournalId {
         self.inner.id()
     }
     fn storage_owner(&self) -> Option<&JournalOwner> {
         self.inner.owner()
     }
+    async fn storage_committed_position(&self) -> Result<u64, JournalError> {
+        self.inner.committed_position().await
+    }
     async fn storage_append(
         &self,
         event: T,
         options: AppendOptions<T>,
     ) -> Result<JournalRecord<T::Payload>, JournalError> {
+        let gate = self.append_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         self.inner.append(event, options).await
     }
     async fn storage_append_group(
@@ -278,12 +288,12 @@ fn run(
     StandardHandle<Event, State>,
     crate::supervised_base::builder::EventSender<Event>,
 ) {
-    let (control, receiver, watcher) = ChannelBuilder::new().build(State::Initializing);
+    let (control, receiver, watcher) = ChannelBuilder::new().build(State::Created);
     let supervisor = MetricsAggregatorSupervisor {
         name: "metrics-test".into(),
         system_journal: ctx.journals.coordination.clone(),
         system_id: ctx.system_id,
-        control: receiver,
+        control: receiver.into(),
         readers: None,
         final_refresh: None,
         state_watcher: watcher.clone(),
@@ -296,7 +306,7 @@ fn run(
             .with_supervisor_task(
                 SupervisorTaskBuilder::new("metrics-test").spawn_self_supervised(
                     supervisor,
-                    State::Initializing,
+                    State::Created,
                     ctx,
                 ),
             )
@@ -559,45 +569,35 @@ pub async fn metrics_terminal_accounting_survives_without_optional_packets(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
     use obzenflow_core::event::provenance::ExecutionAccounting;
-    use obzenflow_core::event::{StageLifecycleEvent, SystemPayload};
     let stage = StageId::new();
     let data = stage_journal(&mut *factory, stage, "filtered");
-    let (mut ctx, system, exports) = context(&mut *factory, vec![(stage, data)], vec![]).await;
+    let (mut ctx, system, exports) =
+        context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
     let writer = SystemId::new();
     ctx.pipeline_writer = Some(writer.into());
-    system
-        .append(
-            SystemEvent::new(
-                stage.into(),
-                SystemPayload::StageLifecycle {
-                    stage_id: stage,
-                    event: StageLifecycleEvent::Completed {
-                        accounting: Some(ExecutionAccounting {
-                            events_processed_total: 1000,
-                            events_emitted_total: 0,
-                            ..Default::default()
-                        }),
-                    },
-                },
-            ),
-            Default::default(),
+    let owner = obzenflow_core::event::provenance::FlowContext::new("filtered", stage);
+    data.append(
+        ChainEventFactory::stage_completed(
+            stage.into(),
+            stage,
+            ExecutionAccounting {
+                events_processed_total: 1000,
+                events_emitted_total: 0,
+                ..Default::default()
+            },
         )
-        .await
-        .unwrap();
+        .with_flow_context(owner.clone()),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     // A later lifecycle without counters cannot discard the accounting slot.
-    system
-        .append(
-            SystemEvent::new(
-                stage.into(),
-                SystemPayload::StageLifecycle {
-                    stage_id: stage,
-                    event: StageLifecycleEvent::Drained,
-                },
-            ),
-            Default::default(),
-        )
-        .await
-        .unwrap();
+    data.append(
+        ChainEventFactory::stage_drained(stage.into(), stage, None).with_flow_context(owner),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     system
         .append(
             SystemEventFactory::new(writer).pipeline_not_started(),
@@ -684,98 +684,62 @@ pub async fn metrics_manual_export_uses_the_live_control_receiver(
     let _ = task.wait_for_completion().await;
 }
 
-pub async fn metrics_export_power_law_does_not_expand_parent_coordination_work(
+pub async fn metrics_exports_settle_accepted_requests_in_their_own_journal(
     mut factory: Box<dyn FlowJournalFactory>,
 ) {
-    use crate::supervised_base::report_reader::{ReportRead, ReportReaders};
-    use obzenflow_core::event::payloads::execution_payload::{
-        ExecutionPayload, StageLifecycleFact,
-    };
-    use obzenflow_core::event::ChainPayload;
-    let stage = StageId::new();
-    let data = stage_journal(&mut *factory, stage, "quiet");
-    data.append(fact(stage, stage.into(), 1, 0), Default::default())
-        .await
-        .unwrap();
-    let (mut ctx, pipeline, exports) =
-        context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
-    ctx.export_interval = Duration::from_secs(60);
-    let journals = ctx.journals.clone();
-    let mut parent = ReportReaders::default();
-    parent.stage(data.inner.clone());
-    parent.system(journals.coordination.clone());
-    let (task, control) = run(ctx);
-    until(|| !exports.0.lock().unwrap().is_empty()).await;
-    let mut admitted = 0;
-    while admitted < 2 || !parent.initial_prefix_complete() {
-        if let ReportRead::Record(_) = std::future::poll_fn(|cx| parent.poll_next(cx))
-            .await
-            .unwrap()
-        {
-            admitted += 1;
-        }
-    }
-    for volume in [1, 100, 1000] {
-        let baseline = exports.0.lock().unwrap().len();
-        let quiet = data
-            .append(
-                ChainEventFactory::create_event(
-                    stage.into(),
-                    ChainPayload::Execution(ExecutionPayload::StageLifecycle(
-                        StageLifecycleFact::Running { stage_id: stage },
-                    )),
-                ),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        let started = std::time::Instant::now();
-        let sender = control.clone();
-        let flood = tokio::spawn(async move {
-            for _ in 0..volume {
-                sender.send(Event::ExportMetrics).await.unwrap();
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
+    async fn wait_for_exports(journal: &dyn Journal<SystemEvent>, expected: usize) {
+        let committed = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if let ReportRead::Record(row) = std::future::poll_fn(|cx| parent.poll_next(cx))
-                    .await
-                    .unwrap()
-                {
-                    admitted += 1;
-                    if row.id() == quiet.id() {
-                        break;
-                    }
+                let position = journal.committed_position().await.unwrap();
+                if position >= expected as u64 {
+                    break position;
                 }
+                tokio::time::sleep(Duration::from_millis(2)).await;
             }
         })
         .await
-        .expect("quiet reports remain serviceable during export traffic");
-        let latency = started.elapsed();
-        flood.await.unwrap();
-        until(|| exports.0.lock().unwrap().len() == baseline + volume).await;
-        let coord = journals.coordination.committed_position().await.unwrap();
-        assert_eq!(
-            coord, 2,
-            "only registration and readiness; exports have a separate physical history"
-        );
-        let stats = parent.diagnostics();
-        assert_eq!(
-            stats
-                .iter()
-                .find(|row| row.journal == *journals.coordination.id())
-                .unwrap()
-                .scanned_records,
-            2,
-            "parent must not read/decode/filter export history"
-        );
-        assert!(stats.iter().all(|row| row.journal != *journals.export.id()));
-        eprintln!("exports_per_quiet_report={volume}, quiet_admission={latency:?}, parent_coordination_scans=2");
+        .expect("accepted exports must commit their receipts");
+        assert_eq!(committed, expected as u64);
     }
-    assert_eq!(
-        admitted, 5,
-        "two coordination facts and three quiet reports"
-    );
+
+    let (mut ctx, pipeline, exports) = context(&mut *factory, vec![], vec![]).await;
+    ctx.export_interval = Duration::from_secs(60);
+    let export_journal = ObservedJournal::new(ctx.journals.export.clone());
+    ctx.journals.export = export_journal.clone();
+    let journals = ctx.journals.clone();
+    let (task, control) = run(ctx);
+    wait_for_exports(journals.export.as_ref(), 1).await;
+    for volume in [1, 100, 1000] {
+        let baseline = exports.0.lock().unwrap().len();
+        let gate = Arc::new(Gate::default());
+        *export_journal.append_gate.lock().unwrap() = Some(gate.clone());
+        control.send(Event::ExportMetrics).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .unwrap();
+        // A visible snapshot precedes its receipt. Hold the append here so
+        // the test cannot mistake the callback for journal settlement.
+        assert_eq!(exports.0.lock().unwrap().len(), baseline + 1);
+        assert_eq!(
+            journals.export.committed_position().await.unwrap(),
+            baseline as u64
+        );
+        gate.release.notify_one();
+        for _ in 1..volume {
+            control.send(Event::ExportMetrics).await.unwrap();
+        }
+        wait_for_exports(journals.export.as_ref(), baseline + volume).await;
+        assert_eq!(exports.0.lock().unwrap().len(), baseline + volume);
+        assert_eq!(
+            journals.coordination.committed_position().await.unwrap(),
+            2,
+            "accepted exports settle in the export journal without extending coordination history"
+        );
+        assert_eq!(
+            journals.export.committed_position().await.unwrap(),
+            (baseline + volume) as u64
+        );
+    }
     pipeline
         .append(
             SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
@@ -796,4 +760,201 @@ pub async fn metrics_export_power_law_does_not_expand_parent_coordination_work(
         .pop()
         .unwrap();
     assert_eq!(end.event_type_name(), "system.metrics.shutdown");
+}
+
+pub async fn metrics_drain_during_export_settles_before_final_refresh(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    let (mut ctx, _, exports) = context(&mut *factory, vec![], vec![]).await;
+    ctx.export_interval = Duration::from_secs(60);
+    let export_journal = ObservedJournal::new(ctx.journals.export.clone());
+    let gate = Arc::new(Gate::default());
+    *export_journal.append_gate.lock().unwrap() = Some(gate.clone());
+    ctx.journals.export = export_journal;
+    let journals = ctx.journals.clone();
+    let (task, control) = run(ctx);
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .expect("first export reaches its pending journal append");
+    control.send(Event::StartDraining).await.unwrap();
+    until(|| task.current_state() == State::DrainingExport).await;
+    assert_eq!(exports.0.lock().unwrap().len(), 1);
+    assert_eq!(journals.export.committed_position().await.unwrap(), 0);
+
+    // Completing the accepted export changes state again before any queued
+    // drain action can run. The final refresh must still begin after settlement.
+    gate.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), task.wait_for_completion())
+        .await
+        .expect("drain completes after the accepted export settles")
+        .unwrap();
+    assert!(matches!(task.current_state(), State::Drained { .. }));
+    assert_eq!(exports.0.lock().unwrap().len(), 2);
+    assert_eq!(journals.export.committed_position().await.unwrap(), 2);
+    let rows = journals.coordination.read_all_unordered().await.unwrap();
+    let names: Vec<_> = rows.iter().map(|row| row.event_type_name()).collect();
+    assert_eq!(
+        names,
+        [
+            "system.supervisor.registered",
+            "system.metrics.ready",
+            "system.metrics.drained",
+            "system.metrics.shutdown",
+        ]
+    );
+}
+
+pub async fn metrics_folds_check_eligibility_before_causal_incorporation(
+    mut factory: Box<dyn FlowJournalFactory>,
+) {
+    use super::fsm::MetricsJournalKind;
+    use crate::supervised_base::publication::{capture, with_snapshot};
+    use obzenflow_core::event::payloads::execution_payload::{
+        ExecutionPayload, StageLifecycleFact,
+    };
+    use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext};
+    use obzenflow_core::event::{CausalFrontier, ChainPayload, SystemPayload};
+
+    let stage = StageId::new();
+    let foreign = StageId::new();
+    let data = stage_journal(&mut *factory, stage, "eligible");
+    let (mut ctx, system, _) = context(&mut *factory, vec![(stage, data.clone())], vec![]).await;
+    let pipeline = SystemId::new();
+    ctx.pipeline_writer = Some(pipeline.into());
+    let owner = FlowContext::new("eligible", stage);
+    let mut ignored = Vec::new();
+    for event in [
+        ChainEventFactory::data_event(stage.into(), "ordinary.business", serde_json::json!({})),
+        ChainEventFactory::stage_running(foreign.into(), stage),
+        ChainEventFactory::stage_running(stage.into(), foreign),
+    ] {
+        ignored.push(
+            data.append(event.with_flow_context(owner.clone()), Default::default())
+                .await
+                .unwrap(),
+        );
+    }
+    // A buffer tag and even apparently intact serialized provenance grant no
+    // authority. Ignored business records must not attempt causal admission.
+    ignored[0] = serde_json::from_value(serde_json::to_value(&ignored[0]).unwrap()).unwrap();
+    let wrong_pipeline = system
+        .append(
+            SystemEventFactory::new(SystemId::new()).pipeline_not_started(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let unused_system = system
+        .append(
+            SystemEventFactory::new(pipeline).metrics_ready(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    with_snapshot(CausalFrontier::default(), async {
+        Action::UpdateMetrics {
+            events: ignored.into(),
+            journal_kind: MetricsJournalKind::Data,
+            journal_stage: stage,
+        }
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+        ctx.fold_system_record(&wrong_pipeline).unwrap();
+        ctx.fold_system_record(&unused_system).unwrap();
+        assert_eq!(capture(), CausalFrontier::default());
+        assert!(ctx.metrics_store.stage_vector_clocks.is_empty());
+        assert!(ctx.metrics_store.system_vector_clocks.is_empty());
+        assert!(ctx.metrics_store.pipeline_state.is_empty());
+        assert!(ctx.metrics_store.last_event_id.is_none());
+    })
+    .await;
+
+    let completed = data
+        .append(
+            ChainEventFactory::stage_completed(
+                stage.into(),
+                stage,
+                ExecutionAccounting {
+                    events_processed_total: 7,
+                    ..Default::default()
+                },
+            )
+            .with_flow_context(owner),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    with_snapshot(CausalFrontier::default(), async {
+        Action::UpdateMetrics {
+            events: vec![completed.clone()].into(),
+            journal_kind: MetricsJournalKind::Data,
+            journal_stage: stage,
+        }
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+        assert_eq!(capture(), CausalFrontier::from_record(&completed).unwrap());
+        assert_eq!(
+            ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+            Some(7)
+        );
+
+        let reconstructed =
+            serde_json::from_value(serde_json::to_value(&completed).unwrap()).unwrap();
+        let mut mutated = completed.clone();
+        let ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+            StageLifecycleFact::Completed {
+                accounting: Some(accounting),
+                ..
+            },
+        )) = &mut mutated.payload
+        else {
+            unreachable!()
+        };
+        accounting.events_processed_total = 999;
+        for rejected in [reconstructed, mutated] {
+            assert!(Action::UpdateMetrics {
+                events: vec![rejected].into(),
+                journal_kind: MetricsJournalKind::Data,
+                journal_stage: stage,
+            }
+            .execute(&mut ctx)
+            .await
+            .is_err());
+            assert_eq!(
+                ctx.metrics_store.stage_metrics[&stage].latest_events_processed_total,
+                Some(7),
+                "unadmitted data cannot mutate the projection before failing"
+            );
+        }
+    })
+    .await;
+
+    let not_started = system
+        .append(
+            SystemEventFactory::new(pipeline).pipeline_not_started(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    with_snapshot(CausalFrontier::default(), async {
+        ctx.fold_system_record(&not_started).unwrap();
+        assert_eq!(
+            capture(),
+            CausalFrontier::from_record(&not_started).unwrap()
+        );
+        assert_eq!(ctx.metrics_store.pipeline_state, "not_started");
+        let reconstructed =
+            serde_json::from_value(serde_json::to_value(&not_started).unwrap()).unwrap();
+        let mut mutated = not_started.clone();
+        mutated.payload = SystemPayload::PipelineLifecycle(
+            obzenflow_core::event::PipelineLifecycleEvent::Drained,
+        );
+        for rejected in [reconstructed, mutated] {
+            assert!(ctx.fold_system_record(&rejected).is_err());
+            assert_eq!(ctx.metrics_store.pipeline_state, "not_started");
+        }
+    })
+    .await;
 }

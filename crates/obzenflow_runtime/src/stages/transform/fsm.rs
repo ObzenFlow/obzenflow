@@ -396,6 +396,13 @@ pub enum TransformState<H> {
     /// Initial state - transform has been created but not initialized
     Created,
 
+    Initializing,
+    Starting,
+    Finalising,
+    Failing(String),
+    Cancelling(String),
+    Cancelled(String),
+
     /// Resources allocated, ready to start processing
     Initialized,
 
@@ -420,6 +427,13 @@ impl<H> Clone for TransformState<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Created => Self::Created,
+            Self::Initializing => Self::Initializing,
+            Self::Starting => Self::Starting,
+            Self::Finalising => Self::Finalising,
+            Self::Failing(cause) => Self::Failing(cause.clone()),
+            Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
+            Self::Cancelled(cause) => Self::Cancelled(cause.clone()),
+
             Self::Initialized => Self::Initialized,
             Self::Running => Self::Running,
             Self::Draining => Self::Draining,
@@ -434,6 +448,13 @@ impl<H> std::fmt::Debug for TransformState<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Created => write!(f, "Created"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Starting => write!(f, "Starting"),
+            Self::Finalising => write!(f, "Finalising"),
+            Self::Failing(cause) => write!(f, "Failing({cause:?})"),
+            Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
+            Self::Cancelled(cause) => write!(f, "Cancelled({cause:?})"),
+
             Self::Initialized => write!(f, "Initialized"),
             Self::Running => write!(f, "Running"),
             Self::Draining => write!(f, "Draining"),
@@ -448,6 +469,13 @@ impl<H: Send + Sync> PartialEq for TransformState<H> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (TransformState::Created, TransformState::Created) => true,
+            (Self::Initializing, Self::Initializing) => true,
+            (Self::Starting, Self::Starting) => true,
+            (Self::Finalising, Self::Finalising) => true,
+            (Self::Failing(a), Self::Failing(b)) => a == b,
+            (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
+            (Self::Cancelled(a), Self::Cancelled(b)) => a == b,
+
             (TransformState::Initialized, TransformState::Initialized) => true,
             (TransformState::Running, TransformState::Running) => true,
             (TransformState::Draining, TransformState::Draining) => true,
@@ -462,12 +490,49 @@ impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
     fn variant_name(&self) -> &str {
         match self {
             TransformState::Created => "Created",
+            Self::Initializing => "Initializing",
+            Self::Starting => "Starting",
+            Self::Finalising => "Finalising",
+            Self::Failing(..) => "Failing",
+            Self::Cancelling(..) => "Cancelling",
+            Self::Cancelled(..) => "Cancelled",
+
             TransformState::Initialized => "Initialized",
             TransformState::Running => "Running",
             TransformState::Draining => "Draining",
             TransformState::Drained => "Drained",
             TransformState::Failed(_) => "Failed",
             TransformState::_Phantom(_) => unreachable!("PhantomData variant"),
+        }
+    }
+}
+
+impl<H> TransformState<H> {
+    pub(crate) fn failure(cause: String) -> Self {
+        use crate::stages::common::stage_handle::{
+            FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+        };
+        match cause.as_str() {
+            FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT => {
+                Self::Cancelling(cause)
+            }
+            _ => Self::Failing(cause),
+        }
+    }
+
+    pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
+        match self {
+            Self::Initializing => Phase::Initializing,
+            Self::Initialized => Phase::Initialized,
+            Self::Running => Phase::Active,
+            Self::Finalising => Phase::Finalising,
+            Self::Failing(cause) => Phase::Failing(cause.clone()),
+            Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
+            Self::Drained => Phase::Completed,
+            Self::Failed(cause) => Phase::Failed(cause.clone()),
+            Self::Cancelled(reason) => Phase::Cancelled(reason.clone()),
+            _ => Phase::Other,
         }
     }
 }
@@ -480,6 +545,10 @@ impl<H: Send + Sync + 'static> StateVariant for TransformState<H> {
 pub enum TransformEvent<H> {
     /// Initialize the transform
     Initialize,
+    InitializationCompleted,
+    ActivationCompleted,
+    FinalisationCompleted,
+    TerminationSettled,
 
     /// Ready to start processing (transforms start immediately)
     Ready,
@@ -505,6 +574,11 @@ impl<H> Clone for TransformEvent<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Initialize => Self::Initialize,
+            Self::InitializationCompleted => Self::InitializationCompleted,
+            Self::ActivationCompleted => Self::ActivationCompleted,
+            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::TerminationSettled => Self::TerminationSettled,
+
             Self::Ready => Self::Ready,
             Self::ReceivedEOF => Self::ReceivedEOF,
             Self::BeginDrain => Self::BeginDrain,
@@ -519,6 +593,11 @@ impl<H> std::fmt::Debug for TransformEvent<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initialize => write!(f, "Initialize"),
+            Self::InitializationCompleted => write!(f, "InitializationCompleted"),
+            Self::ActivationCompleted => write!(f, "ActivationCompleted"),
+            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::TerminationSettled => write!(f, "TerminationSettled"),
+
             Self::Ready => write!(f, "Ready"),
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
             Self::BeginDrain => write!(f, "BeginDrain"),
@@ -540,6 +619,10 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
     ) {
         crate::stages::common::stage_handle::discarded_control_details(match self {
             Self::Error(message) => Some(message.as_str()),
+            Self::InitializationCompleted
+            | Self::ActivationCompleted
+            | Self::FinalisationCompleted
+            | Self::TerminationSettled => None,
             Self::Initialize
             | Self::Ready
             | Self::ReceivedEOF
@@ -554,6 +637,11 @@ impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
             TransformEvent::Initialize => "Initialize",
+            Self::InitializationCompleted => "InitializationCompleted",
+            Self::ActivationCompleted => "ActivationCompleted",
+            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::TerminationSettled => "TerminationSettled",
+
             TransformEvent::Ready => "Ready",
             TransformEvent::ReceivedEOF => "ReceivedEOF",
             TransformEvent::BeginDrain => "BeginDrain",
@@ -570,6 +658,7 @@ impl<H: Send + Sync + 'static> EventVariant for TransformEvent<H> {
 
 /// Actions that transform FSM transitions can emit
 pub(crate) enum TransformAction<H> {
+    Host(crate::supervised_base::handler_supervised::SupervisorAction<TransformEvent<H>>),
     /// Allocate resources (writer ID, subscriptions)
     AllocateResources,
 
@@ -586,7 +675,9 @@ pub(crate) enum TransformAction<H> {
     SendCompletion,
 
     /// Send failure event to journal with metrics
-    SendFailure { message: String },
+    SendFailure {
+        message: String,
+    },
 
     /// Clean up all resources
     Cleanup,
@@ -599,6 +690,8 @@ pub(crate) enum TransformAction<H> {
 impl<H> Clone for TransformAction<H> {
     fn clone(&self) -> Self {
         match self {
+            Self::Host(action) => Self::Host(action.clone()),
+
             Self::AllocateResources => Self::AllocateResources,
             Self::PublishRunning => Self::PublishRunning,
             Self::ForwardEOF => Self::ForwardEOF,
@@ -616,6 +709,8 @@ impl<H> Clone for TransformAction<H> {
 impl<H> std::fmt::Debug for TransformAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Host(action) => action.fmt(f),
+
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
@@ -633,9 +728,9 @@ impl<H> std::fmt::Debug for TransformAction<H> {
 // ============================================================================
 
 /// Context for transform handlers - contains everything actions need
-pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
+pub(crate) struct TransformResources<H: UnifiedTransformHandler> {
     /// The handler instance (owned - allows `drain(&mut self)` without locks)
-    pub handler: H,
+    pub handler: Option<H>,
 
     /// This transform's stage ID
     pub stage_id: obzenflow_core::StageId,
@@ -677,7 +772,6 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Writer ID for this transform (initialized during setup)
     pub writer_id: Option<WriterId>,
@@ -763,6 +857,28 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
+pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
+    pub(crate) resources: Option<TransformResources<H>>,
+    pub(crate) instrumentation: Arc<StageInstrumentation>,
+}
+
+impl<H: UnifiedTransformHandler> TransformContext<H> {
+    pub(crate) fn new(resources: TransformResources<H>) -> Self {
+        Self {
+            instrumentation: resources.instrumentation.clone(),
+            resources: Some(resources),
+        }
+    }
+    pub(crate) fn resources_mut(
+        &mut self,
+    ) -> Result<&mut TransformResources<H>, obzenflow_fsm::FsmError> {
+        self.resources.as_mut().ok_or_else(|| {
+            obzenflow_fsm::FsmError::HandlerError(
+                "transform resources belong to a pending operation".into(),
+            )
+        })
+    }
+}
 impl<H: UnifiedTransformHandler + 'static> FsmContext for TransformContext<H> {}
 
 // ============================================================================
@@ -774,7 +890,20 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
     type Context = TransformContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+        self.execute_resources(ctx.resources_mut()?).await
+    }
+}
+
+impl<H: UnifiedTransformHandler + Send + Sync + 'static> TransformAction<H> {
+    pub(crate) async fn execute_resources(
+        &self,
+        ctx: &mut TransformResources<H>,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
+            TransformAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
+                "host action requires the supervised runner".into(),
+            )),
+
             TransformAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id);
@@ -791,7 +920,6 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                         writer_id,
                         contract_journal: ctx.data_journal.clone(),
                         config: ContractConfig::default(),
-                        report_journal: Some(ctx.report_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
@@ -846,13 +974,17 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::PublishRunning => {
-                lifecycle_actions::publish_running_best_effort(
-                    "Transform",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &ctx.report_journal,
+                lifecycle_actions::publish_running(
+                    &ctx.data_journal,
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Transform,
+                    ),
                 )
-                .await;
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -875,7 +1007,10 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::DrainHandler => {
-                let handler = &mut ctx.handler;
+                let handler = ctx
+                    .handler
+                    .as_mut()
+                    .expect("handler available before cleanup");
                 handler.drain().await.map_err(|e| {
                     obzenflow_fsm::FsmError::HandlerError(format!(
                         "Failed to drain transform handler: {e:?}"
@@ -969,16 +1104,18 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     heartbeat.state.mark_completed();
                 }
 
-                lifecycle_actions::send_completion_best_effort(
-                    "Transform",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &ctx.report_journal,
+                lifecycle_actions::send_completion(
                     &ctx.data_journal,
-                    Some(&ctx.error_journal),
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Transform,
+                    ),
                     ctx.instrumentation.as_ref(),
                 )
-                .await;
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -1001,17 +1138,20 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::SendFailure { message } => {
-                lifecycle_actions::send_failure_best_effort(
-                    "Transform",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    message,
-                    &ctx.report_journal,
+                lifecycle_actions::send_failure(
                     &ctx.data_journal,
-                    Some(&ctx.error_journal),
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Transform,
+                    ),
+                    message,
                     ctx.instrumentation.as_ref(),
+                    None,
                 )
-                .await;
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -1034,6 +1174,8 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
             }
 
             TransformAction::Cleanup => {
+                ctx.handler.take();
+                ctx.subscription.take();
                 if let Some(heartbeat) = ctx.heartbeat.take() {
                     heartbeat.cancel();
                 }

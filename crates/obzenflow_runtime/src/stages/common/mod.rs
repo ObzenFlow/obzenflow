@@ -12,6 +12,7 @@ pub mod handlers;
 pub(crate) mod heartbeat;
 pub mod source_handle;
 pub mod stage_handle;
+pub mod stage_lifecycle;
 pub(crate) mod supervision;
 
 pub use heartbeat::new_liveness_snapshots;

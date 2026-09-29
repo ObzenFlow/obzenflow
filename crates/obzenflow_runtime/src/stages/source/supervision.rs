@@ -7,6 +7,83 @@
 //! Reduces duplication across source supervisors while preserving
 //! responsiveness and backpressure semantics.
 
+/// The stage owns command admission. An owned source turn only receives a copy
+/// of the first admitted interrupt, used at cancellation-safe input/credit waits.
+/// Publications and replay reads never select on this signal: they must settle.
+pub(crate) enum SourceControl<E> {
+    Mailbox {
+        commands: crate::supervised_base::with_external_events::CommandMailbox<E>,
+        interrupt: Option<tokio::sync::watch::Sender<Option<E>>>,
+    },
+    Turn(tokio::sync::watch::Receiver<Option<E>>),
+}
+
+impl<E> From<crate::supervised_base::EventReceiver<E>> for SourceControl<E> {
+    fn from(receiver: crate::supervised_base::EventReceiver<E>) -> Self {
+        Self::Mailbox {
+            commands: receiver.into(),
+            interrupt: None,
+        }
+    }
+}
+
+impl<E: Clone> SourceControl<E> {
+    pub(crate) fn begin_turn(&mut self) -> Self {
+        let Self::Mailbox { interrupt, .. } = self else {
+            unreachable!("only the owner starts work")
+        };
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *interrupt = Some(sender);
+        Self::Turn(receiver)
+    }
+
+    pub(crate) fn end_turn(&mut self) {
+        let Self::Mailbox { interrupt, .. } = self else {
+            unreachable!("only the owner settles work")
+        };
+        *interrupt = None;
+    }
+
+    pub(crate) async fn recv(&mut self, admits: impl Fn(&E) -> bool) -> Option<E> {
+        match self {
+            Self::Mailbox {
+                commands,
+                interrupt,
+            } => {
+                let event = commands.recv(admits).await?;
+                if let Some(interrupt) = interrupt {
+                    interrupt.send_if_modified(|retained| {
+                        if retained.is_some() {
+                            return false;
+                        }
+                        *retained = Some(event.clone());
+                        true
+                    });
+                }
+                Some(event)
+            }
+            Self::Turn(interrupt) => interrupt.wait_for(Option::is_some).await.ok()?.clone(),
+        }
+    }
+}
+
+impl<E: crate::supervised_base::with_external_events::ExternalControlEvent + Send + 'static>
+    SourceControl<E>
+{
+    pub(crate) fn close_and_record(
+        &mut self,
+        publish: crate::supervised_base::with_external_events::CommandRecorder,
+        supervisor: &str,
+        state: &str,
+    ) -> futures::future::BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>
+    {
+        let Self::Mailbox { commands, .. } = self else {
+            unreachable!("only the owner closes admission")
+        };
+        commands.close_and_record(publish, supervisor, state)
+    }
+}
+
 use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -25,15 +102,14 @@ use crate::stages::observer::{
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
-use crate::supervised_base::{EventLoopDirective, EventReceiver};
+use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::MiddlewareExecutionScope;
 use obzenflow_core::event::payloads::execution_payload::SourcePollKind;
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::SystemPayload;
 use obzenflow_core::journal::AppendOptions;
 
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{ChainEventFactory, SystemEvent};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
 use std::collections::VecDeque;
@@ -42,6 +118,49 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+pub(crate) async fn acquire_replay_input(
+    execution: &crate::execution::RuntimeExecution,
+    flow_context: &FlowContext,
+    stage_type: obzenflow_core::event::context::StageType,
+    journal: &Arc<dyn Journal<ChainEvent>>,
+) -> Result<crate::replay::ReplayDriver, BoxError> {
+    let archive = execution
+        .archive_for_io()
+        .expect("replaying source has an archive");
+    if stage_type == obzenflow_core::event::context::StageType::InfiniteSource {
+        if let Some(control) = execution.resume_control() {
+            control.register_infinite_source(flow_context.stage_id);
+        }
+    }
+    let stage_key = &flow_context.stage_name;
+    let path = archive.source_data_journal_path(stage_key)?;
+    let reader = archive.open_source_reader(stage_key, stage_type).await?;
+    let replay = crate::replay::ReplayDriver::new(
+        reader,
+        path,
+        crate::replay::ReplayContextTemplate {
+            original_flow_id: archive.archive_flow_id().to_string(),
+            original_stage_id: archive.archived_stage_id(stage_key)?,
+        },
+    );
+    let event = ChainEventFactory::execution_event(
+        flow_context.stage_id.into(),
+        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ReplayLifecycle(
+            obzenflow_core::event::ReplayLifecycleEvent::Started {
+                archive_path: archive.archive_path().to_path_buf(),
+                archive_flow_id: archive.archive_flow_id().to_string(),
+                archive_status: archive.archive_status(),
+                archive_status_derivation: archive.status_derivation(),
+                allow_incomplete: archive.allow_incomplete_archive(),
+                source_stages: archive.source_stage_keys(),
+            },
+        ),
+    )
+    .with_flow_context(flow_context.clone());
+    crate::supervised_base::publication::append(journal, event, Default::default()).await?;
+    Ok(replay)
+}
 
 pub(crate) fn source_error_kind(error: &SourceError) -> ErrorKind {
     match error {
@@ -114,20 +233,20 @@ pub(crate) async fn record_source_stage_fatal(
 }
 
 pub(crate) async fn record_source_cleanup_failed(
-    stage_id: StageId,
-    stage_name: &str,
+    context: &FlowContext,
     error: &SourceError,
-    report_journal: &crate::supervised_base::SupervisorJournal,
+    journal: &Arc<dyn Journal<ChainEvent>>,
 ) -> Result<(), BoxError> {
-    let event = SystemEvent::new(
-        WriterId::from(stage_id),
-        SystemPayload::SourceCleanupFailed {
-            stage_id,
-            stage_name: stage_name.to_string(),
+    let event = ChainEventFactory::execution_event(
+        context.stage_id.into(),
+        obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SourceCleanupFailed {
+            stage_id: context.stage_id,
+            stage_name: context.stage_name.clone(),
             error: error.safe_summary().to_string(),
         },
-    );
-    crate::supervised_base::publication::report(report_journal, event, Default::default()).await?;
+    )
+    .with_flow_context(context.clone());
+    crate::supervised_base::publication::append(journal, event, Default::default()).await?;
     Ok(())
 }
 
@@ -388,7 +507,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
-    external_events: &mut EventReceiver<E>,
+    receive_control: impl std::future::Future<Output = Option<E>> + Send,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
 where
@@ -443,7 +562,7 @@ where
                 let wake = crate::stages::common::control_strategies::WakeOn::Notify(waker);
                 let waited = tokio::select! {
                     biased;
-                    maybe_event = external_events.recv() => {
+                    maybe_event = receive_control => {
                         match maybe_event {
                             Some(event) => return Ok(Some(EventLoopDirective::Transition(event))),
                             None => {
@@ -857,7 +976,7 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
                 None,
-                &mut receiver,
+                receiver.recv(),
                 || TestEvent::ChannelClosed,
             )
             .await
@@ -957,7 +1076,7 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_stall,
                 None,
-                &mut receiver,
+                receiver.recv(),
                 || TestEvent::ChannelClosed,
             )
             .await

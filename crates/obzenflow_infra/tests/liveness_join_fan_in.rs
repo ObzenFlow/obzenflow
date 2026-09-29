@@ -18,7 +18,6 @@ use obzenflow_runtime::stages::common::handlers::{
     SinkWriteReport, TypedAsyncFiniteSourceHandler, TypedJoinHandler,
 };
 use obzenflow_runtime::stages::{LivenessSnapshots, SourceError};
-use obzenflow_runtime::supervised_base::SupervisorJournal;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the join-fan-in test. The two legs (reference
@@ -197,12 +196,9 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *liveness_source.lock().unwrap() = Some(handle.observations());
         let stage_journals = handle
-            .report_journals()
+            .stage_journals()
             .into_iter()
-            .filter_map(|journal| match journal {
-                SupervisorJournal::Stage { journal, .. } => Some(journal),
-                SupervisorJournal::System(_) => None,
-            })
+            .map(|(_, journal)| journal)
             .collect();
         *stage_journals_slot_hook
             .lock()

@@ -12,7 +12,7 @@ use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, Stage
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, SinkDestinationErrorCode, SinkOperationFailed, SinkOperationPhase,
-    SinkWritePhase, StageLifecycleEvent, SupervisorRecord, SystemEvent, SystemPayload,
+    SinkWritePhase, SystemEvent,
 };
 use obzenflow_core::journal::archive::ReplayArchive;
 use obzenflow_core::journal::factory::{FlowJournalFactory, RunResourcePlan, RunSubstrateState};
@@ -130,14 +130,6 @@ impl<T: obzenflow_core::event::JournalEvent> obzenflow_core::journal::JournalSto
         position: u64,
     ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
         self.inner.reader_from(position).await
-    }
-
-    async fn storage_report_reader_from(
-        &self,
-        position: u64,
-    ) -> Result<Box<dyn obzenflow_core::journal::reader::JournalReportReader<T>>, JournalError>
-    {
-        self.inner.report_reader_from(position).await
     }
 
     async fn storage_read_last_n(
@@ -710,11 +702,10 @@ async fn read_stage_journal(
     replay_testkit::read_journal_envelopes::<ChainEvent>(&run.join(file)).await
 }
 
-async fn read_sink_reports(run: &Path) -> Vec<SupervisorRecord> {
+async fn read_sink_facts(run: &Path) -> Vec<JournalRecord<ChainPayload>> {
     read_stage_journal(run, "probe", "data_journal_file")
         .await
         .into_iter()
-        .filter_map(SupervisorRecord::from_chain)
         .collect()
 }
 
@@ -1133,14 +1124,11 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
     );
 
     let stage_id = chain.operation.stage_id;
-    let reports = read_sink_reports(&run).await;
+    let reports = read_sink_facts(&run).await;
     let completed = reports.iter().filter(|envelope| {
         matches!(
             &envelope.payload,
-            SystemPayload::StageLifecycle {
-                stage_id: completed_stage,
-                event: StageLifecycleEvent::Completed { .. },
-            } if *completed_stage == stage_id
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed { stage_id: completed_stage, ..  })) if *completed_stage == stage_id
         )
     });
     assert_eq!(
@@ -1152,13 +1140,13 @@ async fn poisoned_failure_links_lifecycle_and_performs_drop_only_teardown() {
     let tied_failures = reports
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
-            SystemPayload::StageLifecycle {
-                stage_id: failed_stage,
-                event:
-                    StageLifecycleEvent::Failed {
-                        causal_event_id, ..
-                    },
-            } if failed_stage == stage_id => causal_event_id,
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Failed {
+                    stage_id: failed_stage,
+                    causal_event_id,
+                    ..
+                },
+            )) if failed_stage == stage_id => causal_event_id,
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1316,14 +1304,11 @@ async fn assert_lifecycle_failure(
     assert_eq!(operation.failed_delivery_event_id, None);
     assert_eq!(direct_parent(operation_event), None);
 
-    let reports = read_sink_reports(&run).await;
+    let reports = read_sink_facts(&run).await;
     let completed = reports.iter().filter(|envelope| {
         matches!(
             &envelope.payload,
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event: StageLifecycleEvent::Completed { .. },
-            } if *stage_id == operation.stage_id
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed { stage_id, ..  })) if *stage_id == operation.stage_id
         )
     });
     assert_eq!(
@@ -1335,13 +1320,13 @@ async fn assert_lifecycle_failure(
     let tied_failures = reports
         .into_iter()
         .filter_map(|envelope| match envelope.payload {
-            SystemPayload::StageLifecycle {
-                stage_id,
-                event:
-                    StageLifecycleEvent::Failed {
-                        causal_event_id, ..
-                    },
-            } if stage_id == operation.stage_id => causal_event_id,
+            ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                StageLifecycleFact::Failed {
+                    stage_id,
+                    causal_event_id,
+                    ..
+                },
+            )) if stage_id == operation.stage_id => causal_event_id,
             _ => None,
         })
         .collect::<Vec<_>>();

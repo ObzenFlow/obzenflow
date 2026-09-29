@@ -655,8 +655,9 @@ mod tests {
 
         let extras = FlowHandleExtras {
             metrics_journals: None,
-            report_journals: vec![],
-            pipeline_reports: None,
+            stage_journals: vec![],
+            system_journals: vec![],
+            ingress_refusals: None,
             observations: Arc::new(ObservationRegistry::default()),
             host_observations: Arc::new(NoObservations),
 

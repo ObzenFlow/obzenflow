@@ -19,7 +19,6 @@ use obzenflow_runtime::stages::common::handlers::{
     SinkWriteReport, TypedFiniteSourceHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::supervised_base::SupervisorJournal;
 use serde::{Deserialize, Serialize};
 
 /// File-local payloads for the stalled-transition test. The JSON shape is
@@ -132,12 +131,9 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     let hook = Box::new(move |handle: &Arc<FlowHandle>| {
         *liveness_source.lock().unwrap() = Some(handle.observations());
         let stage_journals = handle
-            .report_journals()
+            .stage_journals()
             .into_iter()
-            .filter_map(|journal| match journal {
-                SupervisorJournal::Stage { journal, .. } => Some(journal),
-                SupervisorJournal::System(_) => None,
-            })
+            .map(|(_, journal)| journal)
             .collect();
         *stage_journals_slot_hook
             .lock()

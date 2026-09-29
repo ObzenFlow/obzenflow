@@ -76,6 +76,17 @@ pub enum RunRecordData {
     System(Box<SystemJournalRecord>),
 }
 
+impl From<ChainJournalRecord> for RunRecordData {
+    fn from(record: ChainJournalRecord) -> Self {
+        Self::Chain(Box::new(record))
+    }
+}
+impl From<SystemJournalRecord> for RunRecordData {
+    fn from(record: SystemJournalRecord) -> Self {
+        Self::System(Box::new(record))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub version: u16,

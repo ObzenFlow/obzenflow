@@ -2,10 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Component baselines for the remaining journal and parent hot paths.
+//! Component baselines for ordinary journal operations.
 mod append;
 mod dispatch;
-mod fan_in;
 mod fixtures;
 mod record;
 
@@ -20,7 +19,6 @@ fn bench(c: &mut Criterion) {
     let mut censuses = Vec::new();
     record::bench(c, &runtime, &mut censuses);
     dispatch::bench(c, &runtime, &mut censuses);
-    fan_in::bench(c, &runtime, &mut censuses);
     append::bench(c, &runtime, &mut censuses);
     if let Ok(path) = std::env::var("OBZENFLOW_WORK_CENSUS") {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

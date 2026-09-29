@@ -21,10 +21,8 @@ retains matching clock, payload and completed-work dimensions.
 | `per_event_latency_*` | Source-to-sink latency experiments at fixed pipeline depths, including disk and memory variants at 100 stages. | Default |
 | `pipeline_throughput` | Throughput and time-per-event experiments at 1, 3, 5 and 10 stages. | Default |
 | `pipeline_execution` | Batch completion, metrics rendering/publication and causal record costs. | Default |
-| `journal_components` | 59 cases for causal operations, full decoding, dispatch, discovery, ready-report handoff and parent admission/publication. | `components` |
-| `supervision_selection` | 30 cases for selective discovery, mixed groups, cold definition dependencies, work counters and write costs. | `supervision-benchmarks` |
-| `journal_hot_path` | 138 cases for selected-report accounting, validation, reconstruction, dispatch, parent fan-in and append attribution. | `supervision-benchmarks` |
-| `supervision_delivery` | 30 cases measuring first-report delivery and completed parent readiness with fixed report volume and varying business traffic. | `supervision-benchmarks` |
+| `journal_components` | 33 cases for causal operations, full decoding and ordinary reader dispatch. | `components` |
+| `journal_hot_path` | 75 cases for ordinary record accounting, validation, reconstruction, dispatch and append attribution. | `journal-benchmarks` |
 | `idle_cpu_usage` | Idle-runtime experiment. | Default |
 | `waiting_for_gun_cpu_usage` | Manual-start waiting experiment. | Default |
 | `tokio_worker_3_stage_experiment` | Worker-thread counts with a three-stage workload and five-stage control. | Default |
@@ -49,7 +47,7 @@ The component suites lazily construct only selected fixtures. Check completed-wo
 assertions once before collecting a new baseline; `--test` collects no timings:
 
 ```sh
-env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_EXPECT_SELECTIVE_READS=1 OBZENFLOW_SUPERVISION_WORK_OUTPUT=target/supervision-selection-check.json cargo bench --locked --profile test -p obzenflow_benchmarks --features supervision-benchmarks --bench supervision_selection -- --test
+env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_WORK_CENSUS=target/journal-check.json cargo bench --locked --profile test -p obzenflow_benchmarks --features journal-benchmarks --bench journal_hot_path -- --test
 ```
 
 Capture a reference with a new baseline name, then use that name for a candidate
@@ -57,28 +55,19 @@ comparison. This example selects one operation; omit the filter to capture the
 whole suite:
 
 ```sh
-env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo bench --locked --profile test -p obzenflow_benchmarks --features components --bench journal_components -- 'report_discovery/disk/readers1_prefix1024_p256$' --save-baseline discovery-reference-test
-env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo bench --locked --profile test -p obzenflow_benchmarks --features components --bench journal_components -- 'report_discovery/disk/readers1_prefix1024_p256$' --baseline discovery-reference-test
+env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo bench --locked --profile test -p obzenflow_benchmarks --features components --bench journal_components -- 'disk_components/reader_next/' --save-baseline reader-reference-test
+env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo bench --locked --profile test -p obzenflow_benchmarks --features components --bench journal_components -- 'disk_components/reader_next/' --baseline reader-reference-test
 ```
 
 | Target | Work census environment variable | Capture script `--suite` |
 | --- | --- | --- |
 | `journal_components` | None | `components` |
-| `supervision_selection` | `OBZENFLOW_SUPERVISION_WORK_OUTPUT=target/<name>-work.json` | `supervision` |
 | `journal_hot_path` | `OBZENFLOW_WORK_CENSUS=target/<name>-work.json` | `hot-path` |
-| `supervision_delivery` | `OBZENFLOW_WORK_CENSUS=target/<name>-work.json` | `delivery` |
 
-For example, capture delivery timings and their separate completed-work census:
-
-```sh
-env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_WORK_CENSUS=target/delivery-reference-test-work.json cargo bench --locked --profile test -p obzenflow_benchmarks --features supervision-benchmarks --bench supervision_delivery -- --noplot --save-baseline delivery-reference-test
-```
-
-The constrained live-reader cases in `journal_hot_path` require an explicit
-blocking-worker setting, which is included in their case names:
+For example, capture complete append timings and their work census:
 
 ```sh
-env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_LIVE_BLOCKING_THREADS=2 cargo bench --locked --profile test -p obzenflow_benchmarks --features supervision-benchmarks --bench journal_hot_path -- 'supervisor_fan_in/live_per_journal_8/blocking_capacity_2/' --test
+env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 OBZENFLOW_WORK_CENSUS=target/append-candidate-work.json cargo bench --locked --profile test -p obzenflow_benchmarks --features journal-benchmarks --bench journal_hot_path -- journal_append_cost --noplot --save-baseline append-candidate
 ```
 
 The 100-stage disk latency target also accepts
@@ -87,20 +76,15 @@ and `OBZENFLOW_BENCH_100_STAGE_TIMEOUT_SECS`.
 
 ## Measurement boundaries
 
-The four component suites measure elapsed time for a complete named operation.
-Throughput counts records/reports for that operation, including discarded rows
+The component suites measure elapsed time for a complete named operation.
+Throughput counts records for that operation, including discarded rows
 when scanning. It does not represent full application throughput.
 
 | Operation | Timed boundary and important exclusion |
 | --- | --- |
 | Causal/accounting primitives | The actual production operation on admitted records; fixture creation excluded. Validation, accounting and decoding timings can overlap and must not be added together. |
-| Full/selected frame decoding | Production frame verification and reconstruction; preloaded frame cases exclude primary-file I/O. Warm/cold definition cases distinguish auxiliary carrier reads. |
-| Actual readers | Physical reading, dispatch and admission. Opening is excluded from reader-iteration controls and included in discovery cases. |
-| Report discovery | Registration through exact report delivery and covered prefix, with a cheap consumer. History construction and reader teardown excluded. |
-| Ready-report handoff | Consumption of already-ready reports; discovery and readiness waiting excluded. |
-| Parent admission/publication | Admission uses prepared reports and the real FSM; publication measures committed journal output. Neither isolated case establishes combined service capacity. |
-| Parent fan-in/delivery completion | Actual readers, parent FSM, required publication and complete coverage. Live variants also include concurrent child appends. |
-| First-report delivery | Registration until the first report is returned, before application. Every sample still completes the whole fixture. This is not commit-to-application latency. |
+| Ordinary frame decoding | Production frame verification and reconstruction; preloaded frame cases exclude primary-file I/O. Warm/cold definition cases distinguish auxiliary carrier reads. |
+| Actual readers | Physical reading, dispatch and admission. Opening is excluded from reader-iteration controls. |
 | Append attribution | Encoding, preencoded writes and complete appends are distinct controls with overlapping work. They are not additive phases. |
 
 Fresh cursors, frontiers, FSMs or destination journals isolate iterations.
@@ -108,18 +92,12 @@ The component harnesses check counts, identity/order, coverage and required
 publications. Incomplete operations fail the benchmark instead of becoming a
 zero-duration sample. Async operations have a 30-second invalid-sample deadline.
 
-`supervision-benchmarks` enables development-only production counters and a
+`journal-benchmarks` enables development-only production counters and a
 process-wide allocation meter. Use identical instrumentation for comparisons.
-`OBZENFLOW_EXPECT_SELECTIVE_READS=1` additionally requires zero discarded business
-payload decodes, constructions and accounting serialisations in selection fixtures;
-positive full-reader controls verify the counters. Live writer work remains in
-process-wide counters and must not be attributed entirely to reading.
 
 Encoded-byte counters do not measure physical device traffic. Allocation requests
 and incremental live heap do not measure RSS, page cache or a hard memory bound.
-Files are OS-cache-warm; cold definitions mean fresh metadata state. Runtime limits
-are two async/two blocking workers, except explicitly labelled hot-path live
-fixtures, whose default blocking capacity is 512. Compare matching limits.
+Files are OS-cache-warm; cold definitions mean fresh metadata state. Runtime limits are two async/two blocking workers. Compare matching limits.
 
 The metrics-rendering group includes cloning, allocation and retirement but
 excludes scraper startup/joining. Most older suites use `init_tracing()` with
@@ -155,11 +133,10 @@ original document paths and hashes.
 
 Detailed contracts and historical results are collected in the
 [145h benchmark evidence](../../../obzenflow-improvement-proposals/content/planning/obzenflow/P1/evidence/145h-benchmark-measurement-contracts.md).
-[Part 2](../../../obzenflow-improvement-proposals/content/planning/obzenflow/P1/open/FLOWIP-145h-part-2-supervision-capacity.md)
-owns tactical capacity improvements within the existing tapes and clocks;
-[145j](../../../obzenflow-improvement-proposals/content/planning/obzenflow/backlog/open/FLOWIP-145j-message-delivery-for-supervisors.md)
-explores future delivery. These benchmarks do not require additional report journals
-or establish that live supervision must read zero business bytes.
+Part 2 deletes selective reporting and parent reconciliation. Their benchmarks
+are removed. Ordinary append and decoding fixtures remain useful; compare only
+matching surviving operations, with completed append and encoded size as primary
+evidence. Preparation and preencoded writes diagnose costs and overlap with append.
 
 ## Policies
 

@@ -7,12 +7,13 @@ use crate::journal::MemoryJournal;
 use futures::StreamExt;
 use obzenflow_adapters::studio::ContractBoundaryAliases;
 use obzenflow_core::composite::CompositeDefinition;
-use obzenflow_core::event::journal_record::SystemJournalRecord;
-use obzenflow_core::event::{PipelineLifecycleEvent, StageLifecycleEvent, SystemPayload, WriterId};
+use obzenflow_core::event::journal_record::{ChainJournalRecord, SystemJournalRecord};
+use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
+use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, ChainPayload};
+use obzenflow_core::event::{PipelineLifecycleEvent, SystemPayload, WriterId};
 use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
-use obzenflow_core::journal::reader::{
-    JournalReportReader, JournalReportStorageReader, ReportScan, ReportScanBudget, ReportScanItem,
-};
+
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
@@ -30,7 +31,6 @@ fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
 async fn initial_prefix_includes_every_atomic_member_and_stays_fixed_while_tailing() {
     let directory = tempfile::tempdir().unwrap();
     let system = SystemId::new();
-    let stage = StageId::new();
     let journals: Vec<Arc<dyn Journal<SystemEvent>>> = vec![
         Arc::new(MemoryJournal::with_owner(JournalOwner::system(system))),
         Arc::new(
@@ -47,10 +47,9 @@ async fn initial_prefix_includes_every_atomic_member_and_stays_fixed_while_taili
         let event = || {
             SystemEvent::new(
                 system.into(),
-                SystemPayload::StageLifecycle {
-                    stage_id: stage,
-                    event: StageLifecycleEvent::Running,
-                },
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
+                    stage_count: Some(1),
+                }),
             )
         };
         let group = journal
@@ -170,10 +169,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
         let fact = append(
             journal.as_ref(),
             system.into(),
-            SystemPayload::StageLifecycle {
-                stage_id: stage,
-                event: StageLifecycleEvent::Running,
-            },
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
         )
         .await;
         assert_eq!(fast.next().await.unwrap().id, Some(cursor(&fact)));
@@ -203,10 +199,7 @@ async fn two_connections_coalesce_live_and_attached_observations_on_one_deadline
         }
         let mut attached = SystemEvent::new(
             system.into(),
-            SystemPayload::StageLifecycle {
-                stage_id: stage,
-                event: StageLifecycleEvent::Running,
-            },
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
         );
         attached.envelope.observability = Some(edge(10));
         let attached = journal.append(attached, Default::default()).await.unwrap();
@@ -275,18 +268,105 @@ async fn append(
         .expect("test event appends")
 }
 
+async fn append_stage(
+    journal: &dyn Journal<ChainEvent>,
+    stage: StageId,
+    event: ExecutionPayload,
+) -> ChainJournalRecord {
+    journal
+        .append(
+            ChainEventFactory::execution_event(stage.into(), event)
+                .with_flow_context(FlowContext::new(stage.to_string(), stage)),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+}
+
+#[derive(Clone)]
+struct TestJournals {
+    system: Arc<dyn Journal<SystemEvent>>,
+    stages: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+}
+impl<T: Journal<SystemEvent> + 'static> From<Arc<T>> for TestJournals {
+    fn from(system: Arc<T>) -> Self {
+        Self {
+            system,
+            stages: Vec::new(),
+        }
+    }
+}
+impl From<Arc<dyn Journal<SystemEvent>>> for TestJournals {
+    fn from(system: Arc<dyn Journal<SystemEvent>>) -> Self {
+        Self {
+            system,
+            stages: Vec::new(),
+        }
+    }
+}
+impl TestJournals {
+    fn new(system: SystemId, stages: &[StageId]) -> Self {
+        Self {
+            system: Arc::new(MemoryJournal::with_owner(JournalOwner::system(system))),
+            stages: stages
+                .iter()
+                .map(|stage| {
+                    (
+                        *stage,
+                        Arc::new(MemoryJournal::with_owner(JournalOwner::stage(*stage)))
+                            as Arc<dyn Journal<ChainEvent>>,
+                    )
+                })
+                .collect(),
+        }
+    }
+    fn stage(&self, id: StageId) -> &dyn Journal<ChainEvent> {
+        self.stages
+            .iter()
+            .find(|(stage, _)| *stage == id)
+            .unwrap()
+            .1
+            .as_ref()
+    }
+    async fn checkpoint(&self) -> String {
+        let mut positions = std::collections::BTreeMap::new();
+        positions.insert(
+            *self.system.id(),
+            self.system.committed_position().await.unwrap(),
+        );
+        for (_, stage) in &self.stages {
+            positions.insert(*stage.id(), stage.committed_position().await.unwrap());
+        }
+        positions.retain(|_, position| *position != 0);
+        format!("jr1:{}", serde_json::to_string(&positions).unwrap())
+    }
+    async fn cursor_for(&self, id: EventId) -> Option<String> {
+        if let Some(record) = self.system.read_event(&id).await.unwrap() {
+            return Some(cursor(&record));
+        }
+        for (_, stage) in &self.stages {
+            if stage.read_event(&id).await.unwrap().is_some() {
+                return Some(self.checkpoint().await);
+            }
+        }
+        None
+    }
+}
+
 fn endpoint(
-    journal: Arc<dyn Journal<SystemEvent>>,
+    journal: impl Into<TestJournals>,
     definitions: Vec<CompositeDefinition>,
 ) -> (StudioUpdatesEndpoint, watch::Sender<bool>) {
+    let journal = journal.into();
     let (closing, receiver) = watch::channel(false);
     (
         StudioUpdatesEndpoint::new(
-            journal,
+            journal.system.clone(),
             StudioProjection::new(definitions, ContractBoundaryAliases::default()).unwrap(),
             Some(RuntimeInstanceId::new()),
             receiver,
-        ),
+        )
+        .with_live_journals(journal.stages, vec![journal.system]),
         closing,
     )
 }
@@ -335,13 +415,14 @@ pub(super) fn cursor<P: obzenflow_core::event::payloads::JournalPayload>(
 }
 
 async fn request_body(
-    journal: Arc<dyn Journal<SystemEvent>>,
+    journal: impl Into<TestJournals>,
     definitions: Vec<CompositeDefinition>,
     last_event_id: Option<EventId>,
 ) -> Vec<SseFrame> {
+    let journal = journal.into();
     let checkpoint = match last_event_id {
-        Some(id) => Some(match journal.read_event(&id).await.unwrap() {
-            Some(row) => cursor(&row),
+        Some(id) => Some(match journal.cursor_for(id).await {
+            Some(cursor) => cursor,
             None => format!(
                 "jr1:{}",
                 serde_json::json!({obzenflow_core::JournalId::new().to_string(): 1})
@@ -363,56 +444,42 @@ pub(super) fn frame_payload(frame: &SseFrame) -> serde_json::Value {
     serde_json::from_str(&frame.data).expect("SSE data is JSON")
 }
 
-async fn completed_tape() -> (
-    Arc<MemoryJournal<SystemEvent>>,
-    Vec<CompositeDefinition>,
-    EventId,
-) {
-    let system_id = SystemId::new();
-    let writer = WriterId::from(system_id);
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+async fn completed_tape() -> (TestJournals, Vec<CompositeDefinition>, EventId) {
+    let system = SystemId::new();
     let left = StageId::new();
     let right = StageId::new();
-
-    append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
-            stage_id: left,
-            event: StageLifecycleEvent::Running,
-        },
+    let journals = TestJournals::new(system, &[left, right]);
+    append_stage(
+        journals.stage(left),
+        left,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: left }),
     )
     .await;
-    append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
+    append_stage(
+        journals.stage(left),
+        left,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed {
             stage_id: left,
-            event: StageLifecycleEvent::Completed { accounting: None },
-        },
+            accounting: None,
+        }),
     )
     .await;
-    let terminal = append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
+    let terminal = append_stage(
+        journals.stage(right),
+        right,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Drained {
             stage_id: right,
-            event: StageLifecycleEvent::Drained,
-        },
+            events_processed: None,
+        }),
     )
     .await;
     append(
-        journal.as_ref(),
-        writer,
+        journals.system.as_ref(),
+        system.into(),
         SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
     .await;
-
-    (
-        journal,
-        definition(left, right),
-        terminal.envelope.provenance.event.id,
-    )
+    (journals, definition(left, right), *terminal.id())
 }
 
 #[tokio::test]
@@ -433,7 +500,10 @@ async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
     assert_eq!(resumed_status.len(), 1);
     let resumed_payload = frame_payload(resumed_status[0]);
     assert_eq!(resumed_payload["status"], "completed");
-    assert_eq!(resumed_payload["as_of_event_id"], terminal_id.to_string());
+    assert_eq!(
+        resumed_payload["as_of_event_id"],
+        frame_payload(fresh_status[0])["as_of_event_id"]
+    );
     assert!(resumed_status[0].id.is_none());
 
     let missing = request_body(journal, definitions, Some(EventId::new())).await;
@@ -451,23 +521,19 @@ async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
 async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up() {
     use obzenflow_core::event::observability::*;
     use obzenflow_core::event::payloads::execution_payload::{
-        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact,
+        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState,
     };
-    use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
-    use obzenflow_core::event::types::SeqNo;
     use obzenflow_runtime::metrics::observations::LatestObservationMap;
 
     let system = SystemId::new();
     let stage = StageId::new();
     let writer = WriterId::from(system);
     let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)));
-    let prefix = append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
-            stage_id: stage,
-            event: StageLifecycleEvent::Running,
-        },
+    let stage_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)));
+    let prefix = append_stage(
+        stage_journal.as_ref(),
+        stage,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: stage }),
     )
     .await;
     let scope = CaptureScope {
@@ -503,32 +569,25 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
             });
         packet
     };
-    let mut opened = SystemEvent::new(
-        writer,
-        SystemPayload::MiddlewareLifecycle {
-            stage_id: stage,
-            stage_name: Some("worker".into()),
-            flow_id: None,
-            flow_name: None,
-            origin: MiddlewareEventOrigin {
-                event_id: EventId::new(),
-                writer_key: stage.to_string(),
-                seq: SeqNo(420),
-            },
-            middleware: MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
-                cooldown_ms: 5_000,
-                error_rate: 1.0,
-                failure_count: 3,
-                trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
-                observed_calls: 3,
-                slow_call_rate: None,
-                slow_call_count: None,
-                last_error: None,
-            }),
-        },
-    );
+    let mut opened = ChainEventFactory::execution_event(
+        stage.into(),
+        ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+            cooldown_ms: 5_000,
+            error_rate: 1.0,
+            failure_count: 3,
+            trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+            observed_calls: 3,
+            slow_call_rate: None,
+            slow_call_count: None,
+            last_error: None,
+        }),
+    )
+    .with_flow_context(FlowContext::new("worker", stage));
     opened.envelope.observability = Some(sample(3));
-    let opened = journal.append(opened, Default::default()).await.unwrap();
+    let opened = stage_journal
+        .append(opened, Default::default())
+        .await
+        .unwrap();
     source.offer(sample(11));
     let (closing, receiver) = watch::channel(false);
     let endpoint = StudioUpdatesEndpoint::new(
@@ -538,14 +597,18 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
             .with_observations(source),
         Some(RuntimeInstanceId::new()),
         receiver,
-    );
+    )
+    .with_live_journals(vec![(stage, stage_journal)], vec![journal.clone()]);
     let mut first = open(&endpoint, Some(&cursor(&prefix))).await;
     let fact = tokio::time::timeout(Duration::from_secs(2), first.next())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fact.id, Some(cursor(&opened)));
-    assert_eq!(frame_payload(&fact)["revision"], 420);
+    assert_eq!(
+        frame_payload(&fact)["commitment"]["event_id"],
+        opened.id().to_string()
+    );
+    assert_eq!(frame_payload(&fact)["revision"], opened.local_sequence());
     assert_eq!(frame_payload(&fact)["context"]["cooldown_ms"], 5_000);
     drop(first); // Disconnect before the optional frame belonging to this fact.
 
@@ -558,7 +621,9 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
     let resumed = collect_closing(&endpoint, closing, Some(&cursor(&opened))).await;
     let terminal_index = resumed
         .iter()
-        .position(|frame| frame.id == Some(cursor(&terminal)))
+        .position(|frame| {
+            frame_payload(frame)["commitment"]["event_id"] == terminal.id().to_string()
+        })
         .unwrap();
     let measurement_index = resumed
         .iter()
@@ -582,49 +647,48 @@ async fn reconnect_after_fact_recovers_measurements_only_after_factual_catch_up(
 }
 
 async fn terminal_projection_body(
-    events: Vec<(StageId, StageLifecycleEvent)>,
+    events: Vec<StageLifecycleFact>,
     definitions: Vec<CompositeDefinition>,
 ) -> Vec<SseFrame> {
-    let system_id = SystemId::new();
-    let writer = WriterId::from(system_id);
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
-    for (stage_id, event) in events {
-        append(
-            journal.as_ref(),
-            writer,
-            SystemPayload::StageLifecycle { stage_id, event },
+    let system = SystemId::new();
+    let stages: std::collections::BTreeSet<_> =
+        events.iter().map(StageLifecycleFact::stage_id).collect();
+    let journals = TestJournals::new(system, &stages.into_iter().collect::<Vec<_>>());
+    for event in events {
+        append_stage(
+            journals.stage(event.stage_id()),
+            event.stage_id(),
+            ExecutionPayload::StageLifecycle(event),
         )
         .await;
     }
     append(
-        journal.as_ref(),
-        writer,
+        journals.system.as_ref(),
+        system.into(),
         SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
     .await;
-    request_body(journal, definitions, None).await
+    request_body(journals, definitions, None).await
 }
 
 #[tokio::test]
 async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
     let left = StageId::new();
     let right = StageId::new();
+    // Independent child journals have no shared append order. This shutdown
+    // has one cause; Core separately tests retaining the first applied reason.
     let cancelled = terminal_projection_body(
         vec![
-            (
-                left,
-                StageLifecycleEvent::Cancelled {
-                    reason: "operator stop".to_string(),
-                    accounting: None,
-                },
-            ),
-            (
-                right,
-                StageLifecycleEvent::Cancelled {
-                    reason: "sibling stop".to_string(),
-                    accounting: None,
-                },
-            ),
+            StageLifecycleFact::Cancelled {
+                stage_id: left,
+                reason: "operator stop".to_string(),
+                accounting: None,
+            },
+            StageLifecycleFact::Cancelled {
+                stage_id: right,
+                reason: "operator stop".to_string(),
+                accounting: None,
+            },
         ],
         definition(left, right),
     )
@@ -637,14 +701,15 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
     let right = StageId::new();
     let contradictory = terminal_projection_body(
         vec![
-            (left, StageLifecycleEvent::Completed { accounting: None }),
-            (
-                left,
-                StageLifecycleEvent::Cancelled {
-                    reason: "late contradiction".to_string(),
-                    accounting: None,
-                },
-            ),
+            StageLifecycleFact::Completed {
+                stage_id: left,
+                accounting: None,
+            },
+            StageLifecycleFact::Cancelled {
+                stage_id: left,
+                reason: "late contradiction".to_string(),
+                accounting: None,
+            },
         ],
         definition(left, right),
     )
@@ -658,6 +723,7 @@ async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
 
 struct ScriptedReader {
     pending_read: Option<Arc<PendingOpen>>,
+    pending_read_from: usize,
     reads: Arc<AtomicUsize>,
     events: Vec<SystemJournalRecord>,
     position: usize,
@@ -675,10 +741,14 @@ impl Drop for ScriptedReader {
 impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ScriptedReader {
     async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        if let Some(probe) = &self.pending_read {
+        if let Some(probe) = self
+            .pending_read
+            .as_ref()
+            .filter(|_| self.position >= self.pending_read_from)
+        {
             let _guard = PendingOpenGuard(probe.clone());
             probe.entered.notify_one();
-            std::future::pending::<()>().await;
+            probe.release.notified().await;
         }
         if self.fail_at == Some(self.position) {
             return Err(JournalError::SubscriptionClosed);
@@ -703,41 +773,11 @@ impl obzenflow_core::journal::JournalStorageReader<SystemEvent> for ScriptedRead
     }
 }
 
-#[async_trait]
-impl JournalReportStorageReader<SystemEvent> for ScriptedReader {
-    async fn storage_next_report(
-        &mut self,
-        _: ReportScanBudget,
-    ) -> Result<ReportScan<SystemPayload>, JournalError> {
-        // Every system record is a report; share the scripted read and drop probes.
-        Ok(ReportScan {
-            item: match JournalReader::next(self).await? {
-                Some(record) => ReportScanItem::Record(Box::new(record)),
-                None => ReportScanItem::Tail {
-                    committed_end: JournalReader::is_at_end(self),
-                },
-            },
-            scanned_bytes: 0,
-        })
-    }
-
-    fn storage_position(&self) -> u64 {
-        JournalReader::position(self)
-    }
-
-    fn storage_initial_prefix_complete(&self) -> Result<bool, JournalError> {
-        JournalReader::initial_prefix_complete(self)
-    }
-
-    fn storage_is_at_end(&self) -> bool {
-        JournalReader::is_at_end(self)
-    }
-}
-
 #[derive(Default)]
 struct PendingOpen {
     entered: tokio::sync::Notify,
     dropped: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 struct PendingOpenGuard(Arc<PendingOpen>);
@@ -766,6 +806,7 @@ async fn dropping_studio_response_cancels_pending_journal_open() {
 
 pub(crate) struct ScriptedJournal {
     pending_read: Option<Arc<PendingOpen>>,
+    pending_read_from: usize,
     pub(crate) reads: Arc<AtomicUsize>,
     pub(crate) opens: Arc<AtomicUsize>,
     inner: MemoryJournal<SystemEvent>,
@@ -782,6 +823,7 @@ impl ScriptedJournal {
             reads: Arc::new(AtomicUsize::new(0)),
             opens: Arc::new(AtomicUsize::new(0)),
             pending_read: None,
+            pending_read_from: 0,
             inner: MemoryJournal::with_owner(JournalOwner::system(system_id)),
             fail_at: None,
             fail_open: false,
@@ -803,6 +845,7 @@ impl ScriptedJournal {
         }
         let reader = Box::new(ScriptedReader {
             pending_read: self.pending_read.clone(),
+            pending_read_from: self.pending_read_from,
             reads: self.reads.clone(),
             events: self.inner.read_all_unordered().await?,
             position: position as usize,
@@ -850,13 +893,6 @@ impl obzenflow_core::journal::JournalStorage<SystemEvent> for ScriptedJournal {
         Ok(self.open_reader(position).await?)
     }
 
-    async fn storage_report_reader_from(
-        &self,
-        position: u64,
-    ) -> Result<Box<dyn JournalReportReader<SystemEvent>>, JournalError> {
-        Ok(self.open_reader(position).await?)
-    }
-
     async fn storage_read_last_n(
         &self,
         count: usize,
@@ -875,10 +911,9 @@ async fn journal_open_and_read_failures_are_typed_route_errors_only() {
     append(
         &read_failure,
         writer,
-        SystemPayload::StageLifecycle {
-            stage_id: left,
-            event: StageLifecycleEvent::Running,
-        },
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
+            stage_count: Some(1),
+        }),
     )
     .await;
     read_failure.fail_at = Some(1);
@@ -961,7 +996,7 @@ async fn empty_bootstrap_and_closing_admission_do_not_fabricate_cursors() {
 #[tokio::test]
 async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallback() {
     let (journal, definitions, _) = completed_tape().await;
-    let last_id = cursor(&journal.read_last_n(1).await.unwrap()[0]);
+    let last_id = journal.checkpoint().await;
     for cursor in [
         String::new(),
         "malformed".into(),
@@ -969,7 +1004,7 @@ async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallbac
         format!(
             "jr1:{}",
             serde_json::to_string(&std::collections::BTreeMap::from([(
-                *journal.id(),
+                *journal.system.id(),
                 u64::MAX
             )]))
             .unwrap()
@@ -1004,11 +1039,9 @@ async fn malformed_and_unknown_cursors_preserve_error_payloads_and_fresh_fallbac
 #[tokio::test(start_paused = true)]
 async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
     use obzenflow_core::event::payloads::execution_payload::{
-        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact,
-        RateLimiterFact, RateLimiterMode,
+        CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, RateLimiterFact,
+        RateLimiterMode,
     };
-    use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
-    use obzenflow_core::event::types::SeqNo;
 
     for disk in [false, true] {
         for cursor_kind in ["unknown", "fresh", "malformed", "known"] {
@@ -1016,75 +1049,70 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             let system = SystemId::new();
             let breaker = StageId::new();
             let limiter = StageId::new();
-            let journal: Arc<dyn Journal<SystemEvent>> = if disk {
-                Arc::new(
-                    crate::journal::disk::DiskJournal::with_owner(
-                        directory.path().join("fallback.log"),
-                        JournalOwner::system(system),
+            let stage_journal = |stage: StageId, name: &str| -> Arc<dyn Journal<ChainEvent>> {
+                if disk {
+                    Arc::new(
+                        crate::journal::disk::DiskJournal::with_owner(
+                            directory.path().join(name),
+                            JournalOwner::stage(stage),
+                        )
+                        .unwrap(),
                     )
-                    .unwrap(),
-                )
-            } else {
-                Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)))
+                } else {
+                    Arc::new(MemoryJournal::with_owner(JournalOwner::stage(stage)))
+                }
             };
-            let middleware = |stage: StageId, revision, fact| SystemPayload::MiddlewareLifecycle {
-                stage_id: stage,
-                stage_name: None,
-                flow_id: None,
-                flow_name: None,
-                origin: MiddlewareEventOrigin {
-                    event_id: EventId::new(),
-                    writer_key: stage.to_string(),
-                    seq: SeqNo(revision),
-                },
-                middleware: fact,
+            let journals = TestJournals {
+                system: Arc::new(MemoryJournal::with_owner(JournalOwner::system(system))),
+                stages: vec![
+                    (breaker, stage_journal(breaker, "breaker.log")),
+                    (limiter, stage_journal(limiter, "limiter.log")),
+                ],
             };
-            let opened = append(
-                journal.as_ref(),
-                system.into(),
-                middleware(
-                    breaker,
-                    420,
-                    MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
-                        cooldown_ms: 5_000,
-                        error_rate: 1.0,
-                        failure_count: 3,
-                        trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
-                        observed_calls: 3,
-                        slow_call_rate: None,
-                        slow_call_count: None,
-                        last_error: None,
-                    }),
-                ),
+            let opened = append_stage(
+                journals.stage(breaker),
+                breaker,
+                ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
+                    cooldown_ms: 5_000,
+                    error_rate: 1.0,
+                    failure_count: 3,
+                    trigger: CircuitBreakerOpenTrigger::ConsecutiveFailures,
+                    observed_calls: 3,
+                    slow_call_rate: None,
+                    slow_call_count: None,
+                    last_error: None,
+                }),
             )
             .await;
-            let prefix = append(
-                journal.as_ref(),
-                system.into(),
-                middleware(
-                    limiter,
-                    7,
-                    MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
-                        mode_from: RateLimiterMode::Normal,
-                        mode_to: RateLimiterMode::Limiting,
-                        limit_rate: 10.0,
-                    }),
-                ),
+            let prefix = append_stage(
+                journals.stage(limiter),
+                limiter,
+                ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
+                    mode_from: RateLimiterMode::Normal,
+                    mode_to: RateLimiterMode::Limiting,
+                    limit_rate: 10.0,
+                }),
             )
             .await;
+            let prefix_cursor = journals.checkpoint().await;
             let resume_cursor = match cursor_kind {
                 "unknown" => Some(EventId::new().to_string()),
                 "fresh" => None,
                 "malformed" => Some("malformed".to_string()),
-                "known" => Some(self::cursor(&prefix)),
+                "known" => Some(prefix_cursor.clone()),
                 _ => unreachable!(),
             };
-            let (endpoint, closing) = endpoint(journal.clone(), vec![]);
+            let (endpoint, closing) = endpoint(journals.clone(), vec![]);
             let mut stream = open(&endpoint, resume_cursor.as_deref()).await;
             let mut body = Vec::new();
             if cursor_kind != "known" {
                 loop {
-                    let frame = stream.next().await.unwrap();
+                    let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("bootstrap stalled: disk={disk}, cursor={cursor_kind}")
+                        })
+                        .unwrap();
                     let bootstrap = frame.event.as_deref() == Some("bootstrap");
                     body.push(frame);
                     if bootstrap {
@@ -1096,25 +1124,21 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                 // Receiving the bootstrap cursor must already establish factual
                 // middleware state, even if the client disconnects immediately.
                 drop(stream);
-                stream = open(&endpoint, Some(&cursor(&prefix))).await;
+                stream = open(&endpoint, Some(&prefix_cursor)).await;
             }
             // Later facts must not leak into the initial snapshot.
-            let closed = append(
-                journal.as_ref(),
-                system.into(),
-                middleware(
-                    breaker,
-                    421,
-                    MiddlewareFact::CircuitBreaker(CircuitBreakerFact::StateChanged {
-                        from_state: CircuitState::Open,
-                        to_state: CircuitState::Closed,
-                        timestamp: 421,
-                    }),
-                ),
+            let closed = append_stage(
+                journals.stage(breaker),
+                breaker,
+                ExecutionPayload::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                    from_state: CircuitState::Open,
+                    to_state: CircuitState::Closed,
+                    timestamp: 421,
+                }),
             )
             .await;
             let terminal = append(
-                journal.as_ref(),
+                journals.system.as_ref(),
                 system.into(),
                 SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
             )
@@ -1145,24 +1169,26 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
                     .find(|entry| entry["stage_id"] == limiter.to_string())
                     .unwrap();
                 assert_eq!(cb["circuit_breaker"]["state"], "open");
-                assert_eq!(cb["circuit_breaker"]["revision"], 420);
+                assert_eq!(cb["circuit_breaker"]["revision"], opened.local_sequence());
                 assert_eq!(
                     cb["circuit_breaker"]["state_updated_at_ms"],
-                    opened.envelope.provenance.event.timestamp
+                    opened.envelope.provenance.event.processing.event_time
                 );
                 assert_eq!(rl["rate_limiter"]["mode"], "limiting");
-                assert_eq!(rl["rate_limiter"]["revision"], 7);
-                assert_eq!(
-                    payload["vector_clock"],
-                    serde_json::to_value(&prefix.envelope.provenance.journal.vector_clock).unwrap()
-                );
+                assert_eq!(rl["rate_limiter"]["revision"], prefix.local_sequence());
+                assert!([
+                    serde_json::to_value(&prefix.envelope.provenance.journal.vector_clock).unwrap(),
+                    serde_json::to_value(&opened.envelope.provenance.journal.vector_clock).unwrap(),
+                ].contains(&payload["vector_clock"]), "snapshot carries an observed journal clock; independent readers need no total order");
                 let snapshot_index = body
                     .iter()
                     .position(|frame| frame.event.as_deref() == Some("middleware_state_snapshot"))
                     .unwrap();
                 let closed_index = body
                     .iter()
-                    .position(|frame| frame.id == Some(cursor(&closed)))
+                    .position(|frame| {
+                        frame_payload(frame)["commitment"]["event_id"] == closed.id().to_string()
+                    })
                     .unwrap();
                 let bootstrap_index = body
                     .iter()
@@ -1174,18 +1200,33 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             let facts = frames(&body, "middleware_lifecycle");
             assert_eq!(facts.len(), 1);
             assert_eq!(frame_payload(facts[0])["state_to"], "closed");
-            assert_eq!(frame_payload(facts[0])["revision"], 421);
-            let mut expected_ids = Vec::new();
+            assert_eq!(frame_payload(facts[0])["revision"], closed.local_sequence());
+            let ids: Vec<_> = body
+                .iter()
+                .filter_map(|frame| frame.id.as_deref())
+                .collect();
+            assert_eq!(ids.len(), 2 + usize::from(cursor_kind != "known"));
             if cursor_kind != "known" {
-                expected_ids.push(cursor(&prefix));
+                assert_eq!(ids[0], prefix_cursor);
             }
-            expected_ids.extend([cursor(&closed), cursor(&terminal)]);
+            let mut previous: std::collections::BTreeMap<String, u64> =
+                serde_json::from_str(prefix_cursor.strip_prefix("jr1:").unwrap()).unwrap();
+            for id in ids {
+                let current: std::collections::BTreeMap<String, u64> =
+                    serde_json::from_str(id.strip_prefix("jr1:").unwrap()).unwrap();
+                assert!(previous.iter().all(|(journal, position)| current
+                    .get(journal)
+                    .is_some_and(|next| next >= position)));
+                previous = current;
+            }
             assert_eq!(
-                body.iter()
-                    .filter_map(|frame| frame.id.clone())
-                    .collect::<Vec<_>>(),
-                expected_ids
+                format!("jr1:{}", serde_json::to_string(&previous).unwrap()),
+                journals.checkpoint().await
             );
+            assert!(body
+                .iter()
+                .any(|frame| frame_payload(frame)["commitment"]["event_id"]
+                    == terminal.id().to_string()));
             let errors = frames(&body, "error");
             match cursor_kind {
                 "unknown" => assert_eq!(
@@ -1231,27 +1272,34 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
 
     let system = SystemId::new();
     let journal = Arc::new(ScriptedJournal::new(system));
-    let stage = StageId::new();
     for _ in 0..256 {
         append(
             journal.as_ref(),
             WriterId::from(system),
-            SystemPayload::StageLifecycle {
-                stage_id: stage,
-                event: StageLifecycleEvent::Running,
-            },
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
+                stage_count: Some(1),
+            }),
         )
         .await;
     }
     let (endpoint, _closing) = self::endpoint(journal.clone(), vec![]);
     let mut body = open(&endpoint, None).await;
-    assert!(
-        futures::poll!(body.next()).is_pending(),
-        "ready history must yield before exhausting the tape"
-    );
-    tokio::task::yield_now().await;
-    let reads = journal.reads.load(Ordering::SeqCst);
-    assert!(reads > 0 && reads < 256);
+    let reads = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            assert!(
+                futures::poll!(body.next()).is_pending(),
+                "ready history must yield before exhausting the tape"
+            );
+            tokio::task::yield_now().await;
+            let reads = journal.reads.load(Ordering::SeqCst);
+            if reads > 0 {
+                break reads;
+            }
+        }
+    })
+    .await
+    .expect("catch-up begins before cancellation");
+    assert!(reads < 256);
     drop(body);
     tokio::task::yield_now().await;
     assert!(journal.reader_dropped.load(Ordering::SeqCst));
@@ -1263,9 +1311,9 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
 async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_frame_disconnects() {
     let system = SystemId::new();
     let writer = WriterId::from(system);
-    let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system)));
     let left = StageId::new();
     let right = StageId::new();
+    let journal = TestJournals::new(system, &[left, right]);
     let (endpoint, closing) = endpoint(journal.clone(), definition(left, right));
     let mut slow = open(&endpoint, None).await;
     let mut fast = open(&endpoint, None).await;
@@ -1280,13 +1328,10 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
         );
     }
 
-    let running = append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
-            stage_id: left,
-            event: StageLifecycleEvent::Running,
-        },
+    let running = append_stage(
+        journal.stage(left),
+        left,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: left }),
     )
     .await;
     let fact = fast.next().await.unwrap();
@@ -1303,26 +1348,26 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
         running.envelope.provenance.event.id.to_string()
     );
 
-    append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
+    append_stage(
+        journal.stage(left),
+        left,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed {
             stage_id: left,
-            event: StageLifecycleEvent::Completed { accounting: None },
-        },
+            accounting: None,
+        }),
     )
     .await;
-    append(
-        journal.as_ref(),
-        writer,
-        SystemPayload::StageLifecycle {
+    append_stage(
+        journal.stage(right),
+        right,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Drained {
             stage_id: right,
-            event: StageLifecycleEvent::Drained,
-        },
+            events_processed: None,
+        }),
     )
     .await;
     append(
-        journal.as_ref(),
+        journal.system.as_ref(),
         writer,
         SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
     )
@@ -1343,7 +1388,19 @@ async fn differently_paced_clients_keep_independent_cursors_and_repair_derived_f
         );
     }
     assert_eq!(
-        journal.read_all_unordered().await.unwrap().len(),
+        journal.system.read_all_unordered().await.unwrap().len()
+            + journal
+                .stage(left)
+                .read_all_unordered()
+                .await
+                .unwrap()
+                .len()
+            + journal
+                .stage(right)
+                .read_all_unordered()
+                .await
+                .unwrap()
+                .len(),
         4,
         "readers create no facts"
     );
@@ -1358,6 +1415,8 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     use obzenflow_runtime::stages::common::handlers::TypedFiniteSourceHandler;
     use obzenflow_runtime::stages::sink::SinkTyped;
     use obzenflow_runtime::stages::SourceError;
+
+    let started = std::time::Instant::now();
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     struct Item(usize);
@@ -1429,21 +1488,17 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         "the real factory snapshot reaches topology"
     );
     let journal = handle.system_journal().unwrap();
-    let report_journals = handle.report_journals();
-    let source_journal = report_journals
+    let stage_journals = handle.stage_journals();
+    let system_journals = handle.system_journals();
+    let source_journal = stage_journals
         .iter()
-        .find_map(|report| match report {
-            obzenflow_runtime::supervised_base::SupervisorJournal::Stage { journal, context }
-                if context.stage_name == "input" =>
-            {
-                Some(journal.clone())
-            }
-            _ => None,
-        })
-        .unwrap();
+        .find(|(id, _)| *id == StageId::from_ulid(input.id.ulid()))
+        .unwrap()
+        .1
+        .clone();
     let (endpoint, closing) = endpoint(journal.clone(), vec![]);
     let endpoint = endpoint
-        .with_report_journals(report_journals.clone())
+        .with_live_journals(stage_journals.clone(), system_journals.clone())
         .with_observation_interval(Duration::from_secs(3600));
     let mut stream = open(&endpoint, None).await;
     while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {}
@@ -1454,11 +1509,19 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .await
         .expect("source finishes while Studio is unread")
         .unwrap();
+    println!(
+        "Studio middleware proof: flow settled after {:?}",
+        started.elapsed()
+    );
     closing.send(true).unwrap();
     let body: Vec<_> = tokio::time::timeout(Duration::from_secs(2), stream.collect())
         .await
         .unwrap();
     let changes = frames(&body, "middleware_lifecycle");
+    println!(
+        "Studio middleware proof: unread stream drained after {:?}",
+        started.elapsed()
+    );
     let payloads: Vec<_> = changes.iter().map(|frame| frame_payload(frame)).collect();
     let breaker_states: Vec<_> = payloads
         .iter()
@@ -1494,8 +1557,14 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         .await
         .unwrap()
         .into_iter()
-        .filter_map(obzenflow_core::event::SupervisorRecord::from_chain)
-        .filter(|record| matches!(record.payload, SystemPayload::MiddlewareLifecycle { .. }))
+        .filter(|record| {
+            matches!(
+                record.payload,
+                ChainPayload::Execution(
+                    ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_)
+                )
+            )
+        })
         .map(|record| record.id().to_string())
         .collect();
     let ids: Vec<_> = changes
@@ -1508,24 +1577,34 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
         })
         .collect();
     assert_eq!(ids, recorded);
+    println!(
+        "Studio middleware proof: journal transitions checked after {:?}",
+        started.elapsed()
+    );
     assert!(
         journal
             .read_all_unordered()
             .await
             .unwrap()
             .iter()
-            .all(|record| !matches!(record.payload, SystemPayload::MiddlewareLifecycle { .. })),
-        "pipeline history has no middleware mirrors"
+            .all(|record| record.writer_id().as_system().is_some()),
+        "pipeline history contains only owner facts"
     );
 
     // Resume independently in each physical history after the first transition.
     let (resumed_endpoint, resumed_closing) = self::endpoint(journal.clone(), vec![]);
-    let resumed_endpoint = resumed_endpoint.with_report_journals(report_journals.clone());
+    let resumed_endpoint =
+        resumed_endpoint.with_live_journals(stage_journals.clone(), system_journals.clone());
     let resumed =
         collect_closing(&resumed_endpoint, resumed_closing, changes[0].id.as_deref()).await;
+    println!(
+        "Studio middleware proof: reconnect drained after {:?}",
+        started.elapsed()
+    );
     assert_eq!(
         frames(&resumed, "middleware_lifecycle")
             .iter()
+            .filter(|frame| frame_payload(frame).get("commitment").is_some())
             .map(|frame| frame_payload(frame)["commitment"]["event_id"]
                 .as_str()
                 .unwrap()
@@ -1535,13 +1614,17 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     );
 
     let (fresh_endpoint, fresh_closing) = self::endpoint(journal, vec![]);
-    let fresh_endpoint = fresh_endpoint.with_report_journals(report_journals);
+    let fresh_endpoint = fresh_endpoint.with_live_journals(stage_journals, system_journals);
     let fresh = collect_closing(&fresh_endpoint, fresh_closing, None).await;
     let snapshot = frame_payload(frames(&fresh, "middleware_state_snapshot")[0]);
     let middleware = snapshot["middleware"].as_array().unwrap();
     assert_eq!(middleware.len(), 1);
     assert_eq!(middleware[0]["circuit_breaker"]["state"], "closed");
     assert_eq!(middleware[0]["rate_limiter"]["mode"], "limiting");
+    println!(
+        "Studio middleware proof: fresh snapshot checked after {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -1640,7 +1723,6 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
     use obzenflow_runtime::run_context::FlowBuildContext;
     use obzenflow_runtime::stages::common::handlers::TypedAsyncFiniteSourceHandler;
     use obzenflow_runtime::stages::{sink::SinkTyped, SourceError};
-    use obzenflow_runtime::supervised_base::SupervisorJournal;
     use std::collections::HashMap;
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1720,10 +1802,10 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
         .unwrap();
         let handle = built.into_handle();
         let pipeline = handle.system_journal().unwrap();
-        let journals = handle.report_journals();
+        let journals = handle.stage_journals();
         let metrics = handle.metrics_journals().unwrap();
         let (endpoint, closing) = endpoint(pipeline.clone(), vec![]);
-        let endpoint = endpoint.with_report_journals(journals.clone());
+        let endpoint = endpoint.with_live_journals(journals.clone(), handle.system_journals());
         let mut stream = open(&endpoint, None).await;
         while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {}
         let started = std::time::Instant::now();
@@ -1774,21 +1856,17 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
             })
             .collect();
         let mut completion_latencies = Vec::new();
-        for journal in &journals {
-            let SupervisorJournal::Stage { journal, .. } = journal else {
-                continue;
-            };
+        for (stage, journal) in &journals {
             let rows = journal.read_all_unordered().await.unwrap();
             let completed = rows
                 .iter()
-                .filter_map(|row| obzenflow_core::event::SupervisorRecord::from_chain(row.clone()))
+                .filter(|row| row.writer_id().as_stage() == Some(stage))
                 .find(|row| {
                     matches!(
                         row.payload,
-                        SystemPayload::StageLifecycle {
-                            event: StageLifecycleEvent::Completed { .. },
-                            ..
-                        }
+                        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                            StageLifecycleFact::Completed { .. }
+                        ))
                     )
                 })
                 .unwrap();
@@ -1805,10 +1883,11 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
                     .vector_clock
                     .get(&CausalCoordinate::new((*journal.id()).into()))
                     >= position,
-                "pipeline drained covers settled child reports"
+                "pipeline drained inherits the joined child completion frontier"
             );
             completion_latencies.push(
-                (terminal.envelope.provenance.journal.timestamp - completed.journal().timestamp)
+                (terminal.envelope.provenance.journal.timestamp
+                    - completed.envelope.provenance.journal.timestamp)
                     .num_microseconds()
                     .unwrap(),
             );
@@ -1825,4 +1904,142 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
             .all(|row| row.event_type_name() != "system.metrics.exported"));
         eprintln!("composed backend={disk}, stages={stages}, settlement={settled:?}, Studio={:?}, stage-completion-to-pipeline-drained-us p50={} p95={} p99={} max={}, exports={}, coordination={}", started.elapsed(), completion_latencies[stages / 2], completion_latencies[(stages - 1) * 95 / 100], completion_latencies[(stages - 1) * 99 / 100], completion_latencies[stages - 1], exports.len(), coord.len());
     }
+}
+
+#[tokio::test]
+async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observations() {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let run = FlowId::new();
+        let foreign = StageId::new();
+        let owner = StageId::new();
+        let system = SystemId::new();
+        let source = MemoryJournal::with_owner_in_run(JournalOwner::stage(foreign), run);
+        let original = append_stage(
+            &source,
+            foreign,
+            ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: foreign }),
+        )
+        .await;
+        let journal: Arc<dyn Journal<ChainEvent>> = if disk {
+            Arc::new(
+                crate::journal::disk::DiskJournal::with_owner_in_run(
+                    directory.path().join("owner.log"),
+                    JournalOwner::stage(owner),
+                    run,
+                )
+                .unwrap(),
+            )
+        } else {
+            Arc::new(MemoryJournal::with_owner_in_run(
+                JournalOwner::stage(owner),
+                run,
+            ))
+        };
+        journal
+            .append(
+                original.authored(),
+                AppendOptions::from_record(Some(&original)).unwrap(),
+            )
+            .await
+            .unwrap();
+        let owned = append_stage(
+            journal.as_ref(),
+            owner,
+            ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: owner }),
+        )
+        .await;
+        let journals = TestJournals {
+            system: Arc::new(MemoryJournal::with_owner_in_run(
+                JournalOwner::system(system),
+                run,
+            )),
+            stages: vec![(owner, journal.clone())],
+        };
+        append(
+            journals.system.as_ref(),
+            system.into(),
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        )
+        .await;
+        let (endpoint, closing) = endpoint(journals, vec![]);
+        let stream = open(&endpoint, None).await;
+        closing.send(true).unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
+            .await
+            .unwrap();
+        let stages = frames(&body, "stage_lifecycle");
+        assert_eq!(stages.len(), 1);
+        assert_eq!(frame_payload(stages[0])["stage_id"], owner.to_string());
+        let bootstrap = frames(&body, "bootstrap");
+        let cursor = bootstrap[0].id.as_ref().unwrap();
+        let positions: std::collections::BTreeMap<JournalId, u64> =
+            serde_json::from_str(cursor.strip_prefix("jr1:").unwrap()).unwrap();
+        assert_eq!(positions[journal.id()], owned.local_sequence());
+        assert_eq!(
+            owned.local_sequence(),
+            2,
+            "forwarded records retain ordinary journal positions"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_issued_read_settles_while_the_client_stops_polling() {
+    use futures::FutureExt;
+    let probe = Arc::new(PendingOpen::default());
+    let mut journal = ScriptedJournal::new(SystemId::new());
+    journal.pending_read = Some(probe.clone());
+    let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
+    let mut body = open(&endpoint, None).await;
+    assert_eq!(
+        body.next().await.unwrap().event.as_deref(),
+        Some("bootstrap")
+    );
+    assert!(body.next().now_or_never().is_none());
+    tokio::time::timeout(Duration::from_secs(2), probe.entered.notified())
+        .await
+        .unwrap();
+    // Finishing the underlying I/O must release its operation guard even though
+    // this connection does not poll the returned read result again.
+    probe.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), probe.dropped.notified())
+        .await
+        .expect("a paused client cannot retain a settled read's resources");
+    drop(body);
+}
+
+#[tokio::test]
+async fn ready_records_are_delivered_before_a_later_pending_read_settles() {
+    let system = SystemId::new();
+    let mut journal = ScriptedJournal::new(system);
+    let probe = Arc::new(PendingOpen::default());
+    journal.pending_read = Some(probe.clone());
+    journal.pending_read_from = 1;
+    let record = append(
+        &journal,
+        system.into(),
+        SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Running {
+            stage_count: Some(1),
+        }),
+    )
+    .await;
+    let reader_dropped = journal.reader_dropped.clone();
+    let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
+    let mut body = open(&endpoint, Some("jr1:{}")).await;
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.next())
+        .await
+        .expect("a pending tail read cannot withhold the preceding committed record")
+        .unwrap();
+    assert_eq!(frame.event.as_deref(), Some("flow_lifecycle"));
+    assert_eq!(frame.id, Some(cursor(&record)));
+    tokio::select! {
+        _ = body.next() => panic!("the pending tail cannot produce another frame"),
+        _ = probe.entered.notified() => {}
+    }
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
+        .await
+        .expect("response drop cancels the pending read after an emitted record");
+    assert!(reader_dropped.load(Ordering::SeqCst));
 }

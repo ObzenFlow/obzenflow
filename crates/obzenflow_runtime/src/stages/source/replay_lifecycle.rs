@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::types::{Count, DurationMs};
-use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemPayload, WriterId};
-use obzenflow_core::StageId;
+use obzenflow_core::event::{ChainEventFactory, ReplayLifecycleEvent};
 use std::time::Instant;
 
 /// The completion facts one exhaustion (or resume handoff) records.
@@ -26,9 +26,8 @@ pub(crate) struct ReplayCompletionGuard {
 impl ReplayCompletionGuard {
     pub(crate) async fn maybe_emit_completed(
         &mut self,
-        stage_id: StageId,
-        stage_name: &str,
-        report_journal: &crate::supervised_base::SupervisorJournal,
+        context: &obzenflow_core::event::provenance::FlowContext,
+        journal: &std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
         replay_started_at: Option<Instant>,
         facts: ReplayCompletionFacts,
     ) {
@@ -44,25 +43,26 @@ impl ReplayCompletionGuard {
             })
             .unwrap_or(0);
 
-        let completed_event = SystemEvent::new(
-            WriterId::from(stage_id),
-            SystemPayload::ReplayLifecycle(ReplayLifecycleEvent::Completed {
+        let completed_event = ChainEventFactory::execution_event(
+            context.stage_id.into(),
+            ExecutionPayload::ReplayLifecycle(ReplayLifecycleEvent::Completed {
                 replayed_count: Count(facts.replayed_count),
                 skipped_count: Count(facts.skipped_count),
                 duration_ms: DurationMs(duration_ms),
                 synthesized_eof_kind: facts.synthesized_eof_kind,
             }),
-        );
+        )
+        .with_flow_context(context.clone());
 
-        if let Err(e) = crate::supervised_base::publication::report(
-            report_journal,
+        if let Err(e) = crate::supervised_base::publication::append(
+            journal,
             completed_event,
             Default::default(),
         )
         .await
         {
             tracing::error!(
-                stage_name = %stage_name,
+                stage_name = %context.stage_name,
                 journal_error = %e,
                 "Failed to append ReplayLifecycle::Completed system event"
             );

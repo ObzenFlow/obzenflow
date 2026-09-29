@@ -78,7 +78,7 @@ impl Default for IngestionConfig {
 
 /// FLOWIP-115d: the system-journal writer that records hosted-ingress refusal
 /// facts. Installed at web-surface wiring time from the host system journal.
-type IngressRefusalWriter = obzenflow_runtime::pipeline::reports::PipelineReports;
+type IngressRefusalWriter = obzenflow_runtime::pipeline::ingress::IngressRefusalWriter;
 
 #[derive(Debug)]
 pub(crate) struct IngressRefusalRecordError {

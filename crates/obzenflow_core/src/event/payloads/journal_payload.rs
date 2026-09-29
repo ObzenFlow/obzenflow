@@ -31,8 +31,6 @@ pub trait JournalPayload:
         + Sync;
     fn decode(provenance: &Self::Provenance, payload: Value) -> Result<Self, serde_json::Error>;
     fn validate(&self, provenance: &Self::Provenance) -> Result<(), serde_json::Error>;
-    /// Protected, borrowing classification. Owner authority is checked by the consumer.
-    fn is_supervision_candidate(&self) -> bool;
     fn visit_metrics_keys(
         &self,
         provenance: &Self::Provenance,
@@ -44,15 +42,6 @@ impl sealed::Sealed for ChainPayload {}
 impl JournalPayload for ChainPayload {
     type Event = crate::event::ChainEvent;
     type Provenance = ChainEventProvenance;
-
-    fn is_supervision_candidate(&self) -> bool {
-        match self {
-            Self::Execution(execution) => execution.is_supervision_candidate(),
-            Self::Fact(_) | Self::CompositeData(_) | Self::FlowControl(_) | Self::Delivery(_) => {
-                false
-            }
-        }
-    }
 
     fn visit_metrics_keys(
         &self,
@@ -165,68 +154,23 @@ impl JournalPayload for SystemPayload {
     type Event = crate::event::SystemEvent;
     type Provenance = SystemEventProvenance;
 
-    fn is_supervision_candidate(&self) -> bool {
-        true
-    }
-
     fn visit_metrics_keys(
         &self,
         provenance: &Self::Provenance,
         visit: &mut dyn FnMut(MetricsTailKey),
     ) {
-        use super::system_payload::StageLifecycleEvent;
-        match self {
-            Self::StageLifecycle { stage_id, event } => {
-                visit(MetricsTailKey::StageLifecycle(*stage_id));
-                if matches!(
-                    event,
-                    StageLifecycleEvent::Draining {
-                        accounting: Some(_)
-                    } | StageLifecycleEvent::Completed {
-                        accounting: Some(_)
-                    } | StageLifecycleEvent::Cancelled {
-                        accounting: Some(_),
-                        ..
-                    } | StageLifecycleEvent::Failed {
-                        accounting: Some(_),
-                        ..
-                    }
-                ) {
-                    visit(MetricsTailKey::Accounting(*stage_id));
-                }
+        if let Self::PipelineLifecycle(event) = self {
+            visit(MetricsTailKey::PipelineLifecycle(provenance.writer_id));
+            use super::system_payload::PipelineLifecycleEvent;
+            if matches!(
+                event,
+                PipelineLifecycleEvent::Completed { .. }
+                    | PipelineLifecycleEvent::Failed { .. }
+                    | PipelineLifecycleEvent::Cancelled { .. }
+                    | PipelineLifecycleEvent::NotStarted
+            ) {
+                visit(MetricsTailKey::PipelineOutcome(provenance.writer_id));
             }
-            Self::PipelineLifecycle(event) => {
-                visit(MetricsTailKey::PipelineLifecycle(provenance.writer_id));
-                use super::system_payload::PipelineLifecycleEvent;
-                if matches!(
-                    event,
-                    PipelineLifecycleEvent::Completed { .. }
-                        | PipelineLifecycleEvent::Failed { .. }
-                        | PipelineLifecycleEvent::Cancelled { .. }
-                        | PipelineLifecycleEvent::NotStarted
-                ) {
-                    visit(MetricsTailKey::PipelineOutcome(provenance.writer_id));
-                }
-            }
-            Self::ContractResult {
-                upstream,
-                reader,
-                selected_event_type,
-                feed_role,
-                contract_name,
-                ..
-            } => {
-                visit(MetricsTailKey::Contract(
-                    crate::metrics::ContractMetricEdgeKey {
-                        upstream: *upstream,
-                        downstream: *reader,
-                        selected_event_type: selected_event_type.clone(),
-                        feed_role: *feed_role,
-                        contract: contract_name.clone(),
-                    },
-                ));
-            }
-            _ => {}
         }
     }
 

@@ -101,8 +101,8 @@ mod tests {
 
     #[test]
     fn test_system_event_observation() {
-        use crate::event::{StageLifecycleEvent, SystemEvent, SystemPayload};
-        use crate::id::{StageId, SystemId};
+        use crate::event::{PipelineLifecycleEvent, SystemEvent, SystemPayload};
+        use crate::id::SystemId;
 
         let observer = NoOpMetricsObserver::new();
 
@@ -110,10 +110,7 @@ mod tests {
         let system_id = SystemId::new();
         let system_event = SystemEvent::new(
             WriterId::from(system_id),
-            SystemPayload::StageLifecycle {
-                stage_id: StageId::new(),
-                event: StageLifecycleEvent::Running,
-            },
+            SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Starting),
         );
 
         // Create the envelope

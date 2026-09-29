@@ -14,10 +14,6 @@ use async_trait::async_trait;
 
 mod storage;
 pub use storage::JournalStorageReader;
-pub mod reports;
-pub use reports::{
-    JournalReportReader, JournalReportStorageReader, ReportScan, ReportScanBudget, ReportScanItem,
-};
 
 /// A reader that maintains position for efficient sequential journal reading
 ///

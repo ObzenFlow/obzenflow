@@ -14,10 +14,12 @@ use obzenflow_adapters::middleware::{
     SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
 };
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryResult};
-use obzenflow_core::event::payloads::execution_payload::{CircuitBreakerFact, ExecutionPayload};
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, ExecutionPayload, StageLifecycleFact,
+};
 use obzenflow_core::event::{
-    ChainEvent, ChainPayload, SinkOperationFailed, StageFatalCode, StageFatalRecorded,
-    StageLifecycleEvent, SupervisorRecord, SystemEvent, SystemPayload,
+    ChainEvent, ChainPayload, SinkOperationFailed, StageFatalCode, StageFatalRecorded, SystemEvent,
+    SystemPayload,
 };
 use obzenflow_core::{EventId, JournalRecord, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
@@ -466,17 +468,16 @@ async fn poisoned_cause_remains_primary_when_observation_also_panics() {
     let lifecycle = data
         .iter()
         .cloned()
-        .filter_map(SupervisorRecord::from_chain)
         .find_map(|envelope| {
             let id = *envelope.id();
             match envelope.payload {
-                SystemPayload::StageLifecycle {
-                    stage_id: failed_stage,
-                    event:
-                        StageLifecycleEvent::Failed {
-                            causal_event_id, ..
-                        },
-                } if failed_stage == stage_id => Some((id, causal_event_id)),
+                ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                    StageLifecycleFact::Failed {
+                        stage_id: failed_stage,
+                        causal_event_id,
+                        ..
+                    },
+                )) if failed_stage == stage_id => Some((id, causal_event_id)),
                 _ => None,
             }
         })
@@ -601,9 +602,14 @@ async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
 
     let reports = sink
         .iter()
-        .cloned()
-        .filter_map(SupervisorRecord::from_chain)
-        .filter(|report| matches!(report.payload, SystemPayload::MiddlewareLifecycle { .. }))
+        .filter(|report| {
+            matches!(
+                report.payload,
+                ChainPayload::Execution(
+                    ExecutionPayload::CircuitBreaker(_) | ExecutionPayload::RateLimiter(_)
+                )
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         reports
@@ -616,7 +622,7 @@ async fn policy_evidence_is_runtime_stamped_parented_and_reported_in_place() {
         read_system(&run)
             .await
             .iter()
-            .all(|row| !matches!(row.payload, SystemPayload::MiddlewareLifecycle { .. })),
+            .all(|row| row.writer_id().as_system().is_some()),
         "middleware reports stay in their original stage journal"
     );
     assert_eq!(

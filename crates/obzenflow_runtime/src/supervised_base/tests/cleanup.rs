@@ -3,245 +3,305 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::stages::common::stage_handle::discarded_control_details;
-use crate::supervised_base::cleanup::HandlerSupervisedCleanup;
+use crate::stages::common::stage_lifecycle::LifecyclePhase;
 use crate::supervised_base::handle::StandardHandle;
+use crate::supervised_base::handler_supervised::{
+    ActionCompletion, ActionExecution, SupervisorAction,
+};
 use crate::supervised_base::with_external_events::ExternalControlEvent;
 use futures::FutureExt;
-use obzenflow_core::event::payloads::supervisor_descriptor::SupervisorKind;
 use obzenflow_core::event::CommandDiscardDisposition;
-use obzenflow_fsm::FsmError;
-use std::error::Error;
 use tokio::sync::Notify;
 use tokio::time::{timeout, Duration};
 
 #[derive(Default)]
 struct CleanupProbe {
-    dispatches: AtomicUsize,
-    completion_hooks: AtomicUsize,
+    work: AtomicUsize,
     started: AtomicUsize,
     finished: AtomicUsize,
+    dropped: AtomicUsize,
     entered: Notify,
     release: Notify,
+}
+
+#[derive(Clone, Debug, PartialEq, StateVariant)]
+enum State {
+    Created,
+    Initializing,
+    Running,
+    Finalising,
+    Failing(String),
+    Completed,
+    Failed(String),
+}
+#[derive(Clone, Debug, EventVariant)]
+enum Event {
+    Initialize,
+    Initialized,
+    Finish,
+    Settled,
+    Error(String),
+}
+#[derive(Clone, Debug)]
+enum Action {
+    Host(SupervisorAction<Event>),
+    Work,
+}
+
+struct Context {
+    journal: Arc<terminal_commands::TestJournal<obzenflow_core::ChainEvent>>,
+    publications: Arc<PublicationScope>,
+    probe: Arc<CleanupProbe>,
+    work_fails: bool,
+}
+impl FsmContext for Context {}
+impl Drop for Context {
+    fn drop(&mut self) {
+        self.probe.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl FsmAction for Action {
+    type Context = Context;
+    async fn execute(&self, context: &mut Context) -> Result<(), FsmError> {
+        let Self::Work = self else {
+            unreachable!("host operation")
+        };
+        context.journal.assert_registered();
+        let current = PublicationScope::current().expect("publication owner");
+        assert!(Arc::ptr_eq(&context.publications, &current));
+        context.probe.work.fetch_add(1, Ordering::SeqCst);
+        if context.work_fails {
+            return Err(FsmError::HandlerError("primary work failure".into()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct CleanupSupervisor {
     stage_id: StageId,
-    runner_fails: bool,
-    failure_path: Option<FailurePath>,
+    work_fails: bool,
     cleanup_fails: bool,
     block_cleanup: bool,
     probe: Arc<CleanupProbe>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum FailurePath {
-    Transition,
-    DispatchFailureTransition,
-    ActionFailureTransition,
-    DispatchFailureAction,
-    ActionFailureAction,
-}
-
-#[derive(Clone, Debug)]
-enum CleanupTestAction {
-    Normal,
-    Failure,
-}
-
-#[async_trait::async_trait]
-impl FsmAction for CleanupTestAction {
-    type Context = TestContext;
-
-    async fn execute(&self, context: &mut Self::Context) -> Result<(), FsmError> {
-        context.assert_publication_owner();
-        context
-            .failure_actions_executed
-            .fetch_add(1, Ordering::SeqCst);
-        let error = match self {
-            Self::Normal => "normal action failure",
-            Self::Failure => "primary failure action failure",
-        };
-        Err(FsmError::HandlerError(error.into()))
-    }
+fn failing<'a>(
+    state: &'a State,
+    event: &'a Event,
+    _: &'a mut Context,
+) -> futures::future::BoxFuture<'a, Result<Transition<State, Action>, FsmError>> {
+    let Event::Error(cause) = event else {
+        unreachable!()
+    };
+    let cause = cause.clone();
+    // Finalising has already selected cleanup. Its failed result must not repeat it.
+    let actions = if matches!(state, State::Finalising) {
+        vec![
+            Action::Host(SupervisorAction::SettlePublications),
+            Action::Host(SupervisorAction::Emit(Event::Settled)),
+        ]
+    } else {
+        vec![
+            Action::Host(SupervisorAction::Cleanup),
+            Action::Host(SupervisorAction::SettlePublications),
+            Action::Host(SupervisorAction::Emit(Event::Settled)),
+        ]
+    };
+    Box::pin(async move {
+        Ok(Transition {
+            next_state: State::Failing(cause),
+            actions,
+        })
+    })
 }
 
 impl Supervisor for CleanupSupervisor {
-    type State = TestState;
-    type Event = TestEvent;
-    type Context = TestContext;
-    type Action = CleanupTestAction;
-
+    type State = State;
+    type Event = Event;
+    type Context = Context;
+    type Action = Action;
     fn build_state_machine(
         &self,
-        initial_state: Self::State,
-    ) -> StateMachine<Self::State, Self::Event, Self::Context, Self::Action> {
-        let failure_path = self.failure_path;
+        initial_state: State,
+    ) -> StateMachine<State, Event, Context, Action> {
         fsm! {
-            state: TestState;
-            event: TestEvent;
-            context: TestContext;
-            action: CleanupTestAction;
-            initial: initial_state;
-
-            state TestState::Running {
-                on TestEvent::Error => move |_state: &TestState, _event: &TestEvent, _ctx: &mut TestContext| {
-                    Box::pin(async move {
-                        let action = match failure_path {
-                            Some(FailurePath::Transition | FailurePath::DispatchFailureTransition) => {
-                                return Err(FsmError::HandlerError("primary transition failure".into()));
-                            }
-                            Some(FailurePath::DispatchFailureAction) => CleanupTestAction::Failure,
-                            Some(FailurePath::ActionFailureTransition | FailurePath::ActionFailureAction) => CleanupTestAction::Normal,
-                            None => panic!("completion-only fixture must not transition"),
-                        };
-                        Ok(Transition {
-                            next_state: TestState::Failed("failure fixture".into()),
-                            actions: vec![action],
-                        })
-                    })
+            state: State; event: Event; context: Context; action: Action; initial: initial_state;
+            state State::Created {
+                on Event::Initialize => |_: &State, _: &Event, _: &mut Context| {
+                    Box::pin(async { Ok(Transition { next_state: State::Initializing, actions: vec![Action::Host(SupervisorAction::Register), Action::Host(SupervisorAction::Emit(Event::Initialized))] }) })
                 };
             }
-
-            state TestState::Failed {
-                on TestEvent::Error => move |state: &TestState, _event: &TestEvent, _ctx: &mut TestContext| {
+            state State::Initializing {
+                on Event::Initialized => |_: &State, _: &Event, _: &mut Context| {
+                    Box::pin(async { Ok(Transition { next_state: State::Running, actions: vec![Action::Work, Action::Host(SupervisorAction::Emit(Event::Finish))] }) })
+                };
+                on Event::Error => failing;
+            }
+            state State::Running {
+                on Event::Finish => |_: &State, _: &Event, _: &mut Context| {
+                    Box::pin(async { Ok(Transition { next_state: State::Finalising, actions: vec![Action::Host(SupervisorAction::Cleanup), Action::Host(SupervisorAction::SettlePublications), Action::Host(SupervisorAction::Emit(Event::Settled))] }) })
+                };
+                on Event::Error => failing;
+            }
+            state State::Finalising {
+                on Event::Settled => |_: &State, _: &Event, _: &mut Context| {
+                    Box::pin(async { Ok(Transition { next_state: State::Completed, actions: vec![] }) })
+                };
+                on Event::Error => failing;
+            }
+            state State::Failing {
+                on Event::Error => |state: &State, _: &Event, _: &mut Context| {
                     let state = state.clone();
-                    Box::pin(async move {
-                        if matches!(failure_path, Some(FailurePath::ActionFailureTransition)) {
-                            return Err(FsmError::HandlerError("primary transition failure".into()));
-                        }
-                        Ok(Transition {
-                            next_state: state,
-                            actions: vec![CleanupTestAction::Failure],
-                        })
-                    })
+                    Box::pin(async move { Ok(Transition { next_state: state, actions: vec![] }) })
+                };
+                on Event::Settled => |state: &State, _: &Event, _: &mut Context| {
+                    let State::Failing(cause) = state else { unreachable!() };
+                    let cause = cause.clone();
+                    Box::pin(async move { Ok(Transition { next_state: State::Failed(cause), actions: vec![] }) })
                 };
             }
+            state State::Completed {}
+            state State::Failed {}
         }
     }
-
     fn name(&self) -> &str {
         "cleanup-supervisor"
     }
-
     fn supervisor_kind(&self) -> SupervisorKind {
         SupervisorKind::Transform
     }
-
-    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal {
-        context.system_journal.clone().into()
+    fn registration(
+        &self,
+        context: &Context,
+        descriptor: obzenflow_core::event::payloads::supervisor_descriptor::SupervisorDescriptor,
+    ) -> crate::supervised_base::base::Registration {
+        let journal: Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>> =
+            context.journal.clone();
+        crate::supervised_base::base::register_stage(
+            journal,
+            obzenflow_core::event::provenance::FlowContext::new("cleanup", self.stage_id),
+            descriptor,
+        )
     }
 }
 
 impl ExternalEventPolicy for CleanupSupervisor {
-    fn external_event_mode(_state: &Self::State) -> ExternalEventMode {
+    fn external_event_mode(_: &State) -> ExternalEventMode {
         ExternalEventMode::Poll
     }
-
-    fn on_external_event_channel_closed(_state: &Self::State) -> Option<Self::Event> {
+    fn on_external_event_channel_closed(_: &State) -> Option<Event> {
         None
     }
 }
-
-impl ExternalControlEvent for TestEvent {
+impl ExternalControlEvent for Event {
     fn discard_details(&self) -> (CommandDiscardDisposition, Option<String>) {
-        let Self::Error(error) = self;
-        discarded_control_details(Some(error))
+        crate::stages::common::stage_handle::discarded_control_details(match self {
+            Self::Error(cause) => Some(cause),
+            _ => None,
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl HandlerSupervised for CleanupSupervisor {
     type Handler = ();
-
+    fn lifecycle_phase(&self, state: &State) -> LifecyclePhase {
+        match state {
+            State::Initializing => LifecyclePhase::Initializing,
+            State::Running => LifecyclePhase::Active,
+            State::Finalising => LifecyclePhase::Finalising,
+            State::Failing(cause) => LifecyclePhase::Failing(cause.clone()),
+            State::Failed(cause) => LifecyclePhase::Failed(cause.clone()),
+            State::Completed => LifecyclePhase::Completed,
+            State::Created => LifecyclePhase::Other,
+        }
+    }
+    fn supervisor_action(&self, action: &Action) -> Option<SupervisorAction<Event>> {
+        match action {
+            Action::Host(action) => Some(action.clone()),
+            _ => None,
+        }
+    }
     async fn dispatch_state(
         &mut self,
-        _state: &Self::State,
-        context: &mut Self::Context,
-    ) -> Result<EventLoopDirective<Self::Event>, Box<dyn Error + Send + Sync>> {
-        context.assert_publication_owner();
-        self.probe.dispatches.fetch_add(1, Ordering::SeqCst);
-        match self.failure_path {
-            Some(FailurePath::DispatchFailureTransition | FailurePath::DispatchFailureAction) => {
-                Err("dispatch failure".into())
-            }
-            Some(_) => Ok(EventLoopDirective::Transition(TestEvent::Error(
-                "transition fixture".into(),
-            ))),
-            None => Ok(EventLoopDirective::Terminate),
-        }
+        state: &State,
+        _: &mut Context,
+    ) -> Result<EventLoopDirective<Event>, Box<dyn Error + Send + Sync>> {
+        Ok(match state {
+            State::Created => EventLoopDirective::Transition(Event::Initialize),
+            State::Completed | State::Failed(_) => EventLoopDirective::Terminate,
+            _ => panic!("pending states must have an operation"),
+        })
     }
-
-    fn writer_id(&self) -> WriterId {
-        WriterId::from(self.stage_id)
-    }
-
-    fn stage_id(&self) -> StageId {
-        self.stage_id
-    }
-
-    fn event_for_action_error(&self, msg: String) -> Self::Event {
-        TestEvent::Error(msg)
-    }
-
-    async fn write_completion_event(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.probe.completion_hooks.fetch_add(1, Ordering::SeqCst);
-        if self.runner_fails {
-            return Err("primary runner failure".into());
-        }
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl HandlerSupervisedCleanup for CleanupSupervisor {
-    async fn cleanup_after_run(
+    async fn execute_cleanup(
         &mut self,
-        context: &Self::Context,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        context: &Context,
+    ) -> Result<ActionExecution<Context, Event>, FsmError> {
         let current = PublicationScope::current().expect("cleanup retains publication ownership");
         assert!(Arc::ptr_eq(&context.publications, &current));
-        self.probe.started.fetch_add(1, Ordering::SeqCst);
-        self.probe.entered.notify_one();
-        if self.block_cleanup {
-            self.probe.release.notified().await;
-        }
-        self.probe.finished.fetch_add(1, Ordering::SeqCst);
-        if self.cleanup_fails {
-            return Err("secondary cleanup failure".into());
-        }
-        Ok(())
+        let probe = self.probe.clone();
+        let block = self.block_cleanup;
+        let fail = self.cleanup_fails;
+        Ok(ActionExecution::Pending(Box::pin(async move {
+            probe.started.fetch_add(1, Ordering::SeqCst);
+            probe.entered.notify_one();
+            if block {
+                probe.release.notified().await;
+            }
+            probe.finished.fetch_add(1, Ordering::SeqCst);
+            Box::new(move |_: &mut Context| {
+                if fail {
+                    Err(FsmError::HandlerError("secondary cleanup failure".into()).into())
+                } else {
+                    Ok(None)
+                }
+            }) as ActionCompletion<Context, Event>
+        })))
+    }
+    fn writer_id(&self) -> WriterId {
+        self.stage_id.into()
+    }
+
+    fn event_for_action_error(&self, message: String) -> Event {
+        Event::Error(message)
     }
 }
 
 fn spawn(
     supervisor: CleanupSupervisor,
-    mut journal: terminal_commands::TestJournal,
+    mut journal: terminal_commands::TestJournal<obzenflow_core::ChainEvent>,
     wrapped: bool,
-) -> StandardHandle<TestEvent, TestState> {
+) -> StandardHandle<Event, State> {
     journal.owner = Some(obzenflow_core::JournalOwner::stage(supervisor.stage_id));
+    let stage_id = supervisor.stage_id;
     let publications = PublicationScope::new();
-    let context = TestContext {
-        system_journal: Arc::new(journal),
-        failure_actions_executed: Arc::new(AtomicUsize::new(0)),
+    let context = Context {
+        journal: Arc::new(journal),
         publications: publications.clone(),
+        probe: supervisor.probe.clone(),
+        work_fails: supervisor.work_fails,
     };
-    let (sender, receiver, watcher) = ChannelBuilder::new().build(TestState::Running);
+    let (sender, receiver, watcher) = ChannelBuilder::new().build(State::Created);
     let task = if wrapped {
         let supervisor = HandlerSupervisedWithExternalEvents::new(
             supervisor,
             receiver,
             watcher.clone(),
-            (context.system_journal.clone()).into(),
+            crate::supervised_base::with_external_events::stage_commands(
+                context.journal.clone(),
+                obzenflow_core::event::provenance::FlowContext::new("cleanup", stage_id),
+            ),
         );
         SupervisorTaskBuilder::new("cleanup-supervisor")
             .with_publications(publications)
-            .spawn_handler_supervised(supervisor, TestState::Running, context)
+            .spawn_handler_supervised(supervisor, State::Created, context)
     } else {
         SupervisorTaskBuilder::new("cleanup-supervisor")
             .with_publications(publications)
-            .spawn_handler_supervised(supervisor, TestState::Running, context)
+            .spawn_handler_supervised(supervisor, State::Created, context)
     };
     HandleBuilder::new()
         .with_event_sender(sender)
@@ -252,44 +312,46 @@ fn spawn(
 }
 
 #[tokio::test]
-async fn cleanup_runs_once_and_preserves_runner_error_precedence() {
-    for runner_fails in [false, true] {
-        for cleanup_fails in [false, true] {
-            let probe = Arc::new(CleanupProbe::default());
-            let handle = spawn(
-                CleanupSupervisor {
-                    runner_fails,
-                    cleanup_fails,
-                    probe: probe.clone(),
-                    ..Default::default()
-                },
-                terminal_commands::TestJournal::default(),
-                false,
-            );
-            let result = timeout(Duration::from_secs(3), handle.wait_for_completion())
-                .await
-                .expect("cleanup settles");
-            match (runner_fails, cleanup_fails) {
-                (true, _) => assert!(result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("primary runner failure")),
-                (false, true) => assert!(result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("secondary cleanup failure")),
-                (false, false) => result.unwrap(),
+async fn fsm_selected_cleanup_runs_once_and_preserves_the_original_failure() {
+    for wrapped in [false, true] {
+        for work_fails in [false, true] {
+            for cleanup_fails in [false, true] {
+                let probe = Arc::new(CleanupProbe::default());
+                let handle = spawn(
+                    CleanupSupervisor {
+                        work_fails,
+                        cleanup_fails,
+                        probe: probe.clone(),
+                        ..Default::default()
+                    },
+                    terminal_commands::TestJournal::default(),
+                    wrapped,
+                );
+                let result = timeout(Duration::from_secs(3), handle.wait_for_completion())
+                    .await
+                    .expect("cleanup settles");
+                match (work_fails, cleanup_fails) {
+                    (true, _) => assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("primary work failure")),
+                    (false, true) => assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("secondary cleanup failure")),
+                    (false, false) => result.unwrap(),
+                }
+                assert_eq!(probe.work.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.started.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
+                assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
             }
-            assert_eq!(probe.dispatches.load(Ordering::SeqCst), 1);
-            assert_eq!(probe.completion_hooks.load(Ordering::SeqCst), 1);
-            assert_eq!(probe.started.load(Ordering::SeqCst), 1);
-            assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
         }
     }
 }
 
 #[tokio::test]
-async fn registration_failure_still_reaches_cleanup_with_its_publication_owner() {
+async fn registration_failure_selects_cleanup_with_its_publication_owner() {
     let probe = Arc::new(CleanupProbe::default());
     let handle = spawn(
         CleanupSupervisor {
@@ -304,117 +366,51 @@ async fn registration_failure_still_reaches_cleanup_with_its_publication_owner()
         .await
         .expect("failed registration settles")
         .unwrap_err();
-    assert!(failure.to_string().contains("Journal is full"));
-    assert_eq!(probe.dispatches.load(Ordering::SeqCst), 0);
-    assert_eq!(probe.completion_hooks.load(Ordering::SeqCst), 0);
+    assert!(failure.to_string().contains("Journal is full"), "{failure}");
+    assert_eq!(probe.work.load(Ordering::SeqCst), 0);
     assert_eq!(probe.started.load(Ordering::SeqCst), 1);
     assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn handle_completion_waits_for_cleanup_after_success_or_failure() {
-    for runner_fails in [false, true] {
-        let probe = Arc::new(CleanupProbe::default());
-        let handle = spawn(
-            CleanupSupervisor {
-                runner_fails,
-                block_cleanup: true,
-                probe: probe.clone(),
-                ..Default::default()
-            },
-            terminal_commands::TestJournal::default(),
-            false,
-        );
-        timeout(Duration::from_secs(3), probe.entered.notified())
-            .await
-            .expect("cleanup starts");
-        assert_eq!(probe.completion_hooks.load(Ordering::SeqCst), 1);
-        assert_eq!(probe.finished.load(Ordering::SeqCst), 0);
-        assert!(handle.wait_for_completion().now_or_never().is_none());
-
-        probe.release.notify_one();
-        let result = timeout(Duration::from_secs(3), handle.wait_for_completion())
-            .await
-            .expect("handle joins after cleanup");
-        assert_eq!(result.is_err(), runner_fails);
-        assert_eq!(probe.started.load(Ordering::SeqCst), 1);
-        assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
-    }
-}
-
-#[tokio::test]
-async fn fsm_and_failure_action_errors_still_reach_cleanup_through_the_canonical_runner() {
+async fn failure_is_observable_while_owned_cleanup_and_physical_completion_are_pending() {
     for wrapped in [false, true] {
-        for (failure_path, expected) in [
-            (FailurePath::Transition, "FSM error:"),
-            (
-                FailurePath::DispatchFailureTransition,
-                "FSM error after dispatch_state failure",
-            ),
-            (
-                FailurePath::ActionFailureTransition,
-                "FSM error after action failure:",
-            ),
-            (
-                FailurePath::DispatchFailureAction,
-                "Action error during dispatch_state failure handling:",
-            ),
-            (
-                FailurePath::ActionFailureAction,
-                "Action error during failure handling:",
-            ),
-        ] {
+        for work_fails in [false, true] {
             let probe = Arc::new(CleanupProbe::default());
             let handle = spawn(
                 CleanupSupervisor {
-                    failure_path: Some(failure_path),
-                    cleanup_fails: true,
+                    work_fails,
+                    block_cleanup: true,
                     probe: probe.clone(),
                     ..Default::default()
                 },
                 terminal_commands::TestJournal::default(),
                 wrapped,
             );
-            let error = timeout(Duration::from_secs(3), handle.wait_for_completion())
+            timeout(Duration::from_secs(3), probe.entered.notified())
                 .await
-                .expect("early runner failure settles")
-                .unwrap_err()
-                .to_string();
-            assert!(
-                error.contains(expected),
-                "{failure_path:?}, wrapped={wrapped}: {error}"
-            );
-            assert!(!error.contains("secondary cleanup failure"));
-            assert_eq!(probe.dispatches.load(Ordering::SeqCst), 1);
-            assert_eq!(probe.completion_hooks.load(Ordering::SeqCst), 0);
+                .expect("cleanup starts");
+            assert_eq!(probe.finished.load(Ordering::SeqCst), 0);
+            assert!(handle.wait_for_completion().now_or_never().is_none());
+            if work_fails {
+                assert!(handle
+                    .wait_for_failure()
+                    .now_or_never()
+                    .flatten()
+                    .unwrap()
+                    .cause
+                    .to_string()
+                    .contains("primary work failure"));
+            }
+            probe.release.notify_one();
+            let result = timeout(Duration::from_secs(3), handle.wait_for_completion())
+                .await
+                .expect("handle joins after cleanup");
+            assert_eq!(result.is_err(), work_fails);
             assert_eq!(probe.started.load(Ordering::SeqCst), 1);
             assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
         }
     }
-}
-
-#[tokio::test]
-async fn external_event_wrapper_retains_cleanup_until_handle_completion() {
-    let probe = Arc::new(CleanupProbe::default());
-    let handle = spawn(
-        CleanupSupervisor {
-            block_cleanup: true,
-            probe: probe.clone(),
-            ..Default::default()
-        },
-        terminal_commands::TestJournal::default(),
-        true,
-    );
-    timeout(Duration::from_secs(3), probe.entered.notified())
-        .await
-        .expect("inner supervisor cleanup starts");
-    assert!(handle.wait_for_completion().now_or_never().is_none());
-    probe.release.notify_one();
-    timeout(Duration::from_secs(3), handle.wait_for_completion())
-        .await
-        .expect("wrapped supervisor cleanup settles")
-        .unwrap();
-    assert_eq!(probe.completion_hooks.load(Ordering::SeqCst), 1);
-    assert_eq!(probe.started.load(Ordering::SeqCst), 1);
-    assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
 }

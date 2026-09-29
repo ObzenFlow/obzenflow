@@ -19,7 +19,7 @@ use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::config::JoinReferenceMode;
 use crate::stages::join::fsm::{
-    JoinContext, JoinEvent, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
     PendingTransition,
 };
 
@@ -28,7 +28,7 @@ pub(super) async fn dispatch_draining<
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(heartbeat) = &ctx.heartbeat {
         heartbeat.state.mark_draining();
@@ -133,13 +133,17 @@ pub(super) async fn dispatch_draining<
                         subscription.last_delivered_stage_input_position(),
                         None,
                     );
-                    let result = ctx.handler.process_reference(
-                        &mut ctx.handler_state,
-                        event,
-                        reference_stage_id,
-                        writer_id,
-                        scope,
-                    );
+                    let result = ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup")
+                        .process_reference(
+                            &mut ctx.handler_state,
+                            event,
+                            reference_stage_id,
+                            writer_id,
+                            scope,
+                        );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
                     }
@@ -232,11 +236,10 @@ pub(super) async fn dispatch_draining<
                 return Ok(EventLoopDirective::Continue);
             }
             PollResult::NoEvents => {
-                drop(
-                    subscription
-                        .check_contracts(&mut ctx.reference_contract_state[..])
-                        .await,
-                );
+                subscription
+                    .check_contracts(&mut ctx.reference_contract_state[..])
+                    .await
+                    .into_result()?;
             }
             PollResult::Error(e) => {
                 return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
@@ -334,13 +337,11 @@ pub(super) async fn dispatch_draining<
                         subscription.last_delivered_stage_input_position(),
                         None,
                     );
-                    let result = ctx.handler.process_stream(
-                        &mut ctx.handler_state,
-                        event,
-                        source_id,
-                        writer_id,
-                        scope,
-                    );
+                    let result = ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup")
+                        .process_stream(&mut ctx.handler_state, event, source_id, writer_id, scope);
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
                     }
@@ -479,11 +480,10 @@ pub(super) async fn dispatch_draining<
                 return Ok(EventLoopDirective::Continue);
             }
             PollResult::NoEvents => {
-                drop(
-                    subscription
-                        .check_contracts(&mut ctx.stream_contract_state[..])
-                        .await,
-                );
+                subscription
+                    .check_contracts(&mut ctx.stream_contract_state[..])
+                    .await
+                    .into_result()?;
             }
             PollResult::Error(e) => {
                 return Ok(EventLoopDirective::Transition(JoinEvent::Error(
@@ -499,7 +499,11 @@ pub(super) async fn dispatch_draining<
     // question). The transition below stays unconditional.
     match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
         EofKind::Natural | EofKind::Poison => {
-            let handler = ctx.handler.clone();
+            let handler = ctx
+                .handler
+                .as_ref()
+                .expect("handler available before cleanup")
+                .clone();
             let empty_state = handler.initial_state();
             let mut final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
             let mut events = Vec::new();
@@ -601,7 +605,7 @@ async fn dispatch_draining_live<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
 
@@ -625,7 +629,11 @@ async fn dispatch_draining_live<
         // (FLOWIP-075b owns the live question).
         match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
             EofKind::Natural | EofKind::Poison => {
-                let handler = ctx.handler.clone();
+                let handler = ctx
+                    .handler
+                    .as_ref()
+                    .expect("handler available before cleanup")
+                    .clone();
                 let empty_state = handler.initial_state();
                 let mut final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
 

@@ -36,53 +36,54 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// FSM states for metrics aggregator lifecycle
+/// The state announces achieved work only after its completion event.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MetricsAggregatorState {
-    /// Initial state
+    Created,
     Initializing,
-
-    /// Periodic publication of the latest available values
+    Starting,
     Running,
-
-    /// A bounded final refresh before stopping readers and publishing
+    Exporting,
+    DrainingExport,
     Draining,
-
-    /// Terminal state - latest available values published and readers stopped
+    Finalising,
+    Failing { error: String },
+    Cancelling { reason: String },
     Drained { last_event_id: Option<EventId> },
-
-    /// Terminal state - error occurred
     Failed { error: String },
+    Cancelled { reason: String },
 }
-
 impl StateVariant for MetricsAggregatorState {
     fn variant_name(&self) -> &str {
         match self {
-            MetricsAggregatorState::Initializing => "Initializing",
-            MetricsAggregatorState::Running => "Running",
-            MetricsAggregatorState::Draining => "Draining",
-            MetricsAggregatorState::Drained { .. } => "Drained",
-            MetricsAggregatorState::Failed { .. } => "Failed",
+            Self::Created => "Created",
+            Self::Initializing => "Initializing",
+            Self::Starting => "Starting",
+            Self::Running => "Running",
+            Self::Exporting => "Exporting",
+            Self::DrainingExport => "DrainingExport",
+            Self::Draining => "Draining",
+            Self::Finalising => "Finalising",
+            Self::Failing { .. } => "Failing",
+            Self::Cancelling { .. } => "Cancelling",
+            Self::Drained { .. } => "Drained",
+            Self::Failed { .. } => "Failed",
+            Self::Cancelled { .. } => "Cancelled",
         }
     }
 }
-
-/// Events that drive state transitions
 #[derive(Clone, Debug)]
 pub enum MetricsAggregatorEvent {
-    /// Initialization complete, start processing
+    Initialize,
+    InitializationCompleted,
     StartRunning,
-
-    /// Time to export metrics
     ExportMetrics,
-
-    /// Start draining process (from journal control event)
+    ExportCompleted,
     StartDraining,
-
-    /// Flow + stages have reached terminal lifecycle; perform final export and shutdown
     FlowTerminal,
-
-    /// Error occurred (e.g., journal corruption)
+    FinalisationCompleted,
+    TerminationSettled,
+    Cancel,
     Error(String),
 }
 
@@ -97,11 +98,17 @@ pub enum MetricsJournalKind {
 impl EventVariant for MetricsAggregatorEvent {
     fn variant_name(&self) -> &str {
         match self {
-            MetricsAggregatorEvent::StartRunning => "StartRunning",
-            MetricsAggregatorEvent::ExportMetrics => "ExportMetrics",
-            MetricsAggregatorEvent::StartDraining => "StartDraining",
-            MetricsAggregatorEvent::FlowTerminal => "FlowTerminal",
-            MetricsAggregatorEvent::Error(_) => "Error",
+            Self::Initialize => "Initialize",
+            Self::InitializationCompleted => "InitializationCompleted",
+            Self::StartRunning => "StartRunning",
+            Self::ExportMetrics => "ExportMetrics",
+            Self::ExportCompleted => "ExportCompleted",
+            Self::StartDraining => "StartDraining",
+            Self::FlowTerminal => "FlowTerminal",
+            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::TerminationSettled => "TerminationSettled",
+            Self::Cancel => "Cancel",
+            Self::Error(_) => "Error",
         }
     }
 }
@@ -109,6 +116,11 @@ impl EventVariant for MetricsAggregatorEvent {
 /// Actions performed during transitions
 #[derive(Clone, Debug)]
 pub enum MetricsAggregatorAction {
+    Host(crate::supervised_base::handler_supervised::SupervisorAction<MetricsAggregatorEvent>),
+    StartReaders,
+    BeginFinalRefresh,
+    PublishReady,
+    PublishShutdown,
     /// Initialize metrics collection
     Initialize,
 
@@ -119,20 +131,17 @@ pub enum MetricsAggregatorAction {
         journal_stage: StageId,
     },
 
-    /// Process system events from the system journal (FLOWIP-059b)
-    ProcessReport {
-        envelope: Box<obzenflow_core::event::SupervisorRecord>,
-    },
-
     /// Export metrics snapshot
     ExportMetrics,
 
     /// Publish drain complete event to journal
-    PublishDrainComplete { last_event_id: Option<EventId> },
+    PublishDrainComplete {
+        last_event_id: Option<EventId>,
+    },
 }
 
 /// Context for the FSM - contains everything actions need to do their work
-pub struct MetricsAggregatorContext {
+pub struct MetricsAggregatorResources {
     /// System journal for reporting
     pub system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     pub journals: super::builder::MetricsJournals,
@@ -160,6 +169,34 @@ pub struct MetricsAggregatorContext {
     /// registry; each export projects composite RED metrics from them.
     #[doc(hidden)]
     pub composite_boundaries: Vec<obzenflow_core::metrics::CompositeBoundary>,
+}
+
+/// The runner can lend all processing resources to an owned operation while
+/// still accepting commands and exposing the FSM's assigned state.
+pub struct MetricsAggregatorContext {
+    pub(crate) resources: Option<MetricsAggregatorResources>,
+}
+impl From<MetricsAggregatorResources> for MetricsAggregatorContext {
+    fn from(resources: MetricsAggregatorResources) -> Self {
+        Self {
+            resources: Some(resources),
+        }
+    }
+}
+impl std::ops::Deref for MetricsAggregatorContext {
+    type Target = MetricsAggregatorResources;
+    fn deref(&self) -> &Self::Target {
+        self.resources
+            .as_ref()
+            .expect("metrics resources are owned by the current operation")
+    }
+}
+impl std::ops::DerefMut for MetricsAggregatorContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.resources
+            .as_mut()
+            .expect("metrics resources are owned by the current operation")
+    }
 }
 
 /// Simple metrics storage
@@ -395,29 +432,6 @@ impl BoundaryMetricsView for MetricsStore {
 }
 
 impl MetricsAggregatorContext {
-    fn refresh_measurements(&mut self) {
-        use obzenflow_core::event::observability::ObservationSource;
-
-        self.metrics_store.refresh_measurements();
-        for packet in self.metrics_store.observations.snapshot() {
-            let Some(snapshot) = packet.runtime_snapshot else {
-                continue;
-            };
-            let Some(stage_id) = snapshot.capture.observer.as_stage() else {
-                continue;
-            };
-            if let Some(meta) = self.stage_metadata.get_mut(stage_id) {
-                // This is only a reporting label. Factual lifecycle state and
-                // collector coverage never come from the diagnostic snapshot.
-                if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
-                    meta.reference_mode =
-                        infer_join_reference_mode_from_fsm_state(&snapshot.fsm_state)
-                            .map(str::to_owned);
-                }
-            }
-        }
-    }
-
     pub(crate) async fn new(
         inputs: crate::metrics::inputs::MetricsInputs,
         system_journal: Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
@@ -453,7 +467,7 @@ impl MetricsAggregatorContext {
             .map(|(id, journal)| (*id, journal.clone()))
             .collect();
 
-        let context = Self {
+        let context = MetricsAggregatorResources {
             system_journal,
             journals,
             stage_data_journals,
@@ -469,7 +483,7 @@ impl MetricsAggregatorContext {
             composite_boundaries,
         };
 
-        Ok(context)
+        Ok(context.into())
     }
 }
 
@@ -483,7 +497,29 @@ fn infer_join_reference_mode_from_fsm_state(fsm_state: &str) -> Option<&'static 
     }
 }
 
-impl MetricsAggregatorContext {
+impl MetricsAggregatorResources {
+    fn refresh_measurements(&mut self) {
+        use obzenflow_core::event::observability::ObservationSource;
+
+        self.metrics_store.refresh_measurements();
+        for packet in self.metrics_store.observations.snapshot() {
+            let Some(snapshot) = packet.runtime_snapshot else {
+                continue;
+            };
+            let Some(stage_id) = snapshot.capture.observer.as_stage() else {
+                continue;
+            };
+            if let Some(meta) = self.stage_metadata.get_mut(stage_id) {
+                // This is only a reporting label. Factual lifecycle state and
+                // collector coverage never come from the diagnostic snapshot.
+                if meta.reference_mode.is_none() && meta.stage_type == StageType::Join {
+                    meta.reference_mode =
+                        infer_join_reference_mode_from_fsm_state(&snapshot.fsm_state)
+                            .map(str::to_owned);
+                }
+            }
+        }
+    }
     /// Build an `AppMetricsSnapshot` from the current in-memory `metrics_store`.
     ///
     /// This logic was originally inlined in the `ExportMetrics` action and has
@@ -1103,415 +1139,487 @@ impl MetricsStore {
     }
 }
 
+impl MetricsAggregatorResources {
+    /// Fold a borrowed original pipeline fact. Eligibility and ownership precede
+    /// causal observation; optional measurements retain their independent fold.
+    pub fn fold_system_record(
+        &mut self,
+        envelope: &JournalRecord<SystemPayload>,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
+        let ctx = self;
+        if let Some(packet) = &envelope.envelope.observability {
+            ctx.metrics_store
+                .observations
+                .latest()
+                .offer_recorded(packet);
+        }
+        let owner = ctx
+            .pipeline_writer
+            .or_else(|| match ctx.system_journal.owner() {
+                Some(obzenflow_core::JournalOwner::System { system_id }) => {
+                    Some((*system_id).into())
+                }
+                _ => None,
+            });
+        if owner != Some(*envelope.writer_id()) {
+            return Ok(());
+        }
+        use obzenflow_core::event::PipelineLifecycleEvent as P;
+        if !matches!(
+            &envelope.payload,
+            SystemPayload::PipelineLifecycle(
+                P::StopAdmitted { .. }
+                    | P::AllStagesCompleted { .. }
+                    | P::NotStarted
+                    | P::Completed { .. }
+                    | P::Cancelled { .. }
+                    | P::Failed { .. }
+                    | P::Drained
+            )
+        ) {
+            return Ok(());
+        }
+        crate::supervised_base::publication::observe_record(envelope)
+            .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+        tracing::trace!(
+            event_id = %envelope.id(),
+            event_type = envelope.payload.event_type(),
+            "Metrics aggregator selected pipeline lifecycle fact"
+        );
+        let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
+        // FLOWIP-059b: Process system journal events for lifecycle tracking
+        let store = &mut ctx.metrics_store;
+
+        // Retain positions of the selected pipeline facts. This projection does
+        // not claim coverage of ignored records or the complete journal history.
+        if let Some(system_id) = envelope.writer_id().as_system() {
+            let seq = envelope.local_sequence();
+            store.causal_watermark.clocks.insert(
+                obzenflow_core::event::CausalCoordinate::new(
+                    envelope.envelope.provenance.journal.journal_writer_id,
+                ),
+                seq,
+            );
+            let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
+            *entry = (*entry).max(seq);
+        }
+
+        match &envelope.payload {
+            SystemPayload::PipelineLifecycle(event)
+                if ctx
+                    .pipeline_writer
+                    .is_none_or(|writer| writer == *envelope.writer_id()) =>
+            {
+                // Track only essential pipeline events, with monotonic semantics:
+                // - "failed" is sticky and never regresses.
+                // - "completed" never regresses to "drained".
+                // - "drained" is only used when no explicit outcome was ever observed.
+                match event {
+                    obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { .. } => {
+                        if store.pipeline_state.is_empty() {
+                            store.pipeline_state = "stop_admitted".to_string();
+                        }
+                        tracing::info!("Pipeline: stop requested (metrics view)");
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
+                        ..
+                    } => {
+                        store.mark_known_stages_completed(known_stage_ids);
+                        if store.pipeline_state.is_empty() {
+                            store.pipeline_state = "all_stages_completed".to_string();
+                        }
+                        tracing::info!("Pipeline: all stages completed (metrics view)");
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::NotStarted => {
+                        if !store.pipeline_terminal() {
+                            store.pipeline_state = "not_started".into();
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
+                        if store.pipeline_state != "failed" {
+                            store.pipeline_state = "completed".to_string();
+                            tracing::info!("Pipeline: completed (metrics view)");
+                        } else {
+                            tracing::info!(
+                                "Pipeline: completed event observed after failed; \
+	                                         keeping failed as terminal state (metrics view)"
+                            );
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
+                        if store.pipeline_state != "failed" {
+                            store.pipeline_state = "cancelled".to_string();
+                            tracing::info!("Pipeline: cancelled (metrics view)");
+                        } else {
+                            tracing::info!(
+                                "Pipeline: cancelled event observed after failed; \
+	                                         keeping failed as terminal state (metrics view)"
+                            );
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
+                        // Failure is always terminal and sticky.
+                        if store.pipeline_state != "failed" {
+                            store.pipeline_state = "failed".to_string();
+                            tracing::info!("Pipeline: failed (metrics view)");
+                        }
+                    }
+                    obzenflow_core::event::PipelineLifecycleEvent::Drained => {
+                        // Drained is a termination marker only; do not override an
+                        // explicit completed/failed outcome.
+                        match store.pipeline_state.as_str() {
+                            "failed" | "completed" | "cancelled" | "not_started" => {
+                                tracing::info!(
+                                    "Pipeline: drained event observed after terminal outcome; \
+                                             keeping {} as terminal state (metrics view)",
+                                    store.pipeline_state
+                                );
+                            }
+                            _ => {
+                                store.pipeline_state = "drained".to_string();
+                                tracing::info!("Pipeline: drained (metrics view)");
+                            }
+                        }
+                    }
+                    _ => {} // Skip other pipeline events
+                }
+            }
+            _ => {} // Skip MetricsCoordination and other event types
+        }
+
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl FsmAction for MetricsAggregatorAction {
     type Context = MetricsAggregatorContext;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
-        match self {
-            MetricsAggregatorAction::Initialize => {
-                tracing::info!("Metrics aggregator initialized");
-                Ok(())
-            }
-
-            MetricsAggregatorAction::ProcessReport { envelope } => {
-                envelope
-                    .frontier()
-                    .and_then(|frontier| {
-                        crate::supervised_base::publication::incorporate(&frontier)
-                    })
-                    .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
-                tracing::trace!(
-                    event_id = %envelope.id(),
-                    event_type = envelope.payload.event_type(),
-                    "Metrics aggregator ProcessReport action"
-                );
-                let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
-                // FLOWIP-059b: Process system journal events for lifecycle tracking
-                let store = &mut ctx.metrics_store;
-                if let Some(observation) = envelope.observability() {
-                    store.observations.latest().offer_recorded(observation);
+        self.execute_resources(ctx).await
+    }
+}
+impl MetricsAggregatorAction {
+    pub(crate) fn execute_resources<'a>(
+        &'a self,
+        ctx: &'a mut MetricsAggregatorResources,
+    ) -> futures::future::BoxFuture<'a, Result<(), obzenflow_fsm::FsmError>> {
+        Box::pin(async move {
+            match self {
+                Self::Host(_) | Self::StartReaders | Self::BeginFinalRefresh => {
+                    Err(obzenflow_fsm::FsmError::HandlerError(
+                        "host action requires the supervised runner".into(),
+                    ))
                 }
-
-                // FLOWIP-059c: Track system-writer vector clocks so `metrics_watermark` can cover
-                // system-originated metrics (pipeline + metrics writers) in addition to stage journals.
-                if let Some(system_id) = envelope.writer_id().as_system() {
-                    let seq = envelope.position();
-                    store.causal_watermark.clocks.insert(
-                        obzenflow_core::event::CausalCoordinate::new(
-                            envelope.journal().journal_writer_id,
+                Self::PublishReady | Self::PublishShutdown => {
+                    let payload = if matches!(self, Self::PublishReady) {
+                        obzenflow_core::event::MetricsCoordinationEvent::Ready
+                    } else {
+                        obzenflow_core::event::MetricsCoordinationEvent::Shutdown
+                    };
+                    crate::supervised_base::publication::append(
+                        &ctx.journals.coordination,
+                        obzenflow_core::event::SystemEvent::new(
+                            ctx.system_id.into(),
+                            SystemPayload::MetricsCoordination(payload),
                         ),
-                        seq,
-                    );
-                    let entry = store.system_vector_clocks.entry(*system_id).or_insert(0);
-                    *entry = (*entry).max(seq);
+                        Default::default(),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| obzenflow_fsm::FsmError::HandlerError(e.to_string()))
+                }
+                MetricsAggregatorAction::Initialize => {
+                    tracing::info!("Metrics aggregator initialized");
+                    Ok(())
                 }
 
-                match &envelope.payload {
-                    SystemPayload::StageLifecycle { stage_id, event } => {
-                        use obzenflow_core::event::StageLifecycleEvent;
-                        let accounting = match event {
-                            StageLifecycleEvent::Draining { accounting }
-                            | StageLifecycleEvent::Completed { accounting }
-                            | StageLifecycleEvent::Cancelled { accounting, .. }
-                            | StageLifecycleEvent::Failed { accounting, .. } => accounting.as_ref(),
-                            _ => None,
-                        };
-                        if let Some(accounting) = accounting {
-                            store.retain_accounting(*stage_id, accounting);
+                MetricsAggregatorAction::UpdateMetrics {
+                    events,
+                    journal_kind,
+                    journal_stage,
+                } => {
+                    // The supplied carriers are newest first. Only current values
+                    // are selected; historical occurrences are never counted.
+                    let store = &mut ctx.metrics_store;
+                    let mut selected = false;
+                    let mut http_seen = false;
+                    let mut circuit_seen = false;
+                    let mut lifecycle_seen = false;
+                    for envelope in events.iter() {
+                        if let Some(packet) = &envelope.envelope.observability {
+                            store.observations.latest().offer_recorded(packet);
                         }
-
-                        // A current-state projection, not a history of visited states.
-                        store
-                            .stage_lifecycle_states
-                            .retain(|(stage, _), _| stage != stage_id);
-                        let state = match event {
-                            StageLifecycleEvent::Running => "running",
-                            StageLifecycleEvent::Draining { .. } => "draining",
-                            StageLifecycleEvent::Drained => "drained",
-                            StageLifecycleEvent::Completed { .. } => "completed",
-                            StageLifecycleEvent::Cancelled { .. } => "cancelled",
-                            StageLifecycleEvent::Failed { .. } => "failed",
-                        };
-                        store
-                            .stage_lifecycle_states
-                            .insert((*stage_id, state.into()), true);
-                    }
-                    SystemPayload::PipelineLifecycle(event)
-                        if ctx
-                            .pipeline_writer
-                            .is_none_or(|writer| writer == *envelope.writer_id()) =>
-                    {
-                        // Track only essential pipeline events, with monotonic semantics:
-                        // - "failed" is sticky and never regresses.
-                        // - "completed" never regresses to "drained".
-                        // - "drained" is only used when no explicit outcome was ever observed.
-                        match event {
-                            obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted {
+                        let event = &envelope.envelope.provenance.event;
+                        if event.writer_id != WriterId::from(*journal_stage)
+                            || event.flow_context.stage_id != *journal_stage
+                        {
+                            continue;
+                        }
+                        let stage_id = *journal_stage;
+                        let fact_selected = match &envelope.payload {
+                            ChainPayload::Execution(ExecutionPayload::StageLifecycle(fact)) => {
+                                if fact.stage_id() != stage_id {
+                                    continue;
+                                }
+                                true
+                            }
+                            ChainPayload::Execution(ExecutionPayload::ContractResult {
+                                reader,
                                 ..
-                            } => {
-                                if store.pipeline_state.is_empty() {
-                                    store.pipeline_state = "stop_admitted".to_string();
+                            }) => {
+                                if *reader != stage_id {
+                                    continue;
                                 }
-                                tracing::info!("Pipeline: stop requested (metrics view)");
+                                true
                             }
-                            obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
-                                ..
-                            } => {
-                                store.mark_known_stages_completed(known_stage_ids);
-                                if store.pipeline_state.is_empty() {
-                                    store.pipeline_state = "all_stages_completed".to_string();
-                                }
-                                tracing::info!("Pipeline: all stages completed (metrics view)");
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::NotStarted => {
-                                if !store.pipeline_terminal() {
-                                    store.pipeline_state = "not_started".into();
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Completed { .. } => {
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "completed".to_string();
-                                    tracing::info!("Pipeline: completed (metrics view)");
-                                } else {
-                                    tracing::info!(
-                                        "Pipeline: completed event observed after failed; \
-	                                         keeping failed as terminal state (metrics view)"
-                                    );
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "cancelled".to_string();
-                                    tracing::info!("Pipeline: cancelled (metrics view)");
-                                } else {
-                                    tracing::info!(
-                                        "Pipeline: cancelled event observed after failed; \
-	                                         keeping failed as terminal state (metrics view)"
-                                    );
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Failed { .. } => {
-                                // Failure is always terminal and sticky.
-                                if store.pipeline_state != "failed" {
-                                    store.pipeline_state = "failed".to_string();
-                                    tracing::info!("Pipeline: failed (metrics view)");
-                                }
-                            }
-                            obzenflow_core::event::PipelineLifecycleEvent::Drained => {
-                                // Drained is a termination marker only; do not override an
-                                // explicit completed/failed outcome.
-                                match store.pipeline_state.as_str() {
-                                    "failed" | "completed" | "cancelled" | "not_started" => {
-                                        tracing::info!(
-                                            "Pipeline: drained event observed after terminal outcome; \
-                                             keeping {} as terminal state (metrics view)",
-                                            store.pipeline_state
-                                        );
-                                    }
-                                    _ => {
-                                        store.pipeline_state = "drained".to_string();
-                                        tracing::info!("Pipeline: drained (metrics view)");
-                                    }
-                                }
-                            }
-                            _ => {} // Skip other pipeline events
-                        }
-                    }
-                    SystemPayload::ContractResult {
-                        upstream,
-                        reader,
-                        selected_event_type,
-                        feed_role,
-                        contract_name,
-                        reader_seq,
-                        advertised_writer_seq,
-                        ..
-                    } => {
-                        let edge_key = ContractMetricEdgeKey {
-                            upstream: *upstream,
-                            downstream: *reader,
-                            contract: contract_name.clone(),
-                            selected_event_type: selected_event_type.clone(),
-                            feed_role: *feed_role,
+                            ChainPayload::Execution(
+                                ExecutionPayload::HttpPullState(_)
+                                | ExecutionPayload::CircuitBreaker(_),
+                            ) => *journal_kind == MetricsJournalKind::Data,
+                            _ => false,
                         };
-                        if let Some(seq) = reader_seq {
-                            let gauge = store
-                                .contract_metrics
-                                .reader_seq
-                                .entry(edge_key.clone())
-                                .or_insert(0);
-                            *gauge = (*gauge).max(seq.0);
+                        // Runtime accounting is a separate factual fold; a business
+                        // row without it contributes no causal input just by being buffered.
+                        if !fact_selected && event.runtime.is_none() {
+                            continue;
                         }
-                        if let Some(seq) = advertised_writer_seq {
-                            let gauge = store
-                                .contract_metrics
-                                .advertised_writer_seq
-                                .entry(edge_key)
-                                .or_insert(0);
-                            *gauge = (*gauge).max(seq.0);
-                        }
-                    }
-                    _ => {} // Skip MetricsCoordination and other event types
-                }
-
-                Ok(())
-            }
-
-            MetricsAggregatorAction::UpdateMetrics {
-                events,
-                journal_kind,
-                journal_stage,
-            } => {
-                // The supplied carriers are newest first. Only current values
-                // are selected; historical occurrences are never counted.
-                let store = &mut ctx.metrics_store;
-                let mut selected = false;
-                let mut http_seen = false;
-                let mut circuit_seen = false;
-                for envelope in events.iter() {
-                    if let Some(packet) = &envelope.envelope.observability {
-                        store.observations.latest().offer_recorded(packet);
-                    }
-                    let event = &envelope.envelope.provenance.event;
-                    if event.writer_id != WriterId::from(*journal_stage)
-                        || event.flow_context.stage_id != *journal_stage
-                    {
-                        continue;
-                    }
-                    let stage_id = *journal_stage;
-                    // Only factual carriers selected for this stage advance its
-                    // causal input. Offering an optional packet above cannot.
-                    if event.runtime.is_some()
-                        || !selected
-                        || (*journal_kind == MetricsJournalKind::Data
-                            && envelope.local_sequence()
-                                > store
-                                    .stage_vector_clocks
-                                    .get(&stage_id)
-                                    .copied()
-                                    .unwrap_or(0))
-                    {
                         crate::supervised_base::publication::observe_record(envelope).map_err(
                             |error| obzenflow_fsm::FsmError::HandlerError(error.to_string()),
                         )?;
-                    }
-                    if let Some(runtime) = &event.runtime {
-                        store.retain_accounting(stage_id, &runtime.accounting);
-                    }
-                    if !selected {
-                        store.last_event_id = Some(event.id);
-                        selected = true;
-                    }
-                    if *journal_kind == MetricsJournalKind::Data {
-                        let seq = envelope.local_sequence();
-                        store
-                            .causal_watermark
-                            .clocks
-                            .entry(envelope.causal_coordinate())
-                            .and_modify(|current| *current = (*current).max(seq))
-                            .or_insert(seq);
-                        let current = store.stage_vector_clocks.entry(stage_id).or_default();
-                        *current = (*current).max(seq);
-                        if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
-                            &envelope.payload
-                        {
-                            if !http_seen {
-                                store.fold_http_pull_state(stage_id, state);
-                                http_seen = true;
-                            }
-                        }
-                        if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) =
-                            &envelope.payload
-                        {
-                            let state = match fact {
-                                CircuitBreakerFact::Opened { .. } => Some(1.0),
-                                CircuitBreakerFact::Closed { .. } => Some(0.0),
-                                CircuitBreakerFact::HalfOpen { .. } => Some(0.5),
-                                CircuitBreakerFact::StateChanged { to_state, .. } => {
-                                    Some(match to_state {
-                                        CircuitState::Closed => 0.0,
-                                        CircuitState::Open => 1.0,
-                                        CircuitState::HalfOpen => 0.5,
-                                    })
+                        match &envelope.payload {
+                            ChainPayload::Execution(ExecutionPayload::StageLifecycle(event)) => {
+                                use obzenflow_core::event::payloads::execution_payload::StageLifecycleFact;
+                                let accounting = match event {
+                                    StageLifecycleFact::Draining { accounting, .. }
+                                    | StageLifecycleFact::Completed { accounting, .. }
+                                    | StageLifecycleFact::Cancelled { accounting, .. }
+                                    | StageLifecycleFact::Failed { accounting, .. } => {
+                                        accounting.as_ref()
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(accounting) = accounting {
+                                    store.retain_accounting(stage_id, accounting);
                                 }
-                                _ => None,
-                            };
-                            if !circuit_seen {
-                                if let Some(state) = state {
-                                    store.circuit_breaker_state.insert(stage_id, state);
-                                    circuit_seen = true;
+
+                                if !lifecycle_seen {
+                                    lifecycle_seen = true;
+                                    // A current-state projection, not a history of visited states.
+                                    store
+                                        .stage_lifecycle_states
+                                        .retain(|(stage, _), _| *stage != stage_id);
+                                    let state = match event {
+                                        StageLifecycleFact::Running { .. } => "running",
+                                        StageLifecycleFact::Draining { .. } => "draining",
+                                        StageLifecycleFact::Drained { .. } => "drained",
+                                        StageLifecycleFact::Completed { .. } => "completed",
+                                        StageLifecycleFact::Cancelled { .. } => "cancelled",
+                                        StageLifecycleFact::Failed { .. } => "failed",
+                                    };
+                                    store
+                                        .stage_lifecycle_states
+                                        .insert((stage_id, state.into()), true);
                                 }
                             }
-                        }
-                    }
-                    if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
-                        if meta.flow_id.is_none() {
-                            meta.flow_id = FlowId::from_str(&event.flow_context.flow_id).ok();
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            MetricsAggregatorAction::ExportMetrics => {
-                let export_started = tokio::time::Instant::now();
-                tracing::debug!("ExportMetrics action triggered");
-                ctx.metrics_store.throughput.sample(
-                    &ctx.metrics_store.observations,
-                    &ctx.stage_metadata,
-                    export_started,
-                );
-                let buffer_snapshot = ctx.metrics_store.buffer.snapshot();
-                for ((stage, kind), records) in buffer_snapshot.stage_records {
-                    for record in records.iter().rev() {
-                        if let Some(report) =
-                            obzenflow_core::event::SupervisorRecord::from_chain(record.clone())
-                        {
-                            MetricsAggregatorAction::ProcessReport {
-                                envelope: Box::new(report),
+                            ChainPayload::Execution(ExecutionPayload::ContractResult {
+                                upstream,
+                                reader,
+                                selected_event_type,
+                                feed_role,
+                                contract_name,
+                                reader_seq,
+                                advertised_writer_seq,
+                                ..
+                            }) => {
+                                let edge_key = ContractMetricEdgeKey {
+                                    upstream: *upstream,
+                                    downstream: *reader,
+                                    contract: contract_name.clone(),
+                                    selected_event_type: selected_event_type.clone(),
+                                    feed_role: *feed_role,
+                                };
+                                if let Some(seq) = reader_seq {
+                                    let gauge = store
+                                        .contract_metrics
+                                        .reader_seq
+                                        .entry(edge_key.clone())
+                                        .or_insert(0);
+                                    *gauge = (*gauge).max(seq.0);
+                                }
+                                if let Some(seq) = advertised_writer_seq {
+                                    let gauge = store
+                                        .contract_metrics
+                                        .advertised_writer_seq
+                                        .entry(edge_key)
+                                        .or_insert(0);
+                                    *gauge = (*gauge).max(seq.0);
+                                }
                             }
-                            .execute(ctx)
-                            .await?;
+                            _ => {}
+                        }
+                        if let Some(runtime) = &event.runtime {
+                            store.retain_accounting(stage_id, &runtime.accounting);
+                        }
+                        if !selected {
+                            store.last_event_id = Some(event.id);
+                            selected = true;
+                        }
+                        if *journal_kind == MetricsJournalKind::Data {
+                            let seq = envelope.local_sequence();
+                            store
+                                .causal_watermark
+                                .clocks
+                                .entry(envelope.causal_coordinate())
+                                .and_modify(|current| *current = (*current).max(seq))
+                                .or_insert(seq);
+                            let current = store.stage_vector_clocks.entry(stage_id).or_default();
+                            *current = (*current).max(seq);
+                            if let ChainPayload::Execution(ExecutionPayload::HttpPullState(state)) =
+                                &envelope.payload
+                            {
+                                if !http_seen {
+                                    store.fold_http_pull_state(stage_id, state);
+                                    http_seen = true;
+                                }
+                            }
+                            if let ChainPayload::Execution(ExecutionPayload::CircuitBreaker(fact)) =
+                                &envelope.payload
+                            {
+                                let state = match fact {
+                                    CircuitBreakerFact::Opened { .. } => Some(1.0),
+                                    CircuitBreakerFact::Closed { .. } => Some(0.0),
+                                    CircuitBreakerFact::HalfOpen { .. } => Some(0.5),
+                                    CircuitBreakerFact::StateChanged { to_state, .. } => {
+                                        Some(match to_state {
+                                            CircuitState::Closed => 0.0,
+                                            CircuitState::Open => 1.0,
+                                            CircuitState::HalfOpen => 0.5,
+                                        })
+                                    }
+                                    _ => None,
+                                };
+                                if !circuit_seen {
+                                    if let Some(state) = state {
+                                        store.circuit_breaker_state.insert(stage_id, state);
+                                        circuit_seen = true;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(meta) = ctx.stage_metadata.get_mut(&stage_id) {
+                            if meta.flow_id.is_none() {
+                                meta.flow_id = FlowId::from_str(&event.flow_context.flow_id).ok();
+                            }
                         }
                     }
-                    MetricsAggregatorAction::UpdateMetrics {
-                        events: records,
-                        journal_kind: kind,
-                        journal_stage: stage,
-                    }
-                    .execute(ctx)
-                    .await?;
+                    Ok(())
                 }
-                // Older accounting carriers may precede a newer lifecycle value.
-                // Applying oldest first leaves each lifecycle at its newest state.
-                for record in buffer_snapshot.system_records.iter().rev() {
-                    MetricsAggregatorAction::ProcessReport {
-                        envelope: Box::new(record.clone().into()),
-                    }
-                    .execute(ctx)
-                    .await?;
-                }
-                ctx.refresh_measurements();
-                ctx.metrics_exporter
-                    .publish_app_snapshot(ctx.build_app_metrics_snapshot());
 
-                // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
-                // for `/metrics` refresh and deterministic freshness gating.
-                let watermark = ctx.metrics_store.causal_watermark.clone();
-
-                let export_event = obzenflow_core::event::SystemEvent::new(
-                    WriterId::from(ctx.system_id),
-                    SystemPayload::MetricsCoordination(
-                        obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark },
-                    ),
-                );
-
-                crate::supervised_base::publication::append(
-                    &ctx.journals.export,
-                    export_event,
-                    Default::default(),
-                )
-                .await
-                .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
-
-                let completed = tokio::time::Instant::now();
-                let due = ctx.metrics_store.next_export_at.unwrap_or(export_started);
-                // Keep the monotonic schedule and skip missed slots, including
-                // time spent publishing the export-coordination record.
-                let remainder =
-                    completed.duration_since(due).as_nanos() % ctx.export_interval.as_nanos();
-                let until_next = ctx.export_interval
-                    - std::time::Duration::new(
-                        (remainder / 1_000_000_000) as u64,
-                        (remainder % 1_000_000_000) as u32,
+                MetricsAggregatorAction::ExportMetrics => {
+                    let export_started = tokio::time::Instant::now();
+                    tracing::debug!("ExportMetrics action triggered");
+                    ctx.metrics_store.throughput.sample(
+                        &ctx.metrics_store.observations,
+                        &ctx.stage_metadata,
+                        export_started,
                     );
-                ctx.metrics_store.next_export_at = Some(if due > completed {
-                    due
-                } else {
-                    completed + until_next
-                });
-                ctx.metrics_store.last_export_completed = Some(completed);
-                tracing::debug!(
-                    export_elapsed_us = completed.duration_since(export_started).as_micros(),
-                    "Metrics export and coordination publication completed"
-                );
-                Ok(())
+                    let buffer_snapshot = ctx.metrics_store.buffer.snapshot();
+                    for ((stage, kind), records) in buffer_snapshot.stage_records {
+                        MetricsAggregatorAction::UpdateMetrics {
+                            events: records,
+                            journal_kind: kind,
+                            journal_stage: stage,
+                        }
+                        .execute_resources(ctx)
+                        .await?;
+                    }
+                    // Older accounting carriers may precede a newer lifecycle value.
+                    // Applying oldest first leaves each lifecycle at its newest state.
+                    for record in buffer_snapshot.system_records.iter().rev() {
+                        ctx.fold_system_record(record)?;
+                    }
+                    ctx.refresh_measurements();
+                    ctx.metrics_exporter
+                        .publish_app_snapshot(ctx.build_app_metrics_snapshot());
+
+                    // FLOWIP-059c: Emit a metrics watermark event so SSE clients can "pull-on-push"
+                    // for `/metrics` refresh and deterministic freshness gating.
+                    let watermark = ctx.metrics_store.causal_watermark.clone();
+
+                    let export_event = obzenflow_core::event::SystemEvent::new(
+                        WriterId::from(ctx.system_id),
+                        SystemPayload::MetricsCoordination(
+                            obzenflow_core::event::MetricsCoordinationEvent::Exported { watermark },
+                        ),
+                    );
+
+                    crate::supervised_base::publication::append(
+                        &ctx.journals.export,
+                        export_event,
+                        Default::default(),
+                    )
+                    .await
+                    .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
+
+                    let completed = tokio::time::Instant::now();
+                    let due = ctx.metrics_store.next_export_at.unwrap_or(export_started);
+                    // Keep the monotonic schedule and skip missed slots, including
+                    // time spent publishing the export-coordination record.
+                    let remainder =
+                        completed.duration_since(due).as_nanos() % ctx.export_interval.as_nanos();
+                    let until_next = ctx.export_interval
+                        - std::time::Duration::new(
+                            (remainder / 1_000_000_000) as u64,
+                            (remainder % 1_000_000_000) as u32,
+                        );
+                    ctx.metrics_store.next_export_at = Some(if due > completed {
+                        due
+                    } else {
+                        completed + until_next
+                    });
+                    ctx.metrics_store.last_export_completed = Some(completed);
+                    tracing::debug!(
+                        export_elapsed_us = completed.duration_since(export_started).as_micros(),
+                        "Metrics export and coordination publication completed"
+                    );
+                    Ok(())
+                }
+
+                MetricsAggregatorAction::PublishDrainComplete { last_event_id } => {
+                    // Get writer ID from context
+                    let system_writer_id = WriterId::from(ctx.system_id);
+
+                    // Metrics aggregator publishes SystemEvent to system journal
+                    let drain_event = obzenflow_core::event::SystemEvent::new(
+                        system_writer_id,
+                        SystemPayload::MetricsCoordination(
+                            obzenflow_core::event::MetricsCoordinationEvent::Drained,
+                        ),
+                    );
+
+                    // Publish to system journal
+                    crate::supervised_base::publication::append(
+                        &ctx.journals.coordination,
+                        drain_event,
+                        Default::default(),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to publish drain complete event: {e}"
+                        ))
+                    })?;
+
+                    tracing::info!(
+                        "Published metrics drain complete event (last_event_id={:?})",
+                        last_event_id
+                    );
+                    Ok(())
+                }
             }
-
-            MetricsAggregatorAction::PublishDrainComplete { last_event_id } => {
-                // Get writer ID from context
-                let system_writer_id = WriterId::from(ctx.system_id);
-
-                // Metrics aggregator publishes SystemEvent to system journal
-                let drain_event = obzenflow_core::event::SystemEvent::new(
-                    system_writer_id,
-                    SystemPayload::MetricsCoordination(
-                        obzenflow_core::event::MetricsCoordinationEvent::Drained,
-                    ),
-                );
-
-                // Publish to system journal
-                crate::supervised_base::publication::append(
-                    &ctx.journals.coordination,
-                    drain_event,
-                    Default::default(),
-                )
-                .await
-                .map(|_| ())
-                .map_err(|e| {
-                    obzenflow_fsm::FsmError::HandlerError(format!(
-                        "Failed to publish drain complete event: {e}"
-                    ))
-                })?;
-
-                tracing::info!(
-                    "Published metrics drain complete event (last_event_id={:?})",
-                    last_event_id
-                );
-                Ok(())
-            }
-        }
+        })
     }
 }
 
@@ -1523,78 +1631,138 @@ pub type MetricsAggregatorFsm = StateMachine<
     MetricsAggregatorAction,
 >;
 
-/// Build the metrics aggregator FSM with lifecycle transitions only
+/// Host work starts on transition edges; repeated commands cannot restart it.
 pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
+    use crate::supervised_base::handler_supervised::SupervisorAction as H;
+    use MetricsAggregatorAction as A;
+    use MetricsAggregatorEvent as E;
+    use MetricsAggregatorState as S;
     fsm! {
         state: MetricsAggregatorState;
         event: MetricsAggregatorEvent;
         context: MetricsAggregatorContext;
         action: MetricsAggregatorAction;
-        initial: MetricsAggregatorState::Initializing;
-
-        state MetricsAggregatorState::Initializing {
-            on MetricsAggregatorEvent::StartRunning => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                Box::pin(async move { Ok(Transition { next_state: MetricsAggregatorState::Running, actions: vec![MetricsAggregatorAction::Initialize] }) })
-            };
-            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let event = event.clone();
-                Box::pin(async move { failed_transition(event) })
-            };
+        initial: S::Created;
+        unhandled => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(()) }) };
+        state S::Created {
+            on E::Initialize => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Initializing, actions: vec![A::Host(H::Register), A::Initialize, A::StartReaders, A::Host(H::Emit(E::InitializationCompleted))] }) }) };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
         }
-        state MetricsAggregatorState::Running {
-            on MetricsAggregatorEvent::ExportMetrics => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                Box::pin(async move { Ok(Transition { next_state: MetricsAggregatorState::Running, actions: vec![MetricsAggregatorAction::ExportMetrics] }) })
-            };
-            on MetricsAggregatorEvent::StartDraining => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                Box::pin(async move { Ok(Transition { next_state: MetricsAggregatorState::Draining, actions: vec![] }) })
-            };
-            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let event = event.clone();
-                Box::pin(async move { failed_transition(event) })
-            };
+        state S::Initializing {
+            on E::InitializationCompleted => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Starting, actions: vec![A::PublishReady, A::Host(H::Emit(E::StartRunning))] }) }) };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
         }
-        state MetricsAggregatorState::Draining {
-            on MetricsAggregatorEvent::ExportMetrics => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                Box::pin(async move { Ok(Transition { next_state: MetricsAggregatorState::Draining, actions: vec![MetricsAggregatorAction::ExportMetrics] }) })
-            };
-            on MetricsAggregatorEvent::StartDraining => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                Box::pin(async move { Ok(Transition { next_state: MetricsAggregatorState::Draining, actions: vec![] }) })
-            };
-            on MetricsAggregatorEvent::FlowTerminal => |_state: &MetricsAggregatorState, _event: &MetricsAggregatorEvent, ctx: &mut MetricsAggregatorContext| {
+        state S::Starting {
+            on E::StartRunning => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Running, actions: vec![] }) }) };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
+        }
+        state S::Running {
+            on E::ExportMetrics => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Exporting, actions: vec![A::ExportMetrics] }) }) };
+            on E::StartDraining => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Draining, actions: vec![A::BeginFinalRefresh] }) }) };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
+        }
+        state S::Exporting {
+            on E::ExportCompleted => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Running, actions: vec![] }) }) };
+            on E::StartDraining => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::DrainingExport, actions: vec![] }) }) };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
+        }
+        state S::DrainingExport {
+            // The active export owns its resources until completion, which
+            // replaces queued actions. Start the refresh here; the action keeps
+            // an existing deadline when later exports complete during draining.
+            on E::ExportCompleted => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::Draining, actions: vec![A::BeginFinalRefresh] }) }) };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
+        }
+        state S::Draining {
+            on E::ExportMetrics => |_state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| { Box::pin(async { Ok(Transition { next_state: S::DrainingExport, actions: vec![A::ExportMetrics] }) }) };
+            on E::FlowTerminal => |_state: &S, _event: &E, ctx: &mut MetricsAggregatorContext| {
                 let last_event_id = ctx.metrics_store.last_event_id;
-                Box::pin(async move { Ok(Transition {
-                    next_state: MetricsAggregatorState::Drained { last_event_id },
-                    actions: vec![MetricsAggregatorAction::ExportMetrics, MetricsAggregatorAction::PublishDrainComplete { last_event_id }],
-                }) })
+                Box::pin(async move { Ok(Transition { next_state: S::Finalising, actions: vec![A::Host(H::CloseMailbox), A::Host(H::Cleanup), A::ExportMetrics, A::PublishDrainComplete { last_event_id }, A::PublishShutdown, A::Host(H::SettlePublications), A::Host(H::Emit(E::FinalisationCompleted))] }) })
             };
-            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let event = event.clone();
-                Box::pin(async move { failed_transition(event) })
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
+        }
+        state S::Finalising {
+            on E::FinalisationCompleted => |_state: &S, _event: &E, ctx: &mut MetricsAggregatorContext| {
+                let last_event_id = ctx.metrics_store.last_event_id;
+                Box::pin(async move { Ok(Transition { next_state: S::Drained { last_event_id }, actions: vec![] }) })
+            };
+            on E::Error => metrics_failed;
+            on E::Cancel => metrics_cancelled;
+        }
+        state S::Failing {
+            on E::TerminationSettled => |state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| {
+                let S::Failing { error } = state else { unreachable!() };
+                let error = error.clone();
+                Box::pin(async move { Ok(Transition { next_state: S::Failed { error }, actions: vec![] }) })
             };
         }
-        // A final publication failure must not leave a successful terminal state.
-        state MetricsAggregatorState::Drained {
-            on MetricsAggregatorEvent::Error => |_state: &MetricsAggregatorState, event: &MetricsAggregatorEvent, _ctx: &mut MetricsAggregatorContext| {
-                let event = event.clone();
-                Box::pin(async move { failed_transition(event) })
+        state S::Cancelling {
+            on E::Error => metrics_failed;
+            on E::TerminationSettled => |state: &S, _event: &E, _ctx: &mut MetricsAggregatorContext| {
+                let S::Cancelling { reason } = state else { unreachable!() };
+                let reason = reason.clone();
+                Box::pin(async move { Ok(Transition { next_state: S::Cancelled { reason }, actions: vec![] }) })
             };
         }
-        state MetricsAggregatorState::Failed { }
+        state S::Drained { }
+        state S::Failed { }
+        state S::Cancelled { }
     }
 }
 
-fn failed_transition(
-    event: MetricsAggregatorEvent,
-) -> Result<Transition<MetricsAggregatorState, MetricsAggregatorAction>, obzenflow_fsm::FsmError> {
-    match event {
-        MetricsAggregatorEvent::Error(error) => Ok(Transition {
-            next_state: MetricsAggregatorState::Failed { error },
-            actions: vec![],
-        }),
-        _ => Err(obzenflow_fsm::FsmError::HandlerError(
-            "Invalid metrics failure event".into(),
-        )),
-    }
+fn metrics_termination_actions() -> Vec<MetricsAggregatorAction> {
+    use crate::supervised_base::handler_supervised::SupervisorAction as H;
+    use MetricsAggregatorAction as A;
+    vec![
+        A::Host(H::CloseMailbox),
+        A::Host(H::Cleanup),
+        A::PublishShutdown,
+        A::Host(H::SettlePublications),
+        A::Host(H::Emit(MetricsAggregatorEvent::TerminationSettled)),
+    ]
+}
+fn metrics_failed<'a>(
+    _: &'a MetricsAggregatorState,
+    event: &'a MetricsAggregatorEvent,
+    _: &'a mut MetricsAggregatorContext,
+) -> futures::future::BoxFuture<
+    'a,
+    Result<Transition<MetricsAggregatorState, MetricsAggregatorAction>, obzenflow_fsm::FsmError>,
+> {
+    let MetricsAggregatorEvent::Error(error) = event else {
+        unreachable!()
+    };
+    let error = error.clone();
+    Box::pin(async move {
+        Ok(Transition {
+            next_state: MetricsAggregatorState::Failing { error },
+            actions: metrics_termination_actions(),
+        })
+    })
+}
+fn metrics_cancelled<'a>(
+    _: &'a MetricsAggregatorState,
+    _: &'a MetricsAggregatorEvent,
+    _: &'a mut MetricsAggregatorContext,
+) -> futures::future::BoxFuture<
+    'a,
+    Result<Transition<MetricsAggregatorState, MetricsAggregatorAction>, obzenflow_fsm::FsmError>,
+> {
+    Box::pin(async move {
+        Ok(Transition {
+            next_state: MetricsAggregatorState::Cancelling {
+                reason: "Metrics cancellation requested".into(),
+            },
+            actions: metrics_termination_actions(),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1972,7 +2140,7 @@ mod tests {
 
         // Build a context with only the fields required by build_app_metrics_snapshot.
         let downstream = StageId::new();
-        let ctx = MetricsAggregatorContext {
+        let ctx: MetricsAggregatorContext = crate::metrics::fsm::MetricsAggregatorResources {
             journals: super::super::builder::MetricsJournals {
                 system_id: obzenflow_core::SystemId::new(),
                 coordination: Arc::new(NoopJournal::<obzenflow_core::event::SystemEvent>::new(
@@ -2013,7 +2181,8 @@ mod tests {
                     downstream,
                 }],
             }],
-        };
+        }
+        .into();
 
         let snapshot = ctx.build_app_metrics_snapshot();
 

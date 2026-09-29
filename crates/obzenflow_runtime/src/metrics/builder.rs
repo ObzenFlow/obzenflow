@@ -169,18 +169,18 @@ impl PreparedMetricsAggregator {
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::<MetricsAggregatorEvent, MetricsAggregatorState>::new()
                 .with_event_buffer(10) // Small buffer, rarely used
-                .build(MetricsAggregatorState::Initializing);
+                .build(MetricsAggregatorState::Created);
 
         // Create supervisor (private struct)
         let supervisor = MetricsAggregatorSupervisor {
             name: "metrics_aggregator".to_string(),
             system_journal,
             system_id,
-            control: event_receiver,
+            control: event_receiver.into(),
             readers: None,
             final_refresh: None,
             state_watcher: state_watcher.clone(),
-            last_state: Some(MetricsAggregatorState::Initializing),
+            last_state: Some(MetricsAggregatorState::Created),
         };
 
         // Spawn the supervisor task
@@ -188,7 +188,7 @@ impl PreparedMetricsAggregator {
             SupervisorTaskBuilder::<MetricsAggregatorSupervisor>::new("metrics_aggregator")
                 .spawn_self_supervised(
                     supervisor,
-                    MetricsAggregatorState::Initializing,
+                    MetricsAggregatorState::Created,
                     metrics_context,
                 );
 

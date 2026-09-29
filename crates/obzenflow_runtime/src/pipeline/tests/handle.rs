@@ -8,17 +8,18 @@ use super::*;
 use crate::__private::lifecycle;
 use crate::metrics::observations::ObservationRegistry;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
+use crate::stages::common::stage_lifecycle::{LifecyclePhase, LifecycleResults};
 use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
 use obzenflow_core::event::observability::NoObservations;
-use obzenflow_core::event::types::ViolationCause;
 use std::error::Error;
 use tokio::sync::mpsc::error::TryRecvError;
 
 fn empty_extras() -> FlowHandleExtras {
     FlowHandleExtras {
         metrics_journals: None,
-        report_journals: vec![],
-        pipeline_reports: None,
+        stage_journals: vec![],
+        system_journals: vec![],
+        ingress_refusals: None,
         observations: Arc::new(ObservationRegistry::default()),
         host_observations: Arc::new(NoObservations),
         stage_cleanup: Vec::new(),
@@ -101,43 +102,45 @@ fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
     let state_watcher_for_task = state_watcher.clone();
     let extras = empty_extras();
     let published = extras.published_outcome.clone();
-    let task = tokio::spawn(async move {
-        match event_receiver.recv().await {
-            Some(PipelineFsmEvent::Start) => {
-                use super::super::termination::{
-                    ExecutionFailure, ExecutionOutcome, PublishedTermination,
-                };
-                let outcome = match &final_state {
-                    PipelineState::Failed {
-                        reason,
-                        failure_cause,
-                    } => ExecutionOutcome::Failed(ExecutionFailure {
-                        reason: reason.clone(),
-                        cause: failure_cause.clone(),
-                    }),
-                    PipelineState::AbortRequested { reason, .. } => {
-                        ExecutionOutcome::Failed(ExecutionFailure {
-                            reason: format!("{reason:?}"),
-                            cause: Some(reason.clone()),
+    let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("flow-test")
+        .spawn_for_test(move || async move {
+            LifecycleResults::observe(&LifecyclePhase::Ready, Default::default(), None);
+            match event_receiver.recv().await {
+                Some(PipelineFsmEvent::Start) => {
+                    use super::super::termination::{
+                        ExecutionFailure, ExecutionOutcome, PublishedTermination,
+                    };
+                    let outcome = match &final_state {
+                        PipelineState::Failed {
+                            reason,
+                            failure_cause,
+                        } => ExecutionOutcome::Failed(ExecutionFailure {
+                            reason: reason.clone(),
+                            cause: failure_cause.clone(),
+                        }),
+                        PipelineState::FailingChildren { cause } => {
+                            ExecutionOutcome::Failed(ExecutionFailure {
+                                reason: cause.clone(),
+                                cause: None,
+                            })
+                        }
+                        _ => ExecutionOutcome::Completed,
+                    };
+                    published
+                        .set(PublishedTermination {
+                            outcome,
+                            event_id: Some(obzenflow_core::EventId::new()),
                         })
-                    }
-                    _ => ExecutionOutcome::Completed,
-                };
-                published
-                    .set(PublishedTermination {
-                        outcome,
-                        event_id: Some(obzenflow_core::EventId::new()),
-                    })
-                    .unwrap();
-                state_watcher_for_task
-                    .update(final_state)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-                Ok(())
+                        .unwrap();
+                    state_watcher_for_task
+                        .update(final_state)
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+                    Ok(())
+                }
+                Some(event) => Err(format!("unexpected event: {event:?}").into()),
+                None => Err("event channel closed before Run".into()),
             }
-            Some(event) => Err(format!("unexpected event: {event:?}").into()),
-            None => Err("event channel closed before Run".into()),
-        }
-    });
+        });
 
     let handle = HandleBuilder::new()
         .with_event_sender(event_sender)
@@ -155,9 +158,21 @@ fn flow_handle_for_start_admission(
     let (event_sender, event_receiver, state_watcher) =
         ChannelBuilder::<PipelineFsmEvent, PipelineState>::new()
             .with_event_buffer(4)
-            .build(initial_state);
+            .build(initial_state.clone());
 
-    let task = tokio::spawn(async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+    let task = crate::supervised_base::SupervisorTaskBuilder::<()>::new("flow-admission-test")
+        .spawn_for_test(move || async move {
+            match initial_state {
+                PipelineState::ReadyForRun => {
+                    LifecycleResults::observe(&LifecyclePhase::Ready, Default::default(), None)
+                }
+                PipelineState::Running => {
+                    LifecycleResults::observe(&LifecyclePhase::Active, Default::default(), None)
+                }
+                _ => {}
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
 
     let handle = HandleBuilder::new()
         .with_event_sender(event_sender)
@@ -215,12 +230,11 @@ async fn start_if_ready_now_accepts_running_without_dispatch() {
 async fn start_if_ready_now_rejects_non_ready_states_without_dispatch() {
     let cases = [
         PipelineState::Created,
-        PipelineState::Materializing,
-        PipelineState::Materialized,
-        PipelineState::SourceCompleted,
-        PipelineState::AbortRequested {
-            reason: ViolationCause::Other("abort".to_string()),
-            upstream: None,
+        PipelineState::InitializingStages,
+        PipelineState::StartingConsumers,
+        PipelineState::CancellingChildren,
+        PipelineState::FailingChildren {
+            cause: "abort".to_string(),
         },
         PipelineState::Draining,
         PipelineState::Drained,
@@ -255,10 +269,9 @@ async fn start_if_ready_now_rejects_non_ready_states_without_dispatch() {
 #[tokio::test]
 async fn wait_for_ready_returns_error_for_terminal_or_aborting_states() {
     let cases = [
-        PipelineState::SourceCompleted,
-        PipelineState::AbortRequested {
-            reason: ViolationCause::Other("abort".to_string()),
-            upstream: None,
+        PipelineState::CancellingChildren,
+        PipelineState::FailingChildren {
+            cause: "abort".to_string(),
         },
         PipelineState::Draining,
         PipelineState::Drained,
@@ -315,9 +328,8 @@ async fn run_returns_failed_terminal_state_as_error() {
 
 #[tokio::test]
 async fn run_returns_abort_terminal_state_as_error() {
-    let handle = flow_handle_that_finishes_in(PipelineState::AbortRequested {
-        reason: ViolationCause::Other("abort requested".to_string()),
-        upstream: None,
+    let handle = flow_handle_that_finishes_in(PipelineState::FailingChildren {
+        cause: "abort requested".to_string(),
     });
 
     let result = handle.run().await;

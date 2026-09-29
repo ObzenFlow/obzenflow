@@ -1317,6 +1317,7 @@ where
         .with_feed_plan(feed_plan)
         .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
         .with_seq_ordered_fan_ins(seq_ordered_fan_ins)
+        .with_source_contract_strict_mode(obzenflow_runtime::messaging::upstream_subscription_policy::SourceContractStrictMode::from_token(__flow_effective.source_contract_strict_mode()))
         .with_lineage_policies(lineage_policies)
         .with_heartbeat_intervals(heartbeat_intervals)
         .with_effect_ports(effect_ports)

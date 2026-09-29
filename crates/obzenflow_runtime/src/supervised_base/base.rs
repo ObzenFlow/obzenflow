@@ -54,30 +54,65 @@ pub trait Supervisor {
     /// The actual supervisor family, independent of its task name or event types.
     fn supervisor_kind(&self) -> SupervisorKind;
 
-    /// Existing journal owned by this run. Registration is ordinary journal
-    /// evidence, published through the same supervised publication scope.
-    fn report_journal(&self, context: &Self::Context) -> crate::supervised_base::SupervisorJournal;
+    /// The owner selects its canonical journal and authors its registration fact.
+    /// The runner invokes this only for an FSM-selected Register action.
+    fn registration(
+        &self,
+        context: &Self::Context,
+        descriptor: SupervisorDescriptor,
+    ) -> Registration;
 }
 
-pub(super) async fn register<S: Supervisor>(
+pub(crate) type Registration =
+    futures::future::BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
+pub(crate) fn register<S: Supervisor>(
     supervisor: &S,
     context: &S::Context,
     writer: WriterId,
     supervision: SupervisionMode,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Registration {
     let descriptor = SupervisorDescriptor {
         name: supervisor.name().to_owned(),
         kind: supervisor.supervisor_kind(),
         supervision,
     };
-    descriptor
-        .validate(&writer)
-        .map_err(std::io::Error::other)?;
-    super::publication::report(
-        &supervisor.report_journal(context),
-        SystemEvent::new(writer, SystemPayload::SupervisorRegistered { descriptor }),
-        Default::default(),
-    )
-    .await?;
-    Ok(())
+    if let Err(error) = descriptor.validate(&writer) {
+        return Box::pin(async move { Err(std::io::Error::other(error).into()) });
+    }
+    supervisor.registration(context, descriptor)
+}
+
+pub(crate) fn register_stage(
+    journal: std::sync::Arc<dyn obzenflow_core::Journal<obzenflow_core::ChainEvent>>,
+    context: obzenflow_core::event::provenance::FlowContext,
+    descriptor: SupervisorDescriptor,
+) -> Registration {
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+    Box::pin(async move {
+        let event = ChainEventFactory::create_with_context(
+            context.stage_id.into(),
+            ChainPayload::Execution(ExecutionPayload::SupervisorRegistered { descriptor }),
+            context,
+        );
+        super::publication::append(&journal, event, Default::default()).await?;
+        Ok(())
+    })
+}
+
+pub(crate) fn register_system(
+    journal: std::sync::Arc<dyn obzenflow_core::Journal<SystemEvent>>,
+    writer: WriterId,
+    descriptor: SupervisorDescriptor,
+) -> Registration {
+    Box::pin(async move {
+        super::publication::append(
+            &journal,
+            SystemEvent::new(writer, SystemPayload::SupervisorRegistered { descriptor }),
+            Default::default(),
+        )
+        .await?;
+        Ok(())
+    })
 }

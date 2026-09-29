@@ -181,19 +181,6 @@ pub trait SupervisorHandle: Send + Sync {
     #[doc(hidden)]
     fn request_abort(&self);
 
-    /// Publish a pipeline control row through the owning stage's retained
-    /// writer. A closed stage has no remaining control admission.
-    #[doc(hidden)]
-    fn publish_pipeline_control(
-        &self,
-        _journal: std::sync::Arc<
-            dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,
-        >,
-        _event: obzenflow_core::event::ChainEvent,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        Err(std::io::Error::other("supervisor does not own a stage publication scope").into())
-    }
-
     /// Wait for the supervisor to complete
     ///
     /// This borrows the handle and waits for all owned resources to finish.
@@ -201,6 +188,23 @@ pub trait SupervisorHandle: Send + Sync {
     /// the acknowledged execution outcome, so a successfully published flow
     /// failure returns an error even when the supervisor task returned normally.
     async fn wait_for_completion(&self) -> Result<(), Self::Error>;
+
+    /// Observe an achieved FSM transition without changing command acceptance.
+    async fn wait_for_milestone(
+        &self,
+        milestone: crate::stages::common::stage_lifecycle::StageMilestone,
+    ) -> Result<
+        crate::stages::common::stage_lifecycle::MilestoneAck,
+        crate::stages::common::stage_handle::StageError,
+    >;
+
+    /// The original failure is visible while cleanup or publication is pending.
+    async fn wait_for_failure(
+        &self,
+    ) -> Option<crate::stages::common::stage_lifecycle::LifecycleFailure>;
+
+    /// Observe semantic outcome after physical task and publication settlement.
+    async fn wait_for_stage_exit(&self) -> crate::stages::common::stage_lifecycle::LifecycleExit;
 
     /// Abort the supervisor task and join it before returning.
     async fn abort_and_wait(&self) -> Result<(), Self::Error>;
@@ -260,10 +264,17 @@ where
     pub fn build(self, initial_state: S) -> (EventSender<E>, EventReceiver<E>, StateWatcher<S>) {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(self.event_buffer);
         let (state_tx, state_rx) = tokio::sync::watch::channel(initial_state);
+        let capacity = std::sync::Arc::new(tokio::sync::Semaphore::new(self.event_buffer));
 
         (
-            EventSender { tx: event_tx },
-            EventReceiver { rx: Some(event_rx) },
+            EventSender {
+                tx: event_tx,
+                capacity: capacity.clone(),
+            },
+            EventReceiver {
+                rx: Some(event_rx),
+                capacity,
+            },
             StateWatcher {
                 tx: state_tx,
                 rx: state_rx,
@@ -274,7 +285,8 @@ where
 
 /// Type-safe event sender
 pub struct EventSender<E> {
-    tx: tokio::sync::mpsc::Sender<(E, obzenflow_core::event::CausalFrontier)>,
+    tx: tokio::sync::mpsc::Sender<ReceivedCommand<E>>,
+    capacity: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl<E: Debug + Send + 'static> EventSender<E> {
@@ -284,16 +296,35 @@ impl<E: Debug + Send + 'static> EventSender<E> {
     ) -> impl std::future::Future<Output = Result<(), HandleError>> + Send + '_ {
         let frontier = super::publication::capture();
         async move {
+            let permit = self
+                .capacity
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| HandleError::SupervisorNotRunning)?;
             self.tx
-                .send((event, frontier))
+                .send(ReceivedCommand {
+                    event,
+                    frontier,
+                    _permit: permit,
+                })
                 .await
                 .map_err(|_| HandleError::SupervisorNotRunning)
         }
     }
 
     pub fn try_send(&self, event: E) -> Result<(), HandleError> {
+        let permit = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| HandleError::SupervisorNotRunning)?;
         self.tx
-            .try_send((event, super::publication::capture()))
+            .try_send(ReceivedCommand {
+                event,
+                frontier: super::publication::capture(),
+                _permit: permit,
+            })
             .map_err(|_| HandleError::SupervisorNotRunning)
     }
 }
@@ -302,31 +333,62 @@ impl<E> Clone for EventSender<E> {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
+            capacity: self.capacity.clone(),
         }
+    }
+}
+
+/// A delivered command keeps its causal context until the owning FSM admits it.
+pub(crate) struct ReceivedCommand<E> {
+    pub(crate) event: E,
+    frontier: obzenflow_core::event::CausalFrontier,
+    // Deferred commands retain their admission capacity as well as causality.
+    // Moving a message out of the channel cannot grow an unbounded second queue.
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl<E> ReceivedCommand<E> {
+    pub(crate) fn admit(self) -> Option<E> {
+        super::publication::admit_command(&self.frontier).then_some(self.event)
     }
 }
 
 /// Type-safe event receiver
 pub struct EventReceiver<E> {
-    rx: Option<tokio::sync::mpsc::Receiver<(E, obzenflow_core::event::CausalFrontier)>>,
+    rx: Option<tokio::sync::mpsc::Receiver<ReceivedCommand<E>>>,
+    capacity: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl<E> Drop for EventReceiver<E> {
+    fn drop(&mut self) {
+        if self.rx.is_some() {
+            self.capacity.close();
+        }
+    }
 }
 
 impl<E> EventReceiver<E> {
     pub async fn recv(&mut self) -> Option<E> {
-        let (event, frontier) = self.rx.as_mut()?.recv().await?;
-        super::publication::admit_command(&frontier).then_some(event)
+        self.recv_command().await?.admit()
+    }
+
+    pub(crate) async fn recv_command(&mut self) -> Option<ReceivedCommand<E>> {
+        self.rx.as_mut()?.recv().await
+    }
+
+    pub(crate) fn try_recv_command(
+        &mut self,
+    ) -> Result<ReceivedCommand<E>, tokio::sync::mpsc::error::TryRecvError> {
+        self.rx
+            .as_mut()
+            .ok_or(tokio::sync::mpsc::error::TryRecvError::Disconnected)?
+            .try_recv()
     }
 
     pub fn try_recv(&mut self) -> Result<E, tokio::sync::mpsc::error::TryRecvError> {
-        let (event, frontier) = self
-            .rx
-            .as_mut()
-            .ok_or(tokio::sync::mpsc::error::TryRecvError::Disconnected)?
-            .try_recv()?;
-        if !super::publication::admit_command(&frontier) {
-            return Err(tokio::sync::mpsc::error::TryRecvError::Disconnected);
-        }
-        Ok(event)
+        self.try_recv_command()?
+            .admit()
+            .ok_or(tokio::sync::mpsc::error::TryRecvError::Disconnected)
     }
 
     /// Close admission and transfer the accepted queue to retained publication.
@@ -334,7 +396,11 @@ impl<E> EventReceiver<E> {
     pub(crate) fn close_and_take(&mut self) -> Option<Self> {
         let mut receiver = self.rx.take()?;
         receiver.close();
-        Some(Self { rx: Some(receiver) })
+        self.capacity.close();
+        Some(Self {
+            rx: Some(receiver),
+            capacity: self.capacity.clone(),
+        })
     }
 }
 

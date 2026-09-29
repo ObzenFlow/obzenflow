@@ -30,6 +30,7 @@
 //! Notes:
 //! - Entries for unknown accounts are dropped until the account exists.
 //! - Accounts can be submitted at any time; the join catalog updates continuously.
+//! - Account and transaction ingress each have an independent rate limiter.
 //! - The stateful stage emits a `bank.checkbook` snapshot for every posted entry.
 //! - The `{accepted,rejected}` response is per-request (single POST => accepted=1). For cumulative counts, check `/metrics`.
 //! - Ingress POSTs above stay unauthenticated in this example. Control-plane auth protects built-ins such as `/metrics`, `/api/topology`, and `/api/flow/*`.
@@ -86,6 +87,7 @@ pub fn build_flow(
         );
         let checkbook_handler = Checkbook;
         let accounts_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
+        let tx_route_limiter = RateLimiterBuilder::new(10.0).with_burst(1.0).build();
         let printer_sink = sinks::console::<CheckbookSnapshot, _>(
             SnapshotTableFormatter::new(
                 &["#", "Kind", "Amount", "Credit", "Debit", "Balance", "Note"],
@@ -139,28 +141,42 @@ pub fn build_flow(
         );
 
         Ok(flow! {
-        name: "http_ingestion_piggy_bank_demo",
-        journals: disk_journals(PathBuf::from("target/http-ingestion-piggy-bank-demo-logs")),
+            name: "http_ingestion_piggy_bank_demo",
+            journals: disk_journals(PathBuf::from(
+                "target/http-ingestion-piggy-bank-demo-logs"
+            )),
 
-        stages: {
-            accounts = async_infinite_source!(
-                AccountOpened => accounts_source,
-                ingress with accounts_route_limiter
-            );
-            tx = async_infinite_source!(LedgerEntry => tx_source);
+            stages: {
+                // Ingestion
+                accounts = async_infinite_source!(
+                    AccountOpened => accounts_source,
+                    ingress with accounts_route_limiter
+                );
+                tx = async_infinite_source!(
+                    LedgerEntry => tx_source,
+                    ingress with tx_route_limiter
+                );
 
-            posted = join!(catalog accounts: AccountOpened, LedgerEntry -> PostedEntry => post_entry);
+                // Processing
+                posted = join!(
+                    catalog accounts: AccountOpened,
+                    LedgerEntry -> PostedEntry => post_entry
+                );
+                checkbook = stateful!(
+                    PostedEntry -> CheckbookSnapshot => checkbook_handler
+                );
 
-            checkbook = stateful!(PostedEntry -> CheckbookSnapshot => checkbook_handler);
+                // Delivery
+                printer = sink!(
+                    CheckbookSnapshot => printer_sink
+                );
+            },
 
-            printer = sink!(CheckbookSnapshot => printer_sink);
-        },
-
-        topology: {
-            (accounts, tx) |> posted;
-            posted |> checkbook;
-            checkbook |> printer;
-        }
+            topology: {
+                (accounts, tx) |> posted;
+                posted |> checkbook;
+                checkbook |> printer;
+            }
         })
     })
 }

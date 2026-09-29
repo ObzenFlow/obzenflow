@@ -29,7 +29,6 @@ use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{BackpressureFact, ExecutionPayload};
 use obzenflow_core::event::{
     ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason, StageFatalRecorded,
-    SystemEvent,
 };
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -86,8 +85,6 @@ async fn build_cycle_entry_harness<
         Arc::new(TestJournal::new(JournalOwner::stage(t)));
     let error_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(JournalOwner::stage(t)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(TestJournal::new(JournalOwner::stage(t)));
 
     let mut stage_names = HashMap::new();
     stage_names.insert(s, "s".to_string());
@@ -116,8 +113,8 @@ async fn build_cycle_entry_harness<
     };
 
     let handler = handler_factory(t);
-    let mut ctx = TransformContext {
-        handler,
+    let resources = TransformResources {
+        handler: Some(handler),
         stage_id: t,
         stage_name: "t".to_string(),
         observers: crate::stages::observer::StageObserverBundle::default(),
@@ -134,7 +131,6 @@ async fn build_cycle_entry_harness<
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
         direct_fact_continuation: None,
         error_journal,
-        report_journal: (system_journal.clone()).into(),
         writer_id: None,
         lineage_policy: obzenflow_core::config::LineagePolicy::default(),
         subscription: None,
@@ -163,6 +159,8 @@ async fn build_cycle_entry_harness<
         heartbeat: None,
         catch_up_flip: None,
     };
+
+    let mut ctx = TransformContext::new(resources);
 
     TransformAction::AllocateResources
         .execute(&mut ctx)
@@ -447,8 +445,6 @@ async fn build_transform_harness<
         Arc::new(TestJournal::new(JournalOwner::stage(t)));
     let error_journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(TestJournal::new(JournalOwner::stage(t)));
-    let system_journal: Arc<dyn Journal<SystemEvent>> =
-        Arc::new(TestJournal::new(JournalOwner::stage(t)));
 
     let mut stage_names = HashMap::new();
     stage_names.insert(s, "s".to_string());
@@ -467,8 +463,8 @@ async fn build_transform_harness<
     backpressure_readers.insert(s, registry.reader(s, t));
 
     let handler = handler_factory(t);
-    let mut ctx = TransformContext {
-        handler,
+    let resources = TransformResources {
+        handler: Some(handler),
         stage_id: t,
         stage_name: "t".to_string(),
         observers: crate::stages::observer::StageObserverBundle::default(),
@@ -485,7 +481,6 @@ async fn build_transform_harness<
         direct_fact_plan: crate::stages::resources_builder::DirectFactPlan::default(),
         direct_fact_continuation: None,
         error_journal,
-        report_journal: (system_journal.clone()).into(),
         writer_id: None,
         lineage_policy: obzenflow_core::config::LineagePolicy::default(),
         subscription: None,
@@ -514,6 +509,8 @@ async fn build_transform_harness<
         heartbeat: None,
         catch_up_flip: None,
     };
+
+    let mut ctx = TransformContext::new(resources);
 
     TransformAction::AllocateResources
         .execute(&mut ctx)
@@ -572,7 +569,7 @@ async fn forwarding_uses_stage_name_in_running_and_draining_without_reauthoring(
         let (mut supervisor, mut ctx, _, s, t, _, upstream, data) =
             build_transform_harness(|_| FilterHandler, 1, 1).await;
         // The authored stage name deliberately differs from the supervisor's log name.
-        ctx.stage_name = "actual_transform".into();
+        ctx.resources_mut().unwrap().stage_name = "actual_transform".into();
         // Draining deliberately defers EOF; a watermark exercises immediate
         // forwarding in both states without changing that terminal contract.
         let original = ChainEventFactory::watermark_event(WriterId::from(s), 42, None)
@@ -596,7 +593,12 @@ async fn forwarding_uses_stage_name_in_running_and_draining_without_reauthoring(
             .iter()
             .find(|env| env.envelope.provenance.event.id == original.id)
             .expect("forwarded watermark");
-        assert_forwarded_control(&forwarded.authored(), &original, t, &ctx.stage_name);
+        assert_forwarded_control(
+            &forwarded.authored(),
+            &original,
+            t,
+            &ctx.resources_mut().unwrap().stage_name,
+        );
         let source_rows = upstream.read_causally_ordered().await.unwrap();
         assert_eq!(
             serde_json::to_value(source_rows[0].authored()).unwrap(),
@@ -617,11 +619,11 @@ async fn forwarding_fan_out_keeps_independent_local_contexts() {
         .await
         .unwrap();
     let envelope = envelope.into();
-    left.forward_control_event(&envelope, &left_ctx.stage_name)
+    left.forward_control_event(&envelope, &left_ctx.resources.as_ref().unwrap().stage_name)
         .await
         .unwrap();
     right
-        .forward_control_event(&envelope, &right_ctx.stage_name)
+        .forward_control_event(&envelope, &right_ctx.resources.as_ref().unwrap().stage_name)
         .await
         .unwrap();
     let left_rows = left_data.read_causally_ordered().await.unwrap();
@@ -630,13 +632,13 @@ async fn forwarding_fan_out_keeps_independent_local_contexts() {
         &left_rows.last().unwrap().authored(),
         &original,
         t,
-        &left_ctx.stage_name,
+        &left_ctx.resources.as_ref().unwrap().stage_name,
     );
     assert_forwarded_control(
         &right_rows.last().unwrap().authored(),
         &original,
         right_id,
-        &right_ctx.stage_name,
+        &right_ctx.resources.as_ref().unwrap().stage_name,
     );
     assert_eq!(
         serde_json::to_value(envelope.authored()).unwrap(),
@@ -683,7 +685,7 @@ async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
         .filter(|env| env.consumes_data_credit() && env.event_type() == "bp_test.expand_out")
         .count();
     assert_eq!(outputs_written, 1);
-    assert_eq!(ctx.pending_outputs.len(), 1);
+    assert_eq!(ctx.resources_mut().unwrap().pending_outputs.len(), 1);
     assert_eq!(
         upstream_writer.min_downstream_credit(),
         0,
@@ -706,7 +708,7 @@ async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
         .filter(|env| env.consumes_data_credit() && env.event_type() == "bp_test.expand_out")
         .count();
     assert_eq!(outputs_written, 2);
-    assert!(ctx.pending_outputs.is_empty());
+    assert!(ctx.resources_mut().unwrap().pending_outputs.is_empty());
     assert_eq!(
         upstream_writer.min_downstream_credit(),
         1,
@@ -761,7 +763,10 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
                 1,
             )
             .await;
-        TransformHandler::install_writer_id(&mut ctx.handler, WriterId::from(t));
+        TransformHandler::install_writer_id(
+            ctx.resources_mut().unwrap().handler.as_mut().unwrap(),
+            WriterId::from(t),
+        );
 
         let upstream_writer = registry.writer(s);
         upstream_writer.reserve(1).expect("seed reserve").commit(1);
@@ -794,6 +799,8 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
         );
 
         let errors = ctx
+            .resources_mut()
+            .unwrap()
             .error_journal
             .read_causally_ordered()
             .await
@@ -867,7 +874,10 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
                 1,
             )
             .await;
-        TransformHandler::install_writer_id(&mut ctx.handler, WriterId::from(t));
+        TransformHandler::install_writer_id(
+            ctx.resources_mut().unwrap().handler.as_mut().unwrap(),
+            WriterId::from(t),
+        );
 
         let upstream_writer = registry.writer(s);
         upstream_writer.reserve(1).expect("seed reserve").commit(1);
@@ -903,6 +913,8 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
         );
 
         let error_events = ctx
+            .resources_mut()
+            .unwrap()
             .error_journal
             .read_causally_ordered()
             .await
@@ -955,8 +967,14 @@ async fn transport_filtered_data_completes_one_physical_credit_without_handler_d
             ),
         ],
     );
-    let subscription = ctx.subscription.take().expect("allocated subscription");
-    ctx.subscription = Some(subscription.with_selected_feeds(selected).transport_only());
+    let subscription = ctx
+        .resources_mut()
+        .unwrap()
+        .subscription
+        .take()
+        .expect("allocated subscription");
+    ctx.resources_mut().unwrap().subscription =
+        Some(subscription.with_selected_feeds(selected).transport_only());
 
     let upstream_writer = registry.writer(s);
     upstream_writer.reserve(1).expect("seed reserve").commit(1);
@@ -994,7 +1012,10 @@ async fn transport_filtered_data_completes_one_physical_credit_without_handler_d
         .await
         .expect("dispatch empty cursor");
     assert_eq!(upstream_writer.min_downstream_credit(), 1);
-    assert_eq!(registry.edge_in_flight(s, ctx.stage_id), Some(0));
+    assert_eq!(
+        registry.edge_in_flight(s, ctx.resources_mut().unwrap().stage_id),
+        Some(0)
+    );
 }
 
 #[tokio::test]
@@ -1042,11 +1063,13 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
         .await;
 
     // Exhaust downstream credits for this stage so the next reserve will block.
-    ctx.backpressure_writer
+    ctx.resources_mut()
+        .unwrap()
+        .backpressure_writer
         .reserve(1)
         .expect("seed reserve")
         .commit(1);
-    ctx.pending_outputs.push_back(
+    ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
@@ -1077,13 +1100,13 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
     assert_pending!(task.poll());
     drop(task);
     assert!(
-        ctx.pending_outputs.is_empty(),
+        ctx.resources_mut().unwrap().pending_outputs.is_empty(),
         "ack-driven wake flushed the pending output"
     );
 
     // Block again: with no ack, one chunk of the credit wait elapses and the
     // loop returns to dispatch_state with the measured wait recorded.
-    ctx.pending_outputs.push_back(
+    ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending2", json!({})),
@@ -1113,7 +1136,7 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
 }
 
 #[tokio::test]
-async fn terminal_transform_records_queued_controls_and_errors_without_executing_them() {
+async fn transform_finalisation_records_queued_controls_before_terminal_dispatch() {
     for state in [
         TransformState::Failed("archive corruption".into()),
         TransformState::Drained,
@@ -1140,8 +1163,20 @@ async fn terminal_transform_records_queued_controls_and_errors_without_executing
             supervisor,
             receiver,
             watcher,
-            ctx.report_journal.clone(),
+            crate::supervised_base::with_external_events::stage_commands(
+                ctx.resources.as_ref().unwrap().data_journal.clone(),
+                obzenflow_core::event::provenance::FlowContext::new(
+                    ctx.resources.as_ref().unwrap().stage_name.clone(),
+                    ctx.resources.as_ref().unwrap().stage_id,
+                ),
+            ),
         );
+        let pending = match &state {
+            TransformState::Failed(cause) => TransformState::Failing(cause.clone()),
+            TransformState::Drained => TransformState::Finalising,
+            _ => unreachable!(),
+        };
+        wrapped.close_mailbox(&pending).await.unwrap();
         assert!(matches!(
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
             EventLoopDirective::Terminate
@@ -1151,17 +1186,24 @@ async fn terminal_transform_records_queued_controls_and_errors_without_executing
             wrapped.dispatch_state(&state, &mut ctx).await.unwrap(),
             EventLoopDirective::Terminate
         ));
-        let records = ctx.report_journal.read_all_unordered().await.unwrap();
+        let records = ctx
+            .resources
+            .as_ref()
+            .unwrap()
+            .data_journal
+            .read_all_unordered()
+            .await
+            .unwrap();
         assert_eq!(records.len(), 2);
         assert!(
-            matches!(&records[0].payload, obzenflow_core::event::SystemPayload::SupervisorCommandDiscarded {
+            matches!(&records[0].payload, ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorCommandDiscarded {
             command, disposition: obzenflow_core::event::CommandDiscardDisposition::ObsoleteControl, ..
-        } if command == "Ready")
+        }) if command == "Ready")
         );
         assert!(
-            matches!(&records[1].payload, obzenflow_core::event::SystemPayload::SupervisorCommandDiscarded {
+            matches!(&records[1].payload, ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SupervisorCommandDiscarded {
             terminal_state, disposition: obzenflow_core::event::CommandDiscardDisposition::UnexpectedError, error: Some(error), ..
-        } if terminal_state == state.variant_name() && error == "late failure")
+        }) if terminal_state == pending.variant_name() && error == "late failure")
         );
     }
 }
@@ -1180,11 +1222,13 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         )
         .await;
 
-    ctx.backpressure_writer
+    ctx.resources_mut()
+        .unwrap()
+        .backpressure_writer
         .reserve(1)
         .expect("seed reserve")
         .commit(1);
-    ctx.pending_outputs.push_back(
+    ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
@@ -1203,7 +1247,13 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         supervisor,
         receiver,
         watcher,
-        ctx.report_journal.clone(),
+        crate::supervised_base::with_external_events::stage_commands(
+            ctx.resources.as_ref().unwrap().data_journal.clone(),
+            obzenflow_core::event::provenance::FlowContext::new(
+                ctx.resources.as_ref().unwrap().stage_name.clone(),
+                ctx.resources.as_ref().unwrap().stage_id,
+            ),
+        ),
     );
 
     let state = TransformState::<ExpandHandler>::Running;
@@ -1253,11 +1303,13 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
         )
         .await;
 
-    ctx.backpressure_writer
+    ctx.resources_mut()
+        .unwrap()
+        .backpressure_writer
         .reserve(1)
         .expect("seed reserve")
         .commit(1);
-    ctx.pending_outputs.push_back(
+    ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
             event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
@@ -1376,16 +1428,28 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         matches!(directive, EventLoopDirective::Continue),
         "expected entry point to buffer EOF and continue"
     );
-    assert!(ctx.buffered_terminal_envelope.is_some());
+    assert!(ctx
+        .resources_mut()
+        .unwrap()
+        .buffered_terminal_envelope
+        .is_some());
     let original = ctx
+        .resources_mut()
+        .unwrap()
         .buffered_terminal_envelope
         .as_ref()
         .unwrap()
         .authored()
         .clone();
-    assert!(ctx.external_eofs_received.contains(&s));
+    assert!(ctx
+        .resources_mut()
+        .unwrap()
+        .external_eofs_received
+        .contains(&s));
 
     let forwarded = ctx
+        .resources_mut()
+        .unwrap()
         .data_journal
         .read_causally_ordered()
         .await
@@ -1409,6 +1473,8 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
     ));
 
     let forwarded = ctx
+        .resources_mut()
+        .unwrap()
         .data_journal
         .read_causally_ordered()
         .await
@@ -1416,12 +1482,23 @@ async fn entry_point_buffers_external_eof_until_scc_quiescent() {
         .into_iter()
         .any(|env| env.is_eof());
     assert!(forwarded, "expected EOF to be forwarded after quiescence");
-    let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+    let rows = ctx
+        .resources_mut()
+        .unwrap()
+        .data_journal
+        .read_causally_ordered()
+        .await
+        .unwrap();
     let forwarded = rows
         .iter()
         .find(|env| env.envelope.provenance.event.id == original.id)
         .expect("released terminal");
-    assert_forwarded_control(&forwarded.authored(), &original, t, &ctx.stage_name);
+    assert_forwarded_control(
+        &forwarded.authored(),
+        &original,
+        t,
+        &ctx.resources_mut().unwrap().stage_name,
+    );
 }
 
 #[tokio::test]
@@ -1450,16 +1527,24 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
         matches!(directive, EventLoopDirective::Continue),
         "expected entry point to buffer drain and continue"
     );
-    assert!(ctx.buffered_terminal_envelope.is_some());
+    assert!(ctx
+        .resources_mut()
+        .unwrap()
+        .buffered_terminal_envelope
+        .is_some());
     let original = ctx
+        .resources_mut()
+        .unwrap()
         .buffered_terminal_envelope
         .as_ref()
         .unwrap()
         .authored()
         .clone();
-    assert!(ctx.drain_received);
+    assert!(ctx.resources_mut().unwrap().drain_received);
 
     let forwarded = ctx
+        .resources_mut()
+        .unwrap()
         .data_journal
         .read_causally_ordered()
         .await
@@ -1490,6 +1575,8 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
     ));
 
     let forwarded = ctx
+        .resources_mut()
+        .unwrap()
         .data_journal
         .read_causally_ordered()
         .await
@@ -1504,12 +1591,23 @@ async fn entry_point_buffers_drain_until_scc_quiescent() {
             )
         });
     assert!(forwarded, "expected drain to be forwarded after quiescence");
-    let rows = ctx.data_journal.read_causally_ordered().await.unwrap();
+    let rows = ctx
+        .resources_mut()
+        .unwrap()
+        .data_journal
+        .read_causally_ordered()
+        .await
+        .unwrap();
     let forwarded = rows
         .iter()
         .find(|env| env.envelope.provenance.event.id == original.id)
         .expect("released terminal");
-    assert_forwarded_control(&forwarded.authored(), &original, t, &ctx.stage_name);
+    assert_forwarded_control(
+        &forwarded.authored(),
+        &original,
+        t,
+        &ctx.resources_mut().unwrap().stage_name,
+    );
 }
 
 #[tokio::test]
@@ -1535,10 +1633,12 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
             .expect("buffer eof"),
         EventLoopDirective::Continue
     ));
-    registry.reader(u, eof_ctx.stage_id).ack_consumed(1);
+    registry
+        .reader(u, eof_ctx.resources_mut().unwrap().stage_id)
+        .ack_consumed(1);
 
     let (active, release) = generated_continuation(DirectFactPollState::DrivingReconstruction);
-    eof_ctx.direct_fact_continuation = Some(active);
+    eof_ctx.resources_mut().unwrap().direct_fact_continuation = Some(active);
     let mut active_dispatch = tokio_test::task::spawn(async {
         eof_supervisor.dispatch_state(&running, &mut eof_ctx).await
     });
@@ -1556,11 +1656,19 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
     ));
     drop(active_dispatch);
     assert!(
-        eof_ctx.direct_fact_continuation.is_some(),
+        eof_ctx
+            .resources_mut()
+            .unwrap()
+            .direct_fact_continuation
+            .is_some(),
         "an active generated future must prevent clean EOF release"
     );
     assert!(
-        eof_ctx.buffered_terminal_envelope.is_some(),
+        eof_ctx
+            .resources_mut()
+            .unwrap()
+            .buffered_terminal_envelope
+            .is_some(),
         "the authored EOF remains buffered while generated work is active"
     );
 
@@ -1572,7 +1680,11 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
             .expect("complete generated continuation"),
         EventLoopDirective::Continue
     ));
-    assert!(eof_ctx.direct_fact_continuation.is_none());
+    assert!(eof_ctx
+        .resources_mut()
+        .unwrap()
+        .direct_fact_continuation
+        .is_none());
     assert!(matches!(
         eof_supervisor
             .dispatch_state(&running, &mut eof_ctx)
@@ -1584,14 +1696,16 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
     let (mut drain_supervisor, mut drain_ctx, _registry, _s, _t, _k, _, _) =
         build_transform_harness(|_| FilterHandler, 3, 3).await;
     drain_supervisor.subscription = None;
-    drain_ctx.subscription = None;
+    drain_ctx.resources_mut().unwrap().subscription = None;
     drain_ctx
+        .resources_mut()
+        .unwrap()
         .backpressure_writer
         .reserve(1)
         .expect("occupy one of three credits")
         .commit(1);
     let (parked, _release) = generated_continuation(DirectFactPollState::FreshUnpolled);
-    drain_ctx.direct_fact_continuation = Some(parked);
+    drain_ctx.resources_mut().unwrap().direct_fact_continuation = Some(parked);
     let draining = TransformState::<FilterHandler>::Draining;
     let mut parked_dispatch = tokio_test::task::spawn(async {
         drain_supervisor
@@ -1612,7 +1726,11 @@ async fn generated_continuations_remain_non_quiescent_for_eof_and_drain_completi
     ));
     drop(parked_dispatch);
     assert!(
-        drain_ctx.direct_fact_continuation.is_some(),
+        drain_ctx
+            .resources_mut()
+            .unwrap()
+            .direct_fact_continuation
+            .is_some(),
         "a credit-parked admission must prevent DrainComplete"
     );
 }

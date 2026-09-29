@@ -44,6 +44,9 @@ struct Counts {
     polls: AtomicUsize,
     drains: AtomicUsize,
     drops: AtomicUsize,
+    block_cleanup: AtomicBool,
+    cleaning: Notify,
+    release_cleanup: Notify,
     opening: Notify,
     polling: Notify,
     journal_failure: Arc<AtomicBool>,
@@ -67,6 +70,7 @@ enum Reading {
     Eof,
     Pending,
     FailJournal,
+    RowThenPending,
 }
 
 #[derive(Clone)]
@@ -113,10 +117,12 @@ struct Reader {
 impl Reader {
     async fn read(&mut self) -> Result<Option<Vec<Row>>, SourceError> {
         let counts = &self.resource.0;
-        counts.polls.fetch_add(1, Ordering::SeqCst);
+        let poll = counts.polls.fetch_add(1, Ordering::SeqCst);
         counts.polling.notify_one();
         match self.reading {
             Reading::Eof => Ok(None),
+            Reading::RowThenPending if poll == 0 => Ok(Some(vec![Row])),
+            Reading::RowThenPending => std::future::pending().await,
             Reading::Pending => std::future::pending().await,
             Reading::FailJournal => {
                 counts.journal_failure.store(true, Ordering::SeqCst);
@@ -127,6 +133,10 @@ impl Reader {
 
     async fn cleanup(&mut self) -> Result<(), SourceError> {
         self.resource.0.drains.fetch_add(1, Ordering::SeqCst);
+        self.resource.0.cleaning.notify_one();
+        if self.resource.0.block_cleanup.load(Ordering::SeqCst) {
+            self.resource.0.release_cleanup.notified().await;
+        }
         if self.drain_fails {
             Err(SourceError::Other(
                 "secondary cleanup failure credential=DO_NOT_PERSIST".into(),
@@ -251,7 +261,7 @@ macro_rules! lifecycle_family {
                 if resume {
                     resources.runtime_execution = crate::execution::RuntimeExecution::new(
                         crate::execution::RuntimeMode::Resume,
-                        Some(Arc::new(EmptyArchive(stage))),
+                        Some(Arc::new(EmptyArchive(stage, None))),
                     );
                     let control = resources.runtime_execution.resume_control().unwrap();
                     // This test supplies an already-reconstructed plan requiring
@@ -367,13 +377,126 @@ macro_rules! lifecycle_family {
             }
 
             #[tokio::test]
+            async fn replay_opening_is_owned_until_settled_without_claiming_startup() {
+                use crate::stages::common::stage_lifecycle::StageMilestone;
+                for fail in [false, true] {
+                    let fixture = Fixture::new(Opening::Ready, Reading::Pending);
+                    let counts = fixture.counts.clone();
+                    let (stage, mut resources, _) = resources(&counts).await;
+                    let opening = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    resources.runtime_execution = crate::execution::RuntimeExecution::new(
+                        crate::execution::RuntimeMode::Replay,
+                        Some(Arc::new(EmptyArchive(stage, Some((opening.clone(), release.clone()))))),
+                    );
+                    let handle = Builder::new(
+                        <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
+                        Config::new(stage, "input", "lifecycle"), resources,
+                    ).build().await.unwrap();
+                    start(&handle).await;
+                    notified(&opening).await;
+                    assert!(matches!(handle.current_state(), State::AcquiringInput));
+                    assert!(handle.wait_for_milestone(StageMilestone::Started).now_or_never().is_none());
+                    handle.send_event(if fail { Event::Error("failure while opening replay".into()) } else { Event::BeginDrain }).await.unwrap();
+                    if fail {
+                        let failure = tokio::time::timeout(Duration::from_secs(3), handle.wait_for_failure()).await.unwrap().unwrap();
+                        assert!(failure.cause.to_string().contains("failure while opening replay"));
+                    } else {
+                        tokio::time::timeout(Duration::from_secs(3), async {
+                            while !matches!(handle.current_state(), State::Draining) { tokio::task::yield_now().await; }
+                        }).await.unwrap();
+                    }
+                    assert!(handle.wait_for_stage_exit().now_or_never().is_none());
+                    release.notify_one();
+                    assert_eq!(finish(&handle).await.is_err(), fail);
+                    assert!(handle.wait_for_milestone(StageMilestone::Started).await.is_err());
+                    assert_eq!(counts.opens.load(Ordering::SeqCst), 0);
+                }
+            }
+
+            #[tokio::test]
+            async fn source_failure_is_visible_while_accepted_output_publication_settles() {
+                let fixture = Fixture::new(Opening::Ready, Reading::RowThenPending);
+                let counts = fixture.counts.clone();
+                let (stage, mut resources, _) = resources(&counts).await;
+                let journal = Arc::new(TestJournal::<ChainEvent>::new(JournalOwner::stage(stage)));
+                let (writing, release) = journal.block_matching_append(|event| matches!(event.payload, obzenflow_core::event::ChainPayload::Fact(_)));
+                resources.data_journal = journal.clone();
+                let handle = Builder::new(
+                    <Fixture as AdmitSource<dyn $family, ConnectorSource>>::prepare(fixture),
+                    Config::new(stage, "input", "lifecycle"), resources,
+                ).build().await.unwrap();
+                start(&handle).await;
+                notified(&writing).await;
+                handle.send_event(Event::Error("failure during source publication".into())).await.unwrap();
+                let failure = tokio::time::timeout(Duration::from_secs(3), handle.wait_for_failure()).await.unwrap().unwrap();
+                assert!(failure.cause.to_string().contains("failure during source publication"));
+                assert!(matches!(handle.current_state(), State::Failing(_)));
+                assert!(handle.wait_for_stage_exit().now_or_never().is_none());
+                release.notify_one();
+                assert!(finish(&handle).await.is_err());
+                let records = journal.read_all_unordered().await.unwrap();
+                assert_eq!(records.iter().filter(|row| matches!(row.payload, obzenflow_core::event::ChainPayload::Fact(_))).count(), 1);
+                assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+            }
+
+            #[tokio::test]
+            async fn failure_is_acknowledged_before_owned_reader_cleanup_finishes() {
+                use crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE;
+                let fixture = Fixture::new(Opening::Ready, Reading::Pending);
+                let counts = fixture.counts.clone();
+                counts.block_cleanup.store(true, Ordering::SeqCst);
+                let (handle, _) = build(fixture, None, false).await;
+                start(&handle).await;
+                notified(&counts.polling).await;
+                handle.send_event(Event::Error("original failure".into())).await.unwrap();
+                let failure = tokio::time::timeout(Duration::from_secs(3), handle.wait_for_failure()).await.unwrap().unwrap();
+                assert!(failure.cause.to_string().contains("original failure"));
+                notified(&counts.cleaning).await;
+                assert!(matches!(handle.current_state(), State::Failing(cause) if cause == "original failure"));
+                handle.send_event(Event::Error(FORCE_SHUTDOWN_MESSAGE.into())).await.unwrap();
+                assert!(handle.wait_for_stage_exit().now_or_never().is_none());
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 0);
+                counts.release_cleanup.notify_one();
+                assert!(finish(&handle).await.is_err());
+                assert!(matches!(handle.current_state(), State::Failed(cause) if cause == "original failure"));
+                assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+            }
+
+            #[tokio::test]
+            async fn failure_during_cancellation_remains_a_failure_after_cleanup() {
+                use crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE;
+                let fixture = Fixture::new(Opening::Ready, Reading::Pending);
+                let counts = fixture.counts.clone();
+                counts.block_cleanup.store(true, Ordering::SeqCst);
+                let (handle, _) = build(fixture, None, false).await;
+                start(&handle).await;
+                notified(&counts.polling).await;
+                handle.send_event(Event::Error(FORCE_SHUTDOWN_MESSAGE.into())).await.unwrap();
+                notified(&counts.cleaning).await;
+                assert!(matches!(handle.current_state(), State::Cancelling(_)));
+                assert!(handle.wait_for_failure().now_or_never().is_none());
+                handle.send_event(Event::Error("failure during cancellation".into())).await.unwrap();
+                let failure = tokio::time::timeout(Duration::from_secs(3), handle.wait_for_failure()).await.unwrap().unwrap();
+                assert!(failure.cause.to_string().contains("failure during cancellation"));
+                assert!(matches!(handle.current_state(), State::Failing(_)));
+                counts.release_cleanup.notify_one();
+                assert!(finish(&handle).await.is_err());
+                assert!(matches!(handle.current_state(), State::Failed(cause) if cause == "failure during cancellation"));
+                assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.drops.load(Ordering::SeqCst), 1);
+            }
+
+            #[tokio::test]
             async fn partial_open_failure_is_terminal_and_source_attributed() {
                 for resume in [false, true] {
                     let fixture = Fixture::new(Opening::Fail, Reading::Pending);
                     let counts = fixture.counts.clone();
                     let (handle, journal) = build(fixture, None, resume).await;
                     start(&handle).await;
-                    finish(&handle).await.unwrap();
+                    assert!(finish(&handle).await.is_err(), "failed FSM must fail its handle");
                     assert!(matches!(handle.current_state(), State::Failed(_)));
                     assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
                     assert_eq!(counts.polls.load(Ordering::SeqCst), 0);
@@ -400,6 +523,8 @@ macro_rules! lifecycle_family {
                     let (handle, _) = build(fixture, None, false).await;
                     start(&handle).await;
                     notified(&counts.opening).await;
+                    assert!(matches!(handle.current_state(), State::AcquiringInput));
+                    assert!(handle.wait_for_milestone(crate::stages::common::stage_lifecycle::StageMilestone::Started).now_or_never().is_none());
                     if abort {
                         handle.abort_and_wait().await.unwrap();
                     } else {
@@ -436,7 +561,8 @@ macro_rules! lifecycle_family {
                         })
                         .await
                         .unwrap();
-                    finish(&handle).await.unwrap();
+                    let result = finish(&handle).await;
+                    assert_eq!(result.is_err(), fail, "semantic failure survives cleanup: {result:?}");
                     assert_eq!(counts.opens.load(Ordering::SeqCst), 1);
                     assert_eq!(counts.polls.load(Ordering::SeqCst), 0);
                     assert_eq!(counts.drains.load(Ordering::SeqCst), 1);
@@ -566,7 +692,7 @@ async fn cleanup_failure_after_natural_exhaustion_is_secondary_evidence() {
     );
 }
 
-struct EmptyArchive(StageId);
+struct EmptyArchive(StageId, Option<(Arc<Notify>, Arc<Notify>)>);
 #[async_trait]
 impl ReplayArchive for EmptyArchive {
     async fn open_source_reader(
@@ -574,6 +700,10 @@ impl ReplayArchive for EmptyArchive {
         _: &str,
         _: obzenflow_core::event::context::StageType,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        if let Some((opening, release)) = &self.1 {
+            opening.notify_one();
+            release.notified().await;
+        }
         Ok(TestJournal::<ChainEvent>::new(JournalOwner::stage(self.0))
             .reader()
             .await

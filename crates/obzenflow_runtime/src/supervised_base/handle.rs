@@ -10,10 +10,12 @@
 use super::builder::{EventSender, HandleError, StateWatcher, SupervisorHandle};
 use super::publication::{self, PublicationScope};
 use super::{HandlerSupervised, HandlerSupervisedExt, SelfSupervised, SelfSupervisedExt};
+use crate::stages::common::stage_handle::StageError;
+use crate::stages::common::stage_lifecycle::{
+    LifecycleExit, LifecycleFailure, LifecycleResults, MilestoneAck, StageMilestone,
+};
 use futures::future::{BoxFuture, Shared};
 use futures::FutureExt;
-use obzenflow_core::event::ChainEvent;
-use obzenflow_core::journal::Journal;
 use std::error::Error;
 use std::fmt::Debug;
 use std::future::Future;
@@ -30,6 +32,7 @@ type Task = JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>;
 pub struct SupervisorTask {
     task: Task,
     publications: Arc<PublicationScope>,
+    lifecycle: Arc<LifecycleResults>,
 }
 
 #[cfg(test)]
@@ -38,6 +41,7 @@ impl From<Task> for SupervisorTask {
         Self {
             task,
             publications: PublicationScope::new(),
+            lifecycle: LifecycleResults::new(),
         }
     }
 }
@@ -139,13 +143,19 @@ where
         let state_watcher = self.state_watcher.ok_or("State watcher is required")?;
         let supervisor_task = self.supervisor_task.ok_or("Supervisor task is required")?;
 
-        let SupervisorTask { task, publications } = supervisor_task;
+        let SupervisorTask {
+            task,
+            publications,
+            lifecycle,
+        } = supervisor_task;
         let abort_requested = Arc::new(AtomicBool::new(false));
         let supervisor_abort = ExecutionCancellation {
             task: task.abort_handle(),
             publications: publications.clone(),
             requested: abort_requested.clone(),
         };
+        let completion_lifecycle = lifecycle.clone();
+        let completion_publications = publications.clone();
         let completion = async move {
             let exit = match task.await {
                 Ok(Ok(())) => SupervisorExit::Returned,
@@ -159,13 +169,26 @@ where
                 Err(error) if error.is_cancelled() => SupervisorExit::Aborted,
                 Err(error) => SupervisorExit::Panicked(error),
             };
-            let settlement = publications.join().await;
-            Arc::new(match (exit, settlement) {
+            match &exit {
+                SupervisorExit::Failed(error) => {
+                    completion_lifecycle.fail(StageError::Execution(error.clone()))
+                }
+                SupervisorExit::Panicked(error) => completion_lifecycle
+                    .fail(StageError::Other(format!("child task panicked: {error}"))),
+                SupervisorExit::Aborted => completion_lifecycle.cancelled("task aborted"),
+                SupervisorExit::Returned => {}
+            }
+            let settlement = completion_publications.join().await;
+            let exit = match (exit, settlement) {
                 (SupervisorExit::Returned | SupervisorExit::Aborted, Err(error)) => {
                     SupervisorExit::Failed(Arc::new(error))
                 }
                 (exit, _) => exit,
-            })
+            };
+            if let SupervisorExit::Failed(error) = &exit {
+                completion_lifecycle.fail(StageError::Execution(error.clone()));
+            }
+            Arc::new(exit)
         }
         .boxed()
         .shared();
@@ -174,6 +197,8 @@ where
             state_watcher,
             supervisor_abort,
             completion,
+            lifecycle,
+            publications,
         })
     }
 
@@ -197,6 +222,8 @@ pub struct StandardHandle<E, S> {
     supervisor_abort: ExecutionCancellation,
     // Never await this retained clone directly: every caller observes a clone.
     completion: SupervisorCompletion,
+    lifecycle: Arc<LifecycleResults>,
+    publications: Arc<PublicationScope>,
 }
 
 impl<E, S> StandardHandle<E, S>
@@ -217,7 +244,15 @@ where
     /// Observe the retained physical join. Dropping or parking one wait does not
     /// prevent other observers from completing it, and never aborts the task.
     pub(crate) async fn join(&self) -> Result<(), HandleError> {
-        self.completion.clone().await.result()
+        let exit = self.completion.clone().await;
+        if matches!(exit.as_ref(), SupervisorExit::Panicked(_)) {
+            return exit.result();
+        }
+        let result = exit.result();
+        if let Some(failure) = self.lifecycle.current().failure {
+            return Err(HandleError::SupervisorFailed(Arc::new(failure.cause)));
+        }
+        result
     }
 
     /// Abort the supervisor task (best-effort).
@@ -272,31 +307,61 @@ where
         self.abort();
     }
 
-    fn publish_pipeline_control(
+    async fn wait_for_completion(&self) -> Result<(), Self::Error> {
+        self.join().await
+    }
+
+    async fn wait_for_milestone(
         &self,
-        journal: Arc<dyn Journal<ChainEvent>>,
-        event: ChainEvent,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let frontier = publication::capture();
-        match self
-            .supervisor_abort
-            .publications
-            .enqueue_control(async move {
-                crate::supervised_base::publication::append_inline(
-                    &journal,
-                    event,
-                    obzenflow_core::journal::AppendOptions::new(frontier),
-                )
-                .await?;
-                Ok(())
-            }) {
-            Err(error) if error.is::<publication::AdmissionClosed>() => Ok(()),
-            result => result.map(drop),
+        milestone: StageMilestone,
+    ) -> Result<MilestoneAck, StageError> {
+        let mut results = self.lifecycle.subscribe();
+        loop {
+            let current = results.borrow_and_update().clone();
+            let ack = match milestone {
+                StageMilestone::Initialized => current.initialized,
+                StageMilestone::Ready => current.ready,
+                StageMilestone::Started => current.started,
+            };
+            if let Some(ack) = ack {
+                return Ok(ack);
+            }
+            if let Some(failure) = current.failure {
+                return Err(failure.cause);
+            }
+            tokio::select! {
+                biased;
+                _ = results.changed() => {},
+                _ = self.completion.clone() => {
+                    let current = self.lifecycle.current();
+                    let ack = match milestone {
+                        StageMilestone::Initialized => current.initialized,
+                StageMilestone::Ready => current.ready,
+                        StageMilestone::Started => current.started,
+                    };
+                    return ack.ok_or_else(|| current.failure.map(|f| f.cause).unwrap_or(StageError::Aborted));
+                }
+            }
         }
     }
 
-    async fn wait_for_completion(&self) -> Result<(), Self::Error> {
-        self.join().await
+    async fn wait_for_failure(&self) -> Option<LifecycleFailure> {
+        let mut results = self.lifecycle.subscribe();
+        loop {
+            if let Some(failure) = results.borrow_and_update().failure.clone() {
+                return Some(failure);
+            }
+            tokio::select! {
+                biased;
+                _ = results.changed() => {},
+                _ = self.completion.clone() => return self.lifecycle.current().failure,
+            }
+        }
+    }
+
+    async fn wait_for_stage_exit(&self) -> LifecycleExit {
+        let _ = self.completion.clone().await;
+        self.lifecycle.settled(self.publications.capture())
     }
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
@@ -313,6 +378,7 @@ where
 pub struct SupervisorTaskBuilder<S> {
     name: String,
     publications: Arc<PublicationScope>,
+    lifecycle: Arc<LifecycleResults>,
     _phantom: PhantomData<S>,
 }
 
@@ -325,6 +391,7 @@ where
         Self {
             name: name.into(),
             publications: PublicationScope::new(),
+            lifecycle: LifecycleResults::new(),
             _phantom: PhantomData,
         }
     }
@@ -379,6 +446,8 @@ where
         };
 
         let publications = self.publications;
+        let lifecycle = self.lifecycle;
+        let task_lifecycle = lifecycle.clone();
         let task_publications = publications.clone();
         let handle = tokio::spawn(async move {
             struct CloseOnExit(Arc<PublicationScope>);
@@ -388,7 +457,9 @@ where
                 }
             }
             let _close = CloseOnExit(task_publications.clone());
-            task_publications.enter(wrapped_future).await
+            task_lifecycle
+                .enter(task_publications.enter(wrapped_future))
+                .await
         });
         tracing::trace!("⚡ tokio::spawn returned for {}", name_clone2);
         tracing::debug!(
@@ -398,6 +469,7 @@ where
         SupervisorTask {
             task: handle,
             publications,
+            lifecycle,
         }
     }
 }

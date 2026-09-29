@@ -49,6 +49,18 @@ pub enum StatefulState<H> {
     /// Initial state - stateful stage has been created but not initialized
     Created,
 
+    Initializing,
+    Starting,
+    Finalising,
+    ValidatingTerminal,
+    ForwardingTerminal,
+    ProducingFinalOutput,
+    DrainingFinalOutput,
+
+    Failing(String),
+    Cancelling(String),
+    Cancelled(String),
+
     /// Resources allocated, ready to start processing
     Initialized,
 
@@ -57,6 +69,9 @@ pub enum StatefulState<H> {
 
     /// Emitting accumulated results (optional state for future emission strategies)
     Emitting,
+
+    /// Settling an emission accepted before a drain command.
+    EmittingDuringDrain,
 
     /// Received EOF, draining final accumulated state
     Draining,
@@ -76,9 +91,22 @@ impl<H> Clone for StatefulState<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Created => Self::Created,
+            Self::Initializing => Self::Initializing,
+            Self::Starting => Self::Starting,
+            Self::Finalising => Self::Finalising,
+            Self::ValidatingTerminal => Self::ValidatingTerminal,
+            Self::ForwardingTerminal => Self::ForwardingTerminal,
+            Self::ProducingFinalOutput => Self::ProducingFinalOutput,
+            Self::DrainingFinalOutput => Self::DrainingFinalOutput,
+
+            Self::Failing(cause) => Self::Failing(cause.clone()),
+            Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
+            Self::Cancelled(cause) => Self::Cancelled(cause.clone()),
+
             Self::Initialized => Self::Initialized,
             Self::Accumulating => Self::Accumulating,
             Self::Emitting => Self::Emitting,
+            Self::EmittingDuringDrain => Self::EmittingDuringDrain,
             Self::Draining => Self::Draining,
             Self::Drained => Self::Drained,
             Self::Failed(msg) => Self::Failed(msg.clone()),
@@ -91,9 +119,22 @@ impl<H> std::fmt::Debug for StatefulState<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Created => write!(f, "Created"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Starting => write!(f, "Starting"),
+            Self::Finalising => write!(f, "Finalising"),
+            Self::ValidatingTerminal => write!(f, "ValidatingTerminal"),
+            Self::ForwardingTerminal => write!(f, "ForwardingTerminal"),
+            Self::ProducingFinalOutput => write!(f, "ProducingFinalOutput"),
+            Self::DrainingFinalOutput => write!(f, "DrainingFinalOutput"),
+
+            Self::Failing(cause) => write!(f, "Failing({cause:?})"),
+            Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
+            Self::Cancelled(cause) => write!(f, "Cancelled({cause:?})"),
+
             Self::Initialized => write!(f, "Initialized"),
             Self::Accumulating => write!(f, "Accumulating"),
             Self::Emitting => write!(f, "Emitting"),
+            Self::EmittingDuringDrain => write!(f, "EmittingDuringDrain"),
             Self::Draining => write!(f, "Draining"),
             Self::Drained => write!(f, "Drained"),
             Self::Failed(msg) => write!(f, "Failed({msg:?})"),
@@ -106,9 +147,22 @@ impl<H: Send + Sync> PartialEq for StatefulState<H> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (StatefulState::Created, StatefulState::Created) => true,
+            (Self::Initializing, Self::Initializing) => true,
+            (Self::Starting, Self::Starting) => true,
+            (Self::Finalising, Self::Finalising) => true,
+            (Self::ValidatingTerminal, Self::ValidatingTerminal) => true,
+            (Self::ForwardingTerminal, Self::ForwardingTerminal) => true,
+            (Self::ProducingFinalOutput, Self::ProducingFinalOutput) => true,
+            (Self::DrainingFinalOutput, Self::DrainingFinalOutput) => true,
+
+            (Self::Failing(a), Self::Failing(b)) => a == b,
+            (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
+            (Self::Cancelled(a), Self::Cancelled(b)) => a == b,
+
             (StatefulState::Initialized, StatefulState::Initialized) => true,
             (StatefulState::Accumulating, StatefulState::Accumulating) => true,
             (StatefulState::Emitting, StatefulState::Emitting) => true,
+            (Self::EmittingDuringDrain, Self::EmittingDuringDrain) => true,
             (StatefulState::Draining, StatefulState::Draining) => true,
             (StatefulState::Drained, StatefulState::Drained) => true,
             (StatefulState::Failed(a), StatefulState::Failed(b)) => a == b,
@@ -121,13 +175,56 @@ impl<H: Send + Sync + 'static> StateVariant for StatefulState<H> {
     fn variant_name(&self) -> &str {
         match self {
             StatefulState::Created => "Created",
+            Self::Initializing => "Initializing",
+            Self::Starting => "Starting",
+            Self::Finalising => "Finalising",
+            Self::ValidatingTerminal => "ValidatingTerminal",
+            Self::ForwardingTerminal => "ForwardingTerminal",
+            Self::ProducingFinalOutput => "ProducingFinalOutput",
+            Self::DrainingFinalOutput => "DrainingFinalOutput",
+
+            Self::Failing(..) => "Failing",
+            Self::Cancelling(..) => "Cancelling",
+            Self::Cancelled(..) => "Cancelled",
+
             StatefulState::Initialized => "Initialized",
             StatefulState::Accumulating => "Accumulating",
             StatefulState::Emitting => "Emitting",
+            Self::EmittingDuringDrain => "EmittingDuringDrain",
             StatefulState::Draining => "Draining",
             StatefulState::Drained => "Drained",
             StatefulState::Failed(_) => "Failed",
             StatefulState::_Phantom(_) => unreachable!("PhantomData variant"),
+        }
+    }
+}
+
+impl<H> StatefulState<H> {
+    pub(crate) fn failure(cause: String) -> Self {
+        use crate::stages::common::stage_handle::{
+            FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+        };
+        match cause.as_str() {
+            FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT => {
+                Self::Cancelling(cause)
+            }
+            _ => Self::Failing(cause),
+        }
+    }
+
+    pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
+        match self {
+            Self::Initializing => Phase::Initializing,
+            Self::Initialized => Phase::Initialized,
+            Self::Accumulating | Self::Emitting => Phase::Active,
+            Self::Finalising => Phase::Finalising,
+            Self::Failing(cause) => Phase::Failing(cause.clone()),
+            Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
+            Self::Drained => Phase::Completed,
+            Self::Failed(cause) => Phase::Failed(cause.clone()),
+            Self::Cancelled(reason) => Phase::Cancelled(reason.clone()),
+            _ => Phase::Other,
         }
     }
 }
@@ -140,6 +237,16 @@ impl<H: Send + Sync + 'static> StateVariant for StatefulState<H> {
 pub enum StatefulEvent<H> {
     /// Initialize the stateful stage
     Initialize,
+    InitializationCompleted,
+    DrainInputsCompleted,
+    TerminalValidated,
+    TerminalForwarded,
+    FinalOutputsPrepared,
+    FinalOutputPending,
+
+    ActivationCompleted,
+    FinalisationCompleted,
+    TerminationSettled,
 
     /// Ready to start processing (stateful stages start immediately)
     Ready,
@@ -174,6 +281,17 @@ impl<H> Clone for StatefulEvent<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Initialize => Self::Initialize,
+            Self::InitializationCompleted => Self::InitializationCompleted,
+            Self::DrainInputsCompleted => Self::DrainInputsCompleted,
+            Self::TerminalValidated => Self::TerminalValidated,
+            Self::TerminalForwarded => Self::TerminalForwarded,
+            Self::FinalOutputsPrepared => Self::FinalOutputsPrepared,
+            Self::FinalOutputPending => Self::FinalOutputPending,
+
+            Self::ActivationCompleted => Self::ActivationCompleted,
+            Self::FinalisationCompleted => Self::FinalisationCompleted,
+            Self::TerminationSettled => Self::TerminationSettled,
+
             Self::Ready => Self::Ready,
             Self::ReceivedData => Self::ReceivedData,
             Self::ShouldEmit => Self::ShouldEmit,
@@ -191,6 +309,17 @@ impl<H> std::fmt::Debug for StatefulEvent<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initialize => write!(f, "Initialize"),
+            Self::InitializationCompleted => write!(f, "InitializationCompleted"),
+            Self::DrainInputsCompleted => write!(f, "DrainInputsCompleted"),
+            Self::TerminalValidated => write!(f, "TerminalValidated"),
+            Self::TerminalForwarded => write!(f, "TerminalForwarded"),
+            Self::FinalOutputsPrepared => write!(f, "FinalOutputsPrepared"),
+            Self::FinalOutputPending => write!(f, "FinalOutputPending"),
+
+            Self::ActivationCompleted => write!(f, "ActivationCompleted"),
+            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::TerminationSettled => write!(f, "TerminationSettled"),
+
             Self::Ready => write!(f, "Ready"),
             Self::ReceivedData => write!(f, "ReceivedData"),
             Self::ShouldEmit => write!(f, "ShouldEmit"),
@@ -215,6 +344,15 @@ impl<H: Send + Sync + 'static> crate::supervised_base::with_external_events::Ext
     ) {
         crate::stages::common::stage_handle::discarded_control_details(match self {
             Self::Error(message) => Some(message.as_str()),
+            Self::InitializationCompleted
+            | Self::ActivationCompleted
+            | Self::FinalisationCompleted
+            | Self::TerminationSettled
+            | Self::DrainInputsCompleted
+            | Self::TerminalValidated
+            | Self::TerminalForwarded
+            | Self::FinalOutputsPrepared
+            | Self::FinalOutputPending => None,
             Self::Initialize
             | Self::Ready
             | Self::ReceivedData
@@ -232,6 +370,17 @@ impl<H: Send + Sync + 'static> EventVariant for StatefulEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
             StatefulEvent::Initialize => "Initialize",
+            Self::InitializationCompleted => "InitializationCompleted",
+            Self::DrainInputsCompleted => "DrainInputsCompleted",
+            Self::TerminalValidated => "TerminalValidated",
+            Self::TerminalForwarded => "TerminalForwarded",
+            Self::FinalOutputsPrepared => "FinalOutputsPrepared",
+            Self::FinalOutputPending => "FinalOutputPending",
+
+            Self::ActivationCompleted => "ActivationCompleted",
+            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::TerminationSettled => "TerminationSettled",
+
             StatefulEvent::Ready => "Ready",
             StatefulEvent::ReceivedData => "ReceivedData",
             StatefulEvent::ShouldEmit => "ShouldEmit",
@@ -251,6 +400,13 @@ impl<H: Send + Sync + 'static> EventVariant for StatefulEvent<H> {
 
 /// Actions that stateful FSM transitions can emit
 pub enum StatefulAction<H> {
+    ValidateTerminal {
+        drain_requested: bool,
+    },
+    ForwardTerminal,
+    ProduceFinalOutput,
+    DrainFinalOutput,
+    Host(crate::supervised_base::handler_supervised::SupervisorAction<StatefulEvent<H>>),
     /// Allocate resources (writer ID, subscriptions)
     AllocateResources,
 
@@ -273,7 +429,9 @@ pub enum StatefulAction<H> {
     SendCompletion,
 
     /// Send failure event to journal with metrics
-    SendFailure { message: String },
+    SendFailure {
+        message: String,
+    },
 
     /// Clean up all resources
     Cleanup,
@@ -286,6 +444,14 @@ pub enum StatefulAction<H> {
 impl<H> Clone for StatefulAction<H> {
     fn clone(&self) -> Self {
         match self {
+            Self::ValidateTerminal { drain_requested } => Self::ValidateTerminal {
+                drain_requested: *drain_requested,
+            },
+            Self::ForwardTerminal => Self::ForwardTerminal,
+            Self::ProduceFinalOutput => Self::ProduceFinalOutput,
+            Self::DrainFinalOutput => Self::DrainFinalOutput,
+            Self::Host(action) => Self::Host(action.clone()),
+
             Self::AllocateResources => Self::AllocateResources,
             Self::InitializeState => Self::InitializeState,
             Self::PublishRunning => Self::PublishRunning,
@@ -305,6 +471,15 @@ impl<H> Clone for StatefulAction<H> {
 impl<H> std::fmt::Debug for StatefulAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ValidateTerminal { drain_requested } => f
+                .debug_struct("ValidateTerminal")
+                .field("drain_requested", drain_requested)
+                .finish(),
+            Self::ForwardTerminal => f.write_str("ForwardTerminal"),
+            Self::ProduceFinalOutput => f.write_str("ProduceFinalOutput"),
+            Self::DrainFinalOutput => f.write_str("DrainFinalOutput"),
+            Self::Host(action) => action.fmt(f),
+
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::InitializeState => write!(f, "InitializeState"),
             Self::PublishRunning => write!(f, "PublishRunning"),
@@ -326,13 +501,12 @@ impl<H> std::fmt::Debug for StatefulAction<H> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PendingTransition {
     EmitComplete,
-    DrainComplete,
 }
 
 /// Context for stateful handlers - contains everything actions need
-pub struct StatefulContext<H: UnifiedStatefulHandler> {
+pub struct StatefulResources<H: UnifiedStatefulHandler> {
     /// The handler instance (immutable, so wrapped in Arc)
-    pub handler: Arc<H>,
+    pub handler: Option<Arc<H>>,
 
     /// This stateful stage's stage ID
     pub stage_id: obzenflow_core::StageId,
@@ -374,7 +548,6 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -414,15 +587,6 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
 
     /// Whether the current drain was requested through the stage handle rather
     /// than by an upstream terminal control row.
-    pub drain_requested_by_handle: bool,
-
-    /// Terminal validation is single-shot even when final output commits park
-    /// the draining dispatcher for backpressure.
-    pub terminal_validated: bool,
-
-    /// The buffered terminal control row is forwarded at most once, after
-    /// successful terminal validation.
-    pub terminal_forwarded: bool,
 
     /// Worst-wins join over the inputs' terminal EOF kinds (FLOWIP-095k).
     pub terminal_eof_kind: Option<EofKind>,
@@ -494,6 +658,29 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
+pub struct StatefulContext<H: UnifiedStatefulHandler> {
+    pub(crate) resources: Option<StatefulResources<H>>,
+    pub(crate) instrumentation: Arc<StageInstrumentation>,
+    pub(crate) drain_requested_by_handle: bool,
+}
+impl<H: UnifiedStatefulHandler> StatefulContext<H> {
+    pub(crate) fn new(resources: StatefulResources<H>) -> Self {
+        Self {
+            drain_requested_by_handle: false,
+            instrumentation: resources.instrumentation.clone(),
+            resources: Some(resources),
+        }
+    }
+    pub(crate) fn resources_mut(
+        &mut self,
+    ) -> Result<&mut StatefulResources<H>, obzenflow_fsm::FsmError> {
+        self.resources.as_mut().ok_or_else(|| {
+            obzenflow_fsm::FsmError::HandlerError(
+                "stateful resources belong to a pending operation".into(),
+            )
+        })
+    }
+}
 impl<H: UnifiedStatefulHandler + 'static> FsmContext for StatefulContext<H> {}
 
 // ============================================================================
@@ -501,11 +688,28 @@ impl<H: UnifiedStatefulHandler + 'static> FsmContext for StatefulContext<H> {}
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H> {
+impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> FsmAction for StatefulAction<H> {
     type Context = StatefulContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+        self.execute_resources(ctx.resources_mut()?).await
+    }
+}
+
+impl<H: UnifiedStatefulHandler + Clone + Send + Sync + 'static> StatefulAction<H> {
+    pub(crate) async fn execute_resources(
+        &self,
+        ctx: &mut StatefulResources<H>,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
+            StatefulAction::ValidateTerminal { .. }
+            | StatefulAction::ForwardTerminal
+            | StatefulAction::ProduceFinalOutput
+            | StatefulAction::DrainFinalOutput
+            | StatefulAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
+                "host action requires the supervised runner".into(),
+            )),
+
             StatefulAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id);
@@ -523,7 +727,6 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                             writer_id,
                             contract_journal: ctx.data_journal.clone(),
                             config: ContractConfig::default(),
-                            report_journal: Some(ctx.report_journal.clone()),
                             reader_stage: Some(ctx.stage_id),
                             control_plane: ctx.instrumentation.control_plane().clone(),
                             include_delivery_contract: false,
@@ -601,13 +804,17 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
             }
 
             StatefulAction::PublishRunning => {
-                lifecycle_actions::publish_running_best_effort(
-                    "Stateful",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &ctx.report_journal,
+                lifecycle_actions::publish_running(
+                    &ctx.data_journal,
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Stateful,
+                    ),
                 )
-                .await;
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -730,16 +937,18 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     heartbeat.state.mark_completed();
                 }
 
-                lifecycle_actions::send_completion_best_effort(
-                    "Stateful",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &ctx.report_journal,
+                lifecycle_actions::send_completion(
                     &ctx.data_journal,
-                    Some(&ctx.error_journal),
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Stateful,
+                    ),
                     ctx.instrumentation.as_ref(),
                 )
-                .await;
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -762,17 +971,20 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
             }
 
             StatefulAction::SendFailure { message } => {
-                lifecycle_actions::send_failure_best_effort(
-                    "Stateful",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    message,
-                    &ctx.report_journal,
+                lifecycle_actions::send_failure(
                     &ctx.data_journal,
-                    Some(&ctx.error_journal),
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Stateful,
+                    ),
+                    message,
                     ctx.instrumentation.as_ref(),
+                    None,
                 )
-                .await;
+                .await?;
                 let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
@@ -795,6 +1007,8 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
             }
 
             StatefulAction::Cleanup => {
+                ctx.handler.take();
+                ctx.subscription.take();
                 if let Some(heartbeat) = ctx.heartbeat.take() {
                     heartbeat.cancel();
                 }

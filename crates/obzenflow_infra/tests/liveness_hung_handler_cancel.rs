@@ -278,29 +278,29 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
         .expect("flow task join");
 
     // The application has joined the owners and settled their publications.
-    // Read stage reports at their original placements as well as pipeline facts.
     let mut envelopes = Vec::new();
-    for journal in flow_handle.report_journals() {
-        use obzenflow_core::event::SupervisorRecord;
-        use obzenflow_runtime::supervised_base::SupervisorJournal;
-        match journal {
-            SupervisorJournal::System(journal) => envelopes.extend(
-                journal
-                    .read_all_unordered()
-                    .await
-                    .expect("read pipeline journal")
-                    .into_iter()
-                    .map(SupervisorRecord::from),
-            ),
-            SupervisorJournal::Stage { journal, context } => envelopes.extend(
-                journal
-                    .read_all_unordered()
-                    .await
-                    .expect("read stage journal")
-                    .into_iter()
-                    .filter(|row| row.writer_id().as_stage() == Some(&context.stage_id))
-                    .filter_map(SupervisorRecord::from_chain),
-            ),
+    for journal in flow_handle.system_journals() {
+        envelopes.extend(
+            journal
+                .read_all_unordered()
+                .await
+                .expect("read pipeline journal"),
+        );
+    }
+    for (stage, journal) in flow_handle.stage_journals() {
+        for record in journal
+            .read_all_unordered()
+            .await
+            .expect("read stage journal")
+        {
+            if record.writer_id().as_stage() != Some(&stage) {
+                continue;
+            }
+            if let obzenflow_core::event::ChainPayload::Execution(
+                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::ContractStatus { pass, .. }
+            ) = record.payload {
+                assert!(pass, "unexpected failed contract during hung handler cancellation");
+            }
         }
     }
 
@@ -309,35 +309,22 @@ async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     let mut saw_cancelled = false;
     let mut saw_stop_failed = false;
     for envelope in envelopes {
-        match &envelope.payload {
-            SystemPayload::PipelineLifecycle(event) => {
-                pipeline_events.push(format!("{event:?}"));
-                match event {
-                    obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { .. } => {
-                        saw_stop_requested = true
-                    }
-                    obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
-                        saw_cancelled = true
-                    }
-                    obzenflow_core::event::PipelineLifecycleEvent::Failed { reason, .. }
-                        if reason == STOP_REASON_USER_STOP || reason == STOP_REASON_TIMEOUT =>
-                    {
-                        saw_stop_failed = true
-                    }
-                    _ => {}
+        if let SystemPayload::PipelineLifecycle(event) = &envelope.payload {
+            pipeline_events.push(format!("{event:?}"));
+            match event {
+                obzenflow_core::event::PipelineLifecycleEvent::StopAdmitted { .. } => {
+                    saw_stop_requested = true
                 }
+                obzenflow_core::event::PipelineLifecycleEvent::Cancelled { .. } => {
+                    saw_cancelled = true
+                }
+                obzenflow_core::event::PipelineLifecycleEvent::Failed { reason, .. }
+                    if reason == STOP_REASON_USER_STOP || reason == STOP_REASON_TIMEOUT =>
+                {
+                    saw_stop_failed = true
+                }
+                _ => {}
             }
-            SystemPayload::StageLifecycle {
-                event: obzenflow_core::event::StageLifecycleEvent::Cancelled { .. },
-                ..
-            } => saw_cancelled = true,
-            SystemPayload::ContractStatus { pass, .. } => {
-                assert!(
-                    *pass,
-                    "unexpected ContractStatus(pass=false) while exercising hung handler cancellation"
-                );
-            }
-            _ => {}
         }
     }
 

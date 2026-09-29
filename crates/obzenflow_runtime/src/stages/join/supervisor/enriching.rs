@@ -27,7 +27,7 @@ use std::time::Instant;
 use super::common::{self, FlushOutcome};
 use super::JoinSupervisor;
 use crate::stages::join::fsm::{
-    JoinContext, JoinEvent, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
+    JoinEvent, JoinResources, JoinState, JoinSubscriptionSide, PendingSubscriptionAck,
 };
 
 pub(super) async fn dispatch_enriching<
@@ -35,7 +35,7 @@ pub(super) async fn dispatch_enriching<
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     common::ensure_subscriptions(sup, ctx);
 
@@ -284,14 +284,16 @@ pub(super) async fn dispatch_enriching<
                             Some(&envelope),
                         )
                         .await?;
-                        drop(
-                            subscription
-                                .maybe_check_contracts_tick(
-                                    &mut ctx.stream_contract_state[..],
-                                    &mut ctx.stream_last_contract_check,
-                                )
-                                .await,
-                        );
+                        subscription
+                            .maybe_check_contracts_tick(
+                                &mut ctx.stream_contract_state[..],
+                                &mut ctx.stream_last_contract_check,
+                            )
+                            .await
+                            .unwrap_or(
+                                crate::messaging::upstream_subscription::ContractStatus::Healthy,
+                            )
+                            .into_result()?;
                         return Ok(EventLoopDirective::Continue);
                     }
 
@@ -304,13 +306,17 @@ pub(super) async fn dispatch_enriching<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
-                    let result = ctx.handler.process_stream(
-                        &mut ctx.handler_state,
-                        event.clone(),
-                        source_id,
-                        writer_id,
-                        scope,
-                    );
+                    let result = ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup")
+                        .process_stream(
+                            &mut ctx.handler_state,
+                            event.clone(),
+                            source_id,
+                            writer_id,
+                            scope,
+                        );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
                     }
@@ -425,14 +431,14 @@ pub(super) async fn dispatch_enriching<
                 }
             };
 
-            drop(
-                subscription
-                    .maybe_check_contracts_tick(
-                        &mut ctx.stream_contract_state[..],
-                        &mut ctx.stream_last_contract_check,
-                    )
-                    .await,
-            );
+            subscription
+                .maybe_check_contracts_tick(
+                    &mut ctx.stream_contract_state[..],
+                    &mut ctx.stream_last_contract_check,
+                )
+                .await
+                .unwrap_or(crate::messaging::upstream_subscription::ContractStatus::Healthy)
+                .into_result()?;
 
             Ok(directive)
         }
@@ -476,6 +482,12 @@ pub(super) async fn dispatch_enriching<
                             cause = ?cause,
                             "Stream contract violation during join enriching"
                         );
+
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        }
+                        .into_result()?;
                     }
                     _ => {}
                 }
@@ -492,7 +504,7 @@ pub(super) async fn dispatch_enriching<
 
 async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
-    ctx: &mut JoinContext<H>,
+    ctx: &mut JoinResources<H>,
     source_id: obzenflow_core::StageId,
     outputs: VecDeque<ChainEvent>,
     pending_parent: Option<&DeliveredRecord<ChainPayload>>,

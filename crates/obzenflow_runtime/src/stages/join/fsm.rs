@@ -48,6 +48,13 @@ pub enum JoinState<H> {
     #[default]
     Created,
 
+    Initializing,
+    Starting,
+    Finalising,
+    Failing(String),
+    Cancelling(String),
+    Cancelled(String),
+
     /// Resources allocated, ready to start processing
     Initialized,
 
@@ -91,6 +98,13 @@ impl<H> Clone for JoinState<H> {
     fn clone(&self) -> Self {
         match self {
             Self::Created => Self::Created,
+            Self::Initializing => Self::Initializing,
+            Self::Starting => Self::Starting,
+            Self::Finalising => Self::Finalising,
+            Self::Failing(cause) => Self::Failing(cause.clone()),
+            Self::Cancelling(cause) => Self::Cancelling(cause.clone()),
+            Self::Cancelled(cause) => Self::Cancelled(cause.clone()),
+
             Self::Initialized => Self::Initialized,
             Self::Hydrating => Self::Hydrating,
             Self::Live => Self::Live,
@@ -107,6 +121,13 @@ impl<H> std::fmt::Debug for JoinState<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Created => write!(f, "Created"),
+            Self::Initializing => write!(f, "Initializing"),
+            Self::Starting => write!(f, "Starting"),
+            Self::Finalising => write!(f, "Finalising"),
+            Self::Failing(cause) => write!(f, "Failing({cause:?})"),
+            Self::Cancelling(cause) => write!(f, "Cancelling({cause:?})"),
+            Self::Cancelled(cause) => write!(f, "Cancelled({cause:?})"),
+
             Self::Initialized => write!(f, "Initialized"),
             Self::Hydrating => write!(f, "Hydrating"),
             Self::Live => write!(f, "Live"),
@@ -123,6 +144,13 @@ impl<H: Send + Sync> PartialEq for JoinState<H> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (JoinState::Created, JoinState::Created) => true,
+            (Self::Initializing, Self::Initializing) => true,
+            (Self::Starting, Self::Starting) => true,
+            (Self::Finalising, Self::Finalising) => true,
+            (Self::Failing(a), Self::Failing(b)) => a == b,
+            (Self::Cancelling(a), Self::Cancelling(b)) => a == b,
+            (Self::Cancelled(a), Self::Cancelled(b)) => a == b,
+
             (JoinState::Initialized, JoinState::Initialized) => true,
             (JoinState::Hydrating, JoinState::Hydrating) => true,
             (JoinState::Live, JoinState::Live) => true,
@@ -139,6 +167,13 @@ impl<H: Send + Sync + 'static> StateVariant for JoinState<H> {
     fn variant_name(&self) -> &str {
         match self {
             JoinState::Created => "Created",
+            Self::Initializing => "Initializing",
+            Self::Starting => "Starting",
+            Self::Finalising => "Finalising",
+            Self::Failing(..) => "Failing",
+            Self::Cancelling(..) => "Cancelling",
+            Self::Cancelled(..) => "Cancelled",
+
             JoinState::Initialized => "Initialized",
             JoinState::Hydrating => "Hydrating",
             JoinState::Live => "Live",
@@ -147,6 +182,36 @@ impl<H: Send + Sync + 'static> StateVariant for JoinState<H> {
             JoinState::Drained => "Drained",
             JoinState::Failed(_) => "Failed",
             JoinState::_Phantom(_) => unreachable!("PhantomData variant"),
+        }
+    }
+}
+
+impl<H> JoinState<H> {
+    pub(crate) fn failure(cause: String) -> Self {
+        use crate::stages::common::stage_handle::{
+            FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
+        };
+        match cause.as_str() {
+            FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT => {
+                Self::Cancelling(cause)
+            }
+            _ => Self::Failing(cause),
+        }
+    }
+
+    pub(crate) fn lifecycle_phase(&self) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
+        use crate::stages::common::stage_lifecycle::LifecyclePhase as Phase;
+        match self {
+            Self::Initializing => Phase::Initializing,
+            Self::Initialized => Phase::Initialized,
+            Self::Hydrating | Self::Live | Self::Enriching => Phase::Active,
+            Self::Finalising => Phase::Finalising,
+            Self::Failing(cause) => Phase::Failing(cause.clone()),
+            Self::Cancelling(reason) => Phase::Cancelling(reason.clone()),
+            Self::Drained => Phase::Completed,
+            Self::Failed(cause) => Phase::Failed(cause.clone()),
+            Self::Cancelled(reason) => Phase::Cancelled(reason.clone()),
+            _ => Phase::Other,
         }
     }
 }
@@ -160,6 +225,10 @@ impl<H: Send + Sync + 'static> StateVariant for JoinState<H> {
 pub enum JoinEvent<H> {
     /// Initialize the join stage
     Initialize,
+    InitializationCompleted,
+    ActivationCompleted,
+    FinalisationCompleted,
+    TerminationSettled,
 
     /// Ready to start processing
     Ready,
@@ -187,6 +256,11 @@ impl<H> std::fmt::Debug for JoinEvent<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initialize => write!(f, "Initialize"),
+            Self::InitializationCompleted => write!(f, "InitializationCompleted"),
+            Self::ActivationCompleted => write!(f, "ActivationCompleted"),
+            Self::FinalisationCompleted => write!(f, "FinalisationCompleted"),
+            Self::TerminationSettled => write!(f, "TerminationSettled"),
+
             Self::Ready => write!(f, "Ready"),
             Self::ReceivedEOF => write!(f, "ReceivedEOF"),
             Self::ReferenceComplete => write!(f, "ReferenceComplete"),
@@ -209,6 +283,10 @@ impl<H: Clone + Send + Sync + 'static>
     ) {
         crate::stages::common::stage_handle::discarded_control_details(match self {
             Self::Error(message) => Some(message.as_str()),
+            Self::InitializationCompleted
+            | Self::ActivationCompleted
+            | Self::FinalisationCompleted
+            | Self::TerminationSettled => None,
             Self::Initialize
             | Self::Ready
             | Self::ReceivedEOF
@@ -224,6 +302,11 @@ impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
     fn variant_name(&self) -> &str {
         match self {
             JoinEvent::Initialize => "Initialize",
+            Self::InitializationCompleted => "InitializationCompleted",
+            Self::ActivationCompleted => "ActivationCompleted",
+            Self::FinalisationCompleted => "FinalisationCompleted",
+            Self::TerminationSettled => "TerminationSettled",
+
             JoinEvent::Ready => "Ready",
             JoinEvent::ReceivedEOF => "ReceivedEOF",
             JoinEvent::ReferenceComplete => "ReferenceComplete",
@@ -242,6 +325,7 @@ impl<H: Clone + Send + Sync + 'static> EventVariant for JoinEvent<H> {
 /// Actions that join FSM transitions can emit
 #[derive(Clone)]
 pub enum JoinAction<H> {
+    Host(crate::supervised_base::handler_supervised::SupervisorAction<JoinEvent<H>>),
     /// Allocate resources (writer ID, subscriptions)
     AllocateResources,
 
@@ -250,6 +334,7 @@ pub enum JoinAction<H> {
 
     /// Publish running event to journal
     PublishRunning,
+    EmitHydrationHeartbeat,
 
     /// Hydrate reference catalog from reference event
     HydrateCatalog,
@@ -264,7 +349,9 @@ pub enum JoinAction<H> {
     SendCompletion,
 
     /// Send failure event to journal with metrics
-    SendFailure { message: String },
+    SendFailure {
+        message: String,
+    },
 
     /// Clean up all resources
     Cleanup,
@@ -276,9 +363,12 @@ pub enum JoinAction<H> {
 impl<H> std::fmt::Debug for JoinAction<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Host(action) => action.fmt(f),
+
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::InitializeHandlerState => write!(f, "InitializeHandlerState"),
             Self::PublishRunning => write!(f, "PublishRunning"),
+            Self::EmitHydrationHeartbeat => write!(f, "EmitHydrationHeartbeat"),
             Self::HydrateCatalog => write!(f, "HydrateCatalog"),
             Self::EnrichEvent => write!(f, "EnrichEvent"),
             Self::ForwardEOF => write!(f, "ForwardEOF"),
@@ -314,9 +404,9 @@ pub(crate) struct PendingSubscriptionAck {
 }
 
 /// Context for join handlers - contains everything actions need
-pub struct JoinContext<H: UnifiedJoinHandler> {
+pub struct JoinResources<H: UnifiedJoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
-    pub handler: Arc<H>,
+    pub handler: Option<Arc<H>>,
 
     /// Handler state (catalogs, buffers)
     pub handler_state: H::State,
@@ -350,7 +440,6 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
     /// System journal for writing lifecycle events
-    pub report_journal: crate::supervised_base::SupervisorJournal,
 
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -482,6 +571,29 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
+pub struct JoinContext<H: UnifiedJoinHandler> {
+    pub(crate) resources: Option<JoinResources<H>>,
+    pub(crate) instrumentation: Arc<StageInstrumentation>,
+    pub(crate) reference_mode: JoinReferenceMode,
+}
+impl<H: UnifiedJoinHandler> JoinContext<H> {
+    pub(crate) fn new(resources: JoinResources<H>) -> Self {
+        Self {
+            reference_mode: resources.reference_mode,
+            instrumentation: resources.instrumentation.clone(),
+            resources: Some(resources),
+        }
+    }
+    pub(crate) fn resources_mut(
+        &mut self,
+    ) -> Result<&mut JoinResources<H>, obzenflow_fsm::FsmError> {
+        self.resources.as_mut().ok_or_else(|| {
+            obzenflow_fsm::FsmError::HandlerError(
+                "join resources belong to a pending operation".into(),
+            )
+        })
+    }
+}
 impl<H: UnifiedJoinHandler + 'static> FsmContext for JoinContext<H> {}
 
 // ============================================================================
@@ -493,7 +605,30 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
     type Context = JoinContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
+        self.execute_resources(ctx.resources_mut()?).await
+    }
+}
+
+impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> JoinAction<H> {
+    pub(crate) async fn execute_resources(
+        &self,
+        ctx: &mut JoinResources<H>,
+    ) -> Result<(), obzenflow_fsm::FsmError> {
         match self {
+            JoinAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
+                "host action requires the supervised runner".into(),
+            )),
+
+            JoinAction::EmitHydrationHeartbeat => {
+                if ctx.events_since_last_heartbeat > 0 {
+                    super::supervisor::common::emit_join_heartbeat_if_due(ctx, ctx.stage_id)
+                        .await
+                        .map_err(|error| {
+                            obzenflow_fsm::FsmError::HandlerError(error.to_string())
+                        })?;
+                }
+                Ok(())
+            }
             JoinAction::AllocateResources => {
                 // Create WriterId from our StageId
                 let writer_id = WriterId::from(ctx.stage_id);
@@ -522,7 +657,6 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                         writer_id,
                         contract_journal: ctx.data_journal.clone(),
                         config: ContractConfig::default(),
-                        report_journal: Some(ctx.report_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
@@ -562,7 +696,6 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                         writer_id,
                         contract_journal: ctx.data_journal.clone(),
                         config: ContractConfig::default(),
-                        report_journal: Some(ctx.report_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
                         control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
@@ -606,13 +739,17 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
             }
 
             JoinAction::PublishRunning => {
-                lifecycle_actions::publish_running_best_effort(
-                    "Join",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &ctx.report_journal,
+                lifecycle_actions::publish_running(
+                    &ctx.data_journal,
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Join,
+                    ),
                 )
-                .await;
+                .await?;
                 let scope = ctx
                     .runtime_execution
                     .dispatch_scope(ctx.stage_id, None, None);
@@ -743,16 +880,18 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     heartbeat.state.mark_completed();
                 }
 
-                lifecycle_actions::send_completion_best_effort(
-                    "Join",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    &ctx.report_journal,
+                lifecycle_actions::send_completion(
                     &ctx.data_journal,
-                    Some(&ctx.error_journal),
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Join,
+                    ),
                     ctx.instrumentation.as_ref(),
                 )
-                .await;
+                .await?;
                 let scope = ctx
                     .runtime_execution
                     .dispatch_scope(ctx.stage_id, None, None);
@@ -777,17 +916,20 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
             }
 
             JoinAction::SendFailure { message } => {
-                lifecycle_actions::send_failure_best_effort(
-                    "Join",
-                    ctx.stage_id,
-                    &ctx.stage_name,
-                    message,
-                    &ctx.report_journal,
+                lifecycle_actions::send_failure(
                     &ctx.data_journal,
-                    Some(&ctx.error_journal),
+                    crate::stages::common::supervision::flow_context_factory::make_flow_context(
+                        &ctx.flow_name,
+                        &ctx.flow_id.to_string(),
+                        &ctx.stage_name,
+                        ctx.stage_id,
+                        obzenflow_core::event::context::StageType::Join,
+                    ),
+                    message,
                     ctx.instrumentation.as_ref(),
+                    None,
                 )
-                .await;
+                .await?;
                 let scope = ctx
                     .runtime_execution
                     .dispatch_scope(ctx.stage_id, None, None);
@@ -812,6 +954,9 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
             }
 
             JoinAction::Cleanup => {
+                ctx.handler.take();
+                ctx.reference_subscription.take();
+                ctx.stream_subscription.take();
                 if let Some(heartbeat) = ctx.heartbeat.take() {
                     heartbeat.cancel();
                 }

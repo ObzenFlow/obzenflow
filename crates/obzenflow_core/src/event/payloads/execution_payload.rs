@@ -8,6 +8,7 @@ use super::effect_payload::{
     EffectAttemptStarted, EffectCursor, EffectRecord, EffectRecoveryAbandoned,
 };
 
+use super::flow_control_payload::EofKind;
 use super::system_payload::{
     CommandDiscardDisposition, ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
@@ -16,15 +17,17 @@ use crate::event::observability::{HttpPullState, WaitReason};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::EventType;
-use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
-use crate::{StageId, StageKey};
+use crate::event::types::{Count, DurationMs};
+use crate::journal::{ArchiveStatus, StatusDerivation};
+use crate::StageId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "execution_type", rename_all = "snake_case")]
 pub enum ExecutionPayload {
-    ReplayLifecycle(super::system_payload::ReplayLifecycleEvent),
+    ReplayLifecycle(ReplayLifecycleEvent),
     SupervisorRegistered {
         descriptor: super::supervisor_descriptor::SupervisorDescriptor,
     },
@@ -73,29 +76,7 @@ pub enum ExecutionPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         advertised_writer_seq: Option<crate::event::types::SeqNo>,
     },
-    IngressRefusal {
-        /// Protocol-neutral hosted ingress key; the per-surface metric projection key.
-        ingress_key: IngressKey,
-        /// Runtime id of the linked source stage.
-        stage_id: StageId,
-        /// Replay-stable source stage key (`run_manifest.json` key).
-        stage_key: StageKey,
-        reason: IngressRefusalReason,
-        /// Per-attempt sequence; the merge key against accepted source rows.
-        attempt_seq: IngressAttemptSeq,
-        /// HTTP submission requests in this attempt (always 1 in 115D).
-        request_count: u64,
-        /// Events refused by this attempt (1 for `/events`; the refused subset
-        /// size for `/batch`, so a batch refusal is one fact with a count).
-        event_count: u64,
-        /// Batches in this attempt (0 for `/events`, 1 for `/batch`).
-        batch_count: u64,
-        http_status: u16,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        retry_after_ms_bucket: Option<u64>,
-    },
     StageLifecycle(StageLifecycleFact),
-    MetricsCoordination(MetricsCoordinationFact),
     CircuitBreaker(CircuitBreakerFact),
     RateLimiter(RateLimiterFact),
     Backpressure(BackpressureFact),
@@ -111,6 +92,36 @@ pub enum ExecutionPayload {
     EffectRecord(EffectRecord),
     EffectAttemptStarted(EffectAttemptStarted),
     EffectRecoveryAbandoned(EffectRecoveryAbandoned),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "replay_event", rename_all = "snake_case")]
+pub enum ReplayLifecycleEvent {
+    Started {
+        archive_path: PathBuf,
+        archive_flow_id: String,
+        archive_status: ArchiveStatus,
+        archive_status_derivation: StatusDerivation,
+        allow_incomplete: bool,
+        source_stages: Vec<String>,
+    },
+    Completed {
+        replayed_count: Count,
+        skipped_count: Count,
+        duration_ms: DurationMs,
+        /// The terminal EOF kind synthesized at exhaustion (FLOWIP-095k).
+        /// `None` on the resume handoff, which synthesizes no terminal EOF.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        synthesized_eof_kind: Option<EofKind>,
+    },
+    /// Resume handoff (FLOWIP-120n): the source finished its catch-up and
+    /// continues live at `generation`. The transition announcement the
+    /// presentation layer surfaces.
+    ResumedLive {
+        archive_flow_id: String,
+        replayed_count: Count,
+        generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,12 +161,17 @@ pub enum StageLifecycleFact {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "metrics_event", rename_all = "snake_case")]
-pub enum MetricsCoordinationFact {
-    Ready { exporter_count: Option<usize> },
-    DrainRequested,
-    Drained { final_flush_count: Option<u64> },
+impl StageLifecycleFact {
+    pub fn stage_id(&self) -> StageId {
+        match self {
+            Self::Running { stage_id }
+            | Self::Draining { stage_id, .. }
+            | Self::Drained { stage_id, .. }
+            | Self::Completed { stage_id, .. }
+            | Self::Cancelled { stage_id, .. }
+            | Self::Failed { stage_id, .. } => *stage_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,7 +361,6 @@ impl ExecutionPayload {
             Self::SupervisorRegistered { .. } => "execution.supervisor.registered",
             Self::SupervisorCommandDiscarded { .. } => "execution.supervisor.command_discarded",
             Self::SourceCleanupFailed { .. } => "execution.source.cleanup_failed",
-            Self::IngressRefusal { .. } => "execution.ingress.refusal",
             Self::ContractStatus { pass, .. } => {
                 if *pass {
                     "execution.contract.pass"
@@ -366,11 +381,6 @@ impl ExecutionPayload {
                 StageLifecycleFact::Completed { .. } => "lifecycle.stage.completed",
                 StageLifecycleFact::Cancelled { .. } => "lifecycle.stage.cancelled",
                 StageLifecycleFact::Failed { .. } => "lifecycle.stage.failed",
-            },
-            Self::MetricsCoordination(fact) => match fact {
-                MetricsCoordinationFact::Ready { .. } => "lifecycle.metrics.ready",
-                MetricsCoordinationFact::DrainRequested => "lifecycle.metrics.drain",
-                MetricsCoordinationFact::Drained { .. } => "lifecycle.metrics.drained",
             },
             Self::CircuitBreaker(CircuitBreakerFact::StateChanged { .. }) => {
                 "lifecycle.middleware.circuit_breaker.state_changed"
@@ -408,9 +418,7 @@ impl ExecutionPayload {
             | Self::SourceCleanupFailed { .. }
             | Self::ContractStatus { .. }
             | Self::ContractResult { .. }
-            | Self::IngressRefusal { .. }
             | Self::StageLifecycle(_)
-            | Self::MetricsCoordination(_)
             | Self::CircuitBreaker(_)
             | Self::RateLimiter(_)
             | Self::Backpressure(_)
@@ -421,19 +429,6 @@ impl ExecutionPayload {
             | Self::JoinReferenceProgress { .. } => false,
         }
     }
-}
-
-/// System mirrors retain their nested middleware discriminator, but accept only
-/// the same protected decisions as the originating stage journal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(
-    tag = "middleware_event",
-    content = "details",
-    rename_all = "snake_case"
-)]
-pub enum MiddlewareFact {
-    CircuitBreaker(CircuitBreakerFact),
-    RateLimiter(RateLimiterFact),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,5 +496,59 @@ mod tests {
         assert!(missing_cooldown.to_string().contains("cooldown_ms"));
         opening_json["cooldown_ms"] = serde_json::Value::Null;
         assert!(serde_json::from_value::<CircuitBreakerFact>(opening_json).is_err());
+    }
+    #[test]
+    fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
+        use crate::event::types::{EventType, SeqNo};
+        use serde_json::json;
+        let payload = ExecutionPayload::ContractResult {
+            upstream: StageId::new(),
+            reader: StageId::new(),
+            selected_event_type: Some(EventType::from("test.selected.v1")),
+            feed_role: Some(SystemFeedRole::Reference),
+            contract_name: ContractName::from("TransportContract"),
+            status: ContractResultStatusLabel::Healthy,
+            cause: None,
+            reader_seq: Some(SeqNo(3)),
+            advertised_writer_seq: Some(SeqNo(5)),
+        };
+
+        let serialized = serde_json::to_value(&payload).expect("execution fact should serialize");
+        assert_eq!(serialized["selected_event_type"], "test.selected.v1");
+        assert_eq!(serialized["feed_role"], "reference");
+        assert_eq!(serialized["contract_name"], "TransportContract");
+        assert_eq!(serialized["status"], "healthy");
+
+        let decoded: ExecutionPayload = serde_json::from_value(json!({
+            "execution_type": "contract_result",
+            "upstream": serialized["upstream"].clone(),
+            "reader": serialized["reader"].clone(),
+            "selected_event_type": "test.selected.v1",
+            "feed_role": "reference",
+            "contract_name": "TransportContract",
+            "status": "healthy",
+            "reader_seq": 3,
+            "advertised_writer_seq": 5
+        }))
+        .expect("string-label execution fact should deserialize");
+
+        match decoded {
+            ExecutionPayload::ContractResult {
+                selected_event_type,
+                feed_role,
+                contract_name,
+                status,
+                ..
+            } => {
+                assert_eq!(
+                    selected_event_type,
+                    Some(EventType::from("test.selected.v1"))
+                );
+                assert_eq!(feed_role, Some(SystemFeedRole::Reference));
+                assert_eq!(contract_name.as_str(), "TransportContract");
+                assert_eq!(status, ContractResultStatusLabel::Healthy);
+            }
+            other => panic!("expected ContractResult, got {other:?}"),
+        }
     }
 }

@@ -7,13 +7,61 @@
 //! This trait defines the interface that all stage supervisors must implement
 //! so the Pipeline FSM can coordinate them properly.
 
-use obzenflow_core::{event::context::StageType, StageId};
+use super::handler_error::HandlerError;
+pub use super::stage_lifecycle::StageMilestone;
+use super::stage_lifecycle::{LifecycleExit, LifecycleFailure, MilestoneAck, StageSnapshot};
+use crate::messaging::upstream_subscription::ContractFailure;
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::CommandDiscardDisposition;
+use obzenflow_core::StageId;
+use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub struct StageAck {
+    pub stage_id: StageId,
+    pub milestone: StageMilestone,
+    pub snapshot: StageSnapshot,
+}
+
+impl StageAck {
+    pub fn from_result(stage_id: StageId, result: MilestoneAck) -> Self {
+        Self {
+            stage_id,
+            milestone: result.milestone,
+            snapshot: result.snapshot,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StageFailure {
+    pub stage_id: StageId,
+    pub cause: StageError,
+    pub snapshot: StageSnapshot,
+}
+
+impl StageFailure {
+    pub fn from_result(stage_id: StageId, result: LifecycleFailure) -> Self {
+        Self {
+            stage_id,
+            cause: result.cause,
+            snapshot: result.snapshot,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StageExit {
+    pub stage_id: StageId,
+    pub outcome: LifecycleExit,
+}
 
 /// Canonical error message used when the pipeline requests an immediate stage shutdown.
 ///
 /// Stage supervisors treat this as an *intentional cancellation* signal (not a "failed" error),
-/// and should emit `system.stage.cancelled` lifecycle events for observability/UI correctness.
+/// and should author a canonical `StageLifecycleFact::Cancelled` for observers.
 pub const FORCE_SHUTDOWN_MESSAGE: &str = "Force shutdown requested";
 
 /// Stable stop/cancel reason labels used across lifecycle events.
@@ -24,11 +72,7 @@ pub const STOP_REASON_TIMEOUT: &str = "stop_timeout";
 /// protocol from an unexpected failure delivered after stage termination.
 pub(crate) fn discarded_control_details(
     error: Option<&str>,
-) -> (
-    obzenflow_core::event::CommandDiscardDisposition,
-    Option<String>,
-) {
-    use obzenflow_core::event::CommandDiscardDisposition;
+) -> (CommandDiscardDisposition, Option<String>) {
     let disposition = match error {
         None | Some(FORCE_SHUTDOWN_MESSAGE | STOP_REASON_USER_STOP | STOP_REASON_TIMEOUT) => {
             CommandDiscardDisposition::ObsoleteControl
@@ -53,11 +97,11 @@ pub enum StageError {
     ///
     /// This wraps a `HandlerError` from stage logic so the pipeline FSM can
     /// distinguish handler failures from other coordination errors.
-    HandlerFailure(crate::stages::common::handler_error::HandlerError),
+    HandlerFailure(HandlerError),
     /// Execution was explicitly aborted.
     Aborted,
     /// Retained execution/publication failure with its original source.
-    Execution(std::sync::Arc<dyn std::error::Error + Send + Sync>),
+    Execution(Arc<dyn Error + Send + Sync>),
     /// Generic error
     Other(String),
 }
@@ -83,8 +127,8 @@ impl fmt::Display for StageError {
     }
 }
 
-impl std::error::Error for StageError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for StageError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Execution(error) => Some(error.as_ref()),
             _ => None,
@@ -105,8 +149,21 @@ impl From<&str> for StageError {
 }
 
 impl StageError {
+    /// The consuming stage's effective contract failure, including its input
+    /// edge. Parents propagate this decision without parsing error messages or
+    /// applying contract policy again.
+    pub fn contract_failure(&self) -> Option<&ContractFailure> {
+        let mut error: &(dyn Error + 'static) = self;
+        loop {
+            if let Some(failure) = error.downcast_ref::<ContractFailure>() {
+                return Some(failure);
+            }
+            error = error.source()?;
+        }
+    }
+
     /// Helper to construct a handler failure variant from a HandlerError.
-    pub fn handler_failure(err: crate::stages::common::handler_error::HandlerError) -> Self {
+    pub fn handler_failure(err: HandlerError) -> Self {
         StageError::HandlerFailure(err)
     }
 }
@@ -133,7 +190,8 @@ pub enum StageEvent {
 /// Command methods retain a pending mailbox send until acceptance. Dropping an
 /// unaccepted command future cancels that send; an accepted message belongs to
 /// the receiving stage. Returning from a command does not certify the requested
-/// lifecycle transition: the pipeline observes its committed system-journal fact.
+/// lifecycle transition. Achieved transitions are observed separately through
+/// retained FSM acknowledgements; observation never cancels child work.
 #[async_trait::async_trait]
 pub trait StageHandle: Send + Sync {
     /// Get the stage ID
@@ -169,9 +227,14 @@ pub trait StageHandle: Send + Sync {
     /// Force shutdown
     async fn force_shutdown(&self) -> Result<(), StageError>;
 
-    /// Wait for the stage task and every accepted publication to settle.
-    /// A state observation or timeout does not establish resource completion.
-    async fn wait_for_completion(&self) -> Result<(), StageError>;
+    /// Observe a retained achieved transition. Dropping this wait leaves work alone.
+    async fn wait_for_milestone(&self, milestone: StageMilestone) -> Result<StageAck, StageError>;
+
+    /// Observe the original failure as soon as the FSM selects its failure path.
+    async fn wait_for_failure(&self) -> Option<StageFailure>;
+
+    /// Wait for physical task termination and every accepted publication to settle.
+    async fn wait_for_completion(&self) -> StageExit;
 
     /// Abort the underlying supervisor task and join it deterministically.
     async fn abort_and_join(&self) -> Result<(), StageError>;
@@ -181,19 +244,6 @@ pub trait StageHandle: Send + Sync {
     /// Implementations must be idempotent and non-blocking.
     #[doc(hidden)]
     fn request_abort(&self);
-
-    #[doc(hidden)]
-    fn publish_pipeline_control(
-        &self,
-        _journal: std::sync::Arc<
-            dyn obzenflow_core::journal::Journal<obzenflow_core::event::ChainEvent>,
-        >,
-        _event: obzenflow_core::event::ChainEvent,
-    ) -> Result<(), StageError> {
-        Err(StageError::InvalidState(
-            "stage has no retained publication writer".into(),
-        ))
-    }
 }
 
 /// Type-erased stage handle for pipeline storage

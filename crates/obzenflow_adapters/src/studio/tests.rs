@@ -3,15 +3,17 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::event::journal_record::{JournalRecord, SystemJournalRecord};
-use obzenflow_core::event::payloads::execution_payload::{
-    CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, MiddlewareFact, RateLimiterFact,
-    RateLimiterMode,
+use obzenflow_core::event::journal_record::{
+    ChainJournalRecord, JournalRecord, SystemJournalRecord,
 };
-use obzenflow_core::event::payloads::system_payload::MiddlewareEventOrigin;
+use obzenflow_core::event::payloads::execution_payload::{
+    CircuitBreakerFact, CircuitBreakerOpenTrigger, CircuitState, ExecutionPayload, RateLimiterFact,
+    RateLimiterMode, StageLifecycleFact,
+};
 use obzenflow_core::event::provenance::ExecutionAccounting;
-use obzenflow_core::event::types::{SeqNo, WriterId};
-use obzenflow_core::event::{StageLifecycleEvent, SystemEvent};
+use obzenflow_core::event::provenance::FlowContext;
+use obzenflow_core::event::types::WriterId;
+use obzenflow_core::event::{ChainEvent, ChainEventFactory, JournalEvent, SystemEvent};
 use obzenflow_core::FlowId;
 use obzenflow_core::{
     id::{JournalId, SystemId},
@@ -132,20 +134,22 @@ fn throughput_sse_and_prometheus_share_retained_values_without_capture_or_cursor
 }
 
 // Projection tests start after an archive reader has admitted the record.
-fn stored_record(writer: JournalWriterId, event: SystemEvent) -> SystemJournalRecord {
+fn stored_record<T: JournalEvent>(writer: JournalWriterId, event: T) -> JournalRecord<T::Payload> {
     use obzenflow_core::journal::{JournalError, JournalReader, JournalStorageReader};
 
-    struct Stored(Option<SystemJournalRecord>);
+    struct Stored<T: JournalEvent>(Option<JournalRecord<T::Payload>>);
     #[async_trait::async_trait]
-    impl JournalStorageReader<SystemEvent> for Stored {
-        async fn storage_next(&mut self) -> Result<Option<SystemJournalRecord>, JournalError> {
+    impl<T: JournalEvent> JournalStorageReader<T> for Stored<T> {
+        async fn storage_next(
+            &mut self,
+        ) -> Result<Option<JournalRecord<T::Payload>>, JournalError> {
             Ok(self.0.take())
         }
         fn storage_position(&self) -> u64 {
             u64::from(self.0.is_none())
         }
     }
-    let mut reader = Stored(Some(JournalRecord::new(writer, event)));
+    let mut reader = Stored::<T>(Some(JournalRecord::new(writer, event)));
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
@@ -161,25 +165,70 @@ fn fact(event: SystemPayload) -> SystemJournalRecord {
     )
 }
 
+fn execution(stage: StageId, payload: ExecutionPayload) -> ChainJournalRecord {
+    stored_record(
+        JournalWriterId::from(JournalId::new()),
+        ChainEventFactory::execution_event(stage.into(), payload).with_flow_context(FlowContext {
+            flow_name: "demo".into(),
+            flow_id: "flow".into(),
+            ..FlowContext::new("worker", stage)
+        }),
+    )
+}
+
+fn middleware_fact(stage: StageId, revision: u64, payload: ExecutionPayload) -> ChainJournalRecord {
+    let mut record = execution(stage, payload);
+    let coordinate = record.causal_coordinate();
+    record
+        .envelope
+        .provenance
+        .journal
+        .vector_clock
+        .clocks
+        .insert(coordinate, revision);
+    record.envelope.provenance.journal.previous = Some(obzenflow_core::event::JournalCommitRef {
+        run_id: record.envelope.provenance.journal.run_id,
+        journal_writer_id: record.envelope.provenance.journal.journal_writer_id,
+        sequence: revision - 1,
+        event_id: EventId::new(),
+    });
+    // This fixture starts after archive admission; restore the capability using
+    // the ordinary reader, exactly as stored_record does.
+    admit_record(record)
+}
+
+fn admit_record(record: ChainJournalRecord) -> ChainJournalRecord {
+    use obzenflow_core::journal::{JournalError, JournalReader, JournalStorageReader};
+    struct Stored(Option<ChainJournalRecord>);
+    #[async_trait::async_trait]
+    impl JournalStorageReader<ChainEvent> for Stored {
+        async fn storage_next(&mut self) -> Result<Option<ChainJournalRecord>, JournalError> {
+            Ok(self.0.take())
+        }
+        fn storage_position(&self) -> u64 {
+            u64::from(self.0.is_none())
+        }
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(Stored(Some(record)).next())
+        .unwrap()
+        .unwrap()
+}
+
 #[test]
 fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisions() {
     let stage = StageId::new();
-    let envelope = fact(SystemPayload::MiddlewareLifecycle {
-        stage_id: stage,
-        stage_name: Some("worker".into()),
-        flow_id: Some("flow".into()),
-        flow_name: Some("demo".into()),
-        origin: MiddlewareEventOrigin {
-            event_id: EventId::new(),
-            writer_key: "worker".into(),
-            seq: SeqNo(7),
-        },
-        middleware: MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+    let envelope = middleware_fact(
+        stage,
+        7,
+        ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
             mode_from: RateLimiterMode::Normal,
             mode_to: RateLimiterMode::Limiting,
             limit_rate: 10.0,
         }),
-    });
+    );
     let mut rebuilt = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     let mut live = rebuilt.clone();
     rebuilt.rebuild(&envelope.clone().into());
@@ -197,7 +246,7 @@ fn middleware_rebuild_and_live_projection_use_supplied_time_and_preserve_revisio
         serde_json::from_str::<Value>(&snapshot.data).unwrap(),
         json!({
             "timestamp_ms": 456, "flow_id": "flow", "flow_name": "demo", "vector_clock": envelope.envelope.provenance.journal.vector_clock,
-            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.timestamp}}]
+            "middleware": [{"stage_id": stage.to_string(), "stage_name": "worker", "rate_limiter": {"mode": "limiting", "revision": 7, "state_updated_at_ms": envelope.envelope.provenance.event.processing.event_time}}]
         })
     );
     let running = fact(SystemPayload::PipelineLifecycle(
@@ -229,16 +278,20 @@ fn stage_bootstrap_retains_terminal_accounting_after_an_empty_duplicate() {
         ..Default::default()
     })
     .unwrap();
-    let enriched = fact(SystemPayload::StageLifecycle {
-        stage_id: stage,
-        event: StageLifecycleEvent::Completed {
+    let enriched = execution(
+        stage,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed {
+            stage_id: stage,
             accounting: Some(serde_json::from_value(metrics.clone()).unwrap()),
-        },
-    });
-    let duplicate = fact(SystemPayload::StageLifecycle {
-        stage_id: stage,
-        event: StageLifecycleEvent::Completed { accounting: None },
-    });
+        }),
+    );
+    let duplicate = execution(
+        stage,
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Completed {
+            stage_id: stage,
+            accounting: None,
+        }),
+    );
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
     projection.rebuild(&enriched.clone().into());
     projection.rebuild(&duplicate.clone().into());
@@ -248,7 +301,7 @@ fn stage_bootstrap_retains_terminal_accounting_after_an_empty_duplicate() {
     let payload: Value = serde_json::from_str(&snapshots[0].data).unwrap();
     assert_eq!(
         payload["timestamp_ms"],
-        enriched.envelope.provenance.event.timestamp
+        enriched.envelope.provenance.event.processing.event_time
     );
     assert_eq!(payload["accounting"], metrics);
 }
@@ -262,30 +315,42 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
     let stage = StageId::new();
     let cases = [
         (
-            StageLifecycleEvent::Running,
+            StageLifecycleFact::Running { stage_id: stage },
             json!({"event_type": "stage_running"}),
         ),
         (
-            StageLifecycleEvent::Draining { accounting: None },
+            StageLifecycleFact::Draining {
+                stage_id: stage,
+                reason: None,
+                accounting: None,
+            },
             json!({"event_type": "stage_draining"}),
         ),
         (
-            StageLifecycleEvent::Drained,
+            StageLifecycleFact::Drained {
+                stage_id: stage,
+                events_processed: None,
+            },
             json!({"event_type": "stage_drained"}),
         ),
         (
-            StageLifecycleEvent::Completed { accounting: None },
+            StageLifecycleFact::Completed {
+                stage_id: stage,
+                accounting: None,
+            },
             json!({"event_type": "stage_completed"}),
         ),
         (
-            StageLifecycleEvent::Cancelled {
+            StageLifecycleFact::Cancelled {
+                stage_id: stage,
                 reason: "requested".into(),
                 accounting: None,
             },
             json!({"event_type": "stage_cancelled", "reason": "requested"}),
         ),
         (
-            StageLifecycleEvent::Failed {
+            StageLifecycleFact::Failed {
+                stage_id: stage,
                 error: "failed".into(),
                 recoverable: Some(false),
                 accounting: None,
@@ -295,16 +360,13 @@ fn every_stage_message_has_the_same_payload_live_and_in_a_snapshot() {
         ),
     ];
     for (event, mut expected) in cases {
-        let envelope = fact(SystemPayload::StageLifecycle {
-            stage_id: stage,
-            event,
-        });
+        let envelope = execution(stage, ExecutionPayload::StageLifecycle(event));
         let mut projection =
             StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
         let live = projection.project(&envelope.clone().into(), 123).remove(0);
         expected["system_event_type"] = json!("stage_lifecycle");
         expected["stage_id"] = json!(stage.to_string());
-        expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
+        expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.processing.event_time);
         expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
         expected["commitment"] = json!(
             obzenflow_core::event::JournalClock::from_record(&envelope)
@@ -402,25 +464,15 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
             json!({"event_type": "resumed_live", "archive_flow_id": "archived", "replayed_count": 3, "generation": 1}),
         ),
     ];
-    for (journal, expected) in replay_cases {
-        let envelope = fact(SystemPayload::ReplayLifecycle(
-            serde_json::from_value(journal).unwrap(),
-        ));
-        assert_fact_payload(
-            envelope.clone(),
-            "replay_lifecycle",
-            Some("replay_lifecycle"),
-            expected.clone(),
-        );
+    for (journal, mut expected) in replay_cases {
         let stage = StageId::new();
-        let journal = envelope.envelope.provenance.journal.journal_writer_id;
-        let mut stage_event = envelope.into_authored();
-        stage_event.writer_id = WriterId::from(stage);
-        let stage_envelope = stored_record(journal, stage_event);
-        let mut expected = expected;
+        let envelope = execution(
+            stage,
+            ExecutionPayload::ReplayLifecycle(serde_json::from_value(journal).unwrap()),
+        );
         expected["stage_id"] = json!(stage.to_string());
         assert_fact_payload(
-            stage_envelope,
+            envelope,
             "replay_lifecycle",
             Some("replay_lifecycle"),
             expected,
@@ -455,29 +507,41 @@ fn flow_replay_and_metrics_messages_preserve_the_studio_wire_vocabulary() {
 }
 
 fn assert_fact_payload(
-    envelope: SystemJournalRecord,
+    envelope: impl Into<RunRecordData>,
     name: &str,
     family: Option<&str>,
     mut expected: Value,
 ) {
+    let envelope = envelope.into();
+    let (timestamp, clock, commitment, id) = match &envelope {
+        RunRecordData::Chain(record) => (
+            record.envelope.provenance.event.processing.event_time,
+            &record.envelope.provenance.journal.vector_clock,
+            obzenflow_core::event::JournalClock::from_record(record)
+                .unwrap()
+                .reference,
+            *record.id(),
+        ),
+        RunRecordData::System(record) => (
+            record.envelope.provenance.event.timestamp,
+            &record.envelope.provenance.journal.vector_clock,
+            obzenflow_core::event::JournalClock::from_record(record)
+                .unwrap()
+                .reference,
+            *record.id(),
+        ),
+    };
     if let Some(family) = family {
         expected["system_event_type"] = json!(family);
     }
-    expected["timestamp_ms"] = json!(envelope.envelope.provenance.event.timestamp);
-    expected["vector_clock"] = json!(envelope.envelope.provenance.journal.vector_clock);
-    expected["commitment"] = json!(
-        obzenflow_core::event::JournalClock::from_record(&envelope)
-            .unwrap()
-            .reference
-    );
+    expected["timestamp_ms"] = json!(timestamp);
+    expected["vector_clock"] = json!(clock);
+    expected["commitment"] = json!(commitment);
     let mut projection = StudioProjection::new(vec![], ContractBoundaryAliases::default()).unwrap();
-    let frames = projection.project(&envelope.clone().into(), 123);
+    let frames = projection.project(&envelope, 123);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].event.as_deref(), Some(name));
-    assert_eq!(
-        frames[0].id,
-        Some(envelope.envelope.provenance.event.id.to_string())
-    );
+    assert_eq!(frames[0].id, Some(id.to_string()));
     assert_eq!(payload(&frames[0]), expected);
 }
 
@@ -501,16 +565,17 @@ fn discarded_commands_remain_visible_as_journal_backed_studio_facts() {
         let stage_id = StageId::new();
         let envelope = stored_record(
             JournalWriterId::from(JournalId::new()),
-            SystemEvent::new(
+            ChainEventFactory::execution_event(
                 WriterId::from(stage_id),
-                SystemPayload::SupervisorCommandDiscarded {
+                ExecutionPayload::SupervisorCommandDiscarded {
                     supervisor: "transform_orders".into(),
                     terminal_state: "Drained".into(),
                     command: command.into(),
                     disposition,
                     error: error.map(str::to_owned),
                 },
-            ),
+            )
+            .with_flow_context(FlowContext::new("transform_orders", stage_id)),
         );
         let mut expected = json!({
             "stage_id": stage_id.to_string(),
@@ -564,7 +629,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         resume_generation: Default::default(),
     };
     enum Input {
-        Fact(Box<SystemJournalRecord>),
+        Fact(Box<ChainJournalRecord>),
         Measurement(Box<ObservabilityContext>),
     }
     let measured = |seq, record| {
@@ -578,20 +643,8 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         packet.records.push(record);
         Input::Measurement(Box::new(packet))
     };
-    let factual = |revision, middleware| {
-        Input::Fact(Box::new(fact(SystemPayload::MiddlewareLifecycle {
-            stage_id: stage,
-            stage_name: Some("worker".into()),
-            flow_id: Some("flow".into()),
-            flow_name: Some("demo".into()),
-            origin: MiddlewareEventOrigin {
-                event_id: EventId::new(),
-                writer_key: "worker".into(),
-                seq: SeqNo(revision),
-            },
-            middleware,
-        })))
-    };
+    let factual =
+        |revision, middleware| Input::Fact(Box::new(middleware_fact(stage, revision, middleware)));
     let summary = |successes| ObservationRecord::CircuitBreakerSummary {
         effect_type: None,
         window_duration_s: 5,
@@ -611,7 +664,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         measured(1, summary(18)),
         factual(
             7,
-            MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Opened {
+            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Opened {
                 cooldown_ms: 5_000,
                 error_rate: 0.5,
                 failure_count: 2,
@@ -625,13 +678,13 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         measured(2, summary(19)),
         factual(
             8,
-            MiddlewareFact::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
                 test_request_count: 1,
             }),
         ),
         factual(
             9,
-            MiddlewareFact::CircuitBreaker(CircuitBreakerFact::Closed {
+            ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
                 success_count: 1,
                 recovery_duration_ms: 250,
             }),
@@ -647,7 +700,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         ),
         factual(
             7,
-            MiddlewareFact::RateLimiter(RateLimiterFact::ModeChange {
+            ExecutionPayload::RateLimiter(RateLimiterFact::ModeChange {
                 mode_from: RateLimiterMode::Normal,
                 mode_to: RateLimiterMode::Limiting,
                 limit_rate: 10.0,
@@ -666,7 +719,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
         ),
         factual(
             8,
-            MiddlewareFact::RateLimiter(RateLimiterFact::ConfigChanged {
+            ExecutionPayload::RateLimiter(RateLimiterFact::ConfigChanged {
                 old_rate: 10.0,
                 new_rate: 20.0,
             }),
@@ -747,7 +800,7 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     );
     let Input::Fact(carrier) = factual(
         10,
-        MiddlewareFact::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+        ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
             test_request_count: 1,
         }),
     ) else {
@@ -756,10 +809,9 @@ fn middleware_transitions_and_snapshots_survive_every_replay_to_live_boundary() 
     let Input::Measurement(stale) = measured(1, summary(999)) else {
         unreachable!()
     };
-    let writer = carrier.envelope.provenance.journal.journal_writer_id;
-    let mut authored = carrier.into_authored();
-    authored.envelope.observability = Some(*stale);
-    let carrier = Box::new(stored_record(writer, authored));
+    let mut carrier = carrier;
+    carrier.envelope.observability = Some(*stale);
+    let carrier = Box::new(admit_record(*carrier));
     let frames = live.project(&(*carrier).clone().into(), 789);
     assert_eq!(
         frames.len(),

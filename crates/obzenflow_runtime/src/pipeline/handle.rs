@@ -29,9 +29,10 @@ pub(crate) struct FlowHandleExtras {
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
-    pub pipeline_reports: Option<super::reports::PipelineReports>,
+    pub ingress_refusals: Option<super::ingress::IngressRefusalWriter>,
     pub metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
-    pub report_journals: Vec<crate::supervised_base::SupervisorJournal>,
+    pub stage_journals: Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)>,
+    pub system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub pipeline_writer_id: WriterId,
     pub observations: Arc<dyn ObservationSource>,
@@ -75,10 +76,11 @@ pub struct FlowHandle {
     /// baked into the canonical `Topology`.
     contract_attachments: Option<ContractAttachments>,
 
-    /// System journal for lifecycle events (for SSE / observability)
-    pipeline_reports: Option<super::reports::PipelineReports>,
+    /// Host ingress refusals published through this pipeline owner.
+    ingress_refusals: Option<super::ingress::IngressRefusalWriter>,
     metrics_journals: Option<crate::metrics::builder::MetricsJournals>,
-    report_journals: Vec<crate::supervised_base::SupervisorJournal>,
+    stage_journals: Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)>,
+    system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 
     /// Writer identity for this pipeline's lifecycle facts in the system journal.
@@ -100,11 +102,15 @@ impl FlowHandle {
     pub fn metrics_journals(&self) -> Option<crate::metrics::builder::MetricsJournals> {
         self.metrics_journals.clone()
     }
-    pub fn pipeline_reports(&self) -> Option<super::reports::PipelineReports> {
-        self.pipeline_reports.clone()
+    pub fn ingress_refusals(&self) -> Option<super::ingress::IngressRefusalWriter> {
+        self.ingress_refusals.clone()
     }
-    pub fn report_journals(&self) -> Vec<crate::supervised_base::SupervisorJournal> {
-        self.report_journals.clone()
+    /// Live journal handles for presentation consumers. Reading them never participates in coordination.
+    pub fn stage_journals(&self) -> Vec<(StageId, Arc<dyn Journal<obzenflow_core::ChainEvent>>)> {
+        self.stage_journals.clone()
+    }
+    pub fn system_journals(&self) -> Vec<Arc<dyn Journal<SystemEvent>>> {
+        self.system_journals.clone()
     }
 
     /// Create a new flow handle from a standard handle and extras
@@ -121,9 +127,10 @@ impl FlowHandle {
             flow_name,
             contract_attachments,
             system_journal,
-            report_journals,
+            stage_journals,
+            system_journals,
             metrics_journals,
-            pipeline_reports,
+            ingress_refusals,
             pipeline_writer_id,
             observations,
             host_observations,
@@ -142,9 +149,10 @@ impl FlowHandle {
             flow_name,
             contract_attachments,
             system_journal,
-            report_journals,
+            stage_journals,
+            system_journals,
             metrics_journals,
-            pipeline_reports,
+            ingress_refusals,
             pipeline_writer_id,
             observations,
             host_observations,
@@ -243,49 +251,11 @@ impl FlowHandle {
     /// `Running` is already observed. Returns an error if the pipeline reaches a
     /// terminal, aborting, or post-source state before it is ready.
     pub async fn wait_for_ready(&self) -> Result<(), FlowError> {
-        let mut state_rx = self.state_receiver();
-
-        loop {
-            let state = state_rx.borrow().clone();
-            match state {
-                PipelineState::ReadyForRun | PipelineState::Running => return Ok(()),
-                PipelineState::Failed { reason, .. } => {
-                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                        reason,
-                    ))));
-                }
-                PipelineState::AbortRequested { reason, .. } => {
-                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                        format!("{reason:?}"),
-                    ))));
-                }
-                PipelineState::SourceCompleted => {
-                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                        "Pipeline source completed before it became ready for run",
-                    ))));
-                }
-                PipelineState::Draining => {
-                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                        "Pipeline entered draining before it became ready for run",
-                    ))));
-                }
-                PipelineState::Drained => {
-                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
-                        "Pipeline drained before it became ready for run",
-                    ))));
-                }
-                PipelineState::Created
-                | PipelineState::Materializing
-                | PipelineState::Materialized => {}
-            }
-
-            state_rx.changed().await.map_err(|_| {
-                FlowError::ExecutionFailed(Box::new(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "Pipeline state channel closed before readiness",
-                )))
-            })?;
-        }
+        self.handle
+            .wait_for_milestone(crate::stages::common::stage_handle::StageMilestone::Ready)
+            .await
+            .map(|_| ())
+            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)))
     }
 
     /// Start the pipeline without waiting for completion.
@@ -320,19 +290,11 @@ impl FlowHandle {
             PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
                 io::Error::other(reason),
             ))),
-            PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
-                Box::new(io::Error::other(format!("{reason:?}"))),
-            )),
-            PipelineState::SourceCompleted
-            | PipelineState::Draining
-            | PipelineState::Drained
-            | PipelineState::Created
-            | PipelineState::Materializing
-            | PipelineState::Materialized => Err(FlowError::ExecutionFailed(Box::new(
-                io::Error::other(format!(
-                    "Pipeline left readiness window before start command could be sent: {current_state:?}"
-                )),
-            ))),
+            PipelineState::FailingChildren { cause } => Err(FlowError::ExecutionFailed(Box::new(io::Error::other(cause)))),
+            PipelineState::PublishingStart | PipelineState::StartingSources | PipelineState::PublishingRunning => Ok(()),
+            _ => Err(FlowError::ExecutionFailed(Box::new(io::Error::other(format!(
+                "Pipeline left readiness window before start command could be sent: {current_state:?}"
+            ))))),
         }
     }
 

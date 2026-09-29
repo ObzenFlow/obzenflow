@@ -4,27 +4,15 @@
 
 //! System orchestration payloads and their descriptors.
 
-use crate::event::payloads::execution_payload::MiddlewareFact;
-use crate::event::payloads::flow_control_payload::EofKind;
-use crate::event::provenance::ExecutionAccounting;
-use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo};
+use crate::event::types::DurationMs;
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, StageKey};
 use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
-use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::metrics::FlowLifecycleMetricsSnapshot;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MiddlewareEventOrigin {
-    pub event_id: EventId,
-    pub writer_key: String,
-    pub seq: SeqNo,
-}
-
-/// Contract label carried by contract system events.
+/// Contract label carried by canonical execution facts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContractName(String);
@@ -57,7 +45,7 @@ impl From<String> for ContractName {
     }
 }
 
-/// Logical feed role carried by contract system events.
+/// Logical feed role carried by canonical execution facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemFeedRole {
@@ -109,120 +97,25 @@ pub enum CommandDiscardDisposition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "system_event_type", rename_all = "snake_case")]
 pub enum SystemPayload {
-    /// Published by the shared supervisor runner before its FSM starts.
+    /// Published when the system supervisor FSM selects registration.
     /// The envelope's writer identifies the registered supervisor instance.
     SupervisorRegistered {
         descriptor: super::supervisor_descriptor::SupervisorDescriptor,
     },
-    /// A terminal supervisor closed its mailbox without executing this accepted
-    /// command. The envelope's writer identifies the supervisor's stage. This
-    /// records the disposition without replacing the existing terminal outcome.
-    SupervisorCommandDiscarded {
-        supervisor: String,
-        terminal_state: String,
-        command: String,
-        disposition: CommandDiscardDisposition,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    /// Best-effort async source cleanup failed after the stage entered live
-    /// execution (FLOWIP-134g). Cleanup never authors data and never delays a
-    /// terminal transition.
-    #[serde(rename = "source_cleanup_failed")]
-    SourceCleanupFailed {
-        stage_id: StageId,
-        stage_name: String,
-        error: String,
-    },
-    /// Stage lifecycle events
-    #[serde(rename = "stage_lifecycle")]
-    StageLifecycle {
-        stage_id: StageId,
-        #[serde(flatten)]
-        event: StageLifecycleEvent,
-    },
-
     /// Pipeline lifecycle events
     #[serde(rename = "pipeline_lifecycle")]
     PipelineLifecycle(PipelineLifecycleEvent),
 
-    /// Replay lifecycle events (FLOWIP-095a).
-    #[serde(rename = "replay_lifecycle")]
-    ReplayLifecycle(ReplayLifecycleEvent),
-
     /// Metrics subsystem coordination
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
-
-    /// Middleware lifecycle events mirrored into `system.log` (FLOWIP-059c).
-    ///
-    /// Middleware observability originates in stage journals via middleware control events.
-    /// `/api/flow/events` is backed by `system.log`, so we mirror selected low-volume middleware
-    /// events here for SSE consumption.
-    #[serde(rename = "middleware_lifecycle")]
-    MiddlewareLifecycle {
-        stage_id: StageId,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stage_name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        flow_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        flow_name: Option<String>,
-        origin: MiddlewareEventOrigin,
-        middleware: MiddlewareFact,
-    },
-
-    /// Contract status reported by a reader/subscriber (per upstream)
-    #[serde(rename = "contract_status")]
-    ContractStatus {
-        upstream: StageId,
-        reader: StageId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        selected_event_type: Option<EventType>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        feed_role: Option<SystemFeedRole>,
-        pass: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reader_seq: Option<crate::event::types::SeqNo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        advertised_writer_seq: Option<crate::event::types::SeqNo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<crate::event::types::ViolationCause>,
-    },
-
-    /// Raw contract verification result for a single contract on an edge.
-    ///
-    /// This is emitted by readers/subscribers when `ContractChain::verify_all`
-    /// runs (typically at EOF) and is intended for metrics/observability rather
-    /// than pipeline gating.
-    #[serde(rename = "contract_result")]
-    ContractResult {
-        upstream: StageId,
-        reader: StageId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        selected_event_type: Option<EventType>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        feed_role: Option<SystemFeedRole>,
-        contract_name: ContractName,
-        status: ContractResultStatusLabel,
-        /// Stable category label (e.g. "seq_divergence", "content_mismatch", "other")
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cause: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reader_seq: Option<crate::event::types::SeqNo>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        advertised_writer_seq: Option<crate::event::types::SeqNo>,
-    },
 
     /// Durable hosted-ingress refusal fact (FLOWIP-115d).
     ///
     /// A rejected or shed submission attempt is a domain fact, so the hosted
     /// endpoint appends one of these to `system.log` before returning the
     /// protocol refusal, and the metrics aggregator projects the per-`(ingress_key,
-    /// reason)` refusal count from it (`state = fold(facts)`). It is a dedicated
-    /// variant rather than the `MiddlewareLifecycle` family because `EdgeShed`
-    /// and `Validation` refusals are infra-originated admission outcomes, not
-    /// middleware decisions. The `attempt_seq` is the cross-journal merge key with
+    /// reason)` refusal count from it (`state = fold(facts)`). It records an ingress admission outcome. The `attempt_seq` is the cross-journal merge key with
     /// accepted source rows. It carries no raw body or credential-bearing header.
     #[serde(rename = "ingress_refusal")]
     IngressRefusal {
@@ -248,7 +141,7 @@ pub enum SystemPayload {
     },
 }
 
-/// Stable status labels for `SystemPayload::ContractResult`.
+/// Stable status labels for canonical execution contract results.
 ///
 /// The `system.log` schema stores these as strings for compatibility with JSON
 /// consumers (SSE, metrics aggregation). Prefer this enum when emitting or
@@ -291,39 +184,6 @@ impl std::str::FromStr for ContractResultStatusLabel {
             _ => Err(()),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "lifecycle_event", rename_all = "snake_case")]
-pub enum StageLifecycleEvent {
-    Running,
-    Draining {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<ExecutionAccounting>,
-    },
-    Drained,
-    Completed {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<ExecutionAccounting>,
-    },
-    /// Stage terminated due to an intentional stop/cancel request.
-    ///
-    /// This is distinct from `Failed`: cancellation is user/operator initiated and
-    /// should not be treated as an unexpected error by UIs.
-    Cancelled {
-        reason: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<ExecutionAccounting>,
-    },
-    Failed {
-        error: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        recoverable: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        accounting: Option<ExecutionAccounting>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        causal_event_id: Option<EventId>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,36 +255,6 @@ pub enum PipelineCancellationCause {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "replay_event", rename_all = "snake_case")]
-pub enum ReplayLifecycleEvent {
-    Started {
-        archive_path: PathBuf,
-        archive_flow_id: String,
-        archive_status: ArchiveStatus,
-        archive_status_derivation: StatusDerivation,
-        allow_incomplete: bool,
-        source_stages: Vec<String>,
-    },
-    Completed {
-        replayed_count: Count,
-        skipped_count: Count,
-        duration_ms: DurationMs,
-        /// The terminal EOF kind synthesized at exhaustion (FLOWIP-095k).
-        /// `None` on the resume handoff, which synthesizes no terminal EOF.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        synthesized_eof_kind: Option<EofKind>,
-    },
-    /// Resume handoff (FLOWIP-120n): the source finished its catch-up and
-    /// continues live at `generation`. The transition announcement the
-    /// presentation layer surfaces.
-    ResumedLive {
-        archive_flow_id: String,
-        replayed_count: Count,
-        generation: u64,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "metrics_event", rename_all = "snake_case")]
 pub enum MetricsCoordinationEvent {
     Ready,
@@ -445,18 +275,6 @@ impl SystemPayload {
     pub fn event_type(&self) -> &'static str {
         match self {
             SystemPayload::SupervisorRegistered { .. } => "system.supervisor.registered",
-            SystemPayload::SupervisorCommandDiscarded { .. } => {
-                "system.supervisor.command_discarded"
-            }
-            SystemPayload::SourceCleanupFailed { .. } => "system.source.cleanup_failed",
-            SystemPayload::StageLifecycle { event, .. } => match event {
-                StageLifecycleEvent::Running => "system.stage.running",
-                StageLifecycleEvent::Draining { .. } => "system.stage.draining",
-                StageLifecycleEvent::Drained => "system.stage.drained",
-                StageLifecycleEvent::Completed { .. } => "system.stage.completed",
-                StageLifecycleEvent::Failed { .. } => "system.stage.failed",
-                StageLifecycleEvent::Cancelled { .. } => "system.stage.cancelled",
-            },
             SystemPayload::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
                 PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",
@@ -472,31 +290,12 @@ impl SystemPayload {
                 PipelineLifecycleEvent::Failed { .. } => "system.pipeline.failed",
                 PipelineLifecycleEvent::Cancelled { .. } => "system.pipeline.cancelled",
             },
-            SystemPayload::ReplayLifecycle(event) => match event {
-                ReplayLifecycleEvent::Started { .. } => "system.replay.started",
-                ReplayLifecycleEvent::Completed { .. } => "system.replay.completed",
-                ReplayLifecycleEvent::ResumedLive { .. } => "system.replay.resumed_live",
-            },
             SystemPayload::MetricsCoordination(event) => match event {
                 MetricsCoordinationEvent::Ready => "system.metrics.ready",
                 MetricsCoordinationEvent::DrainRequested => "system.metrics.drain_requested",
                 MetricsCoordinationEvent::Drained => "system.metrics.drained",
                 MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
                 MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
-            },
-            SystemPayload::MiddlewareLifecycle { .. } => "system.middleware.lifecycle",
-            SystemPayload::ContractStatus { pass, .. } => {
-                if *pass {
-                    "system.contract.pass"
-                } else {
-                    "system.contract.fail"
-                }
-            }
-            SystemPayload::ContractResult { status, .. } => match status {
-                ContractResultStatusLabel::Passed => "system.contract.result.passed",
-                ContractResultStatusLabel::Failed => "system.contract.result.failed",
-                ContractResultStatusLabel::Pending => "system.contract.result.pending",
-                ContractResultStatusLabel::Healthy => "system.contract.result",
             },
             SystemPayload::IngressRefusal { .. } => "system.ingress.refusal",
         }

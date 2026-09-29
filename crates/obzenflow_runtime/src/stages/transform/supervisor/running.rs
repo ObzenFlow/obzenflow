@@ -37,7 +37,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::TransformSupervisor;
-use crate::stages::transform::fsm::{TransformContext, TransformEvent, TransformState};
+use crate::stages::transform::fsm::{TransformEvent, TransformResources, TransformState};
 
 /// Dispatch a single event-loop iteration for the Running state.
 ///
@@ -49,7 +49,7 @@ pub(super) async fn dispatch_running<
 >(
     sup: &mut TransformSupervisor<H>,
     state: &TransformState<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let loop_count = ctx
         .instrumentation
@@ -84,7 +84,7 @@ async fn dispatch_running_inner<
 >(
     sup: &mut TransformSupervisor<H>,
     state: &TransformState<H>,
-    ctx: &mut TransformContext<H>,
+    ctx: &mut TransformResources<H>,
     loop_count: u64,
     flow_context: &FlowContext,
 ) -> Result<EventLoopDirective<TransformEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -255,6 +255,12 @@ async fn dispatch_running_inner<
                                     cause = ?cause,
                                     "Contract violation detected during active processing"
                                 );
+
+                                crate::messaging::upstream_subscription::ContractStatus::Violated {
+                                    upstream,
+                                    cause,
+                                }
+                                .into_result()?;
                             }
                             _ => {}
                         }
@@ -361,18 +367,16 @@ async fn dispatch_running_inner<
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     if is_cycle_entry_point {
                                         if is_terminal_eof(&envelope, upstream_stage) {
-                                            drop(
-                                                subscription
-                                                    .check_contracts(&mut ctx.contract_state[..])
-                                                    .await,
-                                            );
-                                        }
-                                    } else {
-                                        drop(
                                             subscription
                                                 .check_contracts(&mut ctx.contract_state[..])
-                                                .await,
-                                        );
+                                                .await
+                                                .into_result()?;
+                                        }
+                                    } else {
+                                        subscription
+                                            .check_contracts(&mut ctx.contract_state[..])
+                                            .await
+                                            .into_result()?;
                                         let _ = subscription.take_last_eof_outcome();
                                     }
                                 }
@@ -387,11 +391,10 @@ async fn dispatch_running_inner<
 
                             if envelope.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    drop(
-                                        subscription
-                                            .check_contracts(&mut ctx.contract_state[..])
-                                            .await,
-                                    );
+                                    subscription
+                                        .check_contracts(&mut ctx.contract_state[..])
+                                        .await
+                                        .into_result()?;
                                     if !is_cycle_entry_point {
                                         let _ = subscription.take_last_eof_outcome();
                                     }
@@ -432,11 +435,10 @@ async fn dispatch_running_inner<
                                 );
 
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    drop(
-                                        subscription
-                                            .check_contracts(&mut ctx.contract_state[..])
-                                            .await,
-                                    );
+                                    subscription
+                                        .check_contracts(&mut ctx.contract_state[..])
+                                        .await
+                                        .into_result()?;
                                 }
                             }
 
@@ -448,11 +450,10 @@ async fn dispatch_running_inner<
                                 && is_terminal_eof(&envelope, upstream_stage)
                             {
                                 if let Some(subscription) = sup.subscription.as_mut() {
-                                    drop(
-                                        subscription
-                                            .check_contracts(&mut ctx.contract_state[..])
-                                            .await,
-                                    );
+                                    subscription
+                                        .check_contracts(&mut ctx.contract_state[..])
+                                        .await
+                                        .into_result()?;
                                 }
                             }
 
@@ -494,7 +495,10 @@ async fn dispatch_running_inner<
                     }
 
                     let envelope_clone = envelope.clone();
-                    let handler = &ctx.handler;
+                    let handler = ctx
+                        .handler
+                        .as_ref()
+                        .expect("handler available before cleanup");
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
                     let handler_heartbeat_state = heartbeat_state.clone();
                     let effect_context = stage_input_position.and_then(|input_seq| {
@@ -794,6 +798,12 @@ async fn dispatch_running_inner<
                                 cause = ?cause,
                                 "Contract violation detected during active processing"
                             );
+
+                            crate::messaging::upstream_subscription::ContractStatus::Violated {
+                                upstream,
+                                cause,
+                            }
+                            .into_result()?;
                         }
                         _ => {}
                     }
@@ -858,6 +868,12 @@ async fn dispatch_running_inner<
                             cause = ?cause,
                             "Contract violation detected during active processing"
                         );
+
+                        crate::messaging::upstream_subscription::ContractStatus::Violated {
+                            upstream,
+                            cause,
+                        }
+                        .into_result()?;
                     }
                     _ => {}
                 }

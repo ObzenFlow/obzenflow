@@ -8,7 +8,7 @@ use obzenflow_core::WriterId;
 use std::sync::Arc;
 
 use super::config::JournalSinkConfig;
-use super::fsm::{JournalSinkContext, JournalSinkState};
+use super::fsm::{JournalSinkContext, JournalSinkResources, JournalSinkState};
 use super::handle::JournalSinkHandle;
 use super::supervisor::JournalSinkSupervisor;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -125,8 +125,8 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             .receipt_destination
             .unwrap_or_else(|| self.config.stage_name.clone());
 
-        let context = JournalSinkContext {
-            handler: self.handler,
+        let resources = JournalSinkResources {
+            handler: Some(self.handler),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             receipt_destination,
@@ -139,7 +139,6 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),
             error_journal: self.resources.error_journal.clone(),
-            report_journal: self.resources.report_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
             lineage_policy: self.resources.lineage_policy,
@@ -162,6 +161,8 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             failure_causal_event_id: None,
         };
 
+        let context = JournalSinkContext::new(resources);
+
         // Create supervisor (private - not exposed)
         let supervisor = JournalSinkSupervisor {
             name: format!("sink_{}", self.config.stage_name),
@@ -179,7 +180,10 @@ impl<H: UnifiedSinkHandler + std::fmt::Debug + Send + Sync + 'static> Supervisor
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.report_journal.clone(),
+            crate::supervised_base::with_external_events::stage_commands(
+                self.resources.data_journal.clone(),
+                self.resources.flow_context.clone(),
+            ),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

@@ -27,7 +27,7 @@ use crate::supervised_base::{
 };
 
 use super::config::TransformConfig;
-use super::fsm::{TransformContext, TransformState};
+use super::fsm::{TransformContext, TransformResources, TransformState};
 use super::handle::TransformHandle;
 use super::supervisor::TransformSupervisor;
 
@@ -144,8 +144,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         handler.install_lineage_policy(self.resources.lineage_policy);
         handler.install_observation_recorder(instrumentation.observation_recorder());
         handler.install_writer_id(WriterId::from(self.config.stage_id));
-        let context = TransformContext {
-            handler,
+        let resources = TransformResources {
+            handler: Some(handler),
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             observers,
@@ -159,7 +159,6 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             direct_fact_plan: self.resources.direct_fact_plan.clone(),
             direct_fact_continuation: None,
             error_journal: self.resources.error_journal.clone(),
-            report_journal: self.resources.report_journal.clone(),
             writer_id: None,
             lineage_policy: self.resources.lineage_policy,
             subscription: None,
@@ -190,6 +189,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             catch_up_flip: None,
         };
 
+        let context = TransformContext::new(resources);
+
         // Create supervisor (private - not exposed)
         let supervisor = TransformSupervisor {
             name: format!("transform_{}", self.config.stage_name),
@@ -216,7 +217,10 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             supervisor,
             event_receiver,
             state_watcher_for_task,
-            self.resources.report_journal.clone(),
+            crate::supervised_base::with_external_events::stage_commands(
+                self.resources.data_journal.clone(),
+                self.resources.flow_context.clone(),
+            ),
         );
         let task = SupervisorTaskBuilder::new(&supervisor_name)
             .with_publications(publications)

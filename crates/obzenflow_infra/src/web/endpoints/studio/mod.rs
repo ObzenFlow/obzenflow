@@ -25,7 +25,8 @@ use tokio::sync::watch;
 use crate::web::RuntimeInstanceId;
 
 pub(crate) struct StudioUpdatesEndpoint {
-    journals: Vec<obzenflow_runtime::supervised_base::SupervisorJournal>,
+    stage_journals: Vec<Arc<dyn Journal<obzenflow_core::ChainEvent>>>,
+    system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,
     projection: StudioProjection,
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
@@ -40,7 +41,8 @@ impl StudioUpdatesEndpoint {
         closing: watch::Receiver<bool>,
     ) -> Self {
         Self {
-            journals: vec![journal.into()],
+            stage_journals: Vec::new(),
+            system_journals: vec![journal],
             projection,
             runtime_instance_id,
             closing,
@@ -50,11 +52,16 @@ impl StudioUpdatesEndpoint {
         }
     }
 
-    pub(crate) fn with_report_journals(
+    pub(crate) fn with_live_journals(
         mut self,
-        journals: Vec<obzenflow_runtime::supervised_base::SupervisorJournal>,
+        stages: Vec<(
+            obzenflow_core::StageId,
+            Arc<dyn Journal<obzenflow_core::ChainEvent>>,
+        )>,
+        systems: Vec<Arc<dyn Journal<SystemEvent>>>,
     ) -> Self {
-        self.journals = journals;
+        self.stage_journals = stages.into_iter().map(|(_, journal)| journal).collect();
+        self.system_journals = systems;
         self
     }
 
@@ -85,7 +92,8 @@ impl HttpEndpoint for StudioUpdatesEndpoint {
             .find(|(name, _)| name.eq_ignore_ascii_case("last-event-id"))
             .map(|(_, value)| value.as_str());
         Ok(ManagedResponse::Sse(SseBody::new(stream::connection(
-            self.journals.clone(),
+            self.stage_journals.clone(),
+            self.system_journals.clone(),
             self.projection.clone(),
             self.runtime_instance_id.clone(),
             self.closing.clone(),

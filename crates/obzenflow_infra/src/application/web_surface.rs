@@ -38,7 +38,7 @@ pub struct WebSurfaceWiringContext {
     /// install its refusal-fact writer. `None` when the flow has no system
     /// journal, in which case a surface with refusal recording enabled fails
     /// startup.
-    pub pipeline_reports: Option<obzenflow_runtime::pipeline::reports::PipelineReports>,
+    pub ingress_refusals: Option<obzenflow_runtime::pipeline::ingress::IngressRefusalWriter>,
 }
 
 #[derive(Default)]
@@ -205,7 +205,7 @@ mod tests {
 
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: rx,
-            pipeline_reports: None,
+            ingress_refusals: None,
         })
         .unwrap();
         assert_eq!(wired.tasks.len(), 1);

@@ -163,9 +163,7 @@ impl ChainPayload {
                 | ExecutionPayload::SourceCleanupFailed { .. }
                 | ExecutionPayload::ContractStatus { .. }
                 | ExecutionPayload::ContractResult { .. }
-                | ExecutionPayload::IngressRefusal { .. }
                 | ExecutionPayload::StageLifecycle(_)
-                | ExecutionPayload::MetricsCoordination(_)
                 | ExecutionPayload::CircuitBreaker(_)
                 | ExecutionPayload::RateLimiter(_)
                 | ExecutionPayload::Backpressure(_)

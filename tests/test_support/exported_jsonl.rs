@@ -46,13 +46,14 @@ pub fn omit_observations(run: &std::path::Path, keep: impl Fn(usize) -> bool) ->
 pub fn protected_records(jsonl: &str) -> Vec<serde_json::Value> {
     jsonl
         .lines()
-        .map(|line| {
-            let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
-            value["envelope"]
-                .as_object_mut()
-                .unwrap()
-                .remove("observability");
-            value
-        })
+        .map(|line| without_observations(serde_json::from_str(line).unwrap()))
         .collect()
+}
+
+pub fn without_observations(mut value: serde_json::Value) -> serde_json::Value {
+    value["envelope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("observability");
+    value
 }

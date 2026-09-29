@@ -44,5 +44,5 @@ impl obzenflow_core::metrics::MetricsSnapshotExporter for RecordingSnapshots {
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod tests;

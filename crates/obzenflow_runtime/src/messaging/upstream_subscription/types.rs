@@ -195,6 +195,33 @@ pub enum ContractStatus {
     ProgressEmitted,
 }
 
+/// A fatal decision after applying the configured policy to one input edge.
+#[derive(Debug, Clone)]
+pub struct ContractFailure {
+    pub upstream: StageId,
+    pub cause: EventViolationCause,
+}
+impl std::fmt::Display for ContractFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "contract failed for upstream {}: {:?}",
+            self.upstream, self.cause
+        )
+    }
+}
+impl std::error::Error for ContractFailure {}
+
+impl ContractStatus {
+    /// Stalls remain advisory. Only an effective contract violation fails a child.
+    pub fn into_result(self) -> Result<(), ContractFailure> {
+        match self {
+            Self::Violated { upstream, cause } => Err(ContractFailure { upstream, cause }),
+            Self::Healthy | Self::Stalled(_) | Self::ProgressEmitted => Ok(()),
+        }
+    }
+}
+
 /// Encapsulates the mechanical state of subscription management
 /// This is "mechanism" state - HOW we're reading, not WHY or WHEN
 #[derive(Debug)]
@@ -659,7 +686,6 @@ pub struct ContractTracker {
     /// References for emission (not owned)
     pub(super) writer_id: WriterId,
     pub(super) journal: Arc<dyn Journal<ChainEvent>>,
-    pub(super) report_journal: Option<crate::supervised_base::SupervisorJournal>,
     pub(super) reader_stage: Option<StageId>,
     pub(super) receipt_aware_progress: bool,
 
@@ -685,7 +711,6 @@ pub struct ContractsWiring {
     pub writer_id: WriterId,
     pub contract_journal: Arc<dyn Journal<ChainEvent>>,
     pub config: ContractConfig,
-    pub report_journal: Option<crate::supervised_base::SupervisorJournal>,
     pub reader_stage: Option<StageId>,
     pub control_plane: Arc<dyn ControlPlaneProvider>,
     pub include_delivery_contract: bool,

@@ -94,7 +94,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
             error_journal: self.resources.error_journal.clone(),
-            report_journal: self.resources.report_journal.clone(),
             runtime_execution: self.resources.runtime_execution.clone(),
             bus: self.resources.message_bus.clone(),
             instrumentation,
@@ -110,15 +109,16 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
 
         let supervisor = AsyncInfiniteSourceSupervisor {
             name: format!("async_infinite_source_{}", self.config.stage_name),
-            handler,
-            report_journal: self.resources.report_journal.clone(),
+            handler: Some(handler),
+            data_journal: self.resources.data_journal.clone(),
+            flow_context: self.resources.flow_context.clone(),
             stage_id: self.config.stage_id,
             idle_backoff: IdleBackoff::exponential_with_cap(
                 Duration::from_millis(1),
                 Duration::from_millis(50),
             ),
             pending_idle_delay: None,
-            external_events: event_receiver,
+            external_events: event_receiver.into(),
             state_watcher: state_watcher.clone(),
             last_state: None,
             replay_driver: None,
@@ -128,7 +128,6 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> SupervisorBui
             pending_boundary_begin_drain: false,
             pending_boundary_error: None,
             reader_acquired: false,
-            cleanup_attempted: false,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);
