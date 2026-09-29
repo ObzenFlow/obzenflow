@@ -19,7 +19,7 @@ use crate::stages::common::stage_lifecycle::LifecycleExit;
 use crate::supervised_base::handler_supervised::SupervisorAction as H;
 use crate::supervised_base::publication;
 use futures::future::BoxFuture;
-use obzenflow_core::event::types::DurationMs;
+use obzenflow_core::event::types::{DurationMs, ViolationCause};
 use obzenflow_core::event::{
     PipelineCancellationCause, PipelineStopAdmission, SystemEvent, SystemEventFactory,
 };
@@ -73,6 +73,7 @@ pub(super) fn unhandled<'a>(
             | E::ObservationEnded
             | E::ChildAcknowledged(_)
             | E::MetricsReady(_)
+            | E::RegistrationCompleted
             | E::ReadyPublished
             | E::StartPublished
             | E::RunningPublished
@@ -86,11 +87,7 @@ pub(super) fn unhandled<'a>(
 pub(super) fn bootstrap<'a>(_: &'a S, _: &'a E, _: &'a mut C) -> Decision<'a> {
     decided(change(
         S::Registering,
-        vec![
-            A::ObserveChildren,
-            A::Host(H::Register),
-            A::Host(H::Emit(E::RegistrationCompleted)),
-        ],
+        vec![A::ObserveChildren, A::Register],
     ))
 }
 pub(super) fn registered<'a>(_: &'a S, _: &'a E, ctx: &'a mut C) -> Decision<'a> {
@@ -100,12 +97,14 @@ pub(super) fn registered<'a>(_: &'a S, _: &'a E, ctx: &'a mut C) -> Decision<'a>
         return decided(fail_children(
             ctx,
             "Stage count mismatch between supervisors and topology".into(),
+            None,
         ));
     }
     if ctx.stage_supervisors.is_empty() {
         return decided(fail_children(
             ctx,
             "source-only topologies are unsupported".into(),
+            None,
         ));
     }
     decided(change(S::InitializingStages, vec![A::InitialiseStages]))
@@ -195,8 +194,8 @@ pub(super) fn metrics_ready<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> D
     })
 }
 
-fn fail_children(ctx: &mut C, message: String) -> Change {
-    ctx.termination.fail(message, None);
+fn fail_children(ctx: &mut C, message: String, violation: Option<ViolationCause>) -> Change {
+    ctx.termination.fail(message, violation);
     let cause = ctx
         .termination
         .failure
@@ -210,7 +209,7 @@ fn fail_children(ctx: &mut C, message: String) -> Change {
 }
 pub(super) fn failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
     Box::pin(async move {
-        let message = match event {
+        let (message, violation) = match event {
             E::ChildFailed(failure) => {
                 observe(ctx, failure.stage_id, &failure.snapshot)?;
                 if matches!(state, S::CancellingChildren | S::FailingChildren { .. })
@@ -221,20 +220,26 @@ pub(super) fn failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decisio
                 {
                     return Ok(change(state.clone(), vec![]));
                 }
-                format!("Stage {}: {}", failure.stage_id, failure.cause)
+                (
+                    format!("Stage {}: {}", failure.stage_id, failure.cause),
+                    failure
+                        .cause
+                        .contract_failure()
+                        .map(|failure| failure.cause.clone()),
+                )
             }
-            E::Abort { reason } => format!("Force abort: {reason}"),
+            E::Abort { reason } => (format!("Force abort: {reason}"), None),
             E::OperationalFailure { message } => {
                 ctx.resources
                     .retain_failure(Box::new(std::io::Error::other(message.clone())));
-                message.clone()
+                (message.clone(), None)
             }
             _ => return Err(invalid_input(state, event)),
         };
         if matches!(state, S::FailingChildren { .. }) {
             return Ok(change(state.clone(), vec![]));
         }
-        Ok(fail_children(ctx, message))
+        Ok(fail_children(ctx, message, violation))
     })
 }
 pub(super) fn child_exited<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> Decision<'a> {
@@ -253,10 +258,21 @@ pub(super) fn child_exited<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> De
             LifecycleExit::Cancelled { .. }
                 if matches!(state, S::CancellingChildren | S::FailingChildren { .. }) => {}
             _ if matches!(state, S::FailingChildren { .. }) => {}
+            LifecycleExit::Failed(failure) => {
+                return Ok(fail_children(
+                    ctx,
+                    format!("Stage {} terminated: {}", exit.stage_id, failure.cause),
+                    failure
+                        .cause
+                        .contract_failure()
+                        .map(|failure| failure.cause.clone()),
+                ))
+            }
             _ => {
                 return Ok(fail_children(
                     ctx,
                     format!("Stage {} terminated: {:?}", exit.stage_id, exit.outcome),
+                    None,
                 ))
             }
         }
@@ -405,7 +421,14 @@ pub(super) fn late_failure<'a>(state: &'a S, event: &'a E, ctx: &'a mut C) -> De
     };
     ctx.resources
         .retain_failure(Box::new(std::io::Error::other(message.clone())));
-    ctx.termination.fail(message, None);
+    let violation = match event {
+        E::ChildFailed(failure) => failure
+            .cause
+            .contract_failure()
+            .map(|failure| failure.cause.clone()),
+        _ => None,
+    };
+    ctx.termination.fail(message, violation);
     decided(match state {
         S::PublishingTerminal => change(
             S::FinalisingMetrics,

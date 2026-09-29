@@ -106,6 +106,7 @@ fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
             crate::stages::common::stage_lifecycle::LifecycleResults::observe(
                 &crate::stages::common::stage_lifecycle::LifecyclePhase::Ready,
                 Default::default(),
+                None,
             );
             match event_receiver.recv().await {
                 Some(PipelineFsmEvent::Start) => {
@@ -167,10 +168,10 @@ fn flow_handle_for_start_admission(
             use crate::stages::common::stage_lifecycle::{LifecyclePhase, LifecycleResults};
             match initial_state {
                 PipelineState::ReadyForRun => {
-                    LifecycleResults::observe(&LifecyclePhase::Ready, Default::default())
+                    LifecycleResults::observe(&LifecyclePhase::Ready, Default::default(), None)
                 }
                 PipelineState::Running => {
-                    LifecycleResults::observe(&LifecyclePhase::Active, Default::default())
+                    LifecycleResults::observe(&LifecyclePhase::Active, Default::default(), None)
                 }
                 _ => {}
             }

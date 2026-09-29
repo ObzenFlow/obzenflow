@@ -26,10 +26,10 @@ mod tests;
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
 use types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 pub use types::{
-    CompositeEntrySpec, ContractConfig, ContractStatus, ContractTracker, ContractsWiring,
-    DeliveredCount, DeliveredOrdinal, EofOutcome, FeedIdentity, MergeCandidateStatus,
-    MergeWaitState, ReaderProgress, ReaderSelectionPolicy, ReaderTiebreakKey, SelectedFeedMetadata,
-    SelectedFeedRole, StageInputPosition, StageKey, SubscriptionState,
+    CompositeEntrySpec, ContractConfig, ContractFailure, ContractStatus, ContractTracker,
+    ContractsWiring, DeliveredCount, DeliveredOrdinal, EofOutcome, FeedIdentity,
+    MergeCandidateStatus, MergeWaitState, ReaderProgress, ReaderSelectionPolicy, ReaderTiebreakKey,
+    SelectedFeedMetadata, SelectedFeedRole, StageInputPosition, StageKey, SubscriptionState,
 };
 
 use crate::contracts::ContractChain;

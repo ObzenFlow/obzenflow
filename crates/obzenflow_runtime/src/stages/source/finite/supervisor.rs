@@ -394,7 +394,7 @@ impl<H: UnifiedFiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
             let result = action.execute_resources(&mut resources).await;
             Box::new(move |context: &mut FiniteSourceContext<H>| {
                 context.resources = Some(resources);
-                result.map(|()| None)
+                result.map(|()| None).map_err(Into::into)
             }) as ActionCompletion<FiniteSourceContext<H>, FiniteSourceEvent<H>>
         })))
     }

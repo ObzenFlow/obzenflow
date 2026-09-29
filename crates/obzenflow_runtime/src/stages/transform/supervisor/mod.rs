@@ -335,7 +335,7 @@ impl<H: UnifiedTransformHandler + Clone + Debug + Send + Sync + 'static> Handler
             let resources = Some(resources);
             Box::new(move |context: &mut TransformContext<H>| {
                 context.resources = resources;
-                result.map(|()| None)
+                result.map(|()| None).map_err(Into::into)
             }) as ActionCompletion<TransformContext<H>, TransformEvent<H>>
         })))
     }

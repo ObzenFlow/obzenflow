@@ -254,7 +254,7 @@ impl HandlerSupervised for CleanupSupervisor {
             probe.finished.fetch_add(1, Ordering::SeqCst);
             Box::new(move |_: &mut Context| {
                 if fail {
-                    Err(FsmError::HandlerError("secondary cleanup failure".into()))
+                    Err(FsmError::HandlerError("secondary cleanup failure".into()).into())
                 } else {
                     Ok(None)
                 }

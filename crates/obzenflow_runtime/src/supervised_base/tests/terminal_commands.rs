@@ -524,7 +524,7 @@ impl HandlerSupervised for CompletionSupervisor {
             release.notified().await;
             Box::new(move |_: &mut CompletionContext| {
                 if fail {
-                    Err(FsmError::HandlerError("terminal action failed".into()))
+                    Err(FsmError::HandlerError("terminal action failed".into()).into())
                 } else {
                     Ok(None)
                 }

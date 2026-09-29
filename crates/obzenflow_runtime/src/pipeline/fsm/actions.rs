@@ -20,6 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug)]
 pub(crate) enum PipelineAction {
     Host(SupervisorAction<E>),
+    Register,
     ObserveChildren,
     InitialiseStages,
     StartConsumers,
@@ -111,7 +112,7 @@ impl FsmAction for PipelineAction {
 impl PipelineAction {
     fn handoff(&self, ctx: &mut PipelineContext) -> Result<(), BoxError> {
         match self {
-            Self::Host(_) => {
+            Self::Host(_) | Self::Register => {
                 return Err(
                     std::io::Error::other("host action requires the supervised runner").into(),
                 )

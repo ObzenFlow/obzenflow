@@ -156,7 +156,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
             let result = action.execute_resources(&mut resources).await;
             Box::new(move |ctx: &mut MetricsAggregatorContext| {
                 ctx.resources = Some(resources);
-                result.map(|()| exported.then_some(MetricsAggregatorEvent::ExportCompleted))
+                result
+                    .map(|()| exported.then_some(MetricsAggregatorEvent::ExportCompleted))
+                    .map_err(Into::into)
             }) as ActionCompletion<MetricsAggregatorContext, MetricsAggregatorEvent>
         })))
     }

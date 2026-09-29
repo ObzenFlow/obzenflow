@@ -393,7 +393,7 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
             let result = action.execute_resources(&mut resources).await;
             Box::new(move |context: &mut InfiniteSourceContext<H>| {
                 context.resources = Some(resources);
-                result.map(|()| None)
+                result.map(|()| None).map_err(Into::into)
             }) as ActionCompletion<InfiniteSourceContext<H>, InfiniteSourceEvent<H>>
         })))
     }

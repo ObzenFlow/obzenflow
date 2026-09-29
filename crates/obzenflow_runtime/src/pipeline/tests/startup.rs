@@ -109,6 +109,97 @@ pub async fn startup_waits_for_achieved_transitions_with_zero_child_journal_read
     );
 }
 
+pub async fn blocked_registration_preserves_cancellation_and_cleanup(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let _lock = bootstrap_test_lock_async().await;
+    let cleanup_timeout = Duration::from_secs(30);
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Manual,
+        shutdown_timeout: cleanup_timeout,
+        ..Default::default()
+    });
+    for child_fails in [false, true] {
+        let mut journals = make_journals();
+        let system_id = SystemId::new();
+        let gate = Arc::new(TerminalAppendGate {
+            entered: Default::default(),
+            release: Default::default(),
+            fail: false,
+        });
+        let mut journal = ControlledJournal::new(new_system_journal(&mut *journals, system_id));
+        journal.gate_event = Some("system.supervisor.registered");
+        journal.gate = Some(gate.clone());
+        let journal = Arc::new(journal);
+        let (topology, source, sink) = source_sink_topology_with_source();
+        let mut ctx = test_context(topology, system_id, journal.clone());
+        let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
+        let source_handle =
+            owned_test_stage(source, StageType::FiniteSource, Some(probes[0].clone()));
+        let sink_handle = owned_test_stage(sink, StageType::Sink, Some(probes[1].clone()));
+        let source_results = source_handle.signals.clone();
+        let sink_results = sink_handle.signals.clone();
+        ctx.source_supervisors
+            .insert(source, Arc::new(source_handle));
+        ctx.stage_supervisors.insert(sink, Arc::new(sink_handle));
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
+        let mut states = watcher.subscribe();
+        let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(*states.borrow(), S::Registering);
+        if child_fails {
+            source_results.fail(source, "failure during registration");
+        } else {
+            sender.send(E::Cancel).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while probes
+                .iter()
+                .any(|probe| probe.force_shutdown_count.load(Ordering::Relaxed) != 1)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both children must receive cancellation before registration settles");
+        assert_eq!(source_results.0.borrow().milestones, [false; 3]);
+        assert_eq!(sink_results.0.borrow().milestones, [false; 3]);
+        assert!(!task.is_finished());
+
+        // Cleanup expiry must also execute while the accepted append is blocked.
+        tokio::time::pause();
+        tokio::time::advance(cleanup_timeout).await;
+        wait_for_state(&mut states, "PublishingTerminal", |s| {
+            matches!(s, S::PublishingTerminal)
+        })
+        .await;
+        tokio::time::resume();
+        for probe in &probes {
+            assert_eq!(probe.request_abort_count.load(Ordering::Relaxed), 1);
+        }
+        assert!(!task.is_finished());
+        gate.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.is_err(), child_fails);
+        let rows = journal.read_all_unordered().await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.event_type_name() == "system.supervisor.registered")
+                .count(),
+            1
+        );
+        assert!(!rows.iter().any(|r| matches!(
+            r.event_type_name(),
+            "system.pipeline.ready_for_run" | "system.pipeline.running"
+        )));
+    }
+}
+
 pub async fn blocked_ready_publication_exposes_pending_state_and_preserves_cancellation(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {

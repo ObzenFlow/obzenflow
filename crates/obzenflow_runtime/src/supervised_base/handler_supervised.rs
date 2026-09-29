@@ -8,6 +8,8 @@
 //! such as source, transform, and sink supervisors.
 
 use super::base::{self, EventLoopDirective, Supervisor};
+use super::publication::BoxError;
+use crate::stages::common::stage_handle::StageError;
 use futures::future::BoxFuture;
 use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
@@ -33,7 +35,7 @@ pub enum SupervisorAction<E> {
 /// context. Polling a control command never drops this future. Forced task
 /// abortion remains a distinct task-owner operation.
 pub type OwnedAction<C, E> = BoxFuture<'static, ActionCompletion<C, E>>;
-pub type ActionCompletion<C, E> = Box<dyn FnOnce(&mut C) -> Result<Option<E>, FsmError> + Send>;
+pub type ActionCompletion<C, E> = Box<dyn FnOnce(&mut C) -> Result<Option<E>, BoxError> + Send>;
 
 pub enum ActionExecution<C, E> {
     Completed,
@@ -186,9 +188,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
             future: BoxFuture<'static, Result<(), Box<dyn Error + Send + Sync>>>,
         ) -> OwnedAction<C, E> {
             Box::pin(async move {
-                let result = future
-                    .await
-                    .map_err(|error| FsmError::HandlerError(error.to_string()));
+                let result = future.await;
                 Box::new(move |_: &mut C| result.map(|()| None)) as ActionCompletion<C, E>
             })
         }
@@ -201,6 +201,12 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
         loop {
             let state = machine.state().clone();
             let publications = super::publication::PublicationScope::current();
+            let mut failure = None;
+            let mut retain_error = |error: BoxError| {
+                let message = error.to_string();
+                failure = Some(StageError::Execution(error.into()));
+                message
+            };
             let directive = if let Some(future) = operation.as_mut() {
                 tokio::select! {
                     biased;
@@ -211,7 +217,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         }
                     }, if !publication_failure_delivered => {
                         publication_failure_delivered = true;
-                        EventLoopDirective::Transition(self.event_for_action_error(error.to_string()))
+                        EventLoopDirective::Transition(self.event_for_action_error(retain_error(error.into())))
                     }
                     Some(event) = self.next_control(&state, &mut context) => EventLoopDirective::Transition(event),
                     complete = future => {
@@ -219,7 +225,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         match complete(&mut context) {
                             Ok(None) => continue,
                             Ok(Some(event)) => EventLoopDirective::Transition(event),
-                            Err(error) => EventLoopDirective::Transition(self.event_for_action_error(error.to_string())),
+                            Err(error) => EventLoopDirective::Transition(self.event_for_action_error(retain_error(error))),
                         }
                     }
                 }
@@ -233,14 +239,14 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                         }
                     }, if !publication_failure_delivered => {
                         publication_failure_delivered = true;
-                        EventLoopDirective::Transition(self.event_for_action_error(error.to_string()))
+                        EventLoopDirective::Transition(self.event_for_action_error(retain_error(error.into())))
                     }
                     Some(event) = self.next_control(&state, &mut context) => EventLoopDirective::Transition(event),
                     complete = future => {
                         dispatch = None;
                         match complete(&mut self, &mut context) {
                             Ok(directive) => directive,
-                            Err(error) => EventLoopDirective::Transition(self.event_for_action_error(error.to_string())),
+                            Err(error) => EventLoopDirective::Transition(self.event_for_action_error(retain_error(error))),
                         }
                     }
                 }
@@ -266,7 +272,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             continue;
                         }
                         Err(error) => EventLoopDirective::Transition(
-                            self.event_for_action_error(error.to_string()),
+                            self.event_for_action_error(retain_error(error.into())),
                         ),
                     },
                     Some(SupervisorAction::SettlePublications) => {
@@ -286,7 +292,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                             continue;
                         }
                         Err(error) => EventLoopDirective::Transition(
-                            self.event_for_action_error(error.to_string()),
+                            self.event_for_action_error(retain_error(error.into())),
                         ),
                     },
                 }
@@ -297,7 +303,7 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 match self.dispatch_state(&state, &mut context).await {
                     Ok(directive) => directive,
                     Err(error) => EventLoopDirective::Transition(
-                        self.event_for_action_error(error.to_string()),
+                        self.event_for_action_error(retain_error(error)),
                     ),
                 }
             };
@@ -316,7 +322,11 @@ pub trait HandlerSupervisedExt: HandlerSupervised {
                 .map_err(|error| format!("FSM error: {error}"))?;
             let state = machine.state().clone();
             self.after_transition(&state, &context);
-            LifecycleResults::observe(&self.lifecycle_phase(&state), self.accounting(&context));
+            LifecycleResults::observe(
+                &self.lifecycle_phase(&state),
+                self.accounting(&context),
+                failure,
+            );
             if state != previous_state || !selected.is_empty() {
                 actions = selected.into();
             }

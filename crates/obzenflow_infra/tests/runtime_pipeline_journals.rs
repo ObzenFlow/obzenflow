@@ -36,9 +36,19 @@ async fn startup_waits_for_achieved_transitions_with_zero_child_journal_reads() 
 }
 
 #[tokio::test]
+async fn blocked_registration_preserves_cancellation_and_cleanup() {
+    pipeline::blocked_registration_preserves_cancellation_and_cleanup(journals).await;
+}
+
+#[tokio::test]
 async fn blocked_ready_publication_exposes_pending_state_and_preserves_cancellation() {
     pipeline::blocked_ready_publication_exposes_pending_state_and_preserves_cancellation(journals)
         .await;
+}
+
+#[tokio::test]
+async fn contract_failure_cause_survives_child_observation_order() {
+    pipeline::contract_failure_cause_survives_child_observation_order(journals).await;
 }
 
 #[tokio::test]

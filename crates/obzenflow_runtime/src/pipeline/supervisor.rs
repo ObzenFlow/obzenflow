@@ -8,12 +8,14 @@
 use super::fsm::{PipelineAction, PipelineContext, PipelineFsmEvent as E, PipelineFsmState as S};
 use super::resources::{Observations, OperationalFailure};
 use super::PipelineState;
-use crate::supervised_base::handler_supervised::SupervisorAction;
+use crate::supervised_base::handler_supervised::{ActionExecution, SupervisorAction};
 use crate::supervised_base::publication::BoxError;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, SelfSupervised, StateWatcher};
-use futures::Stream;
+use futures::{FutureExt, Stream};
+use obzenflow_core::event::payloads::supervisor_descriptor::SupervisionMode;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::id::SystemId;
+use obzenflow_fsm::{FsmAction, FsmError};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -194,6 +196,46 @@ impl SelfSupervised for PipelineSupervisor {
         } else {
             None
         }
+    }
+    async fn execute_action(
+        &mut self,
+        action: PipelineAction,
+        ctx: &mut PipelineContext,
+    ) -> Result<ActionExecution<PipelineContext, E>, FsmError> {
+        if matches!(action, PipelineAction::Register) {
+            let registration = crate::supervised_base::base::register(
+                self,
+                ctx,
+                self.writer_id(),
+                SupervisionMode::SelfSupervised,
+            );
+            // Admit registration before any later pipeline publication. Its
+            // receipt gates startup, while child cancellation and deadlines
+            // remain independent of the blocked journal operation.
+            let receipt = ctx
+                .resources
+                .publications
+                .enqueue(registration)
+                .map_err(|error| FsmError::HandlerError(error.to_string()))?;
+            ctx.resources
+                .publication_results
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(
+                    async move {
+                        match receipt.await {
+                            Ok(()) => E::RegistrationCompleted,
+                            Err(error) => E::OperationalFailure {
+                                message: error.to_string(),
+                            },
+                        }
+                    }
+                    .boxed(),
+                );
+        } else {
+            action.execute(ctx).await?;
+        }
+        Ok(ActionExecution::Completed)
     }
     fn lifecycle_phase(&self, state: &S) -> crate::stages::common::stage_lifecycle::LifecyclePhase {
         use super::termination::ExecutionOutcome;

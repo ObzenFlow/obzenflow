@@ -506,7 +506,7 @@ impl<H: UnifiedJoinHandler + Clone + Debug + Send + Sync + 'static> HandlerSuper
             let resources = Some(resources);
             Box::new(move |context: &mut JoinContext<H>| {
                 context.resources = resources;
-                result.map(|()| None)
+                result.map(|()| None).map_err(Into::into)
             }) as ActionCompletion<JoinContext<H>, JoinEvent<H>>
         })))
     }

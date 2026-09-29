@@ -66,7 +66,7 @@ pub trait Supervisor {
 pub(crate) type Registration =
     futures::future::BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>;
 
-pub(super) fn register<S: Supervisor>(
+pub(crate) fn register<S: Supervisor>(
     supervisor: &S,
     context: &S::Context,
     writer: WriterId,

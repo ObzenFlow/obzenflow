@@ -141,7 +141,13 @@ impl LifecycleResults {
         });
     }
 
-    pub(crate) fn observe(phase: &LifecyclePhase, accounting: ExecutionAccounting) {
+    /// Retain the original operation error only when the child FSM selects a
+    /// failure phase. Diagnostics never select or override a lifecycle outcome.
+    pub(crate) fn observe(
+        phase: &LifecyclePhase,
+        accounting: ExecutionAccounting,
+        failure: Option<StageError>,
+    ) {
         let snapshot = StageSnapshot {
             accounting,
             causal_context: crate::supervised_base::publication::capture(),
@@ -173,8 +179,8 @@ impl LifecycleResults {
                         });
                     }
                     LifecyclePhase::Failing(cause) | LifecyclePhase::Failed(cause) => {
-                        results.failure.get_or_insert(LifecycleFailure {
-                            cause: StageError::Other(cause.clone()),
+                        results.failure.get_or_insert_with(|| LifecycleFailure {
+                            cause: failure.unwrap_or_else(|| StageError::Other(cause.clone())),
                             snapshot: snapshot.clone(),
                         });
                         if matches!(phase, LifecyclePhase::Failed(_)) {

@@ -148,6 +148,23 @@ impl From<&str> for StageError {
 }
 
 impl StageError {
+    /// The consuming stage's effective contract failure, including its input
+    /// edge. Parents propagate this decision without parsing error messages or
+    /// applying contract policy again.
+    pub fn contract_failure(
+        &self,
+    ) -> Option<&crate::messaging::upstream_subscription::ContractFailure> {
+        let mut error: &(dyn std::error::Error + 'static) = self;
+        loop {
+            if let Some(failure) =
+                error.downcast_ref::<crate::messaging::upstream_subscription::ContractFailure>()
+            {
+                return Some(failure);
+            }
+            error = error.source()?;
+        }
+    }
+
     /// Helper to construct a handler failure variant from a HandlerError.
     pub fn handler_failure(err: crate::stages::common::handler_error::HandlerError) -> Self {
         StageError::HandlerFailure(err)

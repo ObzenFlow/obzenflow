@@ -583,8 +583,7 @@ impl<H: UnifiedStatefulHandler + Clone + Debug + Send + Sync + 'static> HandlerS
                 EventLoopDirective::Terminate => {
                     unreachable!("terminal operation must return an FSM event")
                 }
-            })
-            .map_err(|error| FsmError::HandlerError(error.to_string()));
+            });
             Box::new(move |context: &mut StatefulContext<H>| {
                 context.resources = Some(resources);
                 result

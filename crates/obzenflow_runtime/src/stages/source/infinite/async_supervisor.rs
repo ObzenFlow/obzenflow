@@ -442,8 +442,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
                 }
                 Ok::<_, Box<dyn Error + Send + Sync>>(())
             }
-            .await
-            .map_err(|error| FsmError::HandlerError(error.to_string()));
+            .await;
             drop(handler);
             Box::new(move |_: &mut InfiniteSourceContext<H>| result.map(|()| None))
                 as ActionCompletion<InfiniteSourceContext<H>, InfiniteSourceEvent<H>>
@@ -466,7 +465,7 @@ impl<H: UnifiedAsyncInfiniteSourceHandler + Send + Sync + 'static> HandlerSuperv
             let result = action.execute_resources(&mut resources).await;
             Box::new(move |context: &mut InfiniteSourceContext<H>| {
                 context.resources = Some(resources);
-                result.map(|()| None)
+                result.map(|()| None).map_err(Into::into)
             }) as ActionCompletion<InfiniteSourceContext<H>, InfiniteSourceEvent<H>>
         })))
     }

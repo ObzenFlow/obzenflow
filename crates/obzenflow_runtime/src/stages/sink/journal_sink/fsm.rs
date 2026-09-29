@@ -579,7 +579,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
     type Context = JournalSinkContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
-        self.execute_resources(ctx.resources_mut()?).await
+        self.execute_resources(ctx.resources_mut()?)
+            .await
+            .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))
     }
 }
 
@@ -587,11 +589,12 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
     pub(crate) async fn execute_resources(
         &self,
         ctx: &mut JournalSinkResources<H>,
-    ) -> Result<(), obzenflow_fsm::FsmError> {
+    ) -> Result<(), crate::supervised_base::publication::BoxError> {
         match self {
             JournalSinkAction::Host(_) => Err(obzenflow_fsm::FsmError::HandlerError(
                 "host action requires the supervised runner".into(),
-            )),
+            )
+            .into()),
 
             JournalSinkAction::AllocateResources => {
                 // Create WriterId from our StageId
@@ -814,7 +817,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 return Err(obzenflow_fsm::FsmError::HandlerError(format!(
                                     "FlushBuffers: commit receipt parent {} is not pending",
                                     commit.parent_event_id
-                                )));
+                                ))
+                                .into());
                             };
                             prepared_commits.push((parent_envelope, commit.payload.clone()));
                         }
@@ -902,7 +906,8 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         }
                         return Err(obzenflow_fsm::FsmError::HandlerError(format!(
                             "Failed to flush: {e:?}"
-                        )));
+                        ))
+                        .into());
                     }
                 }
                 tracing::trace!(
@@ -931,15 +936,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                     let status = subscription.check_contracts(&mut contract_state[..]).await;
                     ctx.subscription = Some(subscription);
                     ctx.contract_state = contract_state;
-                    if let crate::messaging::upstream_subscription::ContractStatus::Violated {
-                        upstream,
-                        cause,
-                    } = status
-                    {
-                        return Err(obzenflow_fsm::FsmError::HandlerError(format!(
-                            "contract failed for upstream {upstream}: {cause:?}"
-                        )));
-                    }
+                    status.into_result()?;
                 }
 
                 tracing::trace!(
@@ -1631,6 +1628,92 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn contract_failure_retains_its_typed_cause_before_and_after_settlement() {
+        use obzenflow_core::event::payloads::execution_payload::{
+            ExecutionPayload, StageLifecycleFact,
+        };
+        use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+        use obzenflow_core::event::types::{SeqNo, ViolationCause};
+        use std::time::Duration;
+
+        let probe = Arc::new(Probe::default());
+        probe.block_flush.store(true, Ordering::SeqCst);
+        let fixture = fixture(probe.clone());
+        let mut eof =
+            obzenflow_core::event::ChainEventFactory::eof_event(fixture.upstream_id.into(), true);
+        let ChainPayload::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+            &mut eof.payload
+        else {
+            unreachable!()
+        };
+        *writer_seq = Some(SeqNo(1));
+        fixture
+            .upstream
+            .append(eof, Default::default())
+            .await
+            .unwrap();
+        activate(&fixture).await;
+        tokio::time::timeout(Duration::from_secs(2), probe.flushing.notified())
+            .await
+            .unwrap();
+        let (entered, release) = fixture.data.block_matching_append(|event| {
+            matches!(
+                event.payload,
+                ChainPayload::Execution(ExecutionPayload::StageLifecycle(
+                    StageLifecycleFact::Failed { .. }
+                ))
+            )
+        });
+        probe.release_flush.notify_one();
+        let expected = ViolationCause::SeqDivergence {
+            advertised: Some(SeqNo(1)),
+            reader: SeqNo(0),
+        };
+        let failure =
+            tokio::time::timeout(Duration::from_secs(2), fixture.handle.wait_for_failure())
+                .await
+                .unwrap()
+                .unwrap();
+        let contract = failure
+            .cause
+            .contract_failure()
+            .expect("retain the consumer's typed decision");
+        assert_eq!(contract.upstream, fixture.upstream_id);
+        assert_eq!(contract.cause, expected);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        fixture
+            .handle
+            .send_event(JournalSinkEvent::Error(
+                crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE.into(),
+            ))
+            .await
+            .unwrap();
+        assert!(fixture
+            .handle
+            .wait_for_stage_exit()
+            .now_or_never()
+            .is_none());
+        release.notify_one();
+        for _ in 0..2 {
+            let LifecycleExit::Failed(failure) =
+                tokio::time::timeout(Duration::from_secs(2), fixture.handle.wait_for_stage_exit())
+                    .await
+                    .unwrap()
+            else {
+                panic!("contract failure must survive cancellation and repeated joins")
+            };
+            let contract = failure.cause.contract_failure().unwrap();
+            assert_eq!(contract.upstream, fixture.upstream_id);
+            assert_eq!(contract.cause, expected);
+        }
+        let rows = fixture.data.read_all_unordered().await.unwrap();
+        assert!(rows.iter().any(|row| matches!(&row.payload,
+            ChainPayload::Execution(ExecutionPayload::ContractStatus { pass: false, reason: Some(cause), .. }) if cause == &expected)));
     }
 
     #[tokio::test]

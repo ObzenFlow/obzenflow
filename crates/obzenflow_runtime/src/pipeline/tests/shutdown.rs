@@ -78,6 +78,100 @@ pub async fn failure_remains_observable_while_child_cleanup_is_blocked(
         .any(|r| r.event_type_name() == "system.pipeline.cancelled"));
 }
 
+pub async fn contract_failure_cause_survives_child_observation_order(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    use crate::messaging::upstream_subscription::ContractFailure;
+    use crate::stages::common::stage_handle::{StageError, StageFailure};
+    use crate::stages::common::stage_lifecycle::{LifecycleExit, LifecycleFailure};
+    use obzenflow_core::event::payloads::system_payload::PipelineLifecycleEvent;
+    use obzenflow_core::event::types::{SeqNo, ViolationCause};
+    use obzenflow_core::event::SystemPayload;
+
+    let _lock = bootstrap_test_lock_async().await;
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Auto,
+        ..Default::default()
+    });
+    for exit_first in [false, true] {
+        let mut journals = make_journals();
+        let system_id = SystemId::new();
+        let journal = new_system_journal(&mut *journals, system_id);
+        let (topology, source, sink) = source_sink_topology_with_source();
+        let mut ctx = test_context(topology, system_id, journal.clone());
+        let sink_handle = owned_test_stage(sink, StageType::Sink, Some(ShutdownProbe::default()));
+        let signals = sink_handle.signals.clone();
+        ctx.stage_supervisors.insert(sink, Arc::new(sink_handle));
+        ctx.source_supervisors.insert(
+            source,
+            TestPipelineStageHandle::boxed(source, "source", StageType::FiniteSource),
+        );
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Created);
+        let mut states = watcher.subscribe();
+        let task = spawn_supervisor_loop(S::Created, system_id, ctx, receiver, watcher);
+        wait_for_state(&mut states, "Running", |s| matches!(s, S::Running)).await;
+        let expected = ViolationCause::SeqDivergence {
+            advertised: Some(SeqNo(3)),
+            reader: SeqNo(2),
+        };
+        let cause = StageError::Execution(Arc::new(ContractFailure {
+            upstream: source,
+            cause: expected.clone(),
+        }));
+        let exit = LifecycleExit::Failed(LifecycleFailure {
+            cause: cause.clone(),
+            snapshot: Default::default(),
+        });
+        if !exit_first {
+            signals.0.send_modify(|result| {
+                result.failure = Some(StageFailure {
+                    stage_id: sink,
+                    cause,
+                    snapshot: Default::default(),
+                })
+            });
+            wait_for_state(&mut states, "FailingChildren", |s| {
+                matches!(s, S::FailingChildren { .. })
+            })
+            .await;
+            sender.send(E::Cancel).await.unwrap();
+            sender
+                .send(E::Abort {
+                    reason: "later cancellation".into(),
+                })
+                .await
+                .unwrap();
+            assert!(!task.is_finished());
+        }
+        // In the exit-first case no prompt failure is exposed by the child.
+        signals.0.send_modify(|result| result.exit = Some(exit));
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(&*states.borrow(), S::Failed { failure_cause: Some(cause), .. } if cause == &expected)
+        );
+        let rows = journal.read_all_unordered().await.unwrap();
+        let failures: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.payload {
+                SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::Failed {
+                    reason,
+                    failure_cause,
+                    ..
+                }) => Some((reason, failure_cause)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].1.as_ref(), Some(&expected));
+        assert!(failures[0].0.contains(&source.to_string()));
+        assert!(failures[0].0.contains(&sink.to_string()));
+    }
+}
+
 pub async fn terminal_publication_is_owned_until_settlement_and_failure_is_retained(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,
 ) {
