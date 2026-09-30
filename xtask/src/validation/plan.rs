@@ -10,6 +10,51 @@ use std::{collections::BTreeSet, fs, path::Path};
 pub(super) const CODEC_TEST: &str =
     "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records";
 
+pub(super) const LEAK_WAIT: &str = "200ms";
+
+/// B15 has no per-profile or per-case exceptions. Check every explicit setting
+/// so inheritance cannot turn a detected leak back into passing coverage.
+pub(super) fn validate_leak_policy(config: &toml::Value) -> Result<()> {
+    fn approved(value: &toml::Value) -> bool {
+        value.as_table().is_some_and(|table| {
+            table.len() == 2
+                && table.get("period").and_then(toml::Value::as_str) == Some(LEAK_WAIT)
+                && table.get("result").and_then(toml::Value::as_str) == Some("fail")
+        })
+    }
+    fn visit(value: &toml::Value, path: &str) -> Result<()> {
+        match value {
+            toml::Value::Table(table) => {
+                for (key, child) in table {
+                    let path = format!("{path}.{key}");
+                    if key == "leak-timeout" && !approved(child) {
+                        return Err(error(format!("{path}: required leak policy is {{ period = \"200ms\", result = \"fail\" }}; found {child}")));
+                    }
+                    visit(child, &path)?;
+                }
+            }
+            toml::Value::Array(array) => {
+                for (index, child) in array.iter().enumerate() {
+                    visit(child, &format!("{path}[{index}]"))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let profiles = config
+        .get("profile")
+        .ok_or_else(|| error("missing Nextest profiles"))?;
+    if !profiles
+        .get("default")
+        .and_then(|p| p.get("leak-timeout"))
+        .is_some_and(approved)
+    {
+        return Err(error("profile.default.leak-timeout must explicitly require { period = \"200ms\", result = \"fail\" }"));
+    }
+    visit(profiles, "profile")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Lane {

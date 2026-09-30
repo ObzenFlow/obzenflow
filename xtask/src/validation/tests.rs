@@ -5,6 +5,70 @@
 use super::*;
 use std::process::Command;
 
+#[cfg(unix)]
+mod leaks;
+
+#[test]
+fn leak_policy_rejects_missing_defaults_and_weakened_inheritance_or_overrides() {
+    let config: toml::Value =
+        toml::from_str(include_str!("../../../.config/nextest.toml")).unwrap();
+    plan::validate_leak_policy(&config).unwrap();
+    for profile in ["default", "ci-fast", "ci-full"] {
+        for replacement in [
+            "leak-timeout = '200ms'",
+            "leak-timeout = { period = '200ms' }",
+            "leak-timeout = { period = '200ms', result = 'pass' }",
+            "leak-timeout = { period = '1s', result = 'fail' }",
+        ] {
+            let replacement: toml::Value = toml::from_str(replacement).unwrap();
+            for in_override in [false, true] {
+                let mut changed = config.clone();
+                let target = if in_override {
+                    &mut changed["profile"][profile]["overrides"][0]
+                } else {
+                    &mut changed["profile"][profile]
+                };
+                target
+                    .as_table_mut()
+                    .unwrap()
+                    .insert("leak-timeout".into(), replacement["leak-timeout"].clone());
+                let failure = plan::validate_leak_policy(&changed)
+                    .unwrap_err()
+                    .to_string();
+                assert!(failure.contains(&format!("profile.{profile}")), "{failure}");
+            }
+        }
+    }
+    let mut missing = config.clone();
+    missing["profile"]["default"]
+        .as_table_mut()
+        .unwrap()
+        .remove("leak-timeout");
+    assert!(plan::validate_leak_policy(&missing).is_err());
+    let mut inherited = config.clone();
+    let profile: toml::Value = toml::from_str(
+        "inherits = 'ci-fast'\nleak-timeout = { period = '200ms', result = 'pass' }",
+    )
+    .unwrap();
+    inherited["profile"]
+        .as_table_mut()
+        .unwrap()
+        .insert("derived".into(), profile);
+    assert!(plan::validate_leak_policy(&inherited)
+        .unwrap_err()
+        .to_string()
+        .contains("profile.derived.leak-timeout"));
+    let mut equivalent = config.clone();
+    equivalent["profile"]["ci-fast"]
+        .as_table_mut()
+        .unwrap()
+        .insert(
+            "leak-timeout".into(),
+            config["profile"]["default"]["leak-timeout"].clone(),
+        );
+    plan::validate_leak_policy(&equivalent).unwrap();
+}
+
 #[test]
 fn retained_launcher_survives_replacement_of_its_running_image() {
     const CHILD: &str = "OBZENFLOW_VALIDATION_LAUNCHER_CHILD";

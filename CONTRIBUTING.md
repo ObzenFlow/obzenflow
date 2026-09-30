@@ -71,7 +71,7 @@ and repository policy checks remain separate requirements.
 
 Omitting `--lane` requests all six correctness lanes. Repeat `--lane` to select
 exactly those lanes; the result certifies only that declared scope. Report version
-2 records unrequested lanes separately. Default success supplies no performance
+3 records unrequested lanes separately. Default success supplies no performance
 qualification. Independent lanes continue
 after failures. Missing tools/services, unfinished reports, unexpected skips,
 changed source and incomplete coverage cannot pass. Installing the pinned
@@ -96,6 +96,14 @@ owner in `.config/validation.toml`; do not maintain binary allowlists.
 The command forwards early failure output while independent tests continue.
 Live diagnostics have a 16 KiB display budget; complete output remains in each
 lane's logs and JUnit report.
+
+Detected test-process leaks fail acceptance. Nextest retains its 200 ms wait for
+captured stdout/stderr to close after a test exits; `LEAK-FAIL` includes the test
+identity in live output, the final failure summary and JUnit diagnostics. The
+native validator rejects missing or weakened leak policy, including overrides.
+Join owned children and close inherited output handles before returning. A clean
+rerun does not explain an earlier leak, and this detector does not detect every
+kind of resource leak.
 
 `ci-full`, stress and retry runs are supplementary diagnostics. A later passing
 attempt never erases a failure and does not replace the shared acceptance run.
@@ -220,7 +228,7 @@ Prefer these primitives over fixed sleeps when writing tests:
 - `JournalSnapshot` (captured journals): assert append-order vs causal-order properties via `JournalOrder`, `SequenceMatchMode`, `JournalExpectation`, `assert_happens_before`, and `assert_concurrent`.
 - `MetricsBarrier` (metrics/exporter): wait for exported watermarks without reading files or adding barrier sleeps.
 
-The 0.3.0 test-support API retires `TestClock::settle_scheduler` and the three
+The 0.2.6 test-support API retires `TestClock::settle_scheduler` and the three
 `JournalProbe::expect_no_event_*` methods. Equal counts, yield loops and advancing
 virtual time cannot establish that all work finished. For finite absence, join the
 relevant producers **and accepted publications**, then read their journals. A

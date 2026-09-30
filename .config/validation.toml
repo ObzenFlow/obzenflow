@@ -48,8 +48,31 @@ owner = "intentional manual rate-limited example proof, outside required accepta
 binary = "obzenflow::product_catalog_enrichment"
 test = "explicit_join_topology_current_schema_live_replay_and_rejected_control"
 owner = "intentional manual rate-limited example proof, outside required acceptance"
+
+[[ignored]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::output_fixture"
+owner = "real_nextest_leaks_fail_acceptance_with_identity owned captured-output fixture"
+
+[[ignored]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::assertion_fixture"
+owner = "real_nextest_leaks_fail_acceptance_with_identity controlled assertion failure"
+
+[[ignored]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::passing_fixture"
+owner = "real_nextest_leaks_fail_acceptance_with_identity independent completion control"
+
 # FLOWIP-145i B10: audited case prerequisites, independent of scheduling groups.
 # Lanes identify applicable inventories only. Undeclared cases are not certified hermetic.
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::real_nextest_leaks_fail_acceptance_with_identity"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child","owned-child-signals"]
+rationale = "Runs the pinned Nextest against its existing Rust binary, owns transferred output descriptors through an anonymous Unix socket pair, and interrupts its owned runner. No network listener or Cargo rebuild."
 
 [[prerequisites]]
 binary = "xtask::bin/xtask"

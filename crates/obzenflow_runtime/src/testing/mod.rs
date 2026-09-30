@@ -10,7 +10,7 @@
 //!
 //! Positive probes cover observed committed records, including cycle and fan-in
 //! attribution. Snapshots do not establish producer completion. FLOWIP-145i
-//! retires scheduler-settling and generic absence guarantees in version 0.3.0:
+//! retires scheduler-settling and generic absence guarantees in version 0.2.6:
 //! close the relevant producers and accepted publications, or identify a
 //! completed journal prefix, before asserting scoped absence.
 

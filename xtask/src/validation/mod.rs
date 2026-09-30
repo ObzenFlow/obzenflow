@@ -258,6 +258,8 @@ fn run_native(
 
 fn native_policy(policy: &Policy) -> Value {
     json!({"profile":policy.profile,"nextest":policy.nextest,"rust":policy.rust,"retries":0,"fail_fast":false,
+        "leak_timeout":{"period":plan::LEAK_WAIT,"result":"fail"},
+        "status_level":"leak","final_status_level":"fail",
         "build_jobs":policy.build_jobs,"nextest_processes":policy.test_threads,"tokio_default_workers":policy.tokio_workers,
         "explicit_tokio_workers":"retained as authored, including the four-worker Studio proof; source identity pins overrides",
         "cargo_incremental":false,"dev_debug":0,"test_debug":0})
@@ -368,6 +370,7 @@ fn nextest(
     }
     let mut config: toml::Value =
         toml::from_str(&fs::read_to_string(root.join(".config/nextest.toml"))?)?;
+    plan::validate_leak_policy(&config)?;
     let expensive = config["profile"]["default"]["overrides"]
         .as_array()
         .and_then(|overrides| {
@@ -470,19 +473,10 @@ fn nextest(
     // expensive-test group, preserving four total process slots and two proofs.
     let mut command = process::command(root, policy, "cargo");
     command.env("OBZENFLOW_TEST_ARTIFACTS", &case_artifacts);
-    command.args(["nextest", "run"]).args(&common).args([
-        "--no-fail-fast",
-        "--retries",
-        "0",
-        "--flaky-result",
-        "fail",
-        "--status-level",
-        "fail",
-        "--final-status-level",
-        "fail",
-        "--test-threads",
-        &policy.test_threads.to_string(),
-    ]);
+    command
+        .args(["nextest", "run"])
+        .args(&common)
+        .args(nextest_execution_args(policy));
     let execution = process::execute_nextest(
         &mut command,
         directory,
@@ -490,6 +484,25 @@ fn nextest(
     )
     .and_then(|status| evaluate_nextest(directory, &admission.runnable, status.success()));
     admission.finish(directory, execution)
+}
+
+fn nextest_execution_args(policy: &Policy) -> Vec<String> {
+    [
+        "--no-fail-fast",
+        "--retries",
+        "0",
+        "--flaky-result",
+        "fail",
+        "--status-level",
+        "leak",
+        "--final-status-level",
+        "fail",
+        "--test-threads",
+        &policy.test_threads.to_string(),
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn evaluate_nextest(
