@@ -62,7 +62,11 @@ pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<
                 .find(|p| p["name"].as_str() == Some("obzenflow_benchmarks"))
         })
         .ok_or_else(|| error("reference benchmark lock entry unavailable"))?;
+    // The copied outer crate inherits the reference workspace's version. A
+    // candidate release bump must not replace that resolved package identity.
+    let reference_version = destination["version"].clone();
     *destination = package.clone();
+    destination["version"] = reference_version;
     write(
         baseline,
         "Cargo.lock",
@@ -245,6 +249,7 @@ mod tests {
             toml::from_str(&fs::read_to_string(reference.path().join("Cargo.lock")).unwrap())
                 .unwrap();
         assert_eq!(lock["package"][1]["version"].as_str(), Some("1.0.0"));
+        assert_eq!(lock["package"][0]["version"].as_str(), Some("1.0.0"));
         assert_eq!(
             lock["package"][0]["dependencies"][0].as_str(),
             Some("reqwest")

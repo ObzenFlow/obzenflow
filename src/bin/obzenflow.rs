@@ -10,7 +10,7 @@ use obzenflow::application::control::*;
 use obzenflow::application::{render_verdict, verify_run_dirs, VerifyOptions};
 use obzenflow::journal::read::*;
 use obzenflow::journal::{inspect, JOURNAL_SCHEMA_VERSION};
-use std::io::{BufWriter, IsTerminal};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -22,6 +22,10 @@ use render::{ColorMode, ObservationEnd, Renderer};
 #[cfg(test)]
 #[path = "obzenflow/args_tests.rs"]
 mod args_tests;
+
+#[cfg(test)]
+#[path = "obzenflow/observation_tests.rs"]
+mod observation_tests;
 
 #[derive(Parser)]
 #[command(name = "obzenflow", version, long_version = version(), about = "Show durable execution history and verify recorded output")]
@@ -370,26 +374,51 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
         )?;
         return Ok(0);
     }
-    let mut tail = snapshot.into_tail();
+    follow_records(
+        snapshot.into_tail(),
+        view,
+        &mut renderer,
+        (&mut output, &mut diagnostics),
+        interrupt,
+        || tokio::time::sleep(Duration::from_millis(100)),
+    )
+    .await
+}
+
+/// The wait is reached only after the real tail read and settlement decision.
+/// Tests can hold that exact boundary without sampling scheduler liveness.
+async fn follow_records<F, P>(
+    mut tail: RunTail,
+    view: &ViewArgs,
+    renderer: &mut Renderer,
+    (output, diagnostics): (&mut impl Write, &mut impl Write),
+    interrupt: F,
+    mut pending_wait: impl FnMut() -> P,
+) -> Result<u8, Error>
+where
+    F: std::future::Future<Output = std::io::Result<()>>,
+    P: std::future::Future<Output = ()>,
+{
+    tokio::pin!(interrupt);
     loop {
         let next = tokio::select! { biased;
             result = &mut interrupt => {
                 result?;
-                renderer.finish(&mut output, &mut diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
+                renderer.finish(output, diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
                 return Ok(0);
             }
             next = tail.read_next() => match next {
                 Ok(next) => next,
                 Err(error) => {
-                    renderer.flush_pending(&mut output)?;
+                    renderer.flush_pending(output)?;
                     return Err(error.into());
                 }
             },
         };
         let pending = matches!(next, TailRead::Pending);
         match next {
-            TailRead::Record(record) => renderer.record(&mut output, record)?,
-            TailRead::Pending => renderer.flush_pending(&mut output)?,
+            TailRead::Record(record) => renderer.record(output, record)?,
+            TailRead::Pending => renderer.flush_pending(output)?,
         }
         if tail.progress().settled_prefix.is_some() {
             if view.jsonl {
@@ -399,8 +428,8 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
                 );
             }
             renderer.finish(
-                &mut output,
-                &mut diagnostics,
+                output,
+                diagnostics,
                 tail.identity(),
                 tail.manifest(),
                 ObservationEnd::Settled,
@@ -412,10 +441,10 @@ async fn observe_records(mut snapshot: RunSnapshot, view: &ViewArgs) -> Result<u
             tokio::select! { biased;
                 result = &mut interrupt => {
                     result?;
-                    renderer.finish(&mut output, &mut diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
+                    renderer.finish(output, diagnostics, tail.identity(), tail.manifest(), ObservationEnd::Detached, tail.progress())?;
                     return Ok(0);
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                _ = pending_wait() => {}
             }
         }
     }

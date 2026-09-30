@@ -112,58 +112,64 @@ fn native_entry_preserves_failures_continues_lanes_and_certifies_only_executed_s
         ])
         .unwrap();
         let mut completed = Vec::new();
-        let result = run_native(&root, options, policy, |root, policy, lane, _, output| {
-            completed.push(lane);
-            let mut expected = BTreeSet::from([plan::TestId {
-                binary: "fixture".into(),
-                test: "work_completed".into(),
-            }]);
-            let first = lane == Lane::Default;
-            if scenario != "missing-report" || !first {
-                let xml = if scenario == "independent-failures"
-                    || (scenario == "early-failure" && first)
-                {
-                    EARLY_FAILURE.to_owned()
-                } else if scenario == "contradictory-summary" && first {
-                    PASS.replace(
-                        "name=\"fixture\" tests=\"1\" failures=\"0\"",
-                        "name=\"fixture\" tests=\"1\" failures=\"1\"",
-                    )
-                } else {
-                    PASS.to_owned()
-                };
-                fs::write(output.join("junit.xml"), xml)?;
-            }
-            if scenario == "missing-test" && first {
-                expected.insert(plan::TestId {
+        let result = run_native(
+            &root,
+            options,
+            policy,
+            None,
+            |root, policy, lane, _, output| {
+                completed.push(lane);
+                let mut expected = BTreeSet::from([plan::TestId {
                     binary: "fixture".into(),
-                    test: "required_but_unexecuted".into(),
-                });
-            }
-            if scenario.starts_with("committed-") && first {
-                git(root, &["add", "."]);
-                commit(root);
-            }
-            if matches!(scenario, "edited-source" | "committed-edited-source") && first {
-                fs::write(root.join("source.txt"), "edited during execution\n")?;
-            }
-            if scenario == "deleted-source" && first {
-                fs::remove_file(root.join("source.txt"))?;
-            }
-            if scenario == "renamed-source" && first {
-                fs::rename(root.join("source.txt"), root.join("renamed.txt"))?;
-            }
-            // Reproduce the incident's zero child status independently from its
-            // failed report. A later successful lane must not overwrite it.
-            let status = process::execute(
-                &mut process::command(root, policy, "true"),
-                output,
-                "zero-exit-child",
-                Duration::from_secs(5),
-            )?;
-            assert!(status.success());
-            evaluate_nextest(output, &expected, status.success())
-        });
+                    test: "work_completed".into(),
+                }]);
+                let first = lane == Lane::Default;
+                if scenario != "missing-report" || !first {
+                    let xml = if scenario == "independent-failures"
+                        || (scenario == "early-failure" && first)
+                    {
+                        EARLY_FAILURE.to_owned()
+                    } else if scenario == "contradictory-summary" && first {
+                        PASS.replace(
+                            "name=\"fixture\" tests=\"1\" failures=\"0\"",
+                            "name=\"fixture\" tests=\"1\" failures=\"1\"",
+                        )
+                    } else {
+                        PASS.to_owned()
+                    };
+                    fs::write(output.join("junit.xml"), xml)?;
+                }
+                if scenario == "missing-test" && first {
+                    expected.insert(plan::TestId {
+                        binary: "fixture".into(),
+                        test: "required_but_unexecuted".into(),
+                    });
+                }
+                if scenario.starts_with("committed-") && first {
+                    git(root, &["add", "."]);
+                    commit(root);
+                }
+                if matches!(scenario, "edited-source" | "committed-edited-source") && first {
+                    fs::write(root.join("source.txt"), "edited during execution\n")?;
+                }
+                if scenario == "deleted-source" && first {
+                    fs::remove_file(root.join("source.txt"))?;
+                }
+                if scenario == "renamed-source" && first {
+                    fs::rename(root.join("source.txt"), root.join("renamed.txt"))?;
+                }
+                // Reproduce the incident's zero child status independently from its
+                // failed report. A later successful lane must not overwrite it.
+                let status = process::execute(
+                    &mut process::command(root, policy, "true"),
+                    output,
+                    "zero-exit-child",
+                    Duration::from_secs(5),
+                )?;
+                assert!(status.success());
+                evaluate_nextest(output, &expected, status.success())
+            },
+        );
         assert_eq!(
             completed,
             [Lane::Default, Lane::JournalFixtures],
@@ -284,4 +290,69 @@ fn watchdog_expiry_is_incomplete_even_when_the_child_handles_termination_with_su
         report["success"], true,
         "the child deliberately returns success; the owner must still reject it"
     );
+}
+
+#[test]
+fn default_and_explicit_performance_report_only_their_requested_scope() {
+    for (arguments, scope, expected) in [
+        (vec![], "correctness", Lane::correctness()),
+        (
+            vec!["--lane".into(), "performance".into()],
+            "performance",
+            vec![Lane::Performance],
+        ),
+        (
+            vec![
+                "--lane".into(),
+                "default".into(),
+                "--lane".into(),
+                "performance".into(),
+            ],
+            "partial",
+            vec![Lane::Default, Lane::Performance],
+        ),
+    ] {
+        let fixture = fixture();
+        let root = fixture.path().canonicalize().unwrap();
+        let policy = Policy::read(&root).unwrap();
+        let mut executed = Vec::new();
+        // A simulated run owns its summary destination, even inside GitHub CI.
+        let summary_path = root.join("target/summary.md");
+        run_native(
+            &root,
+            Options::parse(&arguments).unwrap(),
+            policy,
+            Some(&summary_path),
+            |_, _, lane, _, _| {
+                executed.push(lane);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(executed, expected);
+        let run = fs::read_dir(root.join("target/test-runs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        let report: Value =
+            serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
+        assert_eq!(report["version"], 2);
+        assert_eq!(report["requested_scope"], scope);
+        let unrequested: Vec<Lane> =
+            serde_json::from_value(report["not_requested"].clone()).unwrap();
+        let summary = fs::read_to_string(summary_path).unwrap();
+        assert!(summary.contains(&format!("### Validation: {scope}\n")));
+        assert!(summary.contains("Outcome: Passed\n"));
+        for lane in Lane::ALL {
+            assert_ne!(executed.contains(&lane), unrequested.contains(&lane));
+            let outcome = if executed.contains(&lane) {
+                "Passed"
+            } else {
+                "Not requested; no acceptance evidence"
+            };
+            assert!(summary.contains(&format!("| {} | {outcome} |", lane.name())));
+        }
+        assert_eq!(report["outcome"]["status"], "passed");
+    }
 }

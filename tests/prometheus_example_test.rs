@@ -470,9 +470,7 @@ fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
         let capture_mode = if periodic { "periodic" } else { "every_record" };
         std::fs::create_dir(&directory).unwrap();
         let config = directory.join("obzenflow.toml");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let port = 8080;
         std::fs::write(
             &config,
             format!(
@@ -497,7 +495,7 @@ interval_ms = 250
         let journals = directory.join("journals");
         FlowApplication::builder()
             .with_config_file(config)
-            .with_cli_args(["prometheus-host-journal-test"])
+            .with_cli_args(["prometheus-host-journal-test", "--server-port", "0"])
             .with_log_level(LogLevel::Error)
             .run_blocking(prometheus_demo::flow_definition(1_000, journals.clone()))
             .expect("the finite example must complete in either host mode");
@@ -1275,12 +1273,7 @@ mod managed_lifecycle_regressions {
             Some(scratch)
         };
         let config = dir.join("hosted.toml");
-        let address = if hosted {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap()
-        } else {
-            "127.0.0.1:9999".parse().unwrap()
-        };
+
         std::fs::write(
             &config,
             format!(
@@ -1294,7 +1287,7 @@ on_terminal = "exit"
 [metrics]
 enabled = {prometheus}
 "#,
-                address.port()
+                8080
             ),
         )
         .unwrap();
@@ -1307,7 +1300,7 @@ enabled = {prometheus}
         let model = Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
         let app = FlowApplication::builder()
             .with_config_file(config)
-            .with_cli_args(["prometheus-lifecycle-proof"])
+            .with_cli_args(["prometheus-lifecycle-proof", "--server-port", "0"])
             .with_log_level(if count == JOURNAL_PROOF_INPUTS {
                 LogLevel::Warn
             } else {
@@ -1331,7 +1324,16 @@ enabled = {prometheus}
             MetricsProofMode::InjectedSnapshots => inject_snapshots(definition, model.clone()),
             MetricsProofMode::Disabled => definition,
         };
-        let application = tokio::spawn(app.run_async(definition));
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+        let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+        let subscriber = tracing_subscriber::registry()
+            .with(BoundAddress(Mutex::new(Some(bound_tx))))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_filter(tracing_subscriber::filter::LevelFilter::WARN),
+            );
+        let application = tokio::spawn(app.run_async(definition).with_subscriber(subscriber));
         let flow = match flow_rx.await {
             Ok(flow) => flow,
             Err(error) => panic!(
@@ -1339,8 +1341,13 @@ enabled = {prometheus}
                 application.await
             ),
         };
+        let address = if hosted {
+            Some(bound_rx.await.expect("owned host admission"))
+        } else {
+            None
+        };
         let mut event_clients = Vec::new();
-        if hosted {
+        if let Some(address) = address {
             flow.wait_for_ready().await.unwrap();
             let mut socket = tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
@@ -1384,7 +1391,7 @@ enabled = {prometheus}
             "Prometheus proof phase: application returned after {:?}; {count} inputs, mode={mode:?}",
             proof_started.elapsed()
         );
-        let _rebound = hosted.then(|| std::net::TcpListener::bind(address).unwrap());
+        let _rebound = address.map(|address| std::net::TcpListener::bind(address).unwrap());
         if collecting {
             assert_final_example_metrics(&model, count);
         } else {
@@ -1729,15 +1736,46 @@ enabled = {prometheus}
         assert_final_example_metrics(&replay_model, count);
     }
 
+    // Capture the production diagnostic at the bind boundary. This private
+    // subscriber observes the actual listener without extending framework APIs.
+    struct BoundAddress(Mutex<Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for BoundAddress {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Address(Option<std::net::SocketAddr>);
+            impl tracing::field::Visit for Address {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}")
+                            .strip_prefix("📊 Web server started on http://")
+                            .and_then(|value| value.parse().ok());
+                    }
+                }
+            }
+            let mut address = Address(None);
+            event.record(&mut address);
+            if let Some(address) = address.0 {
+                if let Some(sender) = self.0.lock().unwrap().take() {
+                    let _ = sender.send(address);
+                }
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn invalid_cors_returns_startup_error_and_stops_the_materialised_flow() {
         for startup in ["auto", "manual"] {
             for from_cli in [false, true] {
                 let dir = tempfile::tempdir_in("target").unwrap();
                 let config = dir.path().join("invalid-cors.toml");
-                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                let port = listener.local_addr().unwrap().port();
-                drop(listener);
+                let port = 8080;
                 std::fs::write(
                     &config,
                     r#"
@@ -1810,7 +1848,6 @@ enabled = false
                 assert!(!events
                     .iter()
                     .any(|event| event.event_type_name() == "system.pipeline.running"));
-                let _rebound = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
             }
         }
     }
@@ -1819,9 +1856,7 @@ enabled = false
     async fn framework_terminal_wait_in_a_hook_does_not_fail_a_successful_application() {
         let dir = tempfile::tempdir_in("target").unwrap();
         let config = dir.path().join("terminal-wait.toml");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+
         std::fs::write(
             &config,
             format!(
@@ -1835,7 +1870,7 @@ on_terminal = "exit"
 [metrics]
 enabled = false
 "#,
-                address.port()
+                8080
             ),
         )
         .unwrap();
@@ -1843,7 +1878,7 @@ enabled = false
         let handle_tx = Arc::new(Mutex::new(Some(handle_tx)));
         let app = FlowApplication::builder()
             .with_config_file(config)
-            .with_cli_args(["inspection-probe"])
+            .with_cli_args(["inspection-probe", "--server-port", "0"])
             .with_log_level(LogLevel::Error)
             .with_flow_handle_hook(move |flow| {
                 let flow = flow.clone();
@@ -1860,11 +1895,20 @@ enabled = false
                         .expect("the hook observes successful terminal publication");
                 })
             });
-        let app = tokio::spawn(app.run_async(prometheus_demo::flow_definition(
-            10,
-            dir.path().join("journals"),
-        )));
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+        let (bound_tx, bound_rx) = tokio::sync::oneshot::channel();
+        let subscriber =
+            tracing_subscriber::registry().with(BoundAddress(Mutex::new(Some(bound_tx))));
+        let app = tokio::spawn(
+            app.run_async(prometheus_demo::flow_definition(
+                10,
+                dir.path().join("journals"),
+            ))
+            .with_subscriber(subscriber),
+        );
         let flow = handle_rx.await.unwrap();
+        let address = bound_rx.await.expect("owned host admission");
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 if tokio::net::TcpStream::connect(address).await.is_ok() {

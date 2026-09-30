@@ -20,7 +20,7 @@ async fn http_ingress_builder_hosts_multiple_sources() {
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("obzenflow.toml");
-    let port = available_local_port();
+    let port = 8080; // TOML validates a nonzero port; the CLI requests the owned ephemeral listener.
     std::fs::write(
         &config_path,
         format!(
@@ -41,7 +41,7 @@ enabled = false
     let flow_tx = Mutex::new(Some(flow_tx));
     let mut app = FlowApplication::builder()
         .with_config_file(config_path)
-        .with_cli_args(["http-ingress-builder-test"])
+        .with_cli_args(["http-ingress-builder-test", "--server-port", "0"])
         .with_flow_handle_hook(move |flow| {
             let _ = flow_tx.lock().unwrap().take().unwrap().send(flow.clone());
             tokio::spawn(async {})
@@ -71,9 +71,12 @@ enabled = false
             topology: { first |> output; second |> output; }
         })
     });
+    let (bound_tx, bound_rx) = oneshot::channel();
+    app.test_bound_address = Some(bound_tx);
     let application = tokio::spawn(app.run_async(definition));
     tokio::time::timeout(Duration::from_secs(10), async {
         let flow = flow_rx.await.unwrap();
+        let port = bound_rx.await.unwrap().port();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         for path in ["/first", "/second"] {
             let base = format!("http://127.0.0.1:{port}{path}");
@@ -192,7 +195,7 @@ value_env = "{missing}"
 [metrics]
 enabled = false
 "#,
-            available_local_port()
+            8080
         ),
     )
     .unwrap();
@@ -394,7 +397,7 @@ async fn server_auto_mode_starts_after_host_admission() {
     let journal_dir = tempdir.path().join("journals");
     std::fs::create_dir_all(&journal_dir).expect("create journal root");
     let config_path = tempdir.path().join("obzenflow.toml");
-    let port = available_local_port();
+    let port = 8080; // TOML validates a nonzero port; the CLI requests the owned ephemeral listener.
     std::fs::write(
         &config_path,
         format!(
@@ -474,6 +477,8 @@ enabled = false
                     OsString::from("obzenflow"),
                     OsString::from("--config"),
                     config_path.into_os_string(),
+                    OsString::from("--server-port"),
+                    OsString::from("0"),
                 ]),
                 test_shutdown_signal: Some(shutdown_rx),
                 ..LaunchParams::default()
@@ -494,7 +499,7 @@ async fn server_on_terminal_exit_waits_for_terminal_journal_fact() {
     let flow_journal_dir = journal_dir.clone();
     std::fs::create_dir_all(&journal_dir).expect("create journal root");
     let config_path = tempdir.path().join("obzenflow.toml");
-    let port = available_local_port();
+    let port = 8080; // TOML validates a nonzero port; the CLI requests the owned ephemeral listener.
     std::fs::write(
         &config_path,
         format!(
@@ -543,6 +548,8 @@ enabled = false
                     OsString::from("obzenflow"),
                     OsString::from("--config"),
                     config_path.into_os_string(),
+                    OsString::from("--server-port"),
+                    OsString::from("0"),
                 ]),
                 ..LaunchParams::default()
             },
@@ -593,6 +600,7 @@ async fn server_mode_deregisters_from_phonebook_on_graceful_shutdown() {
     struct Stub {
         registrations: Mutex<Vec<serde_json::Value>>,
         deletes: Mutex<Vec<String>>,
+        registered: tokio::sync::Notify,
     }
     let stub = Arc::new(Stub::default());
 
@@ -606,6 +614,7 @@ async fn server_mode_deregisters_from_phonebook_on_graceful_shutdown() {
                     .lock()
                     .expect("registrations lock")
                     .push(body);
+                stub.registered.notify_one();
                 warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
             })
     };
@@ -634,7 +643,7 @@ async fn server_mode_deregisters_from_phonebook_on_graceful_shutdown() {
     let journal_dir = tempdir.path().join("journals");
     std::fs::create_dir_all(&journal_dir).expect("create journal root");
     let config_path = tempdir.path().join("obzenflow.toml");
-    let port = available_local_port();
+    let port = 8080; // TOML validates a nonzero port; the CLI requests the owned ephemeral listener.
     std::fs::write(
         &config_path,
         format!(
@@ -693,18 +702,7 @@ shutdown_timeout_secs = 2
             if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
                 let _ = tx.send(());
             }
-            // Bounded wait for the heartbeat's first registration.
-            for _ in 0..100 {
-                if !hook_stub
-                    .registrations
-                    .lock()
-                    .expect("registrations lock")
-                    .is_empty()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            hook_stub.registered.notified().await;
             if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
                 let _ = tx.send(ShutdownSignal::Sigint);
             }
@@ -739,6 +737,8 @@ shutdown_timeout_secs = 2
                     OsString::from("obzenflow"),
                     OsString::from("--config"),
                     config_path.into_os_string(),
+                    OsString::from("--server-port"),
+                    OsString::from("0"),
                 ]),
                 test_shutdown_signal: Some(shutdown_rx),
                 ..LaunchParams::default()

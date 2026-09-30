@@ -377,15 +377,7 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         let journal_base = dir.path().join(mode);
         std::fs::create_dir_all(&journal_base).unwrap();
         let config = journal_base.join("obzenflow.toml");
-        let port = if mode == "prometheus" {
-            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port()
-        } else {
-            9090
-        };
+        let port = 9090;
         std::fs::write(
             &config,
             format!(
@@ -399,7 +391,11 @@ async fn monitoring_modes_preserve_live_and_replay_journal_outcomes() {
         let mut live: Option<OsString> = None;
         for replay in [false, true] {
             let calls = Arc::new(AtomicUsize::new(0));
-            let mut args = vec![OsString::from("monitoring-replay")];
+            let mut args = vec![
+                OsString::from("monitoring-replay"),
+                OsString::from("--server-port"),
+                OsString::from("0"),
+            ];
             if replay {
                 args.extend([
                     OsString::from("--replay-from"),

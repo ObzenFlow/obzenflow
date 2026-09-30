@@ -5,6 +5,7 @@
 //! Repository validation owns selection and acceptance, never test execution.
 mod performance;
 mod plan;
+pub(crate) mod prerequisites;
 mod process;
 mod report;
 mod source;
@@ -19,6 +20,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
+    io::Write,
     path::Path,
     time::{Duration, Instant},
 };
@@ -66,6 +68,7 @@ struct RunReport {
     final_source: Option<source::SourceIdentity>,
     platform: String,
     requested_scope: String,
+    not_requested: Vec<Lane>,
     policy: Value,
     lanes: Vec<LaneResult>,
     outcome: Outcome,
@@ -73,18 +76,20 @@ struct RunReport {
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<()> {
     if args.len() == 1 && crate::is_help(&args[0]) {
-        println!("cargo xtask test [--lane <lane>]\n\nLanes: default, production-features, test-support, journal-fixtures, doctest, postgres, performance\nOmitting --lane requests every required lane. Repeated --lane selects a declared partial scope.\nReports: target/test-runs/<run-id>/report.json. Failed attempts and incomplete coverage return nonzero.");
+        println!("cargo xtask test [--lane <lane>]\n\nLanes: default, production-features, test-support, journal-fixtures, doctest, postgres, performance\nOmitting --lane requests all correctness lanes. Use --lane performance for complete performance qualification. Repeated --lane selects exactly the declared scope.\nReports: target/test-runs/<run-id>/report.json. Failed attempts and incomplete required coverage return nonzero. Unrequested lanes supply no acceptance evidence.");
         return Ok(());
     }
     let options = Options::parse(args)?;
     let policy = Policy::read(root)?;
-    run_native(root, options, policy, run_lane)
+    let summary_path = std::env::var_os("GITHUB_STEP_SUMMARY").map(std::path::PathBuf::from);
+    run_native(root, options, policy, summary_path.as_deref(), run_lane)
 }
 
 fn run_native(
     root: &Path,
     options: Options,
     policy: Policy,
+    summary_path: Option<&Path>,
     mut execute_lane: impl FnMut(&Path, &Policy, Lane, &[String], &Path) -> Result<()>,
 ) -> Result<()> {
     let _lock = process::lock(root)?;
@@ -93,7 +98,7 @@ fn run_native(
     let directory = root.join("target/test-runs").join(&run_id);
     fs::create_dir(&directory)?;
     let mut report = RunReport {
-        version: 1,
+        version: 2,
         run_id,
         started_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -101,12 +106,11 @@ fn run_native(
         source: source::identity(root)?,
         final_source: None,
         platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-        requested_scope: if options.lanes == Lane::ALL {
-            "all-required"
-        } else {
-            "partial"
-        }
-        .into(),
+        requested_scope: options.scope().into(),
+        not_requested: Lane::ALL
+            .into_iter()
+            .filter(|lane| !options.lanes.contains(lane))
+            .collect(),
         policy: native_policy(&policy),
         lanes: options
             .lanes
@@ -126,6 +130,11 @@ fn run_native(
         report.requested_scope,
         directory.display()
     );
+    if report.not_requested.contains(&Lane::Performance) {
+        eprintln!(
+            "validation: performance=not-requested; this run supplies no performance qualification"
+        );
+    }
     let prerequisites = (|| {
         let rust = process::capture(
             root,
@@ -157,6 +166,7 @@ fn run_native(
         Err(failure) => {
             report.outcome = Outcome::Incomplete(failure.to_string());
             save(&directory, &report)?;
+            summary(&report, summary_path)?;
             return Err(failure);
         }
     };
@@ -218,6 +228,7 @@ fn run_native(
         Outcome::Failed("one or more required checks failed; see each lane's artifacts".into())
     };
     save(&directory, &report)?;
+    summary(&report, summary_path)?;
     eprintln!(
         "validation: {:?}; scope={}; report={}",
         report.outcome,
@@ -245,6 +256,32 @@ fn save(directory: &Path, report: &RunReport) -> Result<()> {
     let pending = directory.join("report.pending.json");
     fs::write(&pending, serde_json::to_vec_pretty(report)?)?;
     fs::rename(pending, directory.join("report.json"))?;
+    Ok(())
+}
+
+fn summary(report: &RunReport, path: Option<&Path>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(output, "### Validation: {}\n", report.requested_scope)?;
+    writeln!(output, "Outcome: {:?}\n", report.outcome)?;
+    writeln!(output, "Source: `{}`\n", report.source.content_sha256)?;
+    writeln!(output, "| Lane | Outcome |\n|---|---|")?;
+    for lane in &report.lanes {
+        writeln!(output, "| {} | {:?} |", lane.lane.name(), lane.outcome)?;
+    }
+    for lane in &report.not_requested {
+        writeln!(
+            output,
+            "| {} | Not requested; no acceptance evidence |",
+            lane.name()
+        )?;
+    }
+    writeln!(output)?;
     Ok(())
 }
 
@@ -345,11 +382,20 @@ fn nextest(
         "none".into(),
     ];
     common.extend(selection);
-    let inventory = list(root, policy, lane, directory, &common, None)?;
+    let inventory = list(root, policy, lane, directory, &common, None, "inventory")?;
     let expensive_ids = if lane == Lane::JournalFixtures {
         BTreeSet::new()
     } else {
-        list(root, policy, lane, directory, &common, Some(&expensive))?.selected
+        list(
+            root,
+            policy,
+            lane,
+            directory,
+            &common,
+            Some(&expensive),
+            "expensive-inventory",
+        )?
+        .selected
     };
     if !expensive_ids.is_subset(&inventory.selected) {
         return Err(error(
@@ -368,11 +414,47 @@ fn nextest(
             "ordinary": ordinary, "expensive": expensive_ids, "excluded": inventory.excluded,
         }))?,
     )?;
+    let case_artifacts = directory.join("cases");
+    fs::create_dir_all(&case_artifacts)?;
+    let admission = prerequisites::admit(
+        root,
+        policy,
+        lane,
+        &inventory.selected,
+        directory,
+        &case_artifacts,
+    )?;
+    eprintln!(
+        "validation: {} required={} runnable={} blocked={}",
+        lane.name(),
+        admission.required.len(),
+        admission.runnable.len(),
+        admission.blocked.len()
+    );
+    if admission.runnable.is_empty() {
+        return admission.finish(directory, Ok(()));
+    }
+    if let Some(filter) = admission.exclusion_filter() {
+        let selected = list(
+            root,
+            policy,
+            lane,
+            directory,
+            &common,
+            Some(&filter),
+            "runnable-inventory",
+        )?;
+        if selected.selected != admission.runnable {
+            return admission.finish(
+                directory,
+                Err(error("prerequisite filter changed the runnable inventory")),
+            );
+        }
+        common.extend(["-E".into(), filter]);
+    }
     // One Nextest scheduler executes the disjoint selections with the configured
     // expensive-test group, preserving four total process slots and two proofs.
     let mut command = process::command(root, policy, "cargo");
-    let case_artifacts = directory.join("cases");
-    fs::create_dir_all(&case_artifacts)?;
     command.env("OBZENFLOW_TEST_ARTIFACTS", &case_artifacts);
     command.args(["nextest", "run"]).args(&common).args([
         "--no-fail-fast",
@@ -387,12 +469,13 @@ fn nextest(
         "--test-threads",
         &policy.test_threads.to_string(),
     ]);
-    let status = process::execute_nextest(
+    let execution = process::execute_nextest(
         &mut command,
         directory,
         Duration::from_secs(policy.command_watchdog_seconds),
-    )?;
-    evaluate_nextest(directory, &inventory.selected, status.success())
+    )
+    .and_then(|status| evaluate_nextest(directory, &admission.runnable, status.success()));
+    admission.finish(directory, execution)
 }
 
 fn evaluate_nextest(
@@ -417,12 +500,8 @@ fn list(
     directory: &Path,
     common: &[String],
     filter: Option<&str>,
+    label: &str,
 ) -> Result<plan::Inventory> {
-    let label = if filter.is_some() {
-        "expensive-inventory"
-    } else {
-        "inventory"
-    };
     let mut command = process::command(root, policy, "cargo");
     command
         .args(["nextest", "list", "--message-format", "json"])

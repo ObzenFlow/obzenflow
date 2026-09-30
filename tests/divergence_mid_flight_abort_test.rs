@@ -48,7 +48,6 @@ use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, InlineSink, SinkDescription, SinkTerminalOutcome, SinkWriteContext,
     SinkWriteReport, TypedFiniteSourceHandler, TypedTransformHandler,
 };
-use obzenflow_runtime::testing::TestClock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -186,11 +185,15 @@ impl SourcePolicy for DivergenceSignalInjection {
 #[derive(Clone, Debug)]
 struct DelayedSeedTransform {
     delay: Duration,
+    armed: Arc<tokio::sync::Notify>,
 }
 
 impl DelayedSeedTransform {
     fn new(delay: Duration) -> Self {
-        Self { delay }
+        Self {
+            delay,
+            armed: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 }
 
@@ -207,7 +210,14 @@ impl EffectfulTransformHandler for DelayedSeedTransform {
     ) -> std::result::Result<StageCompletion<Self::Output>, HandlerError> {
         // Ensure the pipeline stays busy long enough for the supervisor tick to
         // schedule contract checks from the active processing path.
-        sleep(self.delay).await;
+        let timer = sleep(self.delay);
+        tokio::pin!(timer);
+        assert!(
+            futures::poll!(timer.as_mut()).is_pending(),
+            "delay must arm before readiness"
+        );
+        self.armed.notify_one();
+        timer.await;
         fx.emit(input)
             .await
             .map_err(|error| HandlerError::Other(error.to_string()))?;
@@ -452,10 +462,10 @@ async fn committed_facts(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(30);
     let inject_signals = DivergenceSignalInjection::new(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(10));
+    let armed = delay.armed.clone();
     let entry = CycleEntryTransform;
     let iter = LoopBackTransform;
     let sink = CountingSink;
@@ -491,18 +501,9 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     let pipeline = handle.system_journal().unwrap();
     let run = tokio::spawn(handle.run());
 
-    // Drive paused time until the flow terminates (expected abort).
-    for _ in 0..200 {
-        if run.is_finished() {
-            break;
-        }
-        clock.advance(Duration::from_millis(50)).await?;
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        run.is_finished(),
-        "flow did not terminate under paused time (expected abort)"
-    );
+    // Witness the actual handler's armed timer. Tokio may then advance paused
+    // time while idle; only the joined execution closes the journal scope.
+    armed.notified().await;
 
     let run = run.await.expect("join handle");
     if let Ok(()) = run {
@@ -550,9 +551,9 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(50);
     let delay = DelayedSeedTransform::new(Duration::from_millis(1));
+    let armed = delay.armed.clone();
     let sink = CountingSink;
 
     let harness = test_flow! {
@@ -579,18 +580,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
     let handle = harness.into_inner();
     let journals = handle.stage_journals();
     let run = tokio::spawn(handle.run());
-
-    for _ in 0..200 {
-        if run.is_finished() {
-            break;
-        }
-        clock.advance(Duration::from_millis(20)).await?;
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        run.is_finished(),
-        "flow did not terminate under paused time"
-    );
+    armed.notified().await;
 
     run.await.expect("join handle")?;
 
@@ -628,7 +618,6 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(50);
     let entry = FanInEntryTransform;
     let branch_a = PassThroughTransform;
@@ -666,17 +655,6 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
     let journals = handle.stage_journals();
     let run = tokio::spawn(handle.run());
 
-    for _ in 0..200 {
-        if run.is_finished() {
-            break;
-        }
-        clock.advance(Duration::from_millis(20)).await?;
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        run.is_finished(),
-        "flow did not terminate under paused time"
-    );
     run.await.expect("join handle")?;
 
     let snapshot = committed_facts(&journals).await?;
@@ -726,9 +704,9 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
     let source = SeedSource::new(10);
     let delay = DelayedSeedTransform::new(Duration::from_millis(5));
+    let armed = delay.armed.clone();
     let entry = PassThroughTransform;
     let iter = PassThroughTransform;
     let sink = CountingSink;
@@ -764,19 +742,7 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     let journals = handle.stage_journals();
     let run = tokio::spawn(handle.run());
 
-    use std::convert::Infallible;
-    for _ in 0..400 {
-        if run.is_finished() {
-            break;
-        }
-        clock.advance(Duration::from_millis(50)).await?;
-        let _ = TestClock::settle_scheduler(|| async { Ok::<bool, Infallible>(run.is_finished()) })
-            .await?;
-    }
-    assert!(
-        run.is_finished(),
-        "flow did not terminate under paused time (expected abort)"
-    );
+    armed.notified().await;
 
     let run = run.await.expect("join handle");
     if let Ok(()) = run {

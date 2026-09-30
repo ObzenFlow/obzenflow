@@ -97,6 +97,24 @@ jobs:
               );
             }
 
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run.id,
+              filter: "latest",
+              per_page: 100,
+            });
+            const performance = jobs.filter((job) => job.name === "performance");
+            if (performance.length !== 1 ||
+                performance[0].head_sha !== releaseSha ||
+                performance[0].status !== "completed" ||
+                performance[0].conclusion !== "success") {
+              throw new Error(
+                `Main CI ${run.html_url} does not contain executed, passing performance ` +
+                `qualification for release SHA ${releaseSha}. Skipped jobs do not qualify.`
+              );
+            }
+
             core.info(`Release SHA ${releaseSha} is sealed by ${run.html_url}`);
             core.setOutput("run_url", run.html_url);
             core.setOutput("run_number", run.run_number);

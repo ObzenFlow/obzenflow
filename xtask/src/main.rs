@@ -132,6 +132,9 @@ fn run() -> Result<()> {
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
         [cmd, rest @ ..] if cmd == "postgres" => postgres::run(rest),
         [cmd, rest @ ..] if cmd == "test" => validation::run(&workspace_root()?, rest),
+        [cmd, capability, artifacts] if cmd == "__test-prerequisite" => {
+            validation::prerequisites::child(capability, Path::new(artifacts))
+        }
         [cmd, rest @ ..] if cmd == "regenerate-journal-fixtures" => {
             journal_fixtures::run(&workspace_root()?, rest).map_err(|error| error as Box<dyn Error>)
         }

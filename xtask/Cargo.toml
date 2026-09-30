@@ -14,11 +14,11 @@ ring = { workspace = true }
 roxmltree = "=0.21.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 sqlx = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

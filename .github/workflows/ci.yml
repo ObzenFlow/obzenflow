@@ -250,6 +250,11 @@ jobs:
           if-no-files-found: error
 
   performance:
+    # FLOWIP-145i B12: PR iteration proves correctness; main and explicit
+    # requests also qualify performance. Skipped is not measured or passed.
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
     needs: fmt
     runs-on: ubuntu-24.04
     env:
@@ -289,6 +294,91 @@ jobs:
       - name: Verify lockfile
         run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
+
+      - name: Verify validation cadence and release evidence
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const workflow = fs.readFileSync(".github/workflows/ci.yml", "utf8");
+            const performance = workflow.split("\n  performance:\n")[1];
+            const condition = performance.match(/    if: >-\n((?:      .*\n)+)/)[1].trim();
+            const requestsPerformance = new Function("github", "return (" + condition + ");");
+            for (const [event, ref, expected] of [
+              ["pull_request", "refs/pull/129/merge", false],
+              ["push", "refs/heads/main", true],
+              ["push", "refs/heads/topic", false],
+              ["workflow_dispatch", "refs/heads/topic", true],
+            ]) {
+              assert.equal(requestsPerformance({event_name: event, ref}), expected);
+            }
+
+            // Execute the actual scripts embedded in both release consumers.
+            // API responses are controlled; these checks neither publish nor
+            // query another run, and need no extra test service or credentials.
+            function releaseScript(path) {
+              const text = fs.readFileSync(path, "utf8");
+              const section = text.split("- name: Verify the release SHA passed full CI on main\n")[1];
+              const lines = section.split("          script: |\n")[1].split("\n");
+              const body = [];
+              for (const line of lines) {
+                if (line.trim() && !line.startsWith("            ")) break;
+                body.push(line.slice(12));
+              }
+              return body.join("\n");
+            }
+            const publish = releaseScript(".github/workflows/publish.yml");
+            assert.equal(publish, releaseScript(".github/workflows/dry-run.yml"));
+            const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+            const qualify = new AsyncFunction("github", "context", "core", "process", publish);
+            const sha = "qualified-revision";
+            const run = {id: 1, head_sha: sha, head_branch: "main", event: "push",
+              status: "completed", conclusion: "success", html_url: "fixture://main", run_number: 1};
+            const job = {name: "performance", head_sha: sha, status: "completed", conclusion: "success"};
+            for (const [name, candidate, jobs, passes] of [
+              ["complete", run, [job], true],
+              ["missing run", null, [job], false],
+              ["wrong revision", {...run, head_sha: "other"}, [job], false],
+              ["PR run", {...run, event: "pull_request"}, [job], false],
+              ["wrong branch", {...run, head_branch: "topic"}, [job], false],
+              ["unfinished run", {...run, status: "in_progress"}, [job], false],
+              ["failed sibling", {...run, conclusion: "failure"}, [job], false],
+              ["missing performance", run, [], false],
+              ["skipped performance", run, [{...job, conclusion: "skipped"}], false],
+              ["failed performance", run, [{...job, conclusion: "failure"}], false],
+              ["cancelled performance", run, [{...job, conclusion: "cancelled"}], false],
+              ["unfinished performance", run, [{...job, status: "in_progress", conclusion: null}], false],
+              ["wrong performance revision", run, [{...job, head_sha: "other"}], false],
+              ["ambiguous performance", run, [job, job], false],
+            ]) {
+              const outputs = {};
+              const api = {
+                request: async (_, query) => {
+                  assert.equal(query.head_sha, sha);
+                  assert.equal(query.branch, "main");
+                  assert.equal(query.event, "push");
+                  return {data: {workflow_runs: candidate ? [candidate] : []}};
+                },
+                rest: {actions: {listJobsForWorkflowRun: "jobs"}},
+                paginate: async (_, query) => {
+                  assert.equal(query.run_id, run.id);
+                  assert.equal(query.filter, "latest");
+                  return jobs;
+                },
+              };
+              const attempt = qualify(api, {repo: {owner: "fixture", repo: "fixture"}},
+                {info: () => {}, setOutput: (key, value) => outputs[key] = value},
+                {env: {RELEASE_SHA: sha}});
+              if (passes) {
+                await attempt;
+                assert.equal(outputs.run_url, run.html_url, name);
+              } else {
+                await assert.rejects(attempt, undefined, name);
+                assert.deepEqual(outputs, {}, name);
+              }
+            }
+            core.info("Cadence matrix and exact-release evidence controls passed.");
 
       - name: Verify SPDX headers
         run: |

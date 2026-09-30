@@ -33,6 +33,13 @@ impl Lane {
         Self::Performance,
     ];
 
+    pub(super) fn correctness() -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|lane| *lane != Self::Performance)
+            .collect()
+    }
+
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::Default => "default",
@@ -106,11 +113,23 @@ impl Options {
         }
         Ok(Self {
             lanes: if lanes.is_empty() {
-                Lane::ALL.to_vec()
+                Lane::correctness()
             } else {
                 lanes.into_iter().collect()
             },
         })
+    }
+
+    pub(super) fn scope(&self) -> &'static str {
+        if self.lanes == Lane::ALL {
+            "correctness-and-performance"
+        } else if self.lanes == Lane::correctness() {
+            "correctness"
+        } else if self.lanes == [Lane::Performance] {
+            "performance"
+        } else {
+            "partial"
+        }
     }
 }
 
@@ -140,13 +159,15 @@ pub(super) struct Policy {
     pub(super) tokio_workers: usize,
     pub(super) command_watchdog_seconds: u64,
     pub(super) ignored: Vec<Ignored>,
+    #[serde(default)]
+    pub(super) prerequisites: Vec<super::prerequisites::Requirement>,
 }
 
 impl Policy {
     pub(super) fn read(root: &Path) -> Result<Self> {
         let policy: Self =
             toml::from_str(&fs::read_to_string(root.join(".config/validation.toml"))?)?;
-        if policy.version != 1
+        if policy.version != 2
             || policy.profile != "ci-fast"
             || policy.build_jobs == 0
             || policy.test_threads == 0
@@ -169,6 +190,7 @@ impl Policy {
                 "ignored test policy must have unique identities and explicit owners",
             ));
         }
+        super::prerequisites::validate(&policy.prerequisites)?;
         Ok(policy)
     }
 }
@@ -285,7 +307,7 @@ mod tests {
     use super::*;
     #[test]
     fn only_declared_lanes_and_execution_flags_are_accepted() {
-        assert_eq!(Options::parse(&[]).unwrap().lanes, Lane::ALL);
+        assert_eq!(Options::parse(&[]).unwrap().lanes, Lane::correctness());
         for args in [
             vec!["--profile", "ci-full"],
             vec!["--lane"],
