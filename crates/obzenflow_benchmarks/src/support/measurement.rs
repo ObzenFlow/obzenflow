@@ -33,13 +33,16 @@ impl Meter {
         }
     }
     pub fn finish(self, elapsed: Duration) -> Sample {
-        let (work, allocations) = match self.census {
-            Some((memory, scope)) => (scope.finish(), Some(memory.finish())),
-            None => (BTreeMap::new(), None),
+        let allocations = match self.census {
+            Some((memory, scope)) => {
+                scope.finish();
+                Some(memory.finish())
+            }
+            None => None,
         };
         Sample {
             elapsed,
-            work,
+            work: BTreeMap::new(),
             allocations,
             observations: Value::Null,
         }
@@ -57,9 +60,10 @@ pub struct Sample {
 }
 
 impl Sample {
-    pub fn expect_work(&self, name: &str, expected: u64) {
+    /// Record validated, consumer-visible output, never an internal work estimate.
+    pub fn completed(&mut self, name: &str, count: u64) {
         if self.allocations.is_some() {
-            assert_eq!(self.work[name], expected, "{name}");
+            self.work.insert(name.to_owned(), count);
         }
     }
     pub fn is_census(&self) -> bool {
@@ -96,9 +100,8 @@ pub fn measure(
         *taken = true;
     }
     b.iter_custom(|iterations| {
-        // Keep identical production instrumentation enabled, but collect/reset
-        // counters once per Criterion sample. Per-operation map/JSON allocation
-        // would otherwise dominate the *untimed* harness for sub-microsecond work.
+        // An outer scope suppresses per-iteration census allocation. Framework
+        // code contains no counters or measurement-session state.
         let scope = WorkScope::start();
         let mut elapsed = Duration::ZERO;
         for _ in 0..iterations {

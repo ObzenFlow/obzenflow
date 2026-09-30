@@ -29,6 +29,7 @@ fn bench(c: &mut Criterion) {
             .join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let report = serde_json::json!({
+            "measurement_contract": support::MEASUREMENT_CONTRACT,
             "compiled_manifest_dir": env!("CARGO_MANIFEST_DIR"),
             "cases": censuses,
         });

@@ -6,101 +6,66 @@ use super::{fixtures, measure, timed, Census, Sample};
 use criterion::{Criterion, Throughput};
 use obzenflow_core::{ChainEvent, Journal, JournalOwner};
 use obzenflow_infra::journal::DiskJournal;
-use obzenflow_infra::testing::journal_bench::{write_preencoded, EncodingCursor, FrameCorpus};
 use std::cell::LazyCell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-fn run(runtime: &Runtime, history: &fixtures::History, operation: &str) -> Sample {
-    let encoded = history.corpus.encoded_frames();
-    let (bytes, mut sample) = match operation {
-        "prepare_encoding" => {
-            let mut cursor = EncodingCursor::new(history.path.clone());
-            let (frames, sample) = timed(|| {
-                history
-                    .rows
-                    .chunks(history.group)
-                    .enumerate()
-                    .map(|(index, rows)| {
-                        let group = (history.group != 1).then(|| format!("group-{index}"));
-                        cursor.encode(rows, group.as_deref())
-                    })
-                    .collect::<Vec<_>>()
-            });
-            for (actual, expected) in frames.iter().zip(&encoded) {
-                assert_eq!(actual, expected.as_ref());
+fn run(runtime: &Runtime, history: &fixtures::History) -> Sample {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("append.log");
+    let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
+        DiskJournal::with_owner_in_run(
+            path.clone(),
+            JournalOwner::stage(history.stage),
+            history.run,
+        )
+        .unwrap(),
+    );
+    let events = history.events.clone();
+    let (rows, mut sample) = timed(|| {
+        runtime.block_on(async {
+            tokio::time::timeout(
+                fixtures::DEADLINE,
+                fixtures::append_events(&journal, events, history.group),
+            )
+            .await
+            .expect("complete append watchdog")
+        })
+    });
+    assert_eq!(
+        rows.iter().map(|r| *r.id()).collect::<Vec<_>>(),
+        history.rows.iter().map(|r| *r.id()).collect::<Vec<_>>()
+    );
+    // Validate committed results through an ordinary reader. Byte-format and
+    // atomicity proofs remain private tests at the codec/storage owner.
+    runtime.block_on(async {
+        tokio::time::timeout(fixtures::DEADLINE, async {
+            assert_eq!(
+                journal.committed_position().await.unwrap(),
+                rows.len() as u64
+            );
+            let mut reader = journal.reader().await.unwrap();
+            for (index, expected) in rows.iter().enumerate() {
+                let actual = reader
+                    .next()
+                    .await
+                    .unwrap()
+                    .expect("committed append readable");
+                assert_eq!(actual.local_sequence(), index as u64 + 1);
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
             }
-            (frames.iter().map(Vec::len).sum::<usize>(), sample)
-        }
-        "write_preencoded" => {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("encoded.log");
-            let file = Arc::new(Mutex::new(std::fs::File::create(&path).unwrap()));
-            let (position, sample) = timed(|| {
-                runtime.block_on(async {
-                    let mut position = 0;
-                    for bytes in &encoded {
-                        position =
-                            write_preencoded(file.clone(), path.clone(), bytes.clone()).await;
-                    }
-                    position
-                })
-            });
-            let actual = std::fs::read(&path).unwrap();
-            assert_eq!(
-                actual,
-                encoded
-                    .iter()
-                    .flat_map(|b| b.iter().copied())
-                    .collect::<Vec<_>>()
-            );
-            sample.expect_work("append_blocking_jobs", encoded.len() as u64);
-            (position as usize, sample)
-        }
-        "complete_append" => {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("append.log");
-            let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(
-                DiskJournal::with_owner_in_run(
-                    path.clone(),
-                    JournalOwner::stage(history.stage),
-                    history.run,
-                )
-                .unwrap(),
-            );
-            let events = history.events.clone();
-            let (rows, sample) = timed(|| {
-                runtime.block_on(fixtures::append_events(&journal, events, history.group))
-            });
-            assert_eq!(
-                rows.iter().map(|r| *r.id()).collect::<Vec<_>>(),
-                history.rows.iter().map(|r| *r.id()).collect::<Vec<_>>()
-            );
-            let corpus =
-                FrameCorpus::load(&path, &rows.iter().map(|r| *r.id()).collect::<Vec<_>>())
-                    .unwrap();
-            let mut encoder = EncodingCursor::new(path.clone());
-            let expected: Vec<_> = rows
-                .chunks(history.group)
-                .enumerate()
-                .flat_map(|(index, rows)| {
-                    let group = (history.group != 1).then(|| format!("group-{index}"));
-                    encoder.encode(rows, group.as_deref())
-                })
-                .collect();
-            assert_eq!(std::fs::read(&path).unwrap(), expected);
-            sample.expect_work("append_blocking_jobs", encoded.len() as u64);
-            (corpus.encoded_bytes(), sample)
-        }
-        _ => unreachable!(),
-    };
-    // Complete appends have fresh commitment identities/timestamps. Verify their
-    // exact bytes against their own receipts above, not another journal's size.
-    if operation != "complete_append" {
-        assert_eq!(bytes, history.corpus.encoded_bytes());
-    }
+            assert!(reader.next().await.unwrap().is_none());
+            assert_eq!(reader.position(), rows.len() as u64);
+        })
+        .await
+        .expect("append readback watchdog");
+    });
+    sample.completed("committed_records", rows.len() as u64);
     sample.observations =
-        serde_json::json!({"encoded_bytes":bytes,"physical_frames":encoded.len()});
+        serde_json::json!({"journal_file_bytes":std::fs::metadata(path).unwrap().len()});
     sample
 }
 
@@ -116,21 +81,19 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
         let history = LazyCell::new(|| {
             runtime.block_on(fixtures::History::build(64, payload, group_size, every))
         });
-        for op in ["prepare_encoding", "write_preencoded", "complete_append"] {
-            let case = format!("{op}/{name}");
-            let mut taken = false;
-            let input = serde_json::json!({"records":64,"business_payload_bytes":payload,"group_size":group_size,"execution_fact_every":every});
-            group.bench_function(&case, |b| {
-                measure(
-                    b,
-                    censuses,
-                    &mut taken,
-                    &format!("journal_append_cost/{case}"),
-                    &input,
-                    || run(runtime, &history, op),
-                )
-            });
-        }
+        let case = format!("complete_append/{name}");
+        let mut taken = false;
+        let input = serde_json::json!({"records":64,"business_payload_bytes":payload,"group_size":group_size,"execution_fact_every":every});
+        group.bench_function(&case, |b| {
+            measure(
+                b,
+                censuses,
+                &mut taken,
+                &format!("journal_append_cost/{case}"),
+                &input,
+                || run(runtime, &history),
+            )
+        });
     }
     group.finish();
 }

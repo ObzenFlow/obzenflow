@@ -3,16 +3,16 @@
 // https://obzenflow.dev
 
 //! Explicit shared fixtures and measurement support for component benchmarks.
-//! Production crates expose only their own development-only operation probes.
+//! Framework dependencies expose only their ordinary consumer contracts.
 
 #[cfg(feature = "journal-benchmarks")]
 pub mod allocations;
-#[cfg(feature = "capacity-benchmarks")]
-pub mod capacity;
 #[cfg(feature = "journal-benchmarks")]
 pub mod journal;
 #[cfg(feature = "journal-benchmarks")]
 mod measurement;
+#[cfg(feature = "validation-benchmarks")]
+pub mod studio;
 #[cfg(feature = "validation-benchmarks")]
 pub mod validation;
 #[cfg(feature = "journal-benchmarks")]
@@ -22,6 +22,7 @@ mod work;
 pub use measurement::{measure, timed, Census, Meter, Sample};
 
 pub const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+pub const MEASUREMENT_CONTRACT: &str = "public-operations-v1";
 
 pub fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()

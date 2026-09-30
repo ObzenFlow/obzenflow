@@ -269,8 +269,6 @@ struct Connection {
     observation_interval: Duration,
     next_observation: Option<Instant>,
     read_since_observation: bool,
-    #[cfg(feature = "bench-instrumentation")]
-    capacity_probe: Option<Arc<crate::benchmark::studio::StudioCapacityProbe>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -282,9 +280,6 @@ pub(super) fn connection(
     closing: watch::Receiver<bool>,
     cursor: Option<&str>,
     observation_interval: Duration,
-    #[cfg(feature = "bench-instrumentation")] capacity_probe: Option<
-        Arc<crate::benchmark::studio::StudioCapacityProbe>,
-    >,
 ) -> impl Stream<Item = SseFrame> + Send + 'static {
     let readers = LiveReaders::new(stage_journals, system_journals);
     let mut pending = VecDeque::new();
@@ -328,8 +323,6 @@ pub(super) fn connection(
         observation_interval,
         next_observation: None,
         read_since_observation: false,
-        #[cfg(feature = "bench-instrumentation")]
-        capacity_probe,
     };
     futures::stream::unfold(state, |mut state| async move {
         state.next_frame().await.map(|frame| (frame, state))
@@ -467,22 +460,6 @@ impl Connection {
                         Phase::Closed => unreachable!("closed connections do not read"),
                     };
                     self.enqueue(frames);
-                    #[cfg(feature = "bench-instrumentation")]
-                    if let Some(probe) = &self.capacity_probe {
-                        probe.applied(
-                            journal,
-                            position,
-                            self.pending.len(),
-                            self.pending
-                                .iter()
-                                .map(|frame| {
-                                    frame.data.capacity()
-                                        + frame.id.as_ref().map_or(0, String::capacity)
-                                        + frame.event.as_ref().map_or(0, String::capacity)
-                                })
-                                .sum(),
-                        );
-                    }
                 }
                 Some(Err(error)) => {
                     self.phase = Phase::Closed;

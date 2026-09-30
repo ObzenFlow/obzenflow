@@ -5,7 +5,6 @@
 //! Fixtures for the exact archive, metrics and Studio operations used by the
 //! expensive correctness proofs. Fixture creation and validation stay untimed.
 
-use obzenflow_adapters::studio::{ContractBoundaryAliases, StudioProjection};
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::{ExecutionAccounting, FlowContext, RuntimeProvenance};
 use obzenflow_core::event::{
@@ -14,7 +13,7 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::AppendOptions;
-use obzenflow_core::{ChainEvent, EventId, FlowId, Journal, JournalOwner, StageId, TypedPayload};
+use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::{FlowApplication, LogLevel};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
@@ -209,7 +208,6 @@ pub struct ObserverJournals {
     pub data: Arc<dyn Journal<ChainEvent>>,
     pub error: Arc<dyn Journal<ChainEvent>>,
     pub system: Arc<dyn Journal<SystemEvent>>,
-    pub completed: EventId,
     pub inputs: usize,
     pub _directory: tempfile::TempDir,
 }
@@ -334,32 +332,8 @@ impl ObserverJournals {
             data,
             error,
             system,
-            completed: *complete.id(),
             inputs,
             _directory: directory,
         }
-    }
-
-    pub async fn studio(&self) -> Vec<obzenflow_core::web::SseFrame> {
-        use futures::StreamExt;
-        let (closing, watch) = tokio::sync::watch::channel(false);
-        let projection =
-            StudioProjection::new(Vec::new(), ContractBoundaryAliases::default()).unwrap();
-        let body = obzenflow_infra::testing::studio::connect(
-            vec![
-                (self.stage, self.data.clone()),
-                (self.stage, self.error.clone()),
-            ],
-            vec![self.system.clone()],
-            projection,
-            watch,
-            Some("jr1:{}"),
-            std::time::Duration::from_millis(250),
-        )
-        .await;
-        closing.send(true).unwrap();
-        tokio::time::timeout(super::DEADLINE, body.collect())
-            .await
-            .expect("Studio settlement watchdog")
     }
 }

@@ -7,6 +7,8 @@
 
 mod driver;
 
+const MEASUREMENT_CONTRACT: &str = "public-operations-v1";
+
 use super::{failed, plan::Policy, process};
 use crate::{error, Result};
 use serde::{Deserialize, Serialize};
@@ -43,7 +45,7 @@ impl ComparisonPolicy {
                 "qualified performance policy unavailable: {failure}"
             ))
         })?)?;
-        if policy.version != 3
+        if policy.version != 4
             || policy.statistic != "median"
             || policy.baseline_revision.len() != 40
             || !policy
@@ -303,7 +305,7 @@ pub(super) fn run(root: &Path, tools: &Policy, directory: &Path) -> Result<()> {
         tools,
         &policy,
         directory,
-        &candidate_binary,
+        (&candidate_binary, &candidate_boundaries),
         &nonce,
         (&before, &after),
     );
@@ -389,7 +391,7 @@ fn qualify_controls(
     tools: &Policy,
     policy: &ComparisonPolicy,
     directory: &Path,
-    binary: &Executable,
+    (binary, boundaries): (&Executable, &Executable),
     nonce: &str,
     (before, after): (
         &BTreeMap<String, Measurement>,
@@ -434,16 +436,45 @@ fn qualify_controls(
     let missing_rejected = missing.is_err()
         && result["exit_code"] == 101
         && diagnostic.contains("actual reader output completeness and order");
+    let studio = ComparisonPolicy {
+        cases: vec!["studio_validation/project_and_snapshot/inputs_64".into()],
+        ..policy.clone()
+    };
+    if !policy.boundary_cases.contains(&studio.cases[0]) {
+        return Err(error(
+            "performance policy omits its Studio projection output control",
+        ));
+    }
+    let studio_label = format!("{nonce}-missing-studio-control");
+    let studio_missing = measure(
+        root,
+        tools,
+        &studio,
+        directory,
+        boundaries,
+        &studio_label,
+        Some("missing-studio-output"),
+    );
+    let studio_result: Value = serde_json::from_slice(&fs::read(
+        directory.join(&studio_label).join("criterion.result.json"),
+    )?)?;
+    let studio_diagnostic =
+        fs::read_to_string(directory.join(&studio_label).join("criterion.stderr.log"))?;
+    let studio_rejected = studio_missing.is_err()
+        && studio_result["exit_code"] == 101
+        && studio_diagnostic.contains("Studio projection output completeness and order");
     fs::write(
         directory.join("negative-controls.json"),
         serde_json::to_vec_pretty(&json!({
             "case": CASE, "slowdown": slowdown, "slow_measurement": slow,
             "missing_work_rejected_by_completion_oracle": missing_rejected,
             "missing_work_process": result,
+            "missing_studio_projection_output_rejected": studio_rejected,
+            "missing_studio_process": studio_result,
             "acceptance_measurements_contain_no_controls": true,
         }))?,
     )?;
-    if !matches!(slowdown, Decision::Regressed(_)) || !missing_rejected {
+    if !matches!(slowdown, Decision::Regressed(_)) || !missing_rejected || !studio_rejected {
         return Err(error("performance gate failed its live slowdown/missing-work qualification; see negative-controls.json"));
     }
     Ok(())
@@ -601,6 +632,11 @@ fn measure(
 
 fn read_work(path: &Path, binary: &Executable) -> Result<BTreeMap<String, Value>> {
     let census: Value = serde_json::from_slice(&fs::read(path)?)?;
+    if census["measurement_contract"] != MEASUREMENT_CONTRACT {
+        return Err(error(
+            "benchmark measurement contract differs; requalification required",
+        ));
+    }
     if census["compiled_manifest_dir"].as_str().map(Path::new)
         != Some(binary.compiled_manifest_dir.as_path())
     {
@@ -742,11 +778,42 @@ fn compare(
 mod tests {
     use super::*;
     #[test]
+    fn census_rejects_previous_contract_and_wrong_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("work.json");
+        let binary = Executable {
+            path: PathBuf::new(),
+            compiled_manifest_dir: PathBuf::from("/candidate"),
+            sha256: String::new(),
+        };
+        let mut census = json!({
+            "measurement_contract": MEASUREMENT_CONTRACT,
+            "compiled_manifest_dir": "/candidate",
+            "cases": [{"case":"reader","input":{"records":64},"work":{"complete_records":64}}]
+        });
+        fs::write(&path, serde_json::to_vec(&census).unwrap()).unwrap();
+        assert!(read_work(&path, &binary).is_ok());
+        census["measurement_contract"] = json!("instrumented-v3");
+        fs::write(&path, serde_json::to_vec(&census).unwrap()).unwrap();
+        assert!(read_work(&path, &binary)
+            .unwrap_err()
+            .to_string()
+            .contains("measurement contract"));
+        census["measurement_contract"] = json!(MEASUREMENT_CONTRACT);
+        census["compiled_manifest_dir"] = json!("/reference");
+        fs::write(&path, serde_json::to_vec(&census).unwrap()).unwrap();
+        assert!(read_work(&path, &binary)
+            .unwrap_err()
+            .to_string()
+            .contains("different source tree"));
+    }
+
+    #[test]
     fn comparisons_reject_slow_incomplete_incomparable_and_noisy_work() {
         // Deliberate test thresholds exercise the decision rule. Repository
         // acceptance thresholds must separately be qualified by measurement.
         let policy = ComparisonPolicy {
-            version: 3,
+            version: 4,
             baseline_revision: "a".repeat(40),
             hot_path_validity_cases: 1,
             statistic: "median".into(),

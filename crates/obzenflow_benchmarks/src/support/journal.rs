@@ -10,7 +10,6 @@ use obzenflow_core::event::{CausalFrontier, ChainEventFactory, ChainPayload};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
-use obzenflow_infra::testing::journal_bench::FrameCorpus;
 use std::sync::Arc;
 
 pub fn execution(stage: StageId, payload: ExecutionPayload) -> ChainEvent {
@@ -84,10 +83,8 @@ pub struct RecordFixture {
     pub record: ChainJournalRecord,
     pub canonical_bytes: usize,
     pub clock_bytes: usize,
-    pub corpus: Arc<FrameCorpus>,
-    // DefinitionStore::for_archive keeps weak entries. Retain the actual writer
-    // so warm measurements cannot silently become carrier-cache misses.
-    pub _journal: DiskJournal<ChainEvent>,
+    pub journal: DiskJournal<ChainEvent>,
+    pub rows: Vec<ChainJournalRecord>,
     pub _directory: tempfile::TempDir,
 }
 impl RecordFixture {
@@ -138,15 +135,14 @@ impl RecordFixture {
             .unwrap();
         let metadata = &record.envelope.provenance.journal;
         assert_eq!(metadata.vector_clock.clocks.len(), d.clock);
-        let corpus = FrameCorpus::load(&path, &[*seed.id(), *record.id()]).unwrap();
         let canonical_bytes = serde_json::to_vec(&record).unwrap().len();
         let clock_bytes = serde_json::to_vec(&metadata.vector_clock).unwrap().len();
         Self {
+            rows: vec![seed, record.clone()],
             record,
             canonical_bytes,
             clock_bytes,
-            corpus,
-            _journal: journal,
+            journal,
             _directory: directory,
         }
     }
@@ -156,7 +152,6 @@ pub struct History {
     pub journal: Arc<dyn Journal<ChainEvent>>,
     pub rows: Vec<ChainJournalRecord>,
     pub events: Vec<ChainEvent>,
-    pub corpus: Arc<FrameCorpus>,
     pub path: std::path::PathBuf,
     pub stage: StageId,
     pub run: FlowId,
@@ -187,13 +182,10 @@ impl History {
             })
             .collect();
         let rows = append_events(&journal, events.clone(), group).await;
-        let corpus =
-            FrameCorpus::load(&path, &rows.iter().map(|r| *r.id()).collect::<Vec<_>>()).unwrap();
         Self {
             journal,
             rows,
             events,
-            corpus,
             path,
             stage,
             run,

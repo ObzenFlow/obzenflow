@@ -80,14 +80,6 @@ impl Serialize for VectorClock {
                 "invalid or oversized causal clock",
             ));
         }
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            crate::benchmark::add(crate::benchmark::Counter::ClockSerializations, 1);
-            crate::benchmark::add(
-                crate::benchmark::Counter::SerializedClockEntries,
-                self.clocks.len() as u64,
-            );
-        }
         let entries: Vec<_> = self
             .clocks
             .iter()

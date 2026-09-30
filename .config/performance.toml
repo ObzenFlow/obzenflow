@@ -1,16 +1,16 @@
-# FLOWIP-145i selected operation gate. All 75 surviving hot-path workload
-# oracles are required on both implementations, independently of timing gates.
+# FLOWIP-145i B8: public-operations-v1, without framework instrumentation.
+# All 37 public-operation validity cases are required on both implementations.
 # This contract measures median sampled time, not a tail-latency SLO.
-version = 3
+version = 4
 baseline_revision = "854c04bab261477ad4bec813369244e84f2ffb20"
-hot_path_validity_cases = 75
+hot_path_validity_cases = 37
 statistic = "median"
 sample_size = 40
 warm_up_ms = 1000
 measurement_ms = 3000
-# Required timing cases passed the isolated reference/candidate/reference
-# precision checks. No retries or automatic threshold/baseline changes follow
-# an inconclusive run. See the 145i evidence for the original seven-case trial.
+# These limits remain unchanged during B8 requalification. Earlier instrumented
+# timings do not qualify this contract. Inconclusive runs never trigger retries
+# or automatic threshold/baseline changes.
 allowed_regression = 0.25
 allowed_control_drift = 0.15
 maximum_relative_interval_width = 0.12
@@ -22,17 +22,16 @@ cases = [
     "journal_append_cost/complete_append/ordinary_business_64",
     "journal_append_cost/complete_append/large_business_64",
 ]
-# Single-reader dispatch and grouped append remain in the 75 required validity
+# Single-reader dispatch and grouped append remain in the 37 required validity
 # cases and the ordinary Criterion suite. Their short operations did not qualify
 # for stable timing gates; preserved trials exceeded the same precision/drift
 # rules. The selected timing gate covers 8/32-reader work and ordinary/large
-# appends, plus the six operation boundaries below. It makes no timing acceptance
+# appends, plus the five operation boundaries below. It makes no timing acceptance
 # claim for the three diagnostic cases.
 boundary_cases = [
     "archive_validation/export/inputs_1000",
     "archive_validation/admit_and_read/inputs_1000",
-    "archive_validation/audit/inputs_1000",
     "replay_validation/streaming_comparison/inputs_10000",
     "metrics_validation/tail_refresh/data_and_error_64",
-    "studio_validation/resume_and_settle/inputs_64",
+    "studio_validation/project_and_snapshot/inputs_64",
 ]

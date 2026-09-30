@@ -32,7 +32,6 @@
 
 // This is primarily a benchmark crate, but we can expose some common utilities
 // that benchmarks might share
-use obzenflow_runtime::bootstrap::{set_bootstrap_config, BootstrapConfig};
 
 #[cfg(feature = "components")]
 pub mod support;
@@ -56,12 +55,6 @@ pub mod prelude {
 
     // Monitoring
     pub use obzenflow_adapters::monitoring::*;
-}
-
-fn configure_benchmark_defaults() {
-    // Metrics add substantial overhead (extra journal readers, extra parsing) and can
-    // push deep disk-journal benchmarks over OS file-descriptor limits.
-    set_bootstrap_config(BootstrapConfig::default());
 }
 
 fn bump_nofile_limit() {
@@ -106,7 +99,6 @@ pub fn init_tracing() {
 
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        configure_benchmark_defaults();
         bump_nofile_limit();
 
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()

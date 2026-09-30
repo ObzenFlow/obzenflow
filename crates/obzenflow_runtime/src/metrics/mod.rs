@@ -4,9 +4,6 @@
 
 //! Metrics aggregator implementation
 
-#[cfg(all(feature = "test-support", feature = "bench-instrumentation"))]
-#[doc(hidden)]
-pub mod benchmark;
 mod buffer;
 pub mod builder;
 pub mod constants;

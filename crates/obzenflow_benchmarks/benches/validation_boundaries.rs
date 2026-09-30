@@ -52,8 +52,11 @@ fn bench(c: &mut Criterion) {
     let archive = LazyCell::new(|| Archive::build(&runtime, 1000, false));
     let replay = LazyCell::new(|| Archive::build(&runtime, 10_000, true));
     let observers = LazyCell::new(|| runtime.block_on(ObserverJournals::build(64)));
+    let studio = LazyCell::new(|| {
+        runtime.block_on(obzenflow_benchmarks::support::studio::ProjectionFixture::read(&observers))
+    });
     let mut census = Vec::new();
-    for operation in ["export", "admit_and_read", "audit"] {
+    for operation in ["export", "admit_and_read"] {
         let name = format!("archive_validation/{operation}/inputs_1000");
         case(
             c,
@@ -98,20 +101,6 @@ fn bench(c: &mut Criterion) {
                             "cold admission/read preserves every record exactly"
                         );
                         (elapsed, rows.len())
-                    }
-                    "audit" => {
-                        let audit =
-                            obzenflow_infra::testing::journal::audit_archive(&archive.baseline)
-                                .unwrap();
-                        let elapsed = started.elapsed();
-                        // This fixture disables metrics; all archived records belong
-                        // to the system and stage journals audited by this operation.
-                        assert_eq!(audit.records as usize, archive.records.len());
-                        assert_eq!(
-                            audit.archive_bytes,
-                            audit.journal_bytes + audit.support_bytes
-                        );
-                        (elapsed, audit.records as usize)
                     }
                     _ => unreachable!(),
                 };
@@ -194,54 +183,9 @@ fn bench(c: &mut Criterion) {
     case(
         c,
         &mut census,
-        "studio_validation/resume_and_settle/inputs_64",
-        json!({"data_records":66,"error_records":1,"system_records":2,"connections":1,"start_cursor":"zero","storage":"disk"}),
-        || {
-            let fixture = &*observers;
-            let started = Instant::now();
-            let frames = runtime.block_on(fixture.studio());
-            let elapsed = started.elapsed();
-            let mut checkpoint =
-                std::collections::BTreeMap::<obzenflow_core::JournalId, u64>::new();
-            for cursor in frames.iter().filter_map(|frame| frame.id.as_deref()) {
-                let positions: std::collections::BTreeMap<obzenflow_core::JournalId, u64> =
-                    serde_json::from_str(
-                        cursor.strip_prefix("jr1:").expect("current Studio cursor"),
-                    )
-                    .unwrap();
-                for (journal, position) in positions {
-                    checkpoint
-                        .entry(journal)
-                        .and_modify(|old| *old = (*old).max(position))
-                        .or_insert(position);
-                }
-            }
-            assert_eq!(checkpoint[fixture.data.id()], fixture.inputs as u64 + 2);
-            assert_eq!(checkpoint[fixture.error.id()], 1);
-            assert_eq!(checkpoint[fixture.system.id()], 2);
-            assert_eq!(
-                frames.last().unwrap().event.as_deref(),
-                Some("server_shutdown")
-            );
-            assert!(!frames
-                .iter()
-                .any(|frame| frame.event.as_deref() == Some("stream_error")));
-            assert!(
-                frames
-                    .iter()
-                    .any(
-                        |frame| serde_json::from_str::<Value>(&frame.data)
-                            .ok()
-                            .is_some_and(|data| data["commitment"]["event_id"]
-                                == fixture.completed.to_string())
-                    ),
-                "Studio delivers the committed completion before settlement"
-            );
-            (
-                elapsed,
-                json!({"completed_connections":1,"stage_completions":1,"frames":frames.len()}),
-            )
-        },
+        "studio_validation/project_and_snapshot/inputs_64",
+        json!({"inputs":64,"payload_bytes":256,"data_records":66,"error_records":1,"system_records":2,"stages":1,"preloaded_records":true}),
+        || studio.measure(),
     );
     if let Ok(path) = std::env::var("OBZENFLOW_WORK_CENSUS") {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -249,6 +193,7 @@ fn bench(c: &mut Criterion) {
             .join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let report = serde_json::json!({
+            "measurement_contract": obzenflow_benchmarks::support::MEASUREMENT_CONTRACT,
             "compiled_manifest_dir": env!("CARGO_MANIFEST_DIR"),
             "cases": census,
         });

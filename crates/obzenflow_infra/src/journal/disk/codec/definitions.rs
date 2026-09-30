@@ -77,17 +77,6 @@ struct Cache {
     by_value: HashMap<Definition, Locator>,
     by_location: HashMap<Locator, CachedDefinition>,
     bytes: usize,
-    stats: StoreStats,
-}
-
-#[derive(Default, Debug, Clone, serde::Serialize)]
-pub(crate) struct StoreStats {
-    pub(crate) hits: u64,
-    pub(crate) misses: u64,
-    pub(crate) carrier_frames: u64,
-    pub(crate) carrier_bytes: u64,
-    pub(crate) evictions: u64,
-    pub(crate) peak_retained_bytes: usize,
 }
 
 impl Cache {
@@ -107,10 +96,8 @@ impl Cache {
             self.by_value = HashMap::new();
             self.by_location = HashMap::new();
             self.bytes = 0;
-            self.stats.evictions += 1;
         }
         self.bytes += charge;
-        self.stats.peak_retained_bytes = self.stats.peak_retained_bytes.max(self.bytes);
         self.by_value.insert(definition.clone(), locator.clone());
         self.by_location
             .insert(locator, CachedDefinition { definition, stamp });
@@ -121,19 +108,6 @@ impl Cache {
 pub(crate) struct DefinitionStore(Arc<Mutex<Cache>>);
 
 impl DefinitionStore {
-    /// Only for isolated benchmark fixtures with no outstanding readers/writers.
-    #[cfg(feature = "test-support")]
-    pub(crate) fn clear_for_benchmark(&self) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Cache::default();
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn stats(&self) -> StoreStats {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stats
-            .clone()
-    }
     pub(crate) fn for_archive(path: &Path) -> Self {
         type Registry = Mutex<HashMap<PathBuf, Weak<Mutex<Cache>>>>;
         static REGISTRY: OnceLock<Registry> = OnceLock::new();
@@ -412,21 +386,9 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
                 .as_ref()
                 .is_some_and(|prior| stamp.preserves(prior))
             {
-                self.store
-                    .0
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .stats
-                    .hits += 1;
                 return Ok(cached.definition);
             }
         }
-        self.store
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stats
-            .misses += 1;
         // No aliases out of the archive through symlinks, even with a valid basename.
         let archive = std::fs::canonicalize(self.path.parent().unwrap_or_else(|| Path::new(".")))?;
         let canonical = std::fs::canonicalize(&path)?;
@@ -445,17 +407,6 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
         let mut bytes = header.to_vec();
         file.take((length - frame::HEADER_LEN) as u64)
             .read_to_end(&mut bytes)?;
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            use crate::benchmark::{add, Counter};
-            add(Counter::DefinitionCarrierReads, 1);
-            add(Counter::DefinitionCarrierBytes, bytes.len() as u64);
-        }
-        {
-            let mut cache = self.store.0.lock().unwrap_or_else(|e| e.into_inner());
-            cache.stats.carrier_frames += 1;
-            cache.stats.carrier_bytes += bytes.len() as u64;
-        }
         let body = frame::validate(&bytes).map_err(frame::io_error)?;
         let envelope = super::routing::Envelope::parse(body)?;
         let mut cursor = Cursor::new(envelope.definitions);

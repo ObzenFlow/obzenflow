@@ -4,9 +4,6 @@
 
 //! Pipeline construction, public controls and supervised lifecycle execution.
 
-#[cfg(all(feature = "test-support", feature = "bench-instrumentation"))]
-#[doc(hidden)]
-pub mod benchmark;
 pub mod builder;
 pub mod config;
 pub(crate) mod fsm;

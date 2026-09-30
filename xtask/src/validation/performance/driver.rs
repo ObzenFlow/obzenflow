@@ -2,9 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Apply the new measurement driver to the preserved production reference.
-//! Only benchmark files and a test-support endpoint adapter are added. The
-//! reference's production implementation, codecs and lifecycle code stay intact.
+//! Install an identified outer benchmark driver against the preserved reference.
+//! No framework source, private adapter or production feature is changed.
 
 use crate::{error, Result};
 use ring::digest::{digest, SHA256};
@@ -17,74 +16,66 @@ use std::{
 
 pub(super) fn install(root: &Path, baseline: &Path, artifacts: &Path) -> Result<()> {
     let mut applied = BTreeMap::new();
-    for path in [
-        "crates/obzenflow_benchmarks/benches/validation_boundaries.rs",
-        "crates/obzenflow_benchmarks/src/support/validation.rs",
-        "crates/obzenflow_infra/src/testing/studio.rs",
-    ] {
-        write(baseline, path, &fs::read(root.join(path))?, &mut applied)?;
+    let crate_path = Path::new("crates/obzenflow_benchmarks");
+    // Copy an entire, coherent outer crate. Source layout and framework internals
+    // are not patch points. A future incompatible product API needs an explicitly
+    // versioned outer adapter, never a compatibility API inside the framework.
+    let mut files = vec![PathBuf::from("Cargo.toml")];
+    for directory in ["src", "benches"] {
+        files.extend(
+            tree(&root.join(crate_path).join(directory))?
+                .into_keys()
+                .map(|path| Path::new(directory).join(path)),
+        );
     }
-    let support = fs::read_to_string(root.join("crates/obzenflow_benchmarks/src/support/mod.rs"))?;
-    let (_, runtime) = support
-        .split_once("pub const DEADLINE")
-        .ok_or_else(|| error("shared benchmark runtime boundary unavailable"))?;
-    write(baseline, "crates/obzenflow_benchmarks/src/support/mod.rs",
-        format!("#[cfg(feature = \"validation-benchmarks\")]\npub mod validation;\npub const DEADLINE{runtime}").as_bytes(), &mut applied)?;
-    for (path, declaration) in [
-        (
-            "crates/obzenflow_benchmarks/src/lib.rs",
-            "\n#[cfg(feature = \"components\")]\npub mod support;\n",
-        ),
-        (
-            "crates/obzenflow_infra/src/testing/mod.rs",
-            "\n#[cfg(feature = \"warp-server\")]\npub mod studio;\n",
-        ),
-    ] {
-        let mut contents = fs::read_to_string(baseline.join(path))?;
-        contents.push_str(declaration);
-        write(baseline, path, contents.as_bytes(), &mut applied)?;
+    for relative in files {
+        let source = root.join(crate_path).join(&relative);
+        if source.is_symlink() {
+            return Err(error("measurement driver must not contain symlinks"));
+        }
+        let path = crate_path.join(relative);
+        write(
+            baseline,
+            path.to_str().unwrap(),
+            &fs::read(source)?,
+            &mut applied,
+        )?;
     }
-    // The original workload is retained. Add only the same build-identity
-    // metadata emitted by the candidate, outside every measured operation.
-    let path = "crates/obzenflow_benchmarks/benches/journal_hot_path/main.rs";
-    let contents = fs::read_to_string(baseline.join(path))?;
-    let original = "serde_json::to_vec_pretty(&censuses)";
-    if contents.matches(original).count() != 1 {
-        return Err(error("reference census output boundary changed"));
-    }
-    let contents = contents.replace(original, "serde_json::to_vec_pretty(&serde_json::json!({\"compiled_manifest_dir\": env!(\"CARGO_MANIFEST_DIR\"), \"cases\": censuses}))");
-    write(baseline, path, contents.as_bytes(), &mut applied)?;
-    let path = "crates/obzenflow_benchmarks/Cargo.toml";
-    let mut manifest: toml::Value = toml::from_str(&fs::read_to_string(baseline.join(path))?)?;
-    let futures = manifest["dev-dependencies"]
-        .as_table_mut()
-        .ok_or_else(|| error("reference benchmark manifest has no dev-dependencies"))?
-        .remove("futures")
-        .ok_or_else(|| error("reference benchmark manifest has no futures dependency"))?;
-    manifest["dependencies"]
-        .as_table_mut()
-        .unwrap()
-        .insert("futures".into(), futures);
-    manifest["features"].as_table_mut().unwrap().insert(
-        "validation-benchmarks".into(),
-        toml::Value::Array(vec![
-            "components".into(),
-            "obzenflow_infra/warp-server".into(),
-        ]),
-    );
-    let target: toml::Value = toml::from_str("name = 'validation_boundaries'\npath = 'benches/validation_boundaries.rs'\nharness = false\nrequired-features = ['validation-benchmarks']\n")?;
-    manifest["bench"].as_array_mut().unwrap().push(target);
+    // The driver owns its dependency declaration. Synchronise only its package's
+    // lock entry, preserving the reference's resolved production dependencies.
+    let candidate: toml::Value = toml::from_str(&fs::read_to_string(root.join("Cargo.lock"))?)?;
+    let package = candidate["package"]
+        .as_array()
+        .and_then(|packages| {
+            packages
+                .iter()
+                .find(|p| p["name"].as_str() == Some("obzenflow_benchmarks"))
+        })
+        .ok_or_else(|| error("candidate benchmark lock entry unavailable"))?;
+    let mut reference: toml::Value =
+        toml::from_str(&fs::read_to_string(baseline.join("Cargo.lock"))?)?;
+    let destination = reference["package"]
+        .as_array_mut()
+        .and_then(|packages| {
+            packages
+                .iter_mut()
+                .find(|p| p["name"].as_str() == Some("obzenflow_benchmarks"))
+        })
+        .ok_or_else(|| error("reference benchmark lock entry unavailable"))?;
+    *destination = package.clone();
     write(
         baseline,
-        path,
-        toml::to_string(&manifest)?.as_bytes(),
+        "Cargo.lock",
+        toml::to_string(&reference)?.as_bytes(),
         &mut applied,
     )?;
     fs::write(
         artifacts.join("measurement-driver.json"),
         serde_json::to_vec_pretty(&json!({
-            "purpose": "identical new measurement driver against the pinned production reference and candidate",
+            "measurement_contract": super::MEASUREMENT_CONTRACT,
+            "purpose": "identical public-operation benchmark driver for reference and candidate",
             "production_source_replaced": false,
+            "framework_files_modified": [],
             "applied_files_sha256": applied,
         }))?,
     )?;
@@ -195,4 +186,77 @@ fn write(
     fs::write(target, bytes)?;
     applied.insert(path.into(), sha256(bytes));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_driver_changes_only_its_outer_crate_and_lock_entry() {
+        let candidate = tempfile::tempdir().unwrap();
+        let reference = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        for root in [candidate.path(), reference.path()] {
+            fs::create_dir_all(root.join("crates/obzenflow_benchmarks/src")).unwrap();
+            fs::create_dir_all(root.join("crates/obzenflow_benchmarks/benches")).unwrap();
+            fs::create_dir_all(root.join("crates/obzenflow_core/src")).unwrap();
+            fs::write(
+                root.join("crates/obzenflow_core/src/lib.rs"),
+                "private implementation",
+            )
+            .unwrap();
+            fs::write(
+                root.join("crates/obzenflow_benchmarks/Cargo.toml"),
+                "[package]\nname = 'obzenflow_benchmarks'\n",
+            )
+            .unwrap();
+        }
+        fs::write(candidate.path().join("Cargo.lock"), "version = 4\n[[package]]\nname = 'obzenflow_benchmarks'\nversion = '2.0.0'\ndependencies = ['reqwest']\n[[package]]\nname = 'production'\nversion = '2.0.0'\n").unwrap();
+        fs::write(reference.path().join("Cargo.lock"), "version = 4\n[[package]]\nname = 'obzenflow_benchmarks'\nversion = '1.0.0'\n[[package]]\nname = 'production'\nversion = '1.0.0'\n").unwrap();
+        // Neither source-layout marker required by the former driver is present.
+        fs::write(
+            candidate
+                .path()
+                .join("crates/obzenflow_benchmarks/src/lib.rs"),
+            "pub fn public_driver() {}",
+        )
+        .unwrap();
+        fs::write(
+            candidate
+                .path()
+                .join("crates/obzenflow_benchmarks/benches/operation.rs"),
+            "fn main() {}",
+        )
+        .unwrap();
+        let before = tree(reference.path()).unwrap();
+        install(candidate.path(), reference.path(), artifacts.path()).unwrap();
+        let after = tree(reference.path()).unwrap();
+        for (path, identity) in &after {
+            if before.get(path) != Some(identity) {
+                assert!(path == "Cargo.lock" || path.starts_with("crates/obzenflow_benchmarks/"));
+            }
+        }
+        assert_eq!(
+            fs::read(reference.path().join("crates/obzenflow_core/src/lib.rs")).unwrap(),
+            b"private implementation"
+        );
+        let lock: toml::Value =
+            toml::from_str(&fs::read_to_string(reference.path().join("Cargo.lock")).unwrap())
+                .unwrap();
+        assert_eq!(lock["package"][1]["version"].as_str(), Some("1.0.0"));
+        assert_eq!(
+            lock["package"][0]["dependencies"][0].as_str(),
+            Some("reqwest")
+        );
+        let record: serde_json::Value = serde_json::from_slice(
+            &fs::read(artifacts.path().join("measurement-driver.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record["framework_files_modified"], json!([]));
+        assert_eq!(
+            record["measurement_contract"],
+            super::super::MEASUREMENT_CONTRACT
+        );
+    }
 }

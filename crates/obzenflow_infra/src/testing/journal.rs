@@ -242,12 +242,6 @@ pub struct StorageAudit {
     pub logical_observability_bytes: u64,
     pub logical_payload_bytes: u64,
     pub uncompressed_control_bytes: u64,
-    pub definition_cache_hits: u64,
-    pub definition_cache_misses: u64,
-    pub definition_frames_read: u64,
-    pub definition_bytes_read: u64,
-    pub definition_cache_evictions: u64,
-    pub definition_cache_peak_bytes: usize,
     /// Kind order: writer, context, origin, descriptor, capture scope, clock keys, journal writer.
     pub inline_definition_counts: [u64; 7],
     pub inline_definition_bytes: [u64; 7],
@@ -502,25 +496,13 @@ fn audit_file<T: JournalEvent>(
             );
         }
     }
-    let cache = decoder.cache_stats();
-    audit.definition_cache_hits += cache.hits;
-    audit.definition_cache_misses += cache.misses;
-    audit.definition_frames_read += cache.carrier_frames;
-    audit.definition_bytes_read += cache.carrier_bytes;
-    audit.definition_cache_evictions += cache.evictions;
-    audit.definition_cache_peak_bytes = audit
-        .definition_cache_peak_bytes
-        .max(cache.peak_retained_bytes);
     println!(
-        "Storage audit: {} frames in {:.3}s; decode={:.3}s, JSON roundtrip={:.3}s, accounting={:.3}s, carrier_frames={}, carrier_bytes={}, cache_evictions={}; from {}",
+        "Storage audit: {} frames in {:.3}s; decode={:.3}s, JSON roundtrip={:.3}s, accounting={:.3}s; from {}",
         audit.frames - initial_frames,
         started.elapsed().as_secs_f64(),
         decode_time.as_secs_f64(),
         roundtrip_time.as_secs_f64(),
         accounting_time.as_secs_f64(),
-        cache.carrier_frames,
-        cache.carrier_bytes,
-        cache.evictions,
         path.display()
     );
     Ok(())

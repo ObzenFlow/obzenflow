@@ -4,75 +4,9 @@
 
 use super::{fixtures, measure, Census, Meter, Sample};
 use criterion::{Criterion, Throughput};
-use obzenflow_infra::benchmark::{add, Counter};
 use std::cell::LazyCell;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
-
-fn controlled(
-    runtime: &Runtime,
-    history: &fixtures::History,
-    readers: usize,
-    quantum: usize,
-) -> Sample {
-    let cursors: Vec<_> = (0..readers).map(|_| history.corpus.cursor()).collect();
-    let meter = Meter::start();
-    let start = Instant::now();
-    let output = runtime.block_on(async {
-        tokio::time::timeout(fixtures::DEADLINE, async {
-            let mut tasks = tokio::task::JoinSet::new();
-            for mut cursor in cursors {
-                tasks.spawn(async move {
-                    let mut first = None;
-                    while !cursor.finished() {
-                        if quantum == 0 {
-                            cursor.decode(64, true).unwrap();
-                        } else {
-                            add(Counter::DecodeBlockingJobs, 1);
-                            cursor = tokio::task::spawn_blocking(move || {
-                                cursor.decode(quantum, true).unwrap();
-                                cursor
-                            })
-                            .await
-                            .unwrap();
-                        }
-                        first.get_or_insert_with(|| start.elapsed());
-                    }
-                    (cursor, first.unwrap())
-                });
-            }
-            let mut output = Vec::new();
-            while let Some(task) = tasks.join_next().await {
-                output.push(task.unwrap());
-            }
-            output
-        })
-        .await
-        .expect("dispatch workload exceeded deadline")
-    });
-    let elapsed = meter.elapsed();
-    let mut sample = meter.finish(elapsed);
-    for (cursor, _) in &output {
-        assert_eq!(cursor.work().records, 64);
-        assert_eq!(cursor.work().frames, 64);
-        assert_eq!(cursor.work().sequence_sum, 64 * 65 / 2);
-    }
-    sample.expect_work("verified_frames", (readers * 64) as u64);
-    sample.expect_work("payload_json_decodes", (readers * 64) as u64);
-    sample.expect_work(
-        "decode_blocking_jobs",
-        if quantum == 0 {
-            0
-        } else {
-            (readers * 64 / quantum) as u64
-        },
-    );
-    sample.observations = serde_json::json!({
-        "first_completed_job_ns":output.iter().map(|(_,t)|t.as_nanos() as u64).min(),
-        "last_reader_first_job_ns":output.iter().map(|(_,t)|t.as_nanos() as u64).max(),
-    });
-    sample
-}
 
 fn actual(runtime: &Runtime, history: &fixtures::History, readers: usize) -> Sample {
     let control = super::control::selected();
@@ -128,10 +62,10 @@ fn actual(runtime: &Runtime, history: &fixtures::History, readers: usize) -> Sam
         );
     }
     assert_eq!(results.len(), readers);
-    sample.expect_work("payload_json_decodes", (readers * 64) as u64);
-    sample.expect_work(
-        "primary_frame_bytes",
-        (readers * history.corpus.encoded_bytes()) as u64,
+    sample.completed("complete_readers", results.len() as u64);
+    sample.completed(
+        "complete_records",
+        results.iter().map(|(ids, _)| ids.len() as u64).sum(),
     );
     sample.observations = serde_json::json!({
         "first_record_ns":results.iter().map(|(_,t)|t.as_nanos() as u64).min(),
@@ -145,35 +79,19 @@ pub fn bench(c: &mut Criterion, runtime: &Runtime, censuses: &mut Vec<Census>) {
     let mut group = c.benchmark_group("reader_dispatch");
     for readers in [1, 8, 32] {
         group.throughput(Throughput::Elements((64 * readers) as u64));
-        {
-            let kind = "full";
-            for quantum in [0, 1, 8, 64, usize::MAX] {
-                let boundary = match quantum {
-                    0 => "inline".into(),
-                    usize::MAX => "actual_reader".into(),
-                    q => format!("frames_per_job_{q}"),
-                };
-                let case = format!("{kind}/{boundary}/readers_{readers}");
-                let input = serde_json::json!({"readers":readers,"records_per_reader":64,"physical_group_size":1,"encoded_corpus_in_memory":quantum != usize::MAX});
-                let mut taken = false;
-                group.bench_function(&case, |b| {
-                    measure(
-                        b,
-                        censuses,
-                        &mut taken,
-                        &format!("reader_dispatch/{case}"),
-                        &input,
-                        || {
-                            if quantum == usize::MAX {
-                                actual(runtime, &history, readers)
-                            } else {
-                                controlled(runtime, &history, readers, quantum)
-                            }
-                        },
-                    )
-                });
-            }
-        }
+        let case = format!("full/actual_reader/readers_{readers}");
+        let input = serde_json::json!({"readers":readers,"records_per_reader":64,"physical_group_size":1,"encoded_corpus_in_memory":false});
+        let mut taken = false;
+        group.bench_function(&case, |b| {
+            measure(
+                b,
+                censuses,
+                &mut taken,
+                &format!("reader_dispatch/{case}"),
+                &input,
+                || actual(runtime, &history, readers),
+            )
+        });
     }
     group.finish();
 }

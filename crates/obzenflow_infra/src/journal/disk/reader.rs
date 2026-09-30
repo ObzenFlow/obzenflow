@@ -412,8 +412,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             // a fresh decoder here would canonicalize the archive directory
             // and lock the global registry for every physical frame.
             let mut decoder = self.decoder.clone();
-            #[cfg(feature = "bench-instrumentation")]
-            crate::benchmark::add(crate::benchmark::Counter::DecodeBlockingJobs, 1);
             let (classification, decoder, bytes) = tokio::task::spawn_blocking(move || {
                 let classification = classify_frame::<T>(&bytes, &mut decoder, frame_start);
                 (classification, decoder, bytes)

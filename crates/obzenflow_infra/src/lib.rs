@@ -14,8 +14,6 @@
 
 pub mod ai;
 pub mod application;
-#[cfg(feature = "bench-instrumentation")]
-pub mod benchmark;
 pub mod env;
 pub mod http_client;
 pub mod journal;
