@@ -178,11 +178,18 @@ impl FlowHandle {
     }
 
     pub(crate) async fn wait_for_resources(&self) -> Result<(), FlowError> {
-        let mut result = self
-            .handle
-            .join()
-            .await
-            .map_err(|error| FlowError::ExecutionFailed(Box::new(error)));
+        let joined = self.handle.join().await;
+        let aborted = matches!(
+            joined,
+            Err(crate::supervised_base::HandleError::SupervisorAborted)
+        );
+        // Cancellation is the fallback outcome, not a primary failure. Join
+        // every child and accepted publication before choosing it; otherwise
+        // a parent abort can hide a failure its child already acknowledged.
+        let mut result = match joined {
+            Err(crate::supervised_base::HandleError::SupervisorAborted) => Ok(()),
+            result => result.map_err(|error| FlowError::ExecutionFailed(Box::new(error))),
+        };
         for stage in &self.stage_cleanup {
             stage.request_abort();
         }
@@ -204,7 +211,13 @@ impl FlowHandle {
                 result = Err(FlowError::ExecutionFailed(Box::new(error.clone())));
             }
         }
-        result
+        if result.is_ok() && aborted {
+            Err(FlowError::ExecutionFailed(Box::new(
+                crate::supervised_base::HandleError::SupervisorAborted,
+            )))
+        } else {
+            result
+        }
     }
 
     /// The run substrate selected at composition: durable with its current-run

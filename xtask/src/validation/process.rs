@@ -170,6 +170,45 @@ pub(super) fn execute_nextest(
 
 type OutputCallback<'a> = &'a mut dyn FnMut(&[u8]);
 
+pub(super) fn os_error_code(mut error: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    loop {
+        if let Some(code) = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+        {
+            return Some(code);
+        }
+        error = error.source()?;
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ProcessFailure {
+    pub(super) operation: String,
+    pub(super) executable: String,
+    pub(super) phase: String,
+    pub(super) os_code: Option<i32>,
+    pub(super) message: String,
+    #[serde(skip)]
+    source: Box<dyn std::error::Error>,
+}
+
+impl std::fmt::Display for ProcessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} executable={} os_code={:?}: {}",
+            self.operation, self.phase, self.executable, self.os_code, self.message
+        )
+    }
+}
+
+impl std::error::Error for ProcessFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 struct Feedback<'a> {
     file: File,
     remaining: usize,
@@ -202,6 +241,36 @@ pub(super) fn execute_observed(
     timeout: Duration,
     publish: Option<OutputCallback<'_>>,
 ) -> Result<ExitStatus> {
+    let mut phase = "prepare artifacts";
+    execute_inner(command, directory, label, timeout, publish, &mut phase).map_err(|source| {
+        let failure = ProcessFailure {
+            operation: label.into(),
+            executable: command.get_program().to_string_lossy().into_owned(),
+            phase: phase.into(),
+            os_code: os_error_code(source.as_ref()),
+            message: source.to_string(),
+            source,
+        };
+        eprintln!("validation: {failure}");
+        // Reporting failure must not erase the original operation failure.
+        let saved = serde_json::to_vec_pretty(&failure)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| fs::write(directory.join(format!("{label}.error.json")), bytes));
+        if let Err(error) = saved {
+            eprintln!("validation: could not retain {label} error: {error}");
+        }
+        Box::new(failure) as Box<dyn std::error::Error>
+    })
+}
+
+fn execute_inner(
+    command: &mut Command,
+    directory: &Path,
+    label: &str,
+    timeout: Duration,
+    publish: Option<OutputCallback<'_>>,
+    phase: &mut &'static str,
+) -> Result<ExitStatus> {
     fs::create_dir_all(directory)?;
     let out = directory.join(format!("{label}.stdout.log"));
     let err = directory.join(format!("{label}.stderr.log"));
@@ -229,6 +298,7 @@ pub(super) fn execute_observed(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    *phase = "spawn";
     let mut child = OwnedChild {
         process: command.spawn()?,
         reaped: false,
@@ -236,6 +306,7 @@ pub(super) fn execute_observed(
     // Reading the ordinary log file cannot block the child on a pipe. Forward
     // its early failure evidence while independent tests continue, with a
     // fixed display budget; the original output and JUnit remain complete.
+    *phase = "observe child";
     let mut feedback = match publish {
         Some(publish) => Some(Feedback {
             file: File::open(&err)?,

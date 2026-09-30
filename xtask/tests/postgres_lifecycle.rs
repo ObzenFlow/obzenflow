@@ -2,7 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Black-box lifecycle verification for the public PostgreSQL xtask commands.
+//! Native executable and PostgreSQL lifecycle verification for xtask commands.
+
+#[path = "postgres_lifecycle/validation_launcher.rs"]
+mod validation_launcher;
 
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},

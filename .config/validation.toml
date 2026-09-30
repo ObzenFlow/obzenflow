@@ -52,6 +52,27 @@ owner = "intentional manual rate-limited example proof, outside required accepta
 # Lanes identify applicable inventories only. Undeclared cases are not certified hermetic.
 
 [[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::retained_launcher_survives_replacement_of_its_running_image"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "An isolated running executable is replaced while its retained image must remain usable for delegated subprocesses."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::prerequisites::tests::real_probe_execution_failures_remain_unknown_and_preserve_independent_work"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Actual launch failures and invalid child results prove infrastructure attribution, persisted diagnostics and independent-case admission."
+
+[[prerequisites]]
+binary = "xtask::postgres_lifecycle"
+test = "validation_launcher::real_probe_and_postgres_entry_survive_build_output_replacement"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Real probe and PostgreSQL entry points execute a retained Cargo-built image after controlled output replacement, without a live database."
+
+[[prerequisites]]
 binary = "obzenflow_infra::standalone_embedding_wire_test"
 test = "native_adapters_reject_bad_cardinality_order_and_width_without_retrying"
 lanes = ["production-features"]
@@ -74,10 +95,17 @@ rationale = "Owned HTTP peer proves redirect body preservation at the adapter wi
 
 [[prerequisites]]
 binary = "obzenflow_infra"
-test = "application::flow_application::tests::lifecycle::dropped_application_cancels_runtime_and_pending_stage_work"
+test = "application::flow_application::tests::lifecycle::dropped_hosted_application_cancels_runtime_and_pending_stage_work"
 lanes = ["production-features","test-support"]
 capabilities = ["temp-files","ipv4-loopback-bind"]
-rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+rationale = "Hosted cancellation observes source destruction and physical termination before joining Runtime and rebinding the owned listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::dropped_standalone_application_cancels_runtime_and_pending_stage_work"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Standalone cancellation uses an isolated configuration file and memory journals; it opens no listener."
 
 [[prerequisites]]
 binary = "obzenflow_infra"

@@ -146,7 +146,7 @@ impl From<io::Error> for ProbeFailure {
     fn from(error: io::Error) -> Self {
         Self {
             kind: format!("{:?}", error.kind()),
-            os_code: error.raw_os_error(),
+            os_code: process::os_error_code(&error),
             message: error.to_string(),
         }
     }
@@ -161,6 +161,19 @@ struct ProbeRecord {
     duration_seconds: f64,
     completed: bool,
     failure: Option<ProbeFailure>,
+    infrastructure_failure: Option<InfrastructureFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct InfrastructureFailure {
+    phase: String,
+    executable: String,
+    error: ProbeFailure,
+}
+
+enum ProbeOutcome {
+    Completed(Option<ProbeFailure>),
+    Incomplete(InfrastructureFailure),
 }
 
 #[derive(Debug, Serialize)]
@@ -193,7 +206,17 @@ impl Admission {
         if self.blocked.is_empty() {
             executed
         } else {
-            Err(error(format!("{} required cases have unavailable prerequisites; runnable execution: {}; see prerequisites.json, coverage.json and outcomes.json",
+            let incomplete = self
+                .probes
+                .iter()
+                .filter(|record| !record.completed)
+                .count();
+            let denied = self
+                .probes
+                .iter()
+                .filter(|record| record.failure.is_some())
+                .count();
+            Err(error(format!("{} required cases blocked: {incomplete} probes incomplete (capability unknown), {denied} completed probes reported unavailable capabilities; runnable execution: {}; see prerequisites.json, coverage.json and outcomes.json",
                 self.blocked.len(), executed.err().map_or_else(
                     || if self.runnable.is_empty() { "not run".into() } else { "passed".into() },
                     |error| error.to_string()))))
@@ -241,6 +264,7 @@ pub(super) fn admit(
     required: &BTreeSet<TestId>,
     directory: &Path,
     artifacts: &Path,
+    launcher: &super::launcher::Launcher,
 ) -> Result<Admission> {
     partition(
         &policy.prerequisites,
@@ -249,7 +273,16 @@ pub(super) fn admit(
         directory,
         artifacts,
         root,
-        |capability| bounded_probe(root, policy, directory, artifacts, capability),
+        |capability| {
+            bounded_probe(
+                root,
+                policy,
+                directory,
+                artifacts,
+                capability,
+                launcher.path(),
+            )
+        },
     )
 }
 
@@ -260,7 +293,7 @@ fn partition(
     directory: &Path,
     artifacts: &Path,
     root: &Path,
-    mut probe: impl FnMut(Capability) -> std::result::Result<(), ProbeFailure>,
+    mut probe: impl FnMut(Capability) -> ProbeOutcome,
 ) -> Result<Admission> {
     validate(requirements)?;
     let mut selected: BTreeMap<Capability, BTreeSet<TestId>> = BTreeMap::new();
@@ -298,13 +331,24 @@ fn partition(
             duration_seconds: 0.0,
             completed: false,
             failure: None,
+            infrastructure_failure: None,
         });
         admission.save(directory)?;
         let started = Instant::now();
         let record = admission.probes.last_mut().unwrap();
-        record.failure = probe(capability).err();
+        match probe(capability) {
+            ProbeOutcome::Completed(failure) => {
+                record.completed = true;
+                record.failure = failure;
+            }
+            ProbeOutcome::Incomplete(failure) => record.infrastructure_failure = Some(failure),
+        }
         record.duration_seconds = started.elapsed().as_secs_f64();
-        record.completed = true;
+        if let Some(failure) = &record.infrastructure_failure {
+            eprintln!("validation: probe-{} incomplete: operation={} scope={} phase={} executable={} os_code={:?}: {}; capability unknown", capability.name(), record.operation, record.scope, failure.phase, failure.executable, failure.error.os_code, failure.error.message);
+        } else if let Some(failure) = &record.failure {
+            eprintln!("validation: probe-{} completed, capability unavailable: operation={} scope={} os_code={:?}: {}", capability.name(), record.operation, record.scope, failure.os_code, failure.message);
+        }
         admission.blocked = admission
             .probes
             .iter()
@@ -332,33 +376,46 @@ fn bounded_probe(
     directory: &Path,
     artifacts: &Path,
     capability: Capability,
-) -> std::result::Result<(), ProbeFailure> {
-    let run = || -> Result<Option<ProbeFailure>> {
+    executable: &Path,
+) -> ProbeOutcome {
+    let mut phase = "before launch";
+    let mut run = || -> Result<Option<ProbeFailure>> {
         if process::was_interrupted() {
             return Err(error("prerequisite probe interrupted"));
         }
         let label = format!("probe-{}", capability.name());
-        let mut command = process::command(root, policy, std::env::current_exe()?);
+        let mut command = process::command(root, policy, executable);
         command
             .arg("__test-prerequisite")
             .arg(capability.name())
             .arg(artifacts);
+        phase = "execute";
         let status = process::execute(&mut command, directory, &label, Duration::from_secs(5))?;
+        phase = "exit status";
         if !status.success() {
             return Err(error(format!("probe process did not complete: {status}")));
         }
-        Ok(serde_json::from_slice(&fs::read(
-            directory.join(format!("{label}.stdout.log")),
-        )?)?)
+        phase = "read result";
+        let bytes = fs::read(directory.join(format!("{label}.stdout.log")))?;
+        phase = "decode result";
+        Ok(serde_json::from_slice(&bytes)?)
     };
     match run() {
-        Ok(None) => Ok(()),
-        Ok(Some(error)) => Err(error),
-        Err(error) => Err(ProbeFailure {
-            kind: "probe-incomplete".into(),
-            os_code: None,
-            message: error.to_string(),
-        }),
+        Ok(failure) => ProbeOutcome::Completed(failure),
+        Err(error) => {
+            let process = error.downcast_ref::<process::ProcessFailure>();
+            ProbeOutcome::Incomplete(InfrastructureFailure {
+                phase: process.map_or_else(|| phase.into(), |error| error.phase.clone()),
+                executable: executable.display().to_string(),
+                error: ProbeFailure {
+                    kind: "probe-incomplete".into(),
+                    os_code: process
+                        .and_then(|error| error.os_code)
+                        .or_else(|| process::os_error_code(error.as_ref())),
+                    message: error.to_string(),
+                },
+            })
+        }
     }
 }
 
@@ -515,9 +572,9 @@ mod tests {
             dir.path(),
             |capability| {
                 if capability == Capability::Ipv4LoopbackConnect {
-                    Err(io::Error::from_raw_os_error(libc::EACCES).into())
+                    ProbeOutcome::Completed(Some(io::Error::from_raw_os_error(libc::EACCES).into()))
                 } else {
-                    Ok(())
+                    ProbeOutcome::Completed(None)
                 }
             },
         )
@@ -559,7 +616,7 @@ mod tests {
                 dir.path(),
                 dir.path(),
                 dir.path(),
-                |_| Ok(()),
+                |_| ProbeOutcome::Completed(None),
             )
             .unwrap();
             assert!(admission.blocked.is_empty());
@@ -583,7 +640,7 @@ mod tests {
             dir.path(),
             dir.path(),
             dir.path(),
-            |_| Err(io::Error::from_raw_os_error(libc::EPERM).into()),
+            |_| ProbeOutcome::Completed(Some(io::Error::from_raw_os_error(libc::EPERM).into())),
         )
         .unwrap();
         assert!(admission.runnable.is_empty());
@@ -615,5 +672,75 @@ mod tests {
             b.join().unwrap();
         });
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn real_probe_execution_failures_remain_unknown_and_preserve_independent_work() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let policy = Policy::read(root).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let not_executable = directory.path().join("not-executable");
+        fs::write(&not_executable, "not an executable").unwrap();
+        for (executable, phase, code) in [
+            (
+                directory.path().join("missing-xtask"),
+                "spawn",
+                Some(libc::ENOENT),
+            ),
+            (Path::new("/usr/bin/false").to_owned(), "exit status", None),
+            (Path::new("/usr/bin/true").to_owned(), "decode result", None),
+            (Path::new("/bin/echo").to_owned(), "decode result", None),
+            (not_executable, "spawn", Some(libc::EACCES)),
+        ] {
+            let admission = partition(
+                &[requirement()],
+                Lane::Default,
+                &BTreeSet::from([id("socket"), id("memory")]),
+                directory.path(),
+                directory.path(),
+                root,
+                |capability| {
+                    bounded_probe(
+                        root,
+                        &policy,
+                        directory.path(),
+                        directory.path(),
+                        capability,
+                        &executable,
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(admission.runnable, BTreeSet::from([id("memory")]));
+            if let Some(code) = code {
+                let failure: serde_json::Value = serde_json::from_slice(
+                    &fs::read(directory.path().join("probe-ipv4-loopback-bind.error.json"))
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(failure["phase"], "spawn");
+                assert_eq!(failure["executable"], executable.display().to_string());
+                assert_eq!(failure["os_code"], code);
+            }
+            for record in &admission.probes {
+                assert!(!record.completed);
+                assert!(
+                    record.failure.is_none(),
+                    "a capability denial requires a completed probe"
+                );
+                let failure = record.infrastructure_failure.as_ref().unwrap();
+                assert_eq!(failure.phase, phase);
+                assert_eq!(failure.executable, executable.display().to_string());
+                assert_eq!(failure.error.os_code, code);
+            }
+            let failure = admission
+                .finish(
+                    directory.path(),
+                    Err(super::super::failed("independent assertion")),
+                )
+                .unwrap_err();
+            assert!(failure.to_string().contains("capability unknown"));
+            assert!(failure.to_string().contains("independent assertion"));
+        }
     }
 }

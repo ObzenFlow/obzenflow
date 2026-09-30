@@ -514,7 +514,10 @@ impl StageHandle for TestPipelineStageHandle {
         if let Some(probe) = &self.shutdown_probe {
             probe.abort_and_join_count.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(())
+        match &self.signals.0.borrow().failure {
+            Some(failure) => Err(failure.cause.clone()),
+            None => Ok(()),
+        }
     }
 
     fn request_abort(&self) {

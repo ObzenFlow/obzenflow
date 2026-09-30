@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 //! Repository validation owns selection and acceptance, never test execution.
+mod launcher;
 mod performance;
 mod plan;
 pub(crate) mod prerequisites;
@@ -90,7 +91,14 @@ fn run_native(
     options: Options,
     policy: Policy,
     summary_path: Option<&Path>,
-    mut execute_lane: impl FnMut(&Path, &Policy, Lane, &[String], &Path) -> Result<()>,
+    mut execute_lane: impl FnMut(
+        &Path,
+        &Policy,
+        Lane,
+        &[String],
+        &Path,
+        &launcher::Launcher,
+    ) -> Result<()>,
 ) -> Result<()> {
     let _lock = process::lock(root)?;
     let _signals = process::SignalGuard::install()?;
@@ -98,7 +106,7 @@ fn run_native(
     let directory = root.join("target/test-runs").join(&run_id);
     fs::create_dir(&directory)?;
     let mut report = RunReport {
-        version: 2,
+        version: 3,
         run_id,
         started_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -136,6 +144,8 @@ fn run_native(
         );
     }
     let prerequisites = (|| {
+        // This must precede any Cargo invocation, including inventory builds.
+        let launcher = launcher::Launcher::retain(&directory)?;
         let rust = process::capture(
             root,
             &policy,
@@ -159,9 +169,10 @@ fn run_native(
             &directory,
             "cargo-metadata",
         )?;
-        plan::production_features(&serde_json::from_str(&raw)?, root)
+        let production = plan::production_features(&serde_json::from_str(&raw)?, root)?;
+        Ok((production, launcher))
     })();
-    let production = match prerequisites {
+    let (production, launcher) = match prerequisites {
         Ok(features) => features,
         Err(failure) => {
             report.outcome = Outcome::Incomplete(failure.to_string());
@@ -179,7 +190,7 @@ fn run_native(
         let phase = directory.join(lane.name());
         fs::create_dir(&phase)?;
         let started = Instant::now();
-        let result = execute_lane(root, &policy, lane, &production, &phase);
+        let result = execute_lane(root, &policy, lane, &production, &phase, &launcher);
         report.lanes[index].elapsed_seconds = started.elapsed().as_secs_f64();
         report.lanes[index].outcome = match result {
             Ok(()) => Outcome::Passed,
@@ -291,10 +302,11 @@ fn run_lane(
     lane: Lane,
     production: &[String],
     directory: &Path,
+    launcher: &launcher::Launcher,
 ) -> Result<()> {
     match lane {
         Lane::Default | Lane::ProductionFeatures | Lane::TestSupport | Lane::JournalFixtures => {
-            nextest(root, policy, lane, production, directory)
+            nextest(root, policy, lane, production, directory, launcher)
         }
         Lane::Doctest => {
             let status = process::execute(
@@ -316,7 +328,7 @@ fn run_lane(
         }
         Lane::Postgres => {
             let status = process::execute(
-                process::command(root, policy, std::env::current_exe()?).args(["postgres", "test"]),
+                process::command(root, policy, launcher.path()).args(["postgres", "test"]),
                 directory,
                 "postgres",
                 Duration::from_secs(policy.command_watchdog_seconds),
@@ -337,6 +349,7 @@ fn nextest(
     lane: Lane,
     production: &[String],
     directory: &Path,
+    launcher: &launcher::Launcher,
 ) -> Result<()> {
     let version = process::capture(
         root,
@@ -423,6 +436,7 @@ fn nextest(
         &inventory.selected,
         directory,
         &case_artifacts,
+        launcher,
     )?;
     eprintln!(
         "validation: {} required={} runnable={} blocked={}",

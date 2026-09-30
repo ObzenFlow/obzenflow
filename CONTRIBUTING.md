@@ -141,7 +141,13 @@ own listener, directory and children. A successful probe followed by a test
 failure remains a failed execution.
 
 `prerequisites.json` retains operation, resource scope, OS error, affected case
-identities and duration. `coverage.json` retains the original required inventory,
+identities and duration. Native report version 3 distinguishes completed probes
+reporting unavailable capabilities from infrastructure failures that leave the
+capability unknown. Launch, execution and decoding failures retain the phase,
+executable and underlying error; process errors also have a `*.error.json`
+artifact and are printed immediately. Validation owns a private executable copy
+before Cargo builds and uses it for both probes and PostgreSQL delegation.
+`coverage.json` retains the original required inventory,
 runnable and blocked cases, and executed failures. Unaffected cases continue in
 the normal concurrent scheduler; any blocked required case leaves the lane
 incomplete and returns nonzero. Blocked cases are separate from intentional

@@ -5,6 +5,52 @@
 use super::*;
 use std::process::Command;
 
+#[test]
+fn retained_launcher_survives_replacement_of_its_running_image() {
+    const CHILD: &str = "OBZENFLOW_VALIDATION_LAUNCHER_CHILD";
+    const TEST: &str =
+        "validation::tests::retained_launcher_survives_replacement_of_its_running_image";
+    if let Some(directory) = std::env::var_os(CHILD) {
+        let directory = std::path::PathBuf::from(directory);
+        let original = std::env::current_exe().unwrap();
+        let retained = launcher::Launcher::retain(&directory).unwrap();
+        let replacement = directory.join("replacement");
+        fs::copy("/usr/bin/false", &replacement).unwrap();
+        fs::rename(replacement, &original).unwrap();
+        // This is the old mechanism after the same unlink/replace operation
+        // performed by Cargo. Linux returns the deleted link target; macOS
+        // resolves the replacement. Neither retains the executing image.
+        let rediscovered = std::env::current_exe().unwrap();
+        let old = Command::new(&rediscovered).arg("--list").output();
+        #[cfg(target_os = "linux")]
+        assert_eq!(old.as_ref().unwrap_err().raw_os_error(), Some(libc::ENOENT));
+        assert!(old.is_err() || !old.unwrap().status.success());
+        let repaired = Command::new(retained.path())
+            .arg("--list")
+            .output()
+            .unwrap();
+        assert!(repaired.status.success(), "{repaired:?}");
+        assert!(String::from_utf8_lossy(&repaired.stdout).contains(TEST));
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let policy = Policy::read(root).unwrap();
+    let image = launcher::Launcher::retain(directory.path()).unwrap();
+    let mut command = process::command(root, &policy, image.path());
+    command
+        .args(["--exact", TEST, "--nocapture"])
+        .env(CHILD, directory.path());
+    let status = process::execute(
+        &mut command,
+        directory.path(),
+        "replace-running-image",
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(status.success());
+}
+
 const PASS: &str = r#"<testsuites tests="1" failures="0" errors="0"><testsuite name="fixture" tests="1" failures="0" errors="0"><testcase classname="fixture" name="work_completed"/></testsuite></testsuites>"#;
 const EARLY_FAILURE: &str = r#"<testsuites tests="2" failures="1" errors="0"><testsuite name="fixture@stress-0" tests="1" failures="1" errors="0"><testcase classname="fixture" name="work_completed"><failure>lost durable output</failure></testcase></testsuite><testsuite name="fixture@stress-1" tests="1" failures="0" errors="0"><testcase classname="fixture" name="work_completed"/></testsuite></testsuites>"#;
 
@@ -117,7 +163,7 @@ fn native_entry_preserves_failures_continues_lanes_and_certifies_only_executed_s
             options,
             policy,
             None,
-            |root, policy, lane, _, output| {
+            |root, policy, lane, _, output, _| {
                 completed.push(lane);
                 let mut expected = BTreeSet::from([plan::TestId {
                     binary: "fixture".into(),
@@ -323,7 +369,7 @@ fn default_and_explicit_performance_report_only_their_requested_scope() {
             Options::parse(&arguments).unwrap(),
             policy,
             Some(&summary_path),
-            |_, _, lane, _, _| {
+            |_, _, lane, _, _, _| {
                 executed.push(lane);
                 Ok(())
             },
@@ -337,7 +383,7 @@ fn default_and_explicit_performance_report_only_their_requested_scope() {
             .unwrap();
         let report: Value =
             serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
-        assert_eq!(report["version"], 2);
+        assert_eq!(report["version"], 3);
         assert_eq!(report["requested_scope"], scope);
         let unrequested: Vec<Lane> =
             serde_json::from_value(report["not_requested"].clone()).unwrap();

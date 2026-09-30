@@ -414,3 +414,64 @@ async fn failure_is_observable_while_owned_cleanup_and_physical_completion_are_p
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_during_owned_cleanup_preserves_the_acknowledged_failure() {
+    use crate::stages::common::stage_handle::StageError;
+    use crate::supervised_base::HandleError;
+
+    for wrapped in [false, true] {
+        let probe = Arc::new(CleanupProbe::default());
+        struct ReleaseCleanup(Arc<CleanupProbe>);
+        impl Drop for ReleaseCleanup {
+            fn drop(&mut self) {
+                self.0.release.notify_one();
+            }
+        }
+        let _release = ReleaseCleanup(probe.clone());
+        let handle = spawn(
+            CleanupSupervisor {
+                work_fails: true,
+                block_cleanup: true,
+                probe: probe.clone(),
+                ..Default::default()
+            },
+            terminal_commands::TestJournal::default(),
+            wrapped,
+        );
+        timeout(Duration::from_secs(3), probe.entered.notified())
+            .await
+            .unwrap();
+        let original = handle.wait_for_failure().await.unwrap().cause;
+        assert!(
+            matches!(&original, StageError::Execution(cause) if matches!(cause.downcast_ref::<FsmError>(), Some(FsmError::HandlerError(message)) if message == "primary work failure")),
+            "{original:?}"
+        );
+        assert!(handle.wait_for_completion().now_or_never().is_none());
+        let aborted = timeout(Duration::from_secs(3), handle.abort_and_wait())
+            .await
+            .unwrap();
+        // Release even on assertion failure; cancellation must destroy cleanup,
+        // not wait for this gate or erase the failure it was cleaning up after.
+        probe.release.notify_one();
+        let joined = handle.wait_for_completion().await;
+        let repeated = handle.wait_for_completion().await;
+        for result in [aborted, joined, repeated] {
+            let Err(HandleError::SupervisorFailed(cause)) = result else {
+                panic!("acknowledged {original:?} must survive abort: {result:?}");
+            };
+            let Some(StageError::Execution(actual)) = cause.downcast_ref::<StageError>() else {
+                panic!("original typed failure was lost: {cause:?}");
+            };
+            let StageError::Execution(expected) = &original else {
+                unreachable!()
+            };
+            assert!(
+                Arc::ptr_eq(actual, expected),
+                "retain the original cause, not a recreated error string"
+            );
+        }
+        assert_eq!(probe.finished.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
+    }
+}
