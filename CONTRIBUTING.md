@@ -94,7 +94,10 @@ Reports live at `target/test-runs/<run-id>/report.json`, alongside exact selecti
 features, invocation/exit records, phase output and JUnit identities. Successful
 output is retained too. CI uploads the complete report directory. A source digest
 includes tracked and untracked non-ignored files, so a result identifies the dirty
-checkout actually tested. Later edits require validation of the affected scope.
+checkout actually tested. Both initial and final checkout identities are retained.
+Committing already-tested changes preserves acceptance when file paths, contents,
+executable modes and symlink targets remain unchanged. Later edits require
+validation of the affected scope.
 
 Run the command directly on your development machine. CI runs it directly on its
 Linux runner with the same feature discovery, profile, concurrency, retry policy

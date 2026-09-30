@@ -62,6 +62,8 @@ struct RunReport {
     run_id: String,
     started_at_unix_ms: u128,
     source: source::SourceIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_source: Option<source::SourceIdentity>,
     platform: String,
     requested_scope: String,
     policy: Value,
@@ -97,6 +99,7 @@ fn run_native(
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis(),
         source: source::identity(root)?,
+        final_source: None,
         platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
         requested_scope: if options.lanes == Lane::ALL {
             "all-required"
@@ -181,11 +184,19 @@ fn run_native(
         };
         save(&directory, &report)?;
     }
-    let final_source = source::identity(root);
-    report.outcome = if final_source.as_ref().ok() != Some(&report.source) {
-        Outcome::Incomplete(
-            "source changed during validation; results do not certify the final checkout".into(),
-        )
+    let source_check = source::identity(root).and_then(|final_source| {
+        let unchanged = report.source.same_contents_as(&final_source);
+        report.final_source = Some(final_source);
+        if unchanged {
+            Ok(())
+        } else {
+            Err(error(
+                "source changed during validation; results do not certify the final checkout",
+            ))
+        }
+    });
+    report.outcome = if let Err(failure) = source_check {
+        Outcome::Incomplete(failure.to_string())
     } else if report
         .lanes
         .iter()

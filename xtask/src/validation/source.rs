@@ -14,6 +14,14 @@ pub(super) struct SourceIdentity {
     pub(super) files: usize,
 }
 
+impl SourceIdentity {
+    pub(super) fn same_contents_as(&self, other: &Self) -> bool {
+        // Committing the tested checkout changes provenance, not executable
+        // inputs. The digest includes paths, bytes, modes and symlink targets.
+        self.content_sha256 == other.content_sha256 && self.files == other.files
+    }
+}
+
 pub(super) fn identity(root: &Path) -> Result<SourceIdentity> {
     let head = Command::new("git")
         .current_dir(root)
@@ -40,23 +48,30 @@ pub(super) fn identity(root: &Path) -> Result<SourceIdentity> {
     names.sort();
     names.dedup();
     let mut digest = Context::new(&SHA256);
-    digest.update(b"obzenflow-validation-source-v1\0");
+    digest.update(b"obzenflow-validation-source-v2\0");
+    let mut files = 0;
     for name in &names {
         let name = std::str::from_utf8(name)?;
+        let path = root.join(name);
+        let meta = match fs::symlink_metadata(&path) {
+            // A deletion made before validation is already part of the tested
+            // checkout. Committing it must not change that checkout's digest.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+            Ok(meta) => meta,
+        };
         digest.update(&(name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
-        let path = root.join(name);
-        match fs::symlink_metadata(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => digest.update(b"deleted\0"),
-            Err(err) => return Err(err.into()),
-            Ok(meta) if meta.file_type().is_symlink() => {
+        files += 1;
+        match meta {
+            meta if meta.file_type().is_symlink() => {
                 digest.update(b"symlink\0");
                 let target = fs::read_link(path)?;
                 let bytes = target.as_os_str().as_encoded_bytes();
                 digest.update(&(bytes.len() as u64).to_le_bytes());
                 digest.update(bytes);
             }
-            Ok(meta) if meta.is_file() => {
+            meta if meta.is_file() => {
                 digest.update(b"file\0");
                 digest.update(&meta.len().to_le_bytes());
                 #[cfg(unix)]
@@ -74,7 +89,7 @@ pub(super) fn identity(root: &Path) -> Result<SourceIdentity> {
                     digest.update(&buffer[..n]);
                 }
             }
-            Ok(_) => return Err(error(format!("unsupported source entry: {name}"))),
+            _ => return Err(error(format!("unsupported source entry: {name}"))),
         }
     }
     Ok(SourceIdentity {
@@ -85,6 +100,6 @@ pub(super) fn identity(root: &Path) -> Result<SourceIdentity> {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect(),
-        files: names.len(),
+        files,
     })
 }
