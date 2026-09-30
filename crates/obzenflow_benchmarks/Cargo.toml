@@ -24,7 +24,6 @@ obzenflow_infra = { workspace = true }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
-futures = { workspace = true }
 
 # Benchmarking
 criterion = { workspace = true, features = ["async_tokio", "html_reports"] }

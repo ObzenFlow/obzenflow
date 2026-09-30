@@ -1710,7 +1710,6 @@ dependencies = [
  "async-trait",
  "criterion",
  "fastrand",
- "futures",
  "libc",
  "obzenflow-topology",
  "obzenflow_adapters",
