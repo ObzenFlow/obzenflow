@@ -1262,7 +1262,7 @@ mod tests {
         });
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_append_retains_index_clock_and_writer_serialisation() {
         use futures::FutureExt;
         for grouped in [false, true] {

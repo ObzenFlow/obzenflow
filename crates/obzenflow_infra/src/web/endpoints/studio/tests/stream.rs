@@ -17,7 +17,7 @@ use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
@@ -392,9 +392,9 @@ pub(super) async fn collect_closing(
     let body = open(endpoint, cursor).await;
     // Set shutdown after opening; an endpoint already closing would return HTTP 204.
     closing.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), body.collect())
-        .await
-        .expect("SSE response closes after terminal shutdown")
+    // Correctness is delivery through the committed terminal prefix. Nextest's
+    // test watchdog bounds hangs; disk catch-up has no two-second contract.
+    body.collect().await
 }
 
 pub(super) fn cursor<P: obzenflow_core::event::payloads::JournalPayload>(
@@ -728,12 +728,12 @@ struct ScriptedReader {
     events: Vec<SystemJournalRecord>,
     position: usize,
     fail_at: Option<usize>,
-    dropped: Arc<AtomicBool>,
+    dropped: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for ScriptedReader {
     fn drop(&mut self) {
-        self.dropped.store(true, Ordering::SeqCst);
+        self.dropped.notify_one();
     }
 }
 
@@ -799,9 +799,7 @@ async fn dropping_studio_response_cancels_pending_journal_open() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
-    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
-        .await
-        .expect("response drop must cancel an opening reader");
+    probe.dropped.notified().await;
 }
 
 pub(crate) struct ScriptedJournal {
@@ -813,7 +811,7 @@ pub(crate) struct ScriptedJournal {
     fail_at: Option<usize>,
     fail_open: bool,
     pending_open: Option<Arc<PendingOpen>>,
-    reader_dropped: Arc<AtomicBool>,
+    reader_dropped: Arc<tokio::sync::Notify>,
     reader_opened: tokio::sync::Notify,
 }
 
@@ -828,7 +826,7 @@ impl ScriptedJournal {
             fail_at: None,
             fail_open: false,
             pending_open: None,
-            reader_dropped: Arc::new(AtomicBool::new(false)),
+            reader_dropped: Arc::new(tokio::sync::Notify::new()),
             reader_opened: tokio::sync::Notify::new(),
         }
     }
@@ -952,11 +950,7 @@ async fn dropping_the_sse_body_drops_its_reader() {
         Some("bootstrap")
     );
     drop(body);
-    tokio::task::yield_now().await;
-    assert!(
-        reader_dropped.load(Ordering::SeqCst),
-        "response cancellation releases its owned reader task"
-    );
+    reader_dropped.notified().await;
 }
 
 #[tokio::test]
@@ -1107,12 +1101,9 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             let mut body = Vec::new();
             if cursor_kind != "known" {
                 loop {
-                    let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                        .await
-                        .unwrap_or_else(|_| {
-                            panic!("bootstrap stalled: disk={disk}, cursor={cursor_kind}")
-                        })
-                        .unwrap();
+                    let frame = stream.next().await.unwrap_or_else(|| {
+                        panic!("stream ended before bootstrap: disk={disk}, cursor={cursor_kind}")
+                    });
                     let bootstrap = frame.event.as_deref() == Some("bootstrap");
                     body.push(frame);
                     if bootstrap {
@@ -1144,11 +1135,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             )
             .await;
             closing.send(true).unwrap();
-            body.extend(
-                tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
-                    .await
-                    .expect("post-cut facts drain before shutdown"),
-            );
+            body.extend(stream.collect::<Vec<_>>().await);
             let snapshots = frames(&body, "middleware_state_snapshot");
             assert_eq!(
                 snapshots.len(),
@@ -1264,14 +1251,15 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
-    tokio::task::yield_now().await;
-    assert!(reader_dropped.load(Ordering::SeqCst));
-    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
-        .await
-        .unwrap();
+    probe.dropped.notified().await;
+    reader_dropped.notified().await;
 
     let system = SystemId::new();
-    let journal = Arc::new(ScriptedJournal::new(system));
+    let mut journal = ScriptedJournal::new(system);
+    let catch_up = Arc::new(PendingOpen::default());
+    journal.pending_read = Some(catch_up.clone());
+    journal.pending_read_from = 64;
+    let journal = Arc::new(journal);
     for _ in 0..256 {
         append(
             journal.as_ref(),
@@ -1284,26 +1272,18 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
     }
     let (endpoint, _closing) = self::endpoint(journal.clone(), vec![]);
     let mut body = open(&endpoint, None).await;
-    let reads = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            assert!(
-                futures::poll!(body.next()).is_pending(),
-                "ready history must yield before exhausting the tape"
-            );
-            tokio::task::yield_now().await;
-            let reads = journal.reads.load(Ordering::SeqCst);
-            if reads > 0 {
-                break reads;
-            }
-        }
-    })
-    .await
-    .expect("catch-up begins before cancellation");
+    // Cancel at a witnessed read inside the initial prefix, independent of how
+    // many polls or worker turns were needed to reach it.
+    tokio::select! {
+        _ = body.next() => panic!("bootstrap cannot pass the held prefix read"),
+        _ = catch_up.entered.notified() => {}
+    }
+    let reads = journal.reads.load(Ordering::SeqCst);
+    assert_eq!(reads, 65);
     assert!(reads < 256);
     drop(body);
-    tokio::task::yield_now().await;
-    assert!(journal.reader_dropped.load(Ordering::SeqCst));
-    tokio::task::yield_now().await;
+    catch_up.dropped.notified().await;
+    journal.reader_dropped.notified().await;
     assert_eq!(journal.reads.load(Ordering::SeqCst), reads);
 }
 
@@ -1505,18 +1485,13 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
 
     // Do not read Studio again until the breaker has opened and recovered.
     // All transitions must survive independently of measurement deadlines.
-    tokio::time::timeout(Duration::from_secs(15), handle.run())
-        .await
-        .expect("source finishes while Studio is unread")
-        .unwrap();
+    handle.run().await.unwrap();
     println!(
         "Studio middleware proof: flow settled after {:?}",
         started.elapsed()
     );
     closing.send(true).unwrap();
-    let body: Vec<_> = tokio::time::timeout(Duration::from_secs(2), stream.collect())
-        .await
-        .unwrap();
+    let body: Vec<_> = stream.collect().await;
     let changes = frames(&body, "middleware_lifecycle");
     println!(
         "Studio middleware proof: unread stream drained after {:?}",
@@ -1616,6 +1591,17 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     let (fresh_endpoint, fresh_closing) = self::endpoint(journal, vec![]);
     let fresh_endpoint = fresh_endpoint.with_live_journals(stage_journals, system_journals);
     let fresh = collect_closing(&fresh_endpoint, fresh_closing, None).await;
+    for (phase, frames) in [("unread", &body), ("resumed", &resumed), ("fresh", &fresh)] {
+        assert!(
+            self::frames(frames, "error").is_empty(),
+            "{phase}: {frames:?}"
+        );
+        assert_eq!(
+            frames.last().unwrap().event.as_deref(),
+            Some("server_shutdown"),
+            "{phase}: terminal history must drain before the response closes"
+        );
+    }
     let snapshot = frame_payload(frames(&fresh, "middleware_state_snapshot")[0]);
     let middleware = snapshot["middleware"].as_array().unwrap();
     assert_eq!(middleware.len(), 1);
@@ -2153,9 +2139,7 @@ async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observa
         let (endpoint, closing) = endpoint(journals, vec![]);
         let stream = open(&endpoint, None).await;
         closing.send(true).unwrap();
-        let body = tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
-            .await
-            .unwrap();
+        let body = stream.collect::<Vec<_>>().await;
         let stages = frames(&body, "stage_lifecycle");
         assert_eq!(stages.len(), 1);
         assert_eq!(frame_payload(stages[0])["stage_id"], owner.to_string());
@@ -2174,27 +2158,26 @@ async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observa
 
 #[tokio::test]
 async fn an_issued_read_settles_while_the_client_stops_polling() {
-    use futures::FutureExt;
     let probe = Arc::new(PendingOpen::default());
     let mut journal = ScriptedJournal::new(SystemId::new());
     journal.pending_read = Some(probe.clone());
+    let reader_dropped = journal.reader_dropped.clone();
     let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
     let mut body = open(&endpoint, None).await;
     assert_eq!(
         body.next().await.unwrap().event.as_deref(),
         Some("bootstrap")
     );
-    assert!(body.next().now_or_never().is_none());
-    tokio::time::timeout(Duration::from_secs(2), probe.entered.notified())
-        .await
-        .unwrap();
+    tokio::select! {
+        _ = body.next() => panic!("the held read cannot produce a frame"),
+        _ = probe.entered.notified() => {}
+    }
     // Finishing the underlying I/O must release its operation guard even though
     // this connection does not poll the returned read result again.
     probe.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), probe.dropped.notified())
-        .await
-        .expect("a paused client cannot retain a settled read's resources");
+    probe.dropped.notified().await;
     drop(body);
+    reader_dropped.notified().await;
 }
 
 #[tokio::test]
@@ -2215,10 +2198,7 @@ async fn ready_records_are_delivered_before_a_later_pending_read_settles() {
     let reader_dropped = journal.reader_dropped.clone();
     let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
     let mut body = open(&endpoint, Some("jr1:{}")).await;
-    let frame = tokio::time::timeout(Duration::from_secs(1), body.next())
-        .await
-        .expect("a pending tail read cannot withhold the preceding committed record")
-        .unwrap();
+    let frame = body.next().await.unwrap();
     assert_eq!(frame.event.as_deref(), Some("flow_lifecycle"));
     assert_eq!(frame.id, Some(cursor(&record)));
     tokio::select! {
@@ -2226,8 +2206,6 @@ async fn ready_records_are_delivered_before_a_later_pending_read_settles() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
-    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
-        .await
-        .expect("response drop cancels the pending read after an emitted record");
-    assert!(reader_dropped.load(Ordering::SeqCst));
+    probe.dropped.notified().await;
+    reader_dropped.notified().await;
 }

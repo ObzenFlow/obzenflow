@@ -1027,7 +1027,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // The held optional mutex is the injected failure.
-    async fn held_index_mutex_skips_updates_and_cancelled_appends_still_commit() {
+    async fn held_optional_index_mutex_does_not_block_committed_appends() {
         for grouped in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("held-index.log");
@@ -1038,33 +1038,22 @@ mod tests {
             let key = key(&observed, ObservationFamily::new("runtime.in_flight"));
             let reader = DiskObservationReader::<ChainEvent>::new(path.clone(), true);
             let guard = reader.shared.state.lock().unwrap();
-            let append_journal = journal.clone();
-            let fact = observed.clone();
-            let mut receipt = Box::pin(async move {
-                if grouped {
-                    append_journal
-                        .append_group(
-                            "cancelled",
-                            vec![fact.clone(), recapture(&fact, 2)],
-                            Default::default(),
-                        )
-                        .await
-                        .map(|_| ())
-                } else {
-                    append_journal
-                        .append(fact, Default::default())
-                        .await
-                        .map(|_| ())
-                }
-            });
-            assert!(futures::poll!(receipt.as_mut()).is_pending());
-            drop(receipt);
-            completes(async {
-                while reader.confirmed_end() == Some(0) {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await;
+            // This optional mutex must not delay commit. Cancellation belongs
+            // in journal::tests::cancelled_append_retains_index_clock_and_writer_serialisation,
+            // where the required publication lock keeps the receipt pending.
+            if grouped {
+                completes(journal.append_group(
+                    "held-optional-index",
+                    vec![observed.clone(), recapture(&observed, 2)],
+                    Default::default(),
+                ))
+                .await
+                .unwrap();
+            } else {
+                completes(journal.append(observed.clone(), Default::default()))
+                    .await
+                    .unwrap();
+            }
             completes(journal.append(recapture(&observed, 3), Default::default()))
                 .await
                 .unwrap();

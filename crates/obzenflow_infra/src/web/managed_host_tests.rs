@@ -92,6 +92,64 @@ async fn connect(host: &ManagedWebHost, path: &str) -> TcpStream {
     socket
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_distinguishes_completion_before_shutdown_from_completion_after_shutdown() {
+    #[derive(Clone, Copy, Debug)]
+    enum Completion {
+        Success,
+        Error,
+        Panic,
+    }
+
+    for before_shutdown in [true, false] {
+        for completion in [Completion::Success, Completion::Error, Completion::Panic] {
+            let (shutdown, mut closing) = watch::channel(false);
+            let serving = tokio::spawn(async move {
+                if !before_shutdown {
+                    // A genuine shutdown response cannot complete before close
+                    // takes its snapshot and signals the serving task.
+                    wait_for_close(&mut closing).await;
+                }
+                match completion {
+                    Completion::Success => Ok(()),
+                    Completion::Error => Err(ManagedWebHostError::Accept(std::io::Error::other(
+                        "serving failure witness",
+                    ))),
+                    Completion::Panic => panic!("serving panic witness"),
+                }
+            });
+            if before_shutdown {
+                while !serving.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            }
+            // Task ownership can be tested without binding a listener.
+            let host = ManagedWebHost {
+                address: "127.0.0.1:0".parse().unwrap(),
+                serving: Some(serving),
+                tasks: HostTasks::default(),
+                shutdown,
+            };
+            let result = host.close().await;
+            assert!(
+                matches!(
+                    (before_shutdown, completion, &result),
+                    (
+                        true,
+                        Completion::Success,
+                        Err(ManagedWebHostError::PrematureCompletion)
+                    ) | (false, Completion::Success, Ok(()))
+                        | (_, Completion::Error, Err(ManagedWebHostError::Accept(_)))
+                ) || matches!(
+                    (completion, &result),
+                    (Completion::Panic, Err(ManagedWebHostError::Task(error))) if error.is_panic()
+                ),
+                "before_shutdown={before_shutdown}, completion={completion:?}: {result:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn bind_is_fallible_and_port_zero_reports_the_actual_listener() {
     let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -122,7 +180,7 @@ async fn bind_is_fallible_and_port_zero_reports_the_actual_listener() {
     drop(rebound);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn close_finishes_admitted_unary_within_the_grace_period() {
     let mut routes = WarpWebHost::new();
     let probe = add_pending(&mut routes, false);
@@ -146,7 +204,7 @@ async fn close_finishes_admitted_unary_within_the_grace_period() {
     assert!(tasks.is_empty());
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn close_deadline_aborts_and_joins_pending_unary_and_sse_on_a_live_runtime() {
     let mut routes = WarpWebHost::new();
     let unary = add_pending(&mut routes, false);
@@ -160,6 +218,9 @@ async fn close_deadline_aborts_and_joins_pending_unary_and_sse_on_a_live_runtime
     let mut sse_socket = connect(&host, "/sse").await;
     unary.entered.notified().await;
     sse.entered.notified().await;
+    // Real socket admission precedes virtual time. Only the close deadline is
+    // under test; kernel I/O readiness must not advance the simulated clock.
+    tokio::time::pause();
     let tasks = host.tasks.clone();
     let mut closing = host.shutdown.subscribe();
     let close = tokio::spawn(host.close());
@@ -175,6 +236,7 @@ async fn close_deadline_aborts_and_joins_pending_unary_and_sse_on_a_live_runtime
     assert!(tasks.is_empty());
     assert_eq!(unary.dropped.load(Ordering::SeqCst), 1);
     assert_eq!(sse.dropped.load(Ordering::SeqCst), 1);
+    tokio::time::resume();
     let _ = unary_socket.read_to_end(&mut Vec::new()).await;
     let _ = sse_socket.read_to_end(&mut Vec::new()).await;
     let rebound = TcpListener::bind(address).await.unwrap();
@@ -194,8 +256,13 @@ async fn dropping_host_aborts_response_work_and_releases_the_listener() {
     let _socket = connect(&host, "/sse").await;
     probe.entered.notified().await;
     let tasks = host.tasks.clone();
+    let serving = host.serving.as_ref().unwrap().abort_handle();
     drop(host);
     tasks.drain().await;
+    // Draining responses does not join the separate listener task.
+    while !serving.is_finished() {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
     let _rebound = TcpListener::bind(address).await.unwrap();
 }
@@ -225,12 +292,12 @@ async fn client_disconnect_drops_pending_unary_and_sse_work() {
 
 #[tokio::test(start_paused = true)]
 async fn close_deadline_includes_an_unresponsive_serving_task() {
-    let mut host = WarpWebHost::new()
-        .bind(HostConfig::localhost(0), watch::channel(false).0)
-        .await
-        .unwrap();
-    host.replace_serving_for_test(Box::pin(std::future::pending()), false)
-        .await;
+    let host = ManagedWebHost {
+        address: "127.0.0.1:0".parse().unwrap(),
+        serving: Some(tokio::spawn(std::future::pending())),
+        tasks: HostTasks::default(),
+        shutdown: watch::channel(false).0,
+    };
     let serving = host.serving.as_ref().unwrap().abort_handle();
     let mut closing = host.shutdown.subscribe();
     let close = tokio::spawn(host.close());
@@ -246,7 +313,7 @@ async fn close_deadline_includes_an_unresponsive_serving_task() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn http2_stream_tasks_belong_to_the_host_scope() {
     let mut routes = WarpWebHost::new();
     let probe = add_pending(&mut routes, true);
@@ -275,6 +342,7 @@ async fn http2_stream_tasks_belong_to_the_host_scope() {
         tasks.0.lock().unwrap().tasks.len() >= 2,
         "HTTP/2 connection and stream tasks must both be owned"
     );
+    tokio::time::pause();
     let mut closing = host.shutdown.subscribe();
     let close = tokio::spawn(host.close());
     closing.changed().await.unwrap();
@@ -290,7 +358,7 @@ async fn http2_stream_tasks_belong_to_the_host_scope() {
     let _ = connection.await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flush_before_close() {
     use crate::journal::MemoryJournal;
     use crate::web::endpoints::studio::StudioUpdatesEndpoint;
@@ -340,7 +408,9 @@ async fn registered_studio_updates_survive_admission_timeout_keep_alive_and_flus
     let initial = read_through(&mut socket, "event:bootstrap").await;
     assert!(initial.starts_with("HTTP/1.1 200"));
     assert!(initial.contains("content-type: text/event-stream"));
+    tokio::time::pause();
     tokio::time::advance(Duration::from_secs(16)).await;
+    tokio::time::resume();
     let heartbeat = read_through(&mut socket, ":\n\n").await;
     assert!(!heartbeat.contains("event:"));
     assert_eq!(

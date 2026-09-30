@@ -123,7 +123,11 @@ async fn join_budget_keeps_blocking_task_owned_and_cancels_the_entire_group() {
 #[tokio::test]
 async fn auxiliary_panic_preserves_primary_error_and_retains_original_join_error() {
     let task = ApplicationTask(tokio::spawn(async { panic!("auxiliary panic witness") }));
-    tokio::task::yield_now().await;
+    // finish() aborts unfinished tasks. Establish that the panic has completed
+    // before testing preservation of its JoinError, on any worker schedule.
+    while !task.0.is_finished() {
+        tokio::task::yield_now().await;
+    }
     let mut driver = ApplicationLifecycle::new(Duration::from_secs(5), OnTerminalArg::Exit);
     driver.tasks.push(task);
     let result = driver
