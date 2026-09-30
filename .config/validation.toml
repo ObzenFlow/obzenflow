@@ -1,0 +1,50 @@
+# FLOWIP-145i: executable local/CI acceptance policy, owned by xtask.
+version = 1
+rust = "1.93.0"
+nextest = "0.9.136"
+profile = "ci-fast"
+build_jobs = 4
+test_threads = 4
+tokio_workers = 2
+# Infrastructure watchdog, including a cold build. Test deadlines live in Nextest.
+command_watchdog_seconds = 1800
+
+[[ignored]]
+binary = "obzenflow_infra"
+test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+owner = "journal-fixtures lane"
+
+[[ignored]]
+binary = "xtask::postgres_lifecycle"
+test = "public_commands_preserve_rows_and_passwordless_environment_boundaries"
+owner = "postgres coordinator"
+
+[[ignored]]
+binary = "obzenflow::postgres_payments_e2e_test"
+test = "payments_application_process"
+owner = "postgres coordinator subprocess fixture"
+
+[[ignored]]
+binary = "obzenflow::csv_sink_termination_contract_test"
+test = "crash_fixture_process"
+owner = "crash_before_flush_replays_unreceipted_csv_work_under_truncated_eof subprocess"
+
+[[ignored]]
+binary = "obzenflow::one_shot_inference_effect_journal_test"
+test = "reply_cut_child_process"
+owner = "resume_after_a_durable_reply_reinterprets subprocess"
+
+[[ignored]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::child_application"
+owner = "independent_lifetimes subprocess"
+
+[[ignored]]
+binary = "obzenflow::product_catalog_enrichment"
+test = "product_catalog_enrichment_completes"
+owner = "intentional manual rate-limited example proof, outside required acceptance"
+
+[[ignored]]
+binary = "obzenflow::product_catalog_enrichment"
+test = "explicit_join_topology_current_schema_live_replay_and_rejected_control"
+owner = "intentional manual rate-limited example proof, outside required acceptance"

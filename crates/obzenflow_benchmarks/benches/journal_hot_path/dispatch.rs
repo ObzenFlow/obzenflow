@@ -4,7 +4,7 @@
 
 use super::{fixtures, measure, Census, Meter, Sample};
 use criterion::{Criterion, Throughput};
-use obzenflow_core::benchmark::{add, Counter};
+use obzenflow_infra::benchmark::{add, Counter};
 use std::cell::LazyCell;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -75,6 +75,7 @@ fn controlled(
 }
 
 fn actual(runtime: &Runtime, history: &fixtures::History, readers: usize) -> Sample {
+    let control = super::control::selected();
     let full = runtime.block_on(async {
         let mut opened = Vec::new();
         for _ in 0..readers {
@@ -84,7 +85,7 @@ fn actual(runtime: &Runtime, history: &fixtures::History, readers: usize) -> Sam
     });
     let meter = Meter::start();
     let start = Instant::now();
-    let results = runtime.block_on(async {
+    let mut results = runtime.block_on(async {
         tokio::time::timeout(fixtures::DEADLINE, async {
             let mut tasks = tokio::task::JoinSet::new();
             for mut reader in full {
@@ -109,11 +110,22 @@ fn actual(runtime: &Runtime, history: &fixtures::History, readers: usize) -> Sam
         .await
         .expect("actual reader workload exceeded deadline")
     });
+    if control == super::control::Control::SlowReader {
+        // Delay belongs inside the measured complete operation. The raw output
+        // and work oracle are identical; only completion is deliberately slow.
+        std::thread::sleep(meter.elapsed() * 2);
+    }
     let elapsed = meter.elapsed();
     let mut sample = meter.finish(elapsed);
+    if control == super::control::Control::MissingReaderOutput {
+        results[0].0.pop();
+    }
     let expected: Vec<_> = history.rows.iter().map(|r| *r.id()).collect();
     for (ids, _) in &results {
-        assert_eq!(ids, &expected);
+        assert_eq!(
+            ids, &expected,
+            "actual reader output completeness and order"
+        );
     }
     assert_eq!(results.len(), readers);
     sample.expect_work("payload_json_decodes", (readers * 64) as u64);

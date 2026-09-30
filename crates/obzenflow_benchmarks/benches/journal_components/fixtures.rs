@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+pub use obzenflow_benchmarks::support::{runtime, DEADLINE};
 use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
@@ -10,19 +11,6 @@ use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::runtime::{Builder, Runtime};
-
-pub const DEADLINE: Duration = Duration::from_secs(30);
-
-pub fn runtime() -> Runtime {
-    Builder::new_multi_thread()
-        .worker_threads(2)
-        .max_blocking_threads(2)
-        .enable_all()
-        .build()
-        .unwrap()
-}
 
 pub fn running_fact(stage: StageId) -> ChainEvent {
     ChainEventFactory::create_with_context(

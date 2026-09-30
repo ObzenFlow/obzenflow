@@ -16,6 +16,10 @@ use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
 use std::io::BufReader;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "journal_tests.rs"]
+mod tests;
+
 /// Encode a standalone fixture with the production codec and complete local
 /// definitions. Returns bytes without writing any files.
 pub fn encode_record_fixture<P: JournalPayload>(

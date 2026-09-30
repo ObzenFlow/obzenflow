@@ -170,7 +170,7 @@ pub(crate) async fn read_frame_async<B: tokio::io::AsyncBufRead + Unpin>(
 
 #[cfg(feature = "bench-instrumentation")]
 fn count_read(bytes: usize) {
-    use obzenflow_core::benchmark::{add, Counter};
+    use crate::benchmark::{add, Counter};
     add(Counter::PrimaryFrameReads, 1);
     add(Counter::PrimaryFrameBytes, bytes as u64);
 }

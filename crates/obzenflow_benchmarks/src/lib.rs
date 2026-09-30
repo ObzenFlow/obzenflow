@@ -34,6 +34,9 @@
 // that benchmarks might share
 use obzenflow_runtime::bootstrap::{set_bootstrap_config, BootstrapConfig};
 
+#[cfg(feature = "components")]
+pub mod support;
+
 /// Re-export commonly used types for benchmarks
 pub mod prelude {
     // Core types

@@ -120,219 +120,164 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked ${{ matrix.cargo_args }} -- -D warnings
 
   test:
-    # Required-check names must stay stable when the Cargo feature list changes.
+    # Preserve required-check names; xtask discovers production features.
     name: Tests (${{ matrix.name }})
     needs: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "4"
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: default
-            features: ""
+            lanes: --lane default --lane journal-fixtures
           - name: production-features
-            # Keep this list in sync with the workspace root production features.
-            features: "tokio-console,http-pull,ai,postgres,prometheus,web-host,studio,cli"
+            lanes: --lane production-features
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
-      - name: Verify lockfile
-        run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Verify production feature list
-        if: matrix.name == 'production-features'
-        env:
-          WORKFLOW_PRODUCTION_FEATURES: ${{ matrix.features }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from __future__ import annotations
-
-          import json
-          import os
-          import pathlib
-          import subprocess
-          import sys
-
-          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          metadata = json.loads(
-              subprocess.check_output(
-                  ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-                  text=True,
-              )
-          )
-
-          root_manifest = str(workspace / "Cargo.toml")
-          root_packages = [
-              package
-              for package in metadata["packages"]
-              if pathlib.Path(package["manifest_path"]).resolve() == pathlib.Path(root_manifest)
-          ]
-          if len(root_packages) != 1:
-              print(f"expected exactly one root package for {root_manifest}, found {len(root_packages)}")
-              sys.exit(1)
-
-          non_production_features = {"test-support", "e2e"}
-          root_features = set(root_packages[0].get("features", {}).keys())
-          expected = sorted(root_features - non_production_features)
-          actual = sorted(
-              feature.strip()
-              for feature in os.environ["WORKFLOW_PRODUCTION_FEATURES"].split(",")
-              if feature.strip()
-          )
-
-          missing = sorted(set(expected) - set(actual))
-          extra = sorted(set(actual) - set(expected))
-
-          if missing or extra:
-              print("Production feature list drift detected.")
-              print(f"Root production features: {','.join(expected) or '(none)'}")
-              print(f"Workflow feature list: {','.join(actual) or '(none)'}")
-              print(f"Missing from workflow: {','.join(missing) or '(none)'}")
-              print(f"Extra workflow-only features: {','.join(extra) or '(none)'}")
-              print()
-              print("Remediation:")
-              print(" - Update .github/workflows/ci.yml if a production feature changed.")
-              print(" - Add intentional test-only/non-production features to the guard allowlist.")
-              sys.exit(1)
-
-          print(f"Production feature list OK: {','.join(actual) or '(none)'}")
-          PY
-
-      - name: Tests (${{ matrix.name }})
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            profile="ci-fast"
-          else
-            profile="ci-full"
-          fi
-
-          if [[ -n "${{ matrix.features }}" ]]; then
-            cargo nextest run --workspace --locked --profile "${profile}" --features "${{ matrix.features }}"
-          else
-            cargo nextest run --workspace --locked --profile "${profile}"
-          fi
-
-      - name: Journal codec fixtures
-        if: ${{ !cancelled() && matrix.name == 'default' }}
-        run: |
-          set -euo pipefail
-          # These files are kept in the repository and omitted from crates.io.
-          cargo nextest run --package obzenflow_infra --lib --locked \
-            --run-ignored only current_schema_fixtures_preserve_bytes_and_logical_records
-
-      - name: Preserve test results and phase output
+      - name: Install pinned Nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.136
+      - name: Validate the declared coverage
+        run: cargo xtask test ${{ matrix.lanes }}
+      - name: Preserve validation reports and phase output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.name }}
-          path: target/nextest/**/junit.xml
-          if-no-files-found: warn
+          path: target/test-runs/
+          if-no-files-found: error
 
   test-test-support:
     needs: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
-      - name: Verify lockfile
-        run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Tests (test-support)
-        # Every test-support binary runs; coverage policy lives in
-        # .config/nextest.toml profiles, never in a workflow allowlist. A
-        # hand-maintained binary filter here silently excluded new test
-        # binaries and masked a regression for an entire FLOWIP cycle
-        # (the 054j group_by lineage test after 120b's versioned-emission
-        # change). Keep PR and main test selection identical; give slow tests
-        # an explicit time budget in the profile instead of excluding them.
-        # Include the optional managed host so authentication and startup
-        # regressions execute in CI rather than only compiling under Clippy.
-        run: |
-          set -euo pipefail
-
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            profile="ci-fast"
-          else
-            profile="ci-full"
-          fi
-
-          cargo nextest run \
-            --workspace \
-            --locked \
-            --profile "${profile}" \
-            --features test-support,obzenflow_infra/warp-server
-
-      - name: Preserve test-support results and phase output
+      - name: Install pinned Nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.136
+      - name: Validate test-support
+        run: cargo xtask test --lane test-support
+      - name: Preserve validation reports and phase output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-test-support
-          path: target/nextest/**/junit.xml
-          if-no-files-found: warn
+          path: target/test-runs/
+          if-no-files-found: error
 
   postgres-conformance:
     needs: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
-      - name: Verify lockfile
-        run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
-
-      - name: Run isolated PostgreSQL acceptance coordinator
-        run: cargo xtask postgres test
+      - name: Install pinned Nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.136
+      - name: Validate postgres
+        run: cargo xtask test --lane postgres
+      - name: Preserve validation reports and phase output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-postgres
+          path: target/test-runs/
+          if-no-files-found: error
 
   doctest:
     needs: fmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
-      - name: Verify lockfile
-        run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.136
+      - name: Validate doctest
+        run: cargo xtask test --lane doctest
+      - name: Preserve validation reports and phase output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-doctest
+          path: target/test-runs/
+          if-no-files-found: error
 
-      - name: Doc tests
-        run: cargo test --workspace --doc --locked
+  performance:
+    needs: fmt
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "4"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.136
+      - name: Validate performance
+        run: cargo xtask test --lane performance
+      - name: Preserve validation reports and phase output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-performance
+          path: target/test-runs/
+          if-no-files-found: error
 
   policy:
     runs-on: ubuntu-latest

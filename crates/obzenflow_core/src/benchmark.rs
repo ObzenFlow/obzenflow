@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Development-only counts at production operations, across async/blocking workers.
-//! The benchmark runs one census at a time and joins its tasks before finishing.
+//! Development-only probes for Core's causal and record operations.
+//! The benchmark owner coordinates activation, aggregation and task completion.
 //! These counters are observations, never inputs to execution or admission.
 
 use crate::event::payloads::chain_payload::EventKind;
@@ -11,9 +11,7 @@ use crate::event::provenance::ChainEventProvenance;
 use crate::event::{ChainPayload, JournalRecord};
 use crate::JournalPayload;
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
 
 macro_rules! counters {
     ($($variant:ident => $name:literal),+ $(,)?) => {
@@ -35,14 +33,6 @@ counters! {
     ClockSerializations => "clock_serializations",
     SerializedClockEntries => "serialized_clock_entries",
     ConstructedClockComponents => "constructed_record_clock_components",
-    PrimaryFrameReads => "primary_frame_reads",
-    PrimaryFrameBytes => "primary_frame_bytes",
-    VerifiedFrames => "verified_frames",
-    VerifiedFrameBytes => "verified_frame_bytes",
-    DefinitionCarrierReads => "definition_carrier_reads",
-    DefinitionCarrierBytes => "definition_carrier_bytes",
-    DecodeBlockingJobs => "decode_blocking_jobs",
-    AppendBlockingJobs => "append_blocking_jobs",
 }
 
 /// Exposes the real structural validator only in instrumented development builds.
@@ -54,14 +44,9 @@ pub fn validate_structure<P: JournalPayload>(
 
 static COUNTS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static EXCLUSIVE: Mutex<()> = Mutex::new(());
-
-pub fn active() -> bool {
-    ACTIVE.load(Ordering::Relaxed)
-}
 
 pub fn add(counter: Counter, amount: u64) {
-    if active() {
+    if ACTIVE.load(Ordering::Relaxed) {
         COUNTS[counter as usize].fetch_add(amount, Ordering::Relaxed);
     }
 }
@@ -101,37 +86,21 @@ pub fn record_serialized(payload: &impl Any) {
     }
 }
 
-pub struct WorkScope {
-    _exclusive: MutexGuard<'static, ()>,
-}
-
-impl WorkScope {
-    pub fn start() -> Self {
-        let exclusive = EXCLUSIVE
-            .try_lock()
-            .expect("overlapping benchmark work scopes");
-        for count in &COUNTS {
-            count.store(0, Ordering::Relaxed);
-        }
-        ACTIVE.store(true, Ordering::SeqCst);
-        Self {
-            _exclusive: exclusive,
-        }
-    }
-
-    /// All contributing tasks must already have completed or been joined.
-    pub fn finish(self) -> BTreeMap<String, u64> {
-        ACTIVE.store(false, Ordering::SeqCst);
-        NAMES
-            .iter()
-            .zip(&COUNTS)
-            .map(|(name, count)| ((*name).to_string(), count.load(Ordering::Relaxed)))
-            .collect()
+/// Reset only while the benchmark owner has stopped contributing work.
+pub fn reset() {
+    for count in &COUNTS {
+        count.store(0, Ordering::Relaxed);
     }
 }
 
-impl Drop for WorkScope {
-    fn drop(&mut self) {
-        ACTIVE.store(false, Ordering::SeqCst);
-    }
+pub fn set_enabled(enabled: bool) {
+    ACTIVE.store(enabled, Ordering::SeqCst);
+}
+
+/// Readout is allocation-free; aggregation belongs to the benchmark owner.
+pub fn snapshot() -> impl Iterator<Item = (&'static str, u64)> {
+    NAMES
+        .iter()
+        .zip(&COUNTS)
+        .map(|(name, count)| (*name, count.load(Ordering::Relaxed)))
 }

@@ -26,7 +26,7 @@ pub async fn write_preencoded(
     bytes: Arc<Vec<u8>>,
 ) -> u64 {
     #[cfg(feature = "bench-instrumentation")]
-    obzenflow_core::benchmark::add(obzenflow_core::benchmark::Counter::AppendBlockingJobs, 1);
+    crate::benchmark::add(crate::benchmark::Counter::AppendBlockingJobs, 1);
     tokio::task::spawn_blocking(move || {
         crate::journal::disk::journal::benchmark_append_frame(
             &mut file.lock().unwrap(),

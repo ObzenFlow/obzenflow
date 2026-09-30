@@ -14,9 +14,15 @@ static PEAK: AtomicU64 = AtomicU64::new(0);
 
 pub struct Allocator;
 
+/// All currently live requested Rust heap bytes in this process, including
+/// fixture and diagnostic allocations. Shared Arc allocations are counted once.
+pub fn live_requested_bytes() -> u64 {
+    LIVE.load(Relaxed)
+}
+
 fn allocated(size: usize) {
     let live = LIVE.fetch_add(size as u64, Relaxed) + size as u64;
-    if obzenflow_core::benchmark::active() {
+    if super::work::active() {
         CALLS.fetch_add(1, Relaxed);
         BYTES.fetch_add(size as u64, Relaxed);
         PEAK.fetch_max(live, Relaxed);
@@ -56,7 +62,7 @@ unsafe impl GlobalAlloc for Allocator {
     }
 }
 
-pub struct Start(u64);
+pub(super) struct Start(u64);
 #[derive(serde::Serialize)]
 pub struct Work {
     pub allocation_and_reallocation_calls: u64,
@@ -65,14 +71,14 @@ pub struct Work {
 }
 impl Start {
     /// Call immediately before enabling the exclusive work scope.
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let live = LIVE.load(Relaxed);
         CALLS.store(0, Relaxed);
         BYTES.store(0, Relaxed);
         PEAK.store(live, Relaxed);
         Self(live)
     }
-    pub fn finish(self) -> Work {
+    pub(super) fn finish(self) -> Work {
         Work {
             allocation_and_reallocation_calls: CALLS.load(Relaxed),
             requested_allocation_bytes: BYTES.load(Relaxed),

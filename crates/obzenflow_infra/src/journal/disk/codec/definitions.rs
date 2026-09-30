@@ -447,7 +447,7 @@ impl<'a, const MEASURE: bool> ReadTable<'a, MEASURE> {
             .read_to_end(&mut bytes)?;
         #[cfg(feature = "bench-instrumentation")]
         {
-            use obzenflow_core::benchmark::{add, Counter};
+            use crate::benchmark::{add, Counter};
             add(Counter::DefinitionCarrierReads, 1);
             add(Counter::DefinitionCarrierBytes, bytes.len() as u64);
         }

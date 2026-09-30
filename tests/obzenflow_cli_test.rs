@@ -1611,6 +1611,77 @@ mod hosted {
     const HOST_ROOT: &str = "OBZENFLOW_CLI_TEST_HOST_ROOT";
     const HOST_PORT: &str = "OBZENFLOW_CLI_TEST_HOST_PORT";
 
+    struct LifetimeEvidence {
+        directory: Option<tempfile::TempDir>,
+        mode: &'static str,
+        phase: &'static str,
+    }
+    impl LifetimeEvidence {
+        fn new(mode: &'static str) -> Self {
+            let base = std::env::var_os("OBZENFLOW_TEST_ARTIFACTS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target/hosted-test-evidence"));
+            std::fs::create_dir_all(&base).unwrap();
+            let directory = tempfile::Builder::new()
+                .prefix(&format!("cli-{mode}-"))
+                .tempdir_in(base)
+                .unwrap();
+            let mut evidence = Self {
+                directory: Some(directory),
+                mode,
+                phase: "create",
+            };
+            evidence.phase("host-start");
+            evidence
+        }
+        fn path(&self) -> &std::path::Path {
+            self.directory.as_ref().unwrap().path()
+        }
+        fn phase(&mut self, phase: &'static str) {
+            self.phase = phase;
+            eprintln!(
+                "hosted lifetime: mode={}, phase={phase}, artifacts={}",
+                self.mode,
+                self.path().display()
+            );
+        }
+    }
+    impl Drop for LifetimeEvidence {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                return;
+            }
+            use std::io::{Read, Seek, SeekFrom};
+            eprintln!(
+                "hosted lifetime failed: mode={}, phase={}; retaining {}",
+                self.mode,
+                self.phase,
+                self.path().display()
+            );
+            for name in ["host.log", "viewer.stderr", "viewer.jsonl"] {
+                let Ok(mut file) = std::fs::File::open(self.path().join(name)) else {
+                    continue;
+                };
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                let _ = file.seek(SeekFrom::Start(metadata.len().saturating_sub(8192)));
+                let mut tail = Vec::new();
+                if file.take(8192).read_to_end(&mut tail).is_ok() {
+                    eprintln!(
+                        "{name}: total_bytes={}, final_bytes={}\n{}",
+                        metadata.len(),
+                        tail.len(),
+                        String::from_utf8_lossy(&tail)
+                    );
+                }
+            }
+            // A hard runner timeout also leaves this target-directory fixture
+            // available to the owner's artifact upload, without a journal scan.
+            let _ = self.directory.take().unwrap().keep();
+        }
+    }
+
     #[test]
     #[ignore = "subprocess fixture launched by independent_lifetimes"]
     fn child_application() {
@@ -1652,10 +1723,13 @@ mod hosted {
     }
 
     async fn wait(child: &mut tokio::process::Child) -> std::process::ExitStatus {
-        tokio::time::timeout(Duration::from_secs(15), child.wait())
+        let pid = child.id();
+        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
             .await
             .expect("process exits within lifecycle budget")
-            .unwrap()
+            .unwrap();
+        eprintln!("hosted lifetime: child_pid={pid:?}, exit={status}");
+        status
     }
 
     async fn discover(
@@ -1713,8 +1787,7 @@ mod hosted {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn independent_lifetimes_cover_detach_sigint_sigterm_and_sigkill() {
         for mode in ["detach", "reader_error", "sigint", "sigterm", "sigkill"] {
-            eprintln!("hosted lifetime: mode={mode}");
-            let dir = tempfile::tempdir().unwrap();
+            let mut dir = LifetimeEvidence::new(mode);
             let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = reservation.local_addr().unwrap().port();
             drop(reservation);
@@ -1740,11 +1813,13 @@ mod hosted {
                 .timeout(Duration::from_secs(2))
                 .build()
                 .unwrap();
+            dir.phase("host-discovery");
             let discovery = discover(&client, &url, &mut application).await;
             let RunArchive::LocalDisk { flow_id, path } = &discovery.archive else {
                 panic!("host must admit its archive: {discovery:?}");
             };
             let path = path.decode().unwrap();
+            dir.phase("initial-snapshot");
             let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
                 .arg("show")
                 .arg(&path)
@@ -1822,6 +1897,7 @@ mod hosted {
                     String::from_utf8_lossy(&started.stderr)
                 );
             }
+            dir.phase("first-viewer-fact");
             first_fact(&rows, &mut viewer).await;
             assert_eq!(
                 client
@@ -1838,6 +1914,7 @@ mod hosted {
                 guidance.contains(&format!("kill -TERM {pid}"))
                     && guidance.contains(&format!("kill -KILL {pid}"))
             );
+            dir.phase("fault-or-signal");
             match mode {
                 "detach" => {
                     signal(&viewer, Signal::Interrupt);
@@ -1893,6 +1970,7 @@ mod hosted {
                 "sigkill" => application.start_kill().unwrap(),
                 _ => unreachable!(),
             }
+            dir.phase("host-settlement");
             let _ = wait(&mut application).await;
             let mut tail = open_disk_run(&path).await.unwrap().into_tail();
             while matches!(tail.read_next().await.unwrap(), TailRead::Record(_)) {}
@@ -1917,6 +1995,7 @@ mod hosted {
                     ));
                 }
             }
+            dir.phase("viewer-settlement");
             if mode != "detach" && mode != "reader_error" {
                 assert_eq!(
                     wait(&mut viewer).await.code(),
@@ -1932,6 +2011,7 @@ mod hosted {
             if mode != "reader_error" {
                 assert_json_summary(&stdout, &std::fs::read_to_string(&diagnostics).unwrap());
             }
+            dir.phase("verified");
         }
     }
 }

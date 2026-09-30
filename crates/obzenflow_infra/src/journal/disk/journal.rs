@@ -560,7 +560,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
             u32::from_le_bytes(write_bytes[trailer..trailer + 4].try_into().unwrap());
 
         #[cfg(feature = "bench-instrumentation")]
-        obzenflow_core::benchmark::add(obzenflow_core::benchmark::Counter::AppendBlockingJobs, 1);
+        crate::benchmark::add(crate::benchmark::Counter::AppendBlockingJobs, 1);
         let outcome =
             tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
                 let mut file = match write_file.lock() {
@@ -745,7 +745,7 @@ impl<T: JournalEvent + 'static> DiskJournal<T> {
         let path = self.path.clone();
         let write_file = self.write_file.clone();
         #[cfg(feature = "bench-instrumentation")]
-        obzenflow_core::benchmark::add(obzenflow_core::benchmark::Counter::AppendBlockingJobs, 1);
+        crate::benchmark::add(crate::benchmark::Counter::AppendBlockingJobs, 1);
         let outcome =
             tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
                 let mut file = match write_file.lock() {

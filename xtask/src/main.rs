@@ -18,6 +18,7 @@ use std::{
 
 mod journal_fixtures;
 mod postgres;
+mod validation;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -130,6 +131,7 @@ fn run() -> Result<()> {
         }
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
         [cmd, rest @ ..] if cmd == "postgres" => postgres::run(rest),
+        [cmd, rest @ ..] if cmd == "test" => validation::run(&workspace_root()?, rest),
         [cmd, rest @ ..] if cmd == "regenerate-journal-fixtures" => {
             journal_fixtures::run(&workspace_root()?, rest).map_err(|error| error as Box<dyn Error>)
         }
@@ -771,6 +773,7 @@ fn print_help() {
     println!("usage:");
     println!("  cargo xtask studio-jobs <up|down|status>");
     println!("  cargo xtask postgres <up|status|connection|run|test|logs|down|cleanup>");
+    println!("  cargo xtask test [--lane <lane>]");
     println!("  cargo xtask regenerate-journal-fixtures");
 }
 

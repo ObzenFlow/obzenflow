@@ -11,6 +11,8 @@ publish = false
 [features]
 components = ["obzenflow_infra/test-support"]
 journal-benchmarks = ["components", "obzenflow_infra/bench-instrumentation"]
+validation-benchmarks = ["components", "obzenflow_infra/warp-server"]
+capacity-benchmarks = ["journal-benchmarks", "validation-benchmarks"]
 
 [dependencies]
 # ObzenFlow dependencies - we need all layers for integration benchmarks
@@ -23,6 +25,7 @@ obzenflow_infra = { workspace = true }
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
+futures = { workspace = true }
 
 # Benchmarking
 criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
@@ -42,7 +45,6 @@ sysinfo = { workspace = true }
 
 [dev-dependencies]
 # Additional test utilities
-futures = { workspace = true }
 fastrand = { workspace = true }
 obzenflow-topology = { workspace = true }
 tracing = { workspace = true }
@@ -128,3 +130,20 @@ path = "benches/journal_hot_path/main.rs"
 harness = false
 required-features = ["journal-benchmarks"]
 
+[[bench]]
+name = "validation_boundaries"
+path = "benches/validation_boundaries.rs"
+harness = false
+required-features = ["validation-benchmarks"]
+
+[[bench]]
+name = "supervision_capacity"
+path = "benches/supervision_capacity.rs"
+harness = false
+required-features = ["capacity-benchmarks"]
+
+[[bench]]
+name = "projection_capacity"
+path = "benches/projection_capacity.rs"
+harness = false
+required-features = ["capacity-benchmarks"]

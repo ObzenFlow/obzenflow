@@ -4,24 +4,18 @@
 
 //! Shared measurement and work-census harness; no production behaviour.
 
-use obzenflow_core::benchmark::WorkScope;
+use super::{allocations, work::WorkScope};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-#[path = "allocations.rs"]
-mod allocations;
-
-#[global_allocator]
-static ALLOCATOR: allocations::Allocator = allocations::Allocator;
-
 #[derive(serde::Serialize)]
 pub struct Census {
-    pub(crate) case: String,
-    pub(crate) input: Value,
-    pub(crate) work: BTreeMap<String, u64>,
-    pub(crate) allocations: allocations::Work,
-    pub(crate) observations: Value,
+    pub case: String,
+    pub input: Value,
+    pub work: BTreeMap<String, u64>,
+    pub allocations: allocations::Work,
+    pub observations: Value,
 }
 
 pub struct Meter {
@@ -31,8 +25,8 @@ pub struct Meter {
 
 impl Meter {
     pub fn start() -> Self {
-        let census = (!obzenflow_core::benchmark::active())
-            .then(|| (allocations::Start::new(), WorkScope::start()));
+        let census =
+            (!super::work::active()).then(|| (allocations::Start::new(), WorkScope::start()));
         Self {
             census,
             start: Instant::now(),
@@ -56,19 +50,19 @@ impl Meter {
 }
 
 pub struct Sample {
-    pub(crate) elapsed: Duration,
-    pub(crate) work: BTreeMap<String, u64>,
-    pub(crate) allocations: Option<allocations::Work>,
-    pub(crate) observations: Value,
+    pub elapsed: Duration,
+    pub work: BTreeMap<String, u64>,
+    pub allocations: Option<allocations::Work>,
+    pub observations: Value,
 }
 
 impl Sample {
-    pub(crate) fn expect_work(&self, name: &str, expected: u64) {
+    pub fn expect_work(&self, name: &str, expected: u64) {
         if self.allocations.is_some() {
             assert_eq!(self.work[name], expected, "{name}");
         }
     }
-    pub(crate) fn is_census(&self) -> bool {
+    pub fn is_census(&self) -> bool {
         self.allocations.is_some()
     }
 }

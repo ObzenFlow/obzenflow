@@ -8,3 +8,7 @@ pub mod journal;
 #[doc(hidden)]
 pub mod journal_bench;
 pub mod sink;
+#[cfg(feature = "warp-server")]
+pub mod studio;
+#[cfg(all(feature = "warp-server", feature = "bench-instrumentation"))]
+pub mod studio_capacity;

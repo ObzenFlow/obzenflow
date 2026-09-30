@@ -31,6 +31,8 @@ pub(crate) struct StudioUpdatesEndpoint {
     runtime_instance_id: Option<RuntimeInstanceId>,
     closing: watch::Receiver<bool>,
     observation_interval: std::time::Duration,
+    #[cfg(feature = "bench-instrumentation")]
+    capacity_probe: Option<Arc<crate::benchmark::studio::StudioCapacityProbe>>,
 }
 
 impl StudioUpdatesEndpoint {
@@ -49,6 +51,8 @@ impl StudioUpdatesEndpoint {
             observation_interval: std::time::Duration::from_millis(
                 obzenflow_runtime::runtime_config::schema::DEFAULT_OBSERVATION_EXPORT_INTERVAL_MS,
             ),
+            #[cfg(feature = "bench-instrumentation")]
+            capacity_probe: None,
         }
     }
 
@@ -67,6 +71,15 @@ impl StudioUpdatesEndpoint {
 
     pub(crate) fn with_observation_interval(mut self, interval: std::time::Duration) -> Self {
         self.observation_interval = interval;
+        self
+    }
+
+    #[cfg(feature = "bench-instrumentation")]
+    pub(crate) fn with_capacity_probe(
+        mut self,
+        probe: Arc<crate::benchmark::studio::StudioCapacityProbe>,
+    ) -> Self {
+        self.capacity_probe = Some(probe);
         self
     }
 }
@@ -99,6 +112,8 @@ impl HttpEndpoint for StudioUpdatesEndpoint {
             self.closing.clone(),
             cursor,
             self.observation_interval,
+            #[cfg(feature = "bench-instrumentation")]
+            self.capacity_probe.clone(),
         ))))
     }
 }
