@@ -6,15 +6,17 @@
 //! Physical codec details stay in Infra, including test-only archive rewrites.
 
 use crate::journal::disk::codec::{self, Decoder, DefinitionStore};
-use crate::journal::disk::inspect::load_manifest;
+use crate::journal::disk::inspect::{export_jsonl, load_manifest};
 use crate::journal::disk::scanner::{
     classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
 };
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::payloads::JournalPayload;
-use obzenflow_core::event::{ChainEvent, JournalEvent, SystemEvent};
-use std::io::BufReader;
+use obzenflow_core::event::{ChainEvent, JournalCommitRef, JournalEvent, SystemEvent};
+use std::collections::BTreeSet;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::time::Instant;
 
 #[cfg(test)]
 #[path = "journal_tests.rs"]
@@ -42,7 +44,96 @@ pub fn omit_observations(
     run: &Path,
     keep: impl Fn(usize) -> bool,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    rewrite_archive(run, keep, |_, _| true).map(|(observations, _)| observations)
+    rewrite_archive(
+        run,
+        &ArchiveRewrite::FrameChecked {
+            keep_observation: &keep,
+            keep_frame: &|_, _| true,
+        },
+    )
+    .map(|counts| counts.removed_observations)
+}
+
+/// Remove observations outside `retained`, then verify the complete written
+/// archive through the public JSONL export. The caller must derive `expected`
+/// independently from the original export, deleting only selected attachments.
+/// Retained observations, all other fields and row order are compared exactly.
+///
+/// This operation owns the export check in place of the per-frame in-memory
+/// roundtrip. It cannot return success before that check; the other rewrite
+/// helpers retain their original full-record checks. Use only closed fixtures.
+pub fn omit_observations_and_export_verified(
+    run: &Path,
+    retained: &BTreeSet<JournalCommitRef>,
+    expected: &[serde_json::Value],
+    output: &Path,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let started = Instant::now();
+    let counts = rewrite_archive(run, &ArchiveRewrite::ExportVerified { retained })?;
+    let rewritten = Instant::now();
+    report_rewrite_phase(run, "rewritten", &counts, started, started);
+    export_jsonl(run, Some(output))?;
+    let exported = Instant::now();
+    report_rewrite_phase(run, "exported", &counts, rewritten, started);
+    verify_export(output, expected)?;
+    report_rewrite_phase(run, "verified", &counts, exported, started);
+    Ok(counts.removed_observations)
+}
+
+fn verify_export(
+    output: &Path,
+    expected: &[serde_json::Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut lines = BufReader::new(std::fs::File::open(output)?).lines();
+    for (index, expected) in expected.iter().enumerate() {
+        let line = lines
+            .next()
+            .transpose()?
+            .ok_or_else(|| format!("archive export is missing row {}", index + 1))?;
+        let actual: serde_json::Value = serde_json::from_str(&line)?;
+        if &actual != expected {
+            return Err(format!(
+                "archive export differs at row {}: expected {expected}, actual {actual}",
+                index + 1
+            )
+            .into());
+        }
+    }
+    if lines.next().transpose()?.is_some() {
+        return Err(format!("archive export has an extra row {}", expected.len() + 1).into());
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct RewritePhase<'a> {
+    archive: &'a Path,
+    phase: &'static str,
+    records: usize,
+    removed_observations: usize,
+    phase_ms: u128,
+    elapsed_ms: u128,
+}
+
+fn report_rewrite_phase(
+    archive: &Path,
+    phase: &'static str,
+    counts: &RewriteCounts,
+    phase_started: Instant,
+    started: Instant,
+) {
+    let evidence = RewritePhase {
+        archive,
+        phase,
+        records: counts.records,
+        removed_observations: counts.removed_observations,
+        phase_ms: phase_started.elapsed().as_millis(),
+        elapsed_ms: started.elapsed().as_millis(),
+    };
+    eprintln!(
+        "Archive observation proof: {}",
+        serde_json::to_string(&evidence).expect("serialise archive proof phase")
+    );
 }
 
 /// Retain complete frames in a closed test archive. The predicate receives the
@@ -53,7 +144,14 @@ pub fn retain_archive_frames(
     run: &Path,
     keep: impl Fn(&Path, &[serde_json::Value]) -> bool,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    rewrite_archive(run, |_| true, keep).map(|(_, records)| records)
+    rewrite_archive(
+        run,
+        &ArchiveRewrite::FrameChecked {
+            keep_observation: &|_| true,
+            keep_frame: &keep,
+        },
+    )
+    .map(|counts| counts.removed_records)
 }
 
 /// Damage exactly one non-final chain frame in a closed test archive without
@@ -105,11 +203,29 @@ pub fn corrupt_chain_frame(
     Ok(())
 }
 
+// Only the checked public export operation can select ExportVerified. There is
+// no public unchecked rewrite mode or verification opt-out for other callers.
+enum ArchiveRewrite<'a> {
+    FrameChecked {
+        keep_observation: &'a dyn Fn(usize) -> bool,
+        keep_frame: &'a dyn Fn(&Path, &[serde_json::Value]) -> bool,
+    },
+    ExportVerified {
+        retained: &'a BTreeSet<JournalCommitRef>,
+    },
+}
+
+#[derive(Default)]
+struct RewriteCounts {
+    records: usize,
+    removed_observations: usize,
+    removed_records: usize,
+}
+
 fn rewrite_archive(
     run: &Path,
-    keep_observation: impl Fn(usize) -> bool,
-    keep_frame: impl Fn(&Path, &[serde_json::Value]) -> bool,
-) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+    rewrite: &ArchiveRewrite<'_>,
+) -> Result<RewriteCounts, Box<dyn std::error::Error + Send + Sync>> {
     let manifest = load_manifest(run)?;
     let mut files = std::collections::BTreeMap::new();
     files.insert(manifest.system_journal_file, true);
@@ -123,9 +239,7 @@ fn rewrite_archive(
         files.insert(stage.data_journal_file.clone(), false);
         files.insert(stage.error_journal_file.clone(), false);
     }
-    let mut ordinal = 0;
-    let mut removed = 0;
-    let mut removed_records = 0;
+    let mut counts = RewriteCounts::default();
     let mut replacements = Vec::new();
     for (file, system) in files {
         let path = run.join(file);
@@ -133,39 +247,22 @@ fn rewrite_archive(
             continue;
         }
         let bytes = if system {
-            rewrite::<SystemEvent>(
-                &path,
-                &keep_observation,
-                &keep_frame,
-                &mut ordinal,
-                &mut removed,
-                &mut removed_records,
-            )?
+            rewrite_file::<SystemEvent>(&path, rewrite, &mut counts)?
         } else {
-            rewrite::<ChainEvent>(
-                &path,
-                &keep_observation,
-                &keep_frame,
-                &mut ordinal,
-                &mut removed,
-                &mut removed_records,
-            )?
+            rewrite_file::<ChainEvent>(&path, rewrite, &mut counts)?
         };
         replacements.push((path, bytes));
     }
     for (path, bytes) in replacements {
         std::fs::write(path, bytes)?;
     }
-    Ok((removed, removed_records))
+    Ok(counts)
 }
 
-fn rewrite<T: JournalEvent>(
+fn rewrite_file<T: JournalEvent>(
     path: &Path,
-    keep: &impl Fn(usize) -> bool,
-    keep_frame: &impl Fn(&Path, &[serde_json::Value]) -> bool,
-    ordinal: &mut usize,
-    removed: &mut usize,
-    removed_records: &mut usize,
+    rewrite: &ArchiveRewrite<'_>,
+    counts: &mut RewriteCounts,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let mut reader = BufReader::new(std::fs::File::open(path)?);
     let mut decoder = Decoder::cold(path);
@@ -187,39 +284,59 @@ fn rewrite<T: JournalEvent>(
         offset += consumed as u64;
         let group = frame.group_id().map(str::to_owned);
         let mut records = frame.into_records();
-        let mut expanded = records
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()?;
-        if !keep_frame(path, &expanded) {
-            *removed_records += records.len();
-            *ordinal += records.len();
-            continue;
-        }
+        let mut expanded = match rewrite {
+            ArchiveRewrite::FrameChecked { keep_frame, .. } => {
+                let expanded = records
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !keep_frame(path, &expanded) {
+                    counts.removed_records += records.len();
+                    counts.records += records.len();
+                    continue;
+                }
+                Some(expanded)
+            }
+            ArchiveRewrite::ExportVerified { .. } => None,
+        };
         // Keep the original full-record oracle, changing only the attachment
         // the caller explicitly asked to remove. Reuse it for the roundtrip
         // check instead of repeatedly serialising provenance and payloads.
-        for (record, expected) in records.iter_mut().zip(&mut expanded) {
-            if !keep(*ordinal) {
-                *removed += usize::from(record.envelope.observability.take().is_some());
-                expected["envelope"]
-                    .as_object_mut()
-                    .expect("journal record envelope is an object")
-                    .remove("observability");
+        for (index, record) in records.iter_mut().enumerate() {
+            let keep = match rewrite {
+                ArchiveRewrite::FrameChecked {
+                    keep_observation, ..
+                } => keep_observation(counts.records),
+                ArchiveRewrite::ExportVerified { retained } => {
+                    retained.contains(&record.commitment())
+                }
+            };
+            if !keep {
+                counts.removed_observations +=
+                    usize::from(record.envelope.observability.take().is_some());
+                if let Some(expanded) = &mut expanded {
+                    expanded[index]["envelope"]
+                        .as_object_mut()
+                        .expect("journal record envelope is an object")
+                        .remove("observability");
+                }
             }
-            *ordinal += 1;
+            counts.records += 1;
         }
         let encoded = codec::prepare(&records, group.as_deref(), path, DefinitionStore::default())?;
-        // Independently decode and compare every field, including observations.
-        let decoded = decoder
-            .decode::<T>(
-                codec::frame::validate(&encoded.bytes).map_err(codec::frame::io_error)?,
-                output.len() as u64,
-            )?
-            .into_records();
-        assert_eq!(records.len(), decoded.len());
-        for (expected, after) in expanded.iter().zip(decoded) {
-            assert_eq!(expected, &serde_json::to_value(after)?);
+        if let Some(expanded) = expanded {
+            // Existing fixture callers still independently decode and compare
+            // every field here, including retained observations.
+            let decoded = decoder
+                .decode::<T>(
+                    codec::frame::validate(&encoded.bytes).map_err(codec::frame::io_error)?,
+                    output.len() as u64,
+                )?
+                .into_records();
+            assert_eq!(records.len(), decoded.len());
+            for (expected, after) in expanded.iter().zip(decoded) {
+                assert_eq!(expected, &serde_json::to_value(after)?);
+            }
         }
         output.extend(encoded.bytes);
     }

@@ -457,9 +457,13 @@ fn prometheus_demo_host_preserves_data_errors_and_delivery_receipts() {
         .keep();
     let mut runs = Vec::new();
     let mut storage = Vec::new();
+    let test_started = std::time::Instant::now();
     for (hosted, periodic) in [(false, false), (true, false), (false, true)] {
         let started = std::time::Instant::now();
-        println!("Prometheus archive proof: hosted={hosted}, periodic={periodic}; starting");
+        println!(
+            "Prometheus archive proof: hosted={hosted}, periodic={periodic}; starting; total={:?}",
+            test_started.elapsed()
+        );
         let directory = root.join(if periodic {
             "periodic"
         } else if hosted {
@@ -500,8 +504,9 @@ interval_ms = 250
             .run_blocking(prometheus_demo::flow_definition(1_000, journals.clone()))
             .expect("the finite example must complete in either host mode");
         println!(
-            "Prometheus archive proof: flow settled after {:?}",
-            started.elapsed()
+            "Prometheus archive proof: flow settled after {:?}; total={:?}",
+            started.elapsed(),
+            test_started.elapsed()
         );
         let archives: Vec<_> = std::fs::read_dir(journals.join("flows"))
             .unwrap()
@@ -535,34 +540,59 @@ interval_ms = 250
             .filter(|state| matches!(*state, "completed" | "cancelled" | "failed"))
             .collect();
         assert_eq!(terminal, ["completed"]);
-        let protected: Vec<_> = rows
-            .into_iter()
-            .map(exported_jsonl::without_observations)
-            .collect();
+        let commitments: Vec<_> = rows.iter().map(exported_jsonl::commitment).collect();
         println!(
-            "Prometheus archive proof: original export checked after {:?}",
-            started.elapsed()
+            "Prometheus archive proof: original export checked after {:?}; records={}, observations={packets}; total={:?}",
+            started.elapsed(), rows.len(), test_started.elapsed()
         );
         for retain_some in [true, false] {
+            // Select every third actual attachment in the original export.
+            // Full commitment keys make the selection independent of the
+            // rewriter's file order and distinguish forwarded placements.
+            let retained: BTreeSet<_> = rows
+                .iter()
+                .zip(&commitments)
+                .filter(|(row, _)| row["envelope"]["observability"].is_object())
+                .enumerate()
+                .filter(|(index, _)| retain_some && index % 3 == 0)
+                .map(|(_, (_, reference))| *reference)
+                .collect();
+            if retain_some {
+                assert!(!retained.is_empty() && retained.len() < packets);
+            } else {
+                assert!(retained.is_empty());
+            }
+            // Derive the complete oracle from the untouched export, not the
+            // rewrite implementation. Retained attachments must also match.
+            let expected: Vec<_> = rows
+                .iter()
+                .zip(&commitments)
+                .map(|(row, reference)| {
+                    if retained.contains(reference) {
+                        row.clone()
+                    } else {
+                        exported_jsonl::without_observations(row.clone())
+                    }
+                })
+                .collect();
+            println!(
+                "Prometheus archive proof: hosted={hosted}, periodic={periodic}, retain_some={retain_some}; archive={}; retained_observations={}; total={:?}",
+                archives[0].display(), retained.len(), test_started.elapsed()
+            );
+            let omitted = directory.join(format!("omitted-{retain_some}.jsonl"));
             assert!(
-                exported_jsonl::omit_observations(&archives[0], |index| retain_some
-                    && index % 3 == 0)
+                obzenflow_infra::testing::journal::omit_observations_and_export_verified(
+                    &archives[0],
+                    &retained,
+                    &expected,
+                    &omitted,
+                )
+                .unwrap()
                     > 0
             );
             println!(
-                "Prometheus archive proof: retain_some={retain_some} rewrite complete after {:?}",
-                started.elapsed()
-            );
-            let omitted = directory.join(format!("omitted-{retain_some}.jsonl"));
-            obzenflow_infra::journal::disk::inspect::export_jsonl(&archives[0], Some(&omitted))
-                .unwrap();
-            assert_eq!(
-                exported_jsonl::protected_records(&std::fs::read_to_string(omitted).unwrap()),
-                protected
-            );
-            println!(
-                "Prometheus archive proof: retain_some={retain_some} export verified after {:?}",
-                started.elapsed()
+                "Prometheus archive proof: retain_some={retain_some} export verified after {:?}; total={:?}",
+                started.elapsed(), test_started.elapsed()
             );
         }
 
@@ -727,7 +757,7 @@ interval_ms = 250
             "this pure example uses sink receipts and must not invent effect invocations"
         );
         runs.push((projection, data_types, deliveries, errors));
-        println!("Prometheus archive proof: hosted={hosted}, periodic={periodic}; assertions passed after {:?}", started.elapsed());
+        println!("Prometheus archive proof: hosted={hosted}, periodic={periodic}; assertions passed after {:?}; total={:?}", started.elapsed(), test_started.elapsed());
     }
     assert_eq!(
         runs[0], runs[1],
