@@ -31,6 +31,8 @@ use tokio::time::Instant;
 pub(crate) struct PipelineSupervisor {
     name: String,
     system_id: SystemId,
+    /// Run ownership outlives the host's process-global bootstrap guard.
+    startup_mode: crate::bootstrap::StartupMode,
     controls: EventReceiver<E>,
     controls_open: bool,
     watcher: StateWatcher<PipelineState>,
@@ -49,6 +51,7 @@ impl PipelineSupervisor {
         Self {
             name: "pipeline_supervisor".into(),
             system_id,
+            startup_mode: crate::bootstrap::bootstrap_config().startup_mode,
             controls,
             controls_open: true,
             watcher,
@@ -93,7 +96,7 @@ impl PipelineSupervisor {
             if state.phase_satisfied(ctx) {
                 return Poll::Ready(E::PhaseSatisfied);
             }
-            if matches!(state, S::ReadyForRun) && !crate::bootstrap::startup_mode_manual() {
+            if matches!(state, S::ReadyForRun) && !self.startup_mode.is_manual() {
                 return Poll::Ready(E::Start);
             }
         }
@@ -212,11 +215,16 @@ impl SelfSupervised for PipelineSupervisor {
             // Admit registration before any later pipeline publication. Its
             // receipt gates startup, while child cancellation and deadlines
             // remain independent of the blocked journal operation.
-            let receipt = ctx
-                .resources
-                .publications
-                .enqueue(registration)
-                .map_err(|error| FsmError::HandlerError(error.to_string()))?;
+            let receipt = match ctx.resources.publications.enqueue(registration) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    ctx.resources
+                        .publications
+                        .relinquish_cancelled_admission(error.as_ref())
+                        .await;
+                    return Err(FsmError::HandlerError(error.to_string()));
+                }
+            };
             ctx.resources
                 .publication_results
                 .get_mut()

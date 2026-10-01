@@ -207,7 +207,8 @@ pub fn shutdown_timeout() -> Duration {
     bootstrap_config().shutdown_timeout
 }
 
-/// Returns `true` when the pipeline should not auto-run on materialisation.
+/// Whether the currently installed bootstrap requests manual startup.
+/// Built pipelines retain the startup mode selected during construction.
 pub fn startup_mode_manual() -> bool {
     bootstrap_config().startup_mode.is_manual()
 }

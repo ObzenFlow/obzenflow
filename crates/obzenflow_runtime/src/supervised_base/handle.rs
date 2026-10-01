@@ -8,7 +8,7 @@
 //! with consistent behavior and proper trait implementations.
 
 use super::builder::{EventSender, HandleError, StateWatcher, SupervisorHandle};
-use super::publication::{self, PublicationScope};
+use super::publication::PublicationScope;
 use super::{HandlerSupervised, HandlerSupervisedExt, SelfSupervised, SelfSupervisedExt};
 use crate::stages::common::stage_handle::StageError;
 use crate::stages::common::stage_lifecycle::{
@@ -56,7 +56,7 @@ pub(crate) struct ExecutionCancellation {
 impl ExecutionCancellation {
     pub(crate) fn abort(&self) {
         self.requested.store(true, Ordering::Release);
-        self.publications.close();
+        self.publications.cancel(self.task.id());
         self.task.abort();
     }
 
@@ -161,7 +161,7 @@ where
                 Ok(Ok(())) => SupervisorExit::Returned,
                 Ok(Err(error))
                     if abort_requested.load(Ordering::Acquire)
-                        && publication::is_admission_closed(error.as_ref()) =>
+                        && completion_publications.is_cancelled_admission(error.as_ref()) =>
                 {
                     SupervisorExit::Aborted
                 }
@@ -572,6 +572,7 @@ mod tests {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+    use crate::supervised_base::publication;
     use crate::supervised_base::ChannelBuilder;
     use futures::poll;
 

@@ -7,15 +7,73 @@ use super::support::*;
 use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
-use crate::pipeline::fsm::PipelineFsmEvent as E;
+use crate::pipeline::fsm::{PipelineFsmEvent as E, PipelineFsmState};
+use crate::pipeline::supervisor::PipelineSupervisor;
 use crate::pipeline::PipelineState as S;
 use crate::stages::common::stage_handle::StageMilestone;
-use crate::supervised_base::ChannelBuilder;
+use crate::supervised_base::{ChannelBuilder, EventLoopDirective, SelfSupervised};
+use futures::FutureExt;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::journal::factory::FlowJournalFactory;
 use obzenflow_core::{Journal, SystemId};
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
+
+pub async fn constructed_pipeline_keeps_startup_mode_when_bootstrap_changes(
+    make_journals: fn() -> Box<dyn FlowJournalFactory>,
+) {
+    let _lock = bootstrap_test_lock_async().await;
+    for startup_mode in [StartupMode::Manual, StartupMode::Auto] {
+        let construction = install_bootstrap_config(BootstrapConfig {
+            startup_mode,
+            ..Default::default()
+        });
+        let mut journals = make_journals();
+        let system_id = SystemId::new();
+        let journal = new_system_journal(&mut *journals, system_id);
+        let (topology, _, _) = source_sink_topology_with_source();
+        let mut ctx = test_context(topology, system_id, journal);
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(S::ReadyForRun);
+        // PipelineBuilder constructs this supervisor before handing the flow
+        // back to its host. Later bootstrap installs cannot authorise or defer
+        // input for the already-built flow.
+        let mut supervisor =
+            PipelineSupervisor::new(system_id, receiver, watcher, ctx.resources.failure.clone());
+        drop(construction);
+        let _next_host = install_bootstrap_config(BootstrapConfig {
+            startup_mode: match startup_mode {
+                StartupMode::Manual => StartupMode::Auto,
+                StartupMode::Auto => StartupMode::Manual,
+            },
+            ..Default::default()
+        });
+
+        // Poll the real dispatch once. A pending manual start is observed
+        // directly, without a scheduling delay or timeout as a negative oracle.
+        let dispatch = supervisor
+            .dispatch_state(&PipelineFsmState::ReadyForRun, &mut ctx)
+            .now_or_never();
+        match startup_mode {
+            StartupMode::Manual => {
+                assert!(
+                    dispatch.is_none(),
+                    "a manual pipeline must remain parked after ambient bootstrap changes: {dispatch:?}"
+                );
+                sender.send(E::Start).await.unwrap();
+                assert!(matches!(
+                    supervisor
+                        .dispatch_state(&PipelineFsmState::ReadyForRun, &mut ctx)
+                        .now_or_never(),
+                    Some(Ok(EventLoopDirective::Transition(E::Start)))
+                ));
+            }
+            StartupMode::Auto => assert!(
+                matches!(dispatch, Some(Ok(EventLoopDirective::Transition(E::Start)))),
+                "an automatic pipeline must still start after ambient bootstrap changes: {dispatch:?}"
+            ),
+        }
+    }
+}
 
 pub async fn startup_waits_for_achieved_transitions_with_zero_child_journal_reads(
     make_journals: fn() -> Box<dyn FlowJournalFactory>,

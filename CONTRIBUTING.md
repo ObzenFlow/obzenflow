@@ -230,7 +230,7 @@ Use shared-resource groups in `.config/nextest.toml` when tests contend for a ha
 
 Tier long-running e2e tests deliberately:
 
-- Keep automated regressions in both CI profiles. Give slow tests an explicit time budget instead of excluding them from PRs.
+- Keep automated regressions in the shared native acceptance selection, using `ci-fast` locally and on PRs and `main`. Give slow tests an explicit time budget instead of excluding them from PRs.
 - Use `#[ignore]` when the test should compile normally but run only on demand.
 - Use `cfg(feature = "e2e")` only when the whole test binary needs external services, credentials, heavyweight optional dependencies, or compile-time-gated setup.
 

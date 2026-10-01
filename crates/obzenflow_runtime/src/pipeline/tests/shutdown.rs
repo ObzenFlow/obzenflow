@@ -30,7 +30,20 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
     use obzenflow_core::event::observability::NoObservations;
     use std::task::Poll;
 
-    for cause in ["owner", "independent-child", "child-failure"] {
+    let _lock = bootstrap_test_lock_async().await;
+    let _bootstrap = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Manual,
+        ..Default::default()
+    });
+    for cause in [
+        "owner-publication",
+        "publication-child-failure",
+        "closed-publication",
+        "owner",
+        "independent-child",
+        "child-failure",
+    ] {
+        let publish_after_abort = cause.contains("publication");
         let mut journals = make_journals();
         let system_id = SystemId::new();
         let journal = new_system_journal(&mut *journals, system_id);
@@ -67,6 +80,8 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
         }
         context.outstanding_children.insert(source);
         context.outstanding_children.extend(sinks);
+        let publications = context.resources.publications.clone();
+        let operational_failure = context.resources.failure.clone();
 
         // Hold an actual pipeline poll on one worker. Tokio's abort request
         // cannot destroy a future while that poll is still executing. The
@@ -87,6 +102,13 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
                         ),
                         "controller did not release the held poll"
                     );
+                }
+                if publish_after_abort {
+                    // Continue the same real supervisor poll after the owner
+                    // has closed admission. The Start transition then attempts
+                    // its actual pipeline publication before Tokio can destroy
+                    // this still-executing future.
+                    return Poll::Ready(E::Start);
                 }
                 match signals.0.borrow().exit.clone() {
                     Some(outcome) => Poll::Ready(E::ChildExited(StageExit {
@@ -131,7 +153,17 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             run_substrate: obzenflow_core::journal::factory::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
         };
-        let (sender, receiver, watcher) = ChannelBuilder::new().build(S::Running);
+        let initial = if publish_after_abort {
+            S::ReadyForRun
+        } else {
+            S::Running
+        };
+        let initial_fsm = if publish_after_abort {
+            PipelineFsmState::ReadyForRun
+        } else {
+            PipelineFsmState::Running
+        };
+        let (sender, receiver, watcher) = ChannelBuilder::new().build(initial);
         let supervisor = PipelineSupervisor::new(
             system_id,
             receiver,
@@ -140,7 +172,7 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
         );
         let task = SupervisorTaskBuilder::new("held_pipeline_poll")
             .with_publications(context.resources.publications.clone())
-            .spawn_self_supervised(supervisor, PipelineFsmState::Running, context);
+            .spawn_self_supervised(supervisor, initial_fsm, context);
         let flow = FlowHandle::new(
             HandleBuilder::new()
                 .with_event_sender(sender)
@@ -155,7 +187,10 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             .await
             .unwrap()
             .unwrap();
-        if cause == "independent-child" {
+        if cause == "closed-publication" {
+            guard.disarm();
+            publications.close();
+        } else if cause == "independent-child" {
             guard.disarm();
             assert!(flow.is_running());
             assert!(probes
@@ -166,7 +201,7 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
                 handle.request_abort();
             }
         } else {
-            if cause == "child-failure" {
+            if matches!(cause, "child-failure" | "publication-child-failure") {
                 source_handle.signals.fail(source, "original child failure");
             }
             drop(guard);
@@ -175,6 +210,18 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             .each_ref()
             .map(|probe| probe.request_abort_count.load(Ordering::Relaxed));
         release.send(()).unwrap();
+        if cause == "closed-publication" {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while operational_failure.get().is_none() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ordinary closed admission must remain an operational failure");
+            // A later owner abort must not relabel the original closed-admission
+            // failure as a consequence of cancellation.
+            drop(lifecycle::guard_execution(&flow));
+        }
         tokio::time::timeout(Duration::from_secs(2), async {
             while flow.is_running() {
                 tokio::task::yield_now().await;
@@ -195,7 +242,7 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             let error = result.unwrap_err();
             eprintln!("held parent poll cause={cause}: requests_during_poll={requests_during_poll:?}; requests_before_join={requests_before_join:?}; result={error:?}");
             let source = std::error::Error::source(&error).unwrap();
-            if cause == "owner" {
+            if matches!(cause, "owner" | "owner-publication") {
                 assert!(
                     matches!(
                         source.downcast_ref::<HandleError>(),
@@ -210,6 +257,26 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
                         Some(HandleError::SupervisorFailed(_))
                     ),
                     "independent child cancellation must still fail: {error:?}"
+                );
+            } else if cause == "closed-publication" {
+                let retained = operational_failure.get().unwrap();
+                assert!(std::error::Error::source(retained).is_some_and(|cause| {
+                    cause.is::<crate::supervised_base::publication::AdmissionClosed>()
+                }));
+                assert!(!publications.is_cancelled_admission(retained));
+                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+                let mut retained_cause = false;
+                while let Some(current) = cause {
+                    retained_cause |= current
+                        .is::<crate::supervised_base::publication::AdmissionClosed>()
+                        || matches!(current.downcast_ref::<obzenflow_fsm::FsmError>(),
+                            Some(obzenflow_fsm::FsmError::HandlerError(message))
+                                if message == "publication admission is closed");
+                    cause = current.source();
+                }
+                assert!(
+                    retained_cause,
+                    "original admission failure must survive later owner cancellation: {error:?}"
                 );
             } else {
                 assert!(
