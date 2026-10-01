@@ -98,7 +98,8 @@ pub async fn application_abort_does_not_turn_owned_child_cancellation_into_failu
             })
             .boxed(),
         );
-        for sibling in sink_handles.iter().cloned() {
+        for sibling in &sink_handles {
+            let sibling = sibling.clone();
             context
                 .resources
                 .exits
