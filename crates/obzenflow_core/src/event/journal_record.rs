@@ -47,13 +47,10 @@ impl<P: JournalPayload> DerefMut for JournalRecord<P> {
 
 impl<P: JournalPayload> JournalRecord<P> {
     pub fn from_parts(envelope: EventEnvelope<P::Provenance>, payload: P) -> Self {
-        let record = Self {
+        Self {
             data: JournalRecordData { envelope, payload },
             admitted: false,
-        };
-        #[cfg(feature = "bench-instrumentation")]
-        crate::benchmark::record_constructed(&record);
-        record
+        }
     }
 
     pub fn into_parts(self) -> (EventEnvelope<P::Provenance>, P) {
@@ -193,8 +190,6 @@ impl<P: JournalPayload> JournalRecord<P> {
 
 impl<P: JournalPayload> Serialize for JournalRecord<P> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[cfg(feature = "bench-instrumentation")]
-        crate::benchmark::record_serialized(&self.payload);
         use serde::ser::{Error, SerializeStruct};
         self.payload
             .validate(&self.envelope.provenance.event)

@@ -4,15 +4,18 @@
 
 //! Component baselines for ordinary journal operations.
 mod append;
+mod control;
 mod dispatch;
-mod fixtures;
 mod record;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::time::Duration;
 
-mod support;
-pub(crate) use support::{measure, timed, Census, Meter, Sample};
+use obzenflow_benchmarks::support;
+pub(crate) use support::{journal as fixtures, measure, timed, Census, Meter, Sample};
+
+#[global_allocator]
+static ALLOCATOR: support::allocations::Allocator = support::allocations::Allocator;
 
 fn bench(c: &mut Criterion) {
     let runtime = fixtures::runtime();
@@ -25,7 +28,12 @@ fn bench(c: &mut Criterion) {
             .join("../..")
             .join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_json::to_vec_pretty(&censuses).unwrap()).unwrap();
+        let report = serde_json::json!({
+            "measurement_contract": support::MEASUREMENT_CONTRACT,
+            "compiled_manifest_dir": env!("CARGO_MANIFEST_DIR"),
+            "cases": censuses,
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 }
 

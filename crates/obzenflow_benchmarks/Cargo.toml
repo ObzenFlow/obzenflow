@@ -9,8 +9,9 @@ repository.workspace = true
 publish = false
 
 [features]
-components = ["obzenflow_infra/test-support"]
-journal-benchmarks = ["components", "obzenflow_infra/bench-instrumentation"]
+components = []
+journal-benchmarks = ["components"]
+validation-benchmarks = ["components"]
 
 [dependencies]
 # ObzenFlow dependencies - we need all layers for integration benchmarks
@@ -42,7 +43,6 @@ sysinfo = { workspace = true }
 
 [dev-dependencies]
 # Additional test utilities
-futures = { workspace = true }
 fastrand = { workspace = true }
 obzenflow-topology = { workspace = true }
 tracing = { workspace = true }
@@ -128,3 +128,8 @@ path = "benches/journal_hot_path/main.rs"
 harness = false
 required-features = ["journal-benchmarks"]
 
+[[bench]]
+name = "validation_boundaries"
+path = "benches/validation_boundaries.rs"
+harness = false
+required-features = ["validation-benchmarks"]

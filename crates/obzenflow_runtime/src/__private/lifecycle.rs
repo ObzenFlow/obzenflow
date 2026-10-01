@@ -10,29 +10,19 @@
 
 use crate::errors::FlowError;
 use crate::pipeline::FlowHandle;
-use crate::stages::common::stage_handle::StageHandle;
 use crate::supervised_base::handle::ExecutionCancellation;
-use std::sync::Arc;
 
 /// Emergency cancellation for an application-owned execution lifetime.
 /// This retains cancellation capabilities independently of completion observers
 /// and of the FlowHandle's ownership. Drop cannot claim joined completion.
 pub struct ExecutionGuard {
     supervisor: Option<ExecutionCancellation>,
-    stages: Vec<Arc<dyn StageHandle>>,
-    metrics: Arc<crate::pipeline::resources::MetricsOwner>,
 }
 
 impl ExecutionGuard {
-    pub(crate) fn new(
-        supervisor: ExecutionCancellation,
-        stages: Vec<Arc<dyn StageHandle>>,
-        metrics: Arc<crate::pipeline::resources::MetricsOwner>,
-    ) -> Self {
+    pub(crate) fn new(supervisor: ExecutionCancellation) -> Self {
         Self {
             supervisor: Some(supervisor),
-            stages,
-            metrics,
         }
     }
 
@@ -46,10 +36,9 @@ impl Drop for ExecutionGuard {
     fn drop(&mut self) {
         if let Some(supervisor) = &self.supervisor {
             supervisor.abort();
-            self.metrics.request_abort();
-            for stage in &self.stages {
-                stage.request_abort();
-            }
+            // PipelineContext owns child cancellation when the parent future
+            // is destroyed. Aborting children here races a still-running parent
+            // poll, which can mistake our cancellation for an independent failure.
         }
     }
 }

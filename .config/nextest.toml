@@ -1,17 +1,26 @@
-nextest-version = { required = "0.9.91" }
+nextest-version = { required = "0.9.136" }
 
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 1 }
 retries = 0
 # Keep the failing phase output beside the final CI summary as well.
 failure-output = "immediate-final"
+# B15: keep the pinned runner's wait; a detected output-handle leak is a failure.
+leak-timeout = { period = "200ms", result = "fail" }
+status-level = "leak"
+final-status-level = "fail"
+
+# Cheap defect controls get a slot before the full archive/scale obligations.
+[[profile.default.overrides]]
+filter = "test(archive_observation_rewrite_preserves_both_metrics_consumers) | test(validation::) | test(=blocked_sink_reports_live_phase_and_progress_before_recovery) | test(=web::endpoints::studio::tests::stream::composed_stall_reports_source_progress_before_recovery)"
+priority = 100
 
 # Start the recently failing archive proof immediately. All these expensive
 # proofs own temporary journals; Prometheus listeners use allocated ports.
 # Two concurrent proofs leave capacity for other tests on four-slot CI runners.
 [[profile.default.overrides]]
 filter = "binary(=prometheus_example_test) & test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts)"
-priority = 100
+priority = 90
 
 [[profile.default.overrides]]
 filter = "(binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only) | test(=prometheus_demo_host_preserves_data_errors_and_delivery_receipts))) | (binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)) | (binary(=obzenflow_infra) & test(=web::endpoints::studio::tests::stream::many_stage_pipeline_metrics_and_studio_settle_owned_journals))"
@@ -23,9 +32,9 @@ retries = 0
 [profile.ci-fast]
 test-threads = 4
 slow-timeout = { period = "60s", terminate-after = 1 }
-retries = 1
+retries = 0
 fail-fast = false
-# PRs and main select the same tests; only their execution budgets differ.
+# Local acceptance, PRs and main use this same profile and retry policy.
 
 [profile.ci-fast.junit]
 path = "junit.xml"
@@ -33,9 +42,10 @@ store-success-output = true
 store-failure-output = true
 
 [profile.ci-full]
+# Supplementary diagnosis only; this profile cannot replace acceptance.
 test-threads = 4
 slow-timeout = { period = "300s", terminate-after = 2 }
-retries = 2
+retries = 0
 fail-fast = false
 
 [profile.ci-full.junit]
@@ -44,14 +54,14 @@ store-success-output = true
 store-failure-output = true
 
 # The 5k proofs include rate-limited execution and full journal verification.
-# Use the main-branch time budget when running them before merge.
+# Preserve their existing watchdog while Criterion owns performance acceptance.
 # Include the typed 5k case explicitly; its name does not share the other prefix.
 [[profile.ci-fast.overrides]]
 filter = "binary(=prometheus_example_test) & (test(prometheus_example_5k_completes_) | test(=prometheus_5k_typed_try_map_errors_are_unknown_only))"
 slow-timeout = { period = "300s", terminate-after = 2 }
 
 # Temporary 145h merge budgets, authorised 2026-09-27. Reassess these exact
-# exceptions in FLOWIP-145i; performance acceptance remains in 145h-part-2.
+# exceptions in FLOWIP-145i; Criterion owns performance acceptance.
 # This three-configuration archive proof passed its assertions at 65.90s in CI,
 # after the former 60s deadline. Keep all 1,000-input cases and export checks.
 [[profile.ci-fast.overrides]]
@@ -59,7 +69,7 @@ filter = "binary(=prometheus_example_test) & test(=prometheus_demo_host_preserve
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # Replay's outer limit covers live execution, replay preparation/execution and
-# comparison. Its separate 60s comparison assertion is unchanged.
+# comparison. Criterion owns the comparison's performance acceptance.
 [[profile.ci-fast.overrides]]
 filter = "binary(=replay_verification_scale_test) & test(=five_figure_run_verifies_with_streaming_comparison)"
 slow-timeout = { period = "300s", terminate-after = 1 }

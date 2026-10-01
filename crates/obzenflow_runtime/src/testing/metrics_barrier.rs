@@ -191,8 +191,8 @@ impl MetricsBarrier {
         }
     }
 
-    // FLOWIP-114h: scheduler barriers are provided by
-    // `TestClock::settle_scheduler`, not by this helper.
+    // An exported watermark covers that prefix only. Producer completion and
+    // accepted publication settlement are separate ownership obligations.
 }
 
 fn resolve_stage_id(

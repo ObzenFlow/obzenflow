@@ -37,7 +37,7 @@ fn empty_extras() -> FlowHandleExtras {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execution_guard_is_independent_of_completion_observers_and_handle_ownership() {
     for disarm in [false, true] {
         let (sender, _receiver, watcher) =
@@ -82,12 +82,18 @@ async fn execution_guard_is_independent_of_completion_observers_and_handle_owner
                 .await
                 .unwrap()
                 .unwrap_err();
-            assert!(error
-                .source()
-                .unwrap()
-                .to_string()
-                .contains("Supervisor task was aborted"));
+            assert!(
+                matches!(
+                    error.source().and_then(
+                        |source| source.downcast_ref::<crate::supervised_base::HandleError>()
+                    ),
+                    Some(crate::supervised_base::HandleError::SupervisorAborted)
+                ),
+                "{error:?}"
+            );
         }
+        // Child ownership is exercised with a real PipelineContext in the held
+        // parent-poll regression, rather than adding children to a bare task.
         assert!(!flow.is_running());
         assert_eq!(flow.current_state(), PipelineState::Created);
     }
@@ -150,6 +156,105 @@ fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
         .expect("standard handle should build");
 
     FlowHandle::new(handle, extras)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_pipeline_preserves_acknowledged_resource_failures() {
+    use crate::metrics::fsm::MetricsAggregatorState;
+    use crate::pipeline::tests::support::{owned_test_stage, ShutdownProbe};
+    use crate::supervised_base::SupervisorHandle;
+    use obzenflow_core::event::context::StageType;
+    use std::sync::atomic::Ordering;
+
+    for owner in ["stage", "metrics", "publication"] {
+        for primary_failure in [false, true] {
+            let mut extras = empty_extras();
+            let probes = [ShutdownProbe::default(), ShutdownProbe::default()];
+            for (index, probe) in probes.iter().enumerate() {
+                let child = owned_test_stage(
+                    obzenflow_core::StageId::new(),
+                    StageType::Sink,
+                    Some(probe.clone()),
+                );
+                if owner == "stage" && index == 0 {
+                    child.signals.fail(child.id, "acknowledged child failure");
+                }
+                extras.stage_cleanup.push(Arc::new(child));
+            }
+            if owner == "metrics" {
+                let (sender, _receiver, watcher) =
+                    ChannelBuilder::new().build(MetricsAggregatorState::Created);
+                let task = tokio::spawn(async {
+                    Err::<(), Box<dyn Error + Send + Sync>>(
+                        std::io::Error::other("acknowledged child failure").into(),
+                    )
+                });
+                let metrics = HandleBuilder::new()
+                    .with_event_sender(sender)
+                    .with_state_watcher(watcher)
+                    .with_supervisor_task(task)
+                    .build_standard()
+                    .unwrap();
+                metrics.wait_for_completion().await.unwrap_err();
+                extras.metrics.install_for_test(metrics);
+            } else if owner == "publication" {
+                extras
+                    .operational_failure
+                    .set(crate::supervised_base::publication::SharedError::from(
+                        Box::new(std::io::Error::other("acknowledged child failure"))
+                            as Box<dyn Error + Send + Sync>,
+                    ))
+                    .unwrap();
+            }
+            let (sender, _receiver, watcher) = ChannelBuilder::new().build(PipelineState::Created);
+            let task = tokio::spawn(async move {
+                if primary_failure {
+                    Err(std::io::Error::other("primary pipeline failure").into())
+                } else {
+                    std::future::pending::<Result<(), Box<dyn Error + Send + Sync>>>().await
+                }
+            });
+            let flow = FlowHandle::new(
+                HandleBuilder::new()
+                    .with_event_sender(sender)
+                    .with_state_watcher(watcher)
+                    .with_supervisor_task(task)
+                    .build_standard()
+                    .unwrap(),
+                extras,
+            );
+            if primary_failure {
+                flow.handle.join().await.unwrap_err();
+            }
+            drop(lifecycle::guard_execution(&flow));
+            for _ in 0..2 {
+                let error = lifecycle::wait(&flow).await.unwrap_err();
+                let expected = if primary_failure {
+                    "primary pipeline failure"
+                } else {
+                    "acknowledged child failure"
+                };
+                let mut cause: &(dyn Error + 'static) = &error;
+                while let Some(source) = cause.source() {
+                    cause = source;
+                }
+                if let Some(cause) = cause.downcast_ref::<std::io::Error>() {
+                    assert_eq!(cause.to_string(), expected, "{owner}: {error:?}");
+                } else {
+                    assert!(
+                        matches!(cause.downcast_ref::<crate::stages::common::stage_handle::StageError>(), Some(crate::stages::common::stage_handle::StageError::Other(message)) if message == expected),
+                        "{owner}: {error:?}"
+                    );
+                }
+            }
+            assert!(
+                probes
+                    .iter()
+                    .all(|probe| probe.abort_and_join_count.load(Ordering::Relaxed) == 2),
+                "every sibling joins even after failure"
+            );
+        }
+    }
 }
 
 fn flow_handle_for_start_admission(

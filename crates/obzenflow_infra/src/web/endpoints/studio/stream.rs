@@ -271,6 +271,7 @@ struct Connection {
     read_since_observation: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn connection(
     stage_journals: Vec<Arc<dyn Journal<ChainEvent>>>,
     system_journals: Vec<Arc<dyn Journal<SystemEvent>>>,

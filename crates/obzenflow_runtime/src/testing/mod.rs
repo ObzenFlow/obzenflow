@@ -8,12 +8,11 @@
 //! `test-support` feature pulls in `tokio/test-util` so callers can use
 //! `#[tokio::test(start_paused = true)]` together with [`TestClock`].
 //!
-//! The primitives are scoped to FLOWIP-114h's non-cyclic single-writer
-//! case. Cycle, fan-in, and concurrent-writer semantics for [`JournalProbe`]
-//! are out of scope and move to FLOWIP-114n.
-//!
-//! See `obzenflow_improvement_proposals/content/P0/open/FLOWIP-114h-...md`
-//! for the full contract.
+//! Positive probes cover observed committed records, including cycle and fan-in
+//! attribution. Snapshots do not establish producer completion. FLOWIP-145i
+//! retires scheduler-settling and generic absence guarantees in version 0.2.6:
+//! close the relevant producers and accepted publications, or identify a
+//! completed journal prefix, before asserting scoped absence.
 
 #[cfg(test)]
 pub(crate) mod causal_fixture;

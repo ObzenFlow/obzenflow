@@ -235,27 +235,26 @@ async fn observe_until(
     reader: &mut Reader,
     reached: impl Fn(&crate::application::lifecycle_observation::Projection) -> bool,
 ) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            reader.catch_up().await;
-            if reached(&reader.projection) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+    loop {
+        reader.catch_up().await;
+        if reached(&reader.projection) {
+            break;
         }
-    })
-    .await
-    .expect("journal fact must arrive");
+        // Observe a committed fact, without advancing a paused deadline while
+        // merely giving its producer an opportunity to run.
+        tokio::task::yield_now().await;
+    }
 }
 
 #[cfg(feature = "warp-server")]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadline() {
     use crate::application::flow_application::ShutdownSignal;
     use obzenflow_core::event::types::DurationMs;
 
     for before_running in [false, true] {
         for already_admitted in [false, true] {
+            println!("lagging reader: before_running={before_running}, already_admitted={already_admitted}");
             let (flow, source, sink) = pending_flow(false).await;
             flow.start().await.unwrap();
             source.started.notified().await;
@@ -267,12 +266,6 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
             })
             .await;
             let grace = Duration::from_secs(1);
-            let original_start = TokioInstant::now();
-            if already_admitted {
-                flow.stop_graceful(grace).await.unwrap();
-                observe_until(&mut oracle, |p| p.admission.is_some()).await;
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
             let requested_grace = if already_admitted {
                 Duration::from_secs(30)
             } else {
@@ -289,6 +282,14 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
                     Progress::Unknown
                 }
             );
+            // The observer is now held. Witness admission before advancing the
+            // real Runtime deadline; elapsed wall time is not the oracle.
+            let original_start = TokioInstant::now();
+            if already_admitted {
+                flow.stop_graceful(grace).await.unwrap();
+                observe_until(&mut oracle, |p| p.admission.is_some()).await;
+                tokio::time::advance(Duration::from_millis(300)).await;
+            }
             let (signal, receiver) = oneshot::channel();
             signal.send(ShutdownSignal::Sigterm).unwrap();
             let signals = Some(signals::Signals::new(Some(receiver)).unwrap());
@@ -301,16 +302,19 @@ async fn lagging_reader_sigterm_preserves_graceful_admission_and_original_deadli
             };
             assert_eq!(oracle.projection.admission, Some(graceful.clone()));
             let before_deadline = original_start + grace - Duration::from_millis(100);
-            tokio::time::sleep_until(before_deadline).await;
+            tokio::time::advance(before_deadline - TokioInstant::now()).await;
             assert!(futures::poll!(&mut running).is_pending());
             oracle.catch_up().await;
             assert_eq!(oracle.projection.admission, Some(graceful.clone()));
+            // Cross the original deadline, allowing one timer-resolution tick.
+            // A wrongly reset 30-second deadline cannot satisfy this assertion.
+            tokio::time::advance(Duration::from_millis(101)).await;
             observe_until(&mut oracle, |p| {
                 matches!(p.admission, Some(PipelineStopAdmission::Cancel { .. }))
             })
             .await;
             assert!(
-                TokioInstant::now() < original_start + grace + Duration::from_millis(500),
+                TokioInstant::now() == original_start + grace + Duration::from_millis(1),
                 "the later application request must preserve Runtime's original deadline"
             );
             sink.released.notify_one();

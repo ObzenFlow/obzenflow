@@ -1,0 +1,691 @@
+# FLOWIP-145i: executable local/CI acceptance policy, owned by xtask.
+version = 2
+rust = "1.93.0"
+nextest = "0.9.136"
+profile = "ci-fast"
+build_jobs = 4
+test_threads = 4
+tokio_workers = 2
+# Infrastructure watchdog, including a cold build. Test deadlines live in Nextest.
+command_watchdog_seconds = 1800
+
+[[ignored]]
+binary = "obzenflow_infra"
+test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+owner = "journal-fixtures lane"
+
+[[ignored]]
+binary = "xtask::postgres_lifecycle"
+test = "public_commands_preserve_rows_and_passwordless_environment_boundaries"
+owner = "postgres coordinator"
+
+[[ignored]]
+binary = "obzenflow::postgres_payments_e2e_test"
+test = "payments_application_process"
+owner = "postgres coordinator subprocess fixture"
+
+[[ignored]]
+binary = "obzenflow::csv_sink_termination_contract_test"
+test = "crash_fixture_process"
+owner = "crash_before_flush_replays_unreceipted_csv_work_under_truncated_eof subprocess"
+
+[[ignored]]
+binary = "obzenflow::one_shot_inference_effect_journal_test"
+test = "reply_cut_child_process"
+owner = "resume_after_a_durable_reply_reinterprets subprocess"
+
+[[ignored]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::child_application"
+owner = "independent_lifetimes subprocess"
+
+[[ignored]]
+binary = "obzenflow::product_catalog_enrichment"
+test = "product_catalog_enrichment_completes"
+owner = "intentional manual rate-limited example proof, outside required acceptance"
+
+[[ignored]]
+binary = "obzenflow::product_catalog_enrichment"
+test = "explicit_join_topology_current_schema_live_replay_and_rejected_control"
+owner = "intentional manual rate-limited example proof, outside required acceptance"
+
+[[ignored]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::output_fixture"
+owner = "real_nextest_leaks_fail_acceptance_with_identity owned captured-output fixture"
+
+[[ignored]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::assertion_fixture"
+owner = "real_nextest_leaks_fail_acceptance_with_identity controlled assertion failure"
+
+[[ignored]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::passing_fixture"
+owner = "real_nextest_leaks_fail_acceptance_with_identity independent completion control"
+
+# FLOWIP-145i B10: audited case prerequisites, independent of scheduling groups.
+# Lanes identify applicable inventories only. Undeclared cases are not certified hermetic.
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::leaks::real_nextest_leaks_fail_acceptance_with_identity"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child","owned-child-signals"]
+rationale = "Runs the pinned Nextest against its existing Rust binary, owns transferred output descriptors through an anonymous Unix socket pair, and interrupts its owned runner. No network listener or Cargo rebuild."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::retained_launcher_survives_replacement_of_its_running_image"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "An isolated running executable is replaced while its retained image must remain usable for delegated subprocesses."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::prerequisites::tests::real_probe_execution_failures_remain_unknown_and_preserve_independent_work"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Actual launch failures and invalid child results prove infrastructure attribution, persisted diagnostics and independent-case admission."
+
+[[prerequisites]]
+binary = "xtask::postgres_lifecycle"
+test = "validation_launcher::real_probe_and_postgres_entry_survive_build_output_replacement"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Real probe and PostgreSQL entry points execute a retained Cargo-built image after controlled output replacement, without a live database."
+
+[[prerequisites]]
+binary = "obzenflow_infra::standalone_embedding_wire_test"
+test = "native_adapters_reject_bad_cardinality_order_and_width_without_retrying"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned mock provider records complete native embedding requests and response validation."
+
+[[prerequisites]]
+binary = "obzenflow_infra::standalone_embedding_wire_test"
+test = "ollama_and_openai_send_default_and_explicit_dimensions_natively"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned mock provider records complete native embedding requests and response validation."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "ai::rig::chat_client::tests::one_chat_invocation_can_follow_a_body_preserving_redirect"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned HTTP peer proves redirect body preservation at the adapter wire boundary."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::dropped_hosted_application_cancels_runtime_and_pending_stage_work"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Hosted cancellation observes source destruction and physical termination before joining Runtime and rebinding the owned listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::dropped_standalone_application_cancels_runtime_and_pending_stage_work"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Standalone cancellation uses an isolated configuration file and memory journals; it opens no listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::dropped_application_during_host_preparation_cancels_the_built_flow"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::graceful_finite_completion_and_infinite_cancellation_match_application_results"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::host_completion_and_panic_remain_primary_across_application_phases"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::hosted_start_observes_runtime_exit_before_readiness"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::ready_startup_signals_withhold_automatic_run"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::run_async_closes_pending_responses_before_returning_to_a_live_runtime"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Pending HTTP and SSE responses must be dropped and the owned listener released before application return."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::signals_preserve_published_failures_and_repeatable_observation"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Compound lifecycle assertions include a hosted path, private readiness and joined owners, with unique temporary archives."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::lifecycle::startup_failure_retains_prior_hook_joins_and_the_not_started_journal_outcome"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Temporary archive proves not-started outcome and hook cleanup without starting a listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::authentication_admission_failure_prevents_automatic_run"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Admission must fail before binding; only a unique temporary configuration and journal archive are required."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::http_ingress_builder_hosts_multiple_sources"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Application owns its port-zero listener; clients verify ingress or phonebook lifecycle, using a unique temporary configuration."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::http_ingress_builder_without_source_fails_startup"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Admission must fail before binding; only a unique temporary configuration and journal archive are required."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::occupied_port_prevents_automatic_run"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Temporary configuration and disk evidence cover host admission and terminal publication; occupied-port case retains the conflicting listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::server_auto_mode_starts_after_host_admission"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Temporary configuration and disk evidence cover host admission and terminal publication; occupied-port case retains the conflicting listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::server_mode_deregisters_from_phonebook_on_graceful_shutdown"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Application owns its port-zero listener; clients verify ingress or phonebook lifecycle, using a unique temporary configuration."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "application::flow_application::tests::startup::server_on_terminal_exit_waits_for_terminal_journal_fact"
+lanes = ["production-features","test-support"]
+capabilities = ["temp-files","ipv4-loopback-bind"]
+rationale = "Temporary configuration and disk evidence cover host admission and terminal publication; occupied-port case retains the conflicting listener."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::replay_tests::abort_during_initialization_cancels_the_waiter_before_request_send"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::replay_tests::resume_initializes_only_after_the_recorded_prefix_crosses_continue_live"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::replay_tests::strict_replay_keeps_the_default_source_client_cold"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Isolated child controls process-global client state; owned HTTP peer and disk archive distinguish live, cancelled and replayed requests."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::tests::cancelled_waiter_does_not_repeat_setup_or_send_a_request"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned HTTP peer verifies real wire requests and client initialisation under cancellation or concurrency."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::tests::concurrent_execute_initializes_once_across_clones"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned HTTP peer verifies real wire requests and client initialisation under cancellation or concurrency."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "http_client::reqwest_client::tests::with_client_is_preseeded_and_never_invokes_the_initializer"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned HTTP peer verifies real wire requests and client initialisation under cancellation or concurrency."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::codec::tests::current_schema_fixtures_preserve_bytes_and_logical_records"
+lanes = ["journal-fixtures"]
+capabilities = ["temp-files"]
+rationale = "Cold decode, relocation and byte preservation use temporary on-disk copies of the checked-in codec fixtures."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tail_tests::metrics_tail_read_keeps_the_latest_snapshot_across_chunks"
+lanes = ["default","production-features","test-support"]
+capabilities = ["target-files"]
+rationale = "Owned target/test-logs fixture verifies physical tail boundaries, atomic groups and corrupt or unterminated records."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tail_tests::read_last_n_excludes_unterminated_single_and_group_tails"
+lanes = ["default","production-features","test-support"]
+capabilities = ["target-files"]
+rationale = "Owned target/test-logs fixture verifies physical tail boundaries, atomic groups and corrupt or unterminated records."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tail_tests::read_last_n_preserves_large_atomic_groups_and_member_positions"
+lanes = ["default","production-features","test-support"]
+capabilities = ["target-files"]
+rationale = "Owned target/test-logs fixture verifies physical tail boundaries, atomic groups and corrupt or unterminated records."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tail_tests::read_last_n_preserves_records_across_chunk_boundaries"
+lanes = ["default","production-features","test-support"]
+capabilities = ["target-files"]
+rationale = "Owned target/test-logs fixture verifies physical tail boundaries, atomic groups and corrupt or unterminated records."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tail_tests::read_last_n_preserves_records_larger_than_multiple_chunks"
+lanes = ["default","production-features","test-support"]
+capabilities = ["target-files"]
+rationale = "Owned target/test-logs fixture verifies physical tail boundaries, atomic groups and corrupt or unterminated records."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tail_tests::read_last_n_retains_best_effort_behavior_for_real_corruption"
+lanes = ["default","production-features","test-support"]
+capabilities = ["target-files"]
+rationale = "Owned target/test-logs fixture verifies physical tail boundaries, atomic groups and corrupt or unterminated records."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::journal::tests::cancelled_append_retains_index_clock_and_writer_serialisation"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Controlled cancellation spans real disk publication or read admission; owned temporary archive must survive until retained work settles."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::observations::cardinality_tests::atomic_group_crosses_the_key_limit_with_forwarded_captures_and_terminal_controls"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Disk observation index, checkpoint and retained-prefix assertions require real temporary journal files; memory comparison remains in the same oracle."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::observations::cardinality_tests::checkpoints_above_the_key_limit_load_completely_or_rebuild_when_missing_or_corrupt"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Disk observation index, checkpoint and retained-prefix assertions require real temporary journal files; memory comparison remains in the same oracle."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::observations::cardinality_tests::disk_and_memory_retain_quiet_subjects_and_bound_history_past_the_key_limit"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Disk observation index, checkpoint and retained-prefix assertions require real temporary journal files; memory comparison remains in the same oracle."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::observations::cardinality_tests::oversized_checkpoint_preserves_live_coverage_and_the_last_complete_checkpoint"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Disk observation index, checkpoint and retained-prefix assertions require real temporary journal files; memory comparison remains in the same oracle."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "journal::disk::reader::tests::cancelled_buffered_read_reopens_at_committed_cursor_and_preserves_group_members"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Controlled cancellation spans real disk publication or read admission; owned temporary archive must survive until retained work settles."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::bind_is_fallible_and_port_zero_reports_the_actual_listener"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::client_disconnect_drops_pending_unary_and_sse_work"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::close_deadline_aborts_and_joins_pending_unary_and_sse_on_a_live_runtime"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::close_finishes_admitted_unary_within_the_grace_period"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::dropping_host_aborts_response_work_and_releases_the_listener"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::http2_stream_tasks_belong_to_the_host_scope"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::managed_host::tests::registered_studio_updates_survive_admission_timeout_keep_alive_and_flush_before_close"
+lanes = ["production-features","test-support"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Retained live listener and client exercise transport admission, cancellation and owned shutdown."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::studio_registration::tests::registers_restamps_phase_and_deregisters_on_shutdown"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned local phonebook fixture exercises heartbeat, retry and deregistration transport."
+
+[[prerequisites]]
+binary = "obzenflow_infra"
+test = "web::studio_registration::tests::unreachable_phonebook_never_panics_and_keeps_retrying"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned local phonebook fixture exercises heartbeat, retry and deregistration transport."
+
+[[prerequisites]]
+binary = "obzenflow::bin/obzenflow"
+test = "observation_tests::pending_tail_reaches_wait_decision_and_detaches_without_inventing_settlement"
+lanes = ["production-features"]
+capabilities = ["temp-files"]
+rationale = "A real incomplete disk archive drives the viewer through its controlled Pending decision before detachment."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "control_client::advertised_archive_identity_is_checked_before_play"
+lanes = ["production-features"]
+capabilities = ["temp-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "CLI admits a temporary archive and verifies its identity against an owned discovery peer before Play."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "control_client::bare_start_accepts_ephemeral_and_sends_only_the_conditional_shape"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Joined CLI child and retained HTTP peer establish the finite control-request scope."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "control_client::invalid_origin_is_refused_before_connecting"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Joined CLI child and retained HTTP peer establish the finite control-request scope."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "control_client::local_control_ignores_credentials_and_bypasses_proxies"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Joined CLI child and retained HTTP peer establish the finite control-request scope."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "control_client::stale_target_typed_rejection_and_lost_response_never_retry"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Joined CLI child and retained HTTP peer establish the finite control-request scope."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "control_client::unavailable_follow_or_legacy_server_never_submits_play"
+lanes = ["production-features"]
+capabilities = ["ipv4-loopback-bind","ipv4-loopback-connect","owned-child"]
+rationale = "Joined CLI child and retained HTTP peer establish the finite control-request scope."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::independent_lifetimes_detach"
+lanes = ["production-features"]
+capabilities = ["artifact-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child","owned-child-signals"]
+rationale = "Owned application and viewer children exercise independent lifetimes, real signals and retained case artifacts."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::independent_lifetimes_reader_error"
+lanes = ["production-features"]
+capabilities = ["artifact-files","artifact-hard-links","ipv4-loopback-bind","ipv4-loopback-connect","owned-child","owned-child-signals"]
+rationale = "Hard-linked observer archive preserves live inodes while replacement faults only the viewer; both children are owned and joined."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::independent_lifetimes_sigint"
+lanes = ["production-features"]
+capabilities = ["artifact-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child","owned-child-signals"]
+rationale = "Owned application and viewer children exercise independent lifetimes, real signals and retained case artifacts."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::independent_lifetimes_sigkill"
+lanes = ["production-features"]
+capabilities = ["artifact-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child","owned-child-signals"]
+rationale = "Owned application and viewer children exercise independent lifetimes, real signals and retained case artifacts."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "hosted::independent_lifetimes_sigterm"
+lanes = ["production-features"]
+capabilities = ["artifact-files","ipv4-loopback-bind","ipv4-loopback-connect","owned-child","owned-child-signals"]
+rationale = "Owned application and viewer children exercise independent lifetimes, real signals and retained case artifacts."
+
+[[prerequisites]]
+binary = "obzenflow::obzenflow_cli_test"
+test = "runtime_writer_columns_use_journaled_registration"
+lanes = ["production-features"]
+capabilities = ["temp-files","owned-child"]
+rationale = "The existing metrics exporter supplies writer registration without a host; joined CLI rendering reads the settled temporary archive."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::framework_terminal_wait_in_a_hook_does_not_fail_a_successful_application"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::invalid_cors_returns_startup_error_and_stops_the_materialised_flow"
+lanes = ["production-features"]
+capabilities = ["target-files"]
+rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::manual_prometheus_example_exports_100_inputs_and_replays_without_a_host"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::prometheus_example_5k_completes_with_reporting_250ms_capture_250ms_export"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::prometheus_example_5k_completes_with_reporting_250ms_capture_500ms_export"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::prometheus_example_5k_completes_with_reporting_500ms_capture_250ms_export"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::prometheus_example_5k_completes_with_sse_and_no_prometheus"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind","ipv4-loopback-connect"]
+rationale = "Owned host admission and HTTP/SSE observations precede joined application completion and complete target-directory archive/replay checks."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::prometheus_example_5k_completes_without_reporting"
+lanes = ["production-features"]
+capabilities = ["target-files"]
+rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "managed_lifecycle_regressions::unhosted_prometheus_example_exports_100_inputs_and_replays_with_final_metrics"
+lanes = ["production-features"]
+capabilities = ["target-files"]
+rationale = "Unhosted or pre-bind admission assertions require only unique target-directory configuration and journal fixtures."
+
+[[prerequisites]]
+binary = "obzenflow::prometheus_example_test"
+test = "prometheus_demo_host_preserves_data_errors_and_delivery_receipts"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind"]
+rationale = "Comparative archive oracle includes a hosted mode; other modes no longer reserve incidental ports."
+
+[[prerequisites]]
+binary = "obzenflow::replay_verification_golden_path_test"
+test = "monitoring_modes_preserve_live_and_replay_journal_outcomes"
+lanes = ["production-features"]
+capabilities = ["target-files","ipv4-loopback-bind"]
+rationale = "Production-feature composition includes hosted metrics plus complete live/replay archive comparisons."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "postgres::credentials::tests::acceptance_credential_permissions_fail_closed"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","temp-modes"]
+rationale = "Private temporary credential files exercise mode enforcement and fail-closed validation, without a PostgreSQL service."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "postgres::credentials::tests::acceptance_pgpass_has_only_the_two_exercised_hosts"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","temp-modes"]
+rationale = "Private temporary credential files exercise mode enforcement and fail-closed validation, without a PostgreSQL service."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "postgres::credentials::tests::acceptance_pgpass_pair_round_trips_without_overwrite"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","temp-modes"]
+rationale = "Private temporary credential files exercise mode enforcement and fail-closed validation, without a PostgreSQL service."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "postgres::managed_fs::tests::managed_secret_nodes_are_created_and_verified"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","temp-modes"]
+rationale = "Owned temporary filesystem nodes must retain private directory and file modes."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "postgres::managed_fs::tests::weakened_modes_and_symlinks_fail_closed"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","temp-modes","temp-symlinks"]
+rationale = "Temporary symlinks and weakened modes are the input defects rejected by managed filesystem validation."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::prerequisites::tests::available_prerequisites_never_erase_execution_failure_or_missing_results"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Injected operation results are persisted in owned temporary coverage artifacts."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::prerequisites::tests::concurrent_filesystem_probes_own_distinct_scratch_resources"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","temp-hard-links"]
+rationale = "Two concurrent real filesystem probes own independent temporary paths and must clean up after joining."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::prerequisites::tests::denied_operation_partitions_cases_and_preserves_executed_failure"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Injected operation results are persisted in owned temporary coverage artifacts."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::prerequisites::tests::wholly_blocked_scope_and_invalid_declarations_cannot_pass"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Injected operation results are persisted in owned temporary coverage artifacts."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::default_and_explicit_performance_report_only_their_requested_scope"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Disposable source/output fixture and joined child commands exercise the real validation process and report owner."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::failure_feedback_arrives_before_independent_work_finishes"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Disposable source/output fixture and joined child commands exercise the real validation process and report owner."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::native_entry_preserves_failures_continues_lanes_and_certifies_only_executed_source_and_scope"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Disposable source/output fixture and joined child commands exercise the real validation process and report owner."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::watchdog_expiry_is_incomplete_even_when_the_child_handles_termination_with_success"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child","owned-child-signals"]
+rationale = "Disposable source/output fixture and joined child commands exercise the real validation process and report owner."

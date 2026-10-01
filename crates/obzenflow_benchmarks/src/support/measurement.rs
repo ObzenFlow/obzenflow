@@ -4,24 +4,18 @@
 
 //! Shared measurement and work-census harness; no production behaviour.
 
-use obzenflow_core::benchmark::WorkScope;
+use super::{allocations, work::WorkScope};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-#[path = "allocations.rs"]
-mod allocations;
-
-#[global_allocator]
-static ALLOCATOR: allocations::Allocator = allocations::Allocator;
-
 #[derive(serde::Serialize)]
 pub struct Census {
-    pub(crate) case: String,
-    pub(crate) input: Value,
-    pub(crate) work: BTreeMap<String, u64>,
-    pub(crate) allocations: allocations::Work,
-    pub(crate) observations: Value,
+    pub case: String,
+    pub input: Value,
+    pub work: BTreeMap<String, u64>,
+    pub allocations: allocations::Work,
+    pub observations: Value,
 }
 
 pub struct Meter {
@@ -31,21 +25,24 @@ pub struct Meter {
 
 impl Meter {
     pub fn start() -> Self {
-        let census = (!obzenflow_core::benchmark::active())
-            .then(|| (allocations::Start::new(), WorkScope::start()));
+        let census =
+            (!super::work::active()).then(|| (allocations::Start::new(), WorkScope::start()));
         Self {
             census,
             start: Instant::now(),
         }
     }
     pub fn finish(self, elapsed: Duration) -> Sample {
-        let (work, allocations) = match self.census {
-            Some((memory, scope)) => (scope.finish(), Some(memory.finish())),
-            None => (BTreeMap::new(), None),
+        let allocations = match self.census {
+            Some((memory, scope)) => {
+                scope.finish();
+                Some(memory.finish())
+            }
+            None => None,
         };
         Sample {
             elapsed,
-            work,
+            work: BTreeMap::new(),
             allocations,
             observations: Value::Null,
         }
@@ -56,19 +53,20 @@ impl Meter {
 }
 
 pub struct Sample {
-    pub(crate) elapsed: Duration,
-    pub(crate) work: BTreeMap<String, u64>,
-    pub(crate) allocations: Option<allocations::Work>,
-    pub(crate) observations: Value,
+    pub elapsed: Duration,
+    pub work: BTreeMap<String, u64>,
+    pub allocations: Option<allocations::Work>,
+    pub observations: Value,
 }
 
 impl Sample {
-    pub(crate) fn expect_work(&self, name: &str, expected: u64) {
+    /// Record validated, consumer-visible output, never an internal work estimate.
+    pub fn completed(&mut self, name: &str, count: u64) {
         if self.allocations.is_some() {
-            assert_eq!(self.work[name], expected, "{name}");
+            self.work.insert(name.to_owned(), count);
         }
     }
-    pub(crate) fn is_census(&self) -> bool {
+    pub fn is_census(&self) -> bool {
         self.allocations.is_some()
     }
 }
@@ -102,9 +100,8 @@ pub fn measure(
         *taken = true;
     }
     b.iter_custom(|iterations| {
-        // Keep identical production instrumentation enabled, but collect/reset
-        // counters once per Criterion sample. Per-operation map/JSON allocation
-        // would otherwise dominate the *untimed* harness for sub-microsecond work.
+        // An outer scope suppresses per-iteration census allocation. Framework
+        // code contains no counters or measurement-session state.
         let scope = WorkScope::start();
         let mut elapsed = Duration::ZERO;
         for _ in 0..iterations {

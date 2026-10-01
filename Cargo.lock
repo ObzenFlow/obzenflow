@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_adapters"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1704,13 +1704,12 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_benchmarks"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
  "criterion",
  "fastrand",
- "futures",
  "libc",
  "obzenflow-topology",
  "obzenflow_adapters",
@@ -1729,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1750,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_core_derive"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1759,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_dsl"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "insta",
@@ -1777,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_infra"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1823,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_runtime"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2407,6 +2406,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -4013,15 +4021,19 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "libc",
  "obzenflow_core",
  "obzenflow_infra",
  "ring",
+ "roxmltree",
+ "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
+ "toml",
  "url",
  "uuid",
 ]

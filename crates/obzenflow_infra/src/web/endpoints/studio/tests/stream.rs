@@ -17,7 +17,7 @@ use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{web::SseFrame, EventId, FlowId, JournalOwner, StageId};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
@@ -392,9 +392,9 @@ pub(super) async fn collect_closing(
     let body = open(endpoint, cursor).await;
     // Set shutdown after opening; an endpoint already closing would return HTTP 204.
     closing.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), body.collect())
-        .await
-        .expect("SSE response closes after terminal shutdown")
+    // Correctness is delivery through the committed terminal prefix. Nextest's
+    // test watchdog bounds hangs; disk catch-up has no two-second contract.
+    body.collect().await
 }
 
 pub(super) fn cursor<P: obzenflow_core::event::payloads::JournalPayload>(
@@ -728,12 +728,12 @@ struct ScriptedReader {
     events: Vec<SystemJournalRecord>,
     position: usize,
     fail_at: Option<usize>,
-    dropped: Arc<AtomicBool>,
+    dropped: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for ScriptedReader {
     fn drop(&mut self) {
-        self.dropped.store(true, Ordering::SeqCst);
+        self.dropped.notify_one();
     }
 }
 
@@ -799,9 +799,7 @@ async fn dropping_studio_response_cancels_pending_journal_open() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
-    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
-        .await
-        .expect("response drop must cancel an opening reader");
+    probe.dropped.notified().await;
 }
 
 pub(crate) struct ScriptedJournal {
@@ -813,7 +811,7 @@ pub(crate) struct ScriptedJournal {
     fail_at: Option<usize>,
     fail_open: bool,
     pending_open: Option<Arc<PendingOpen>>,
-    reader_dropped: Arc<AtomicBool>,
+    reader_dropped: Arc<tokio::sync::Notify>,
     reader_opened: tokio::sync::Notify,
 }
 
@@ -828,7 +826,7 @@ impl ScriptedJournal {
             fail_at: None,
             fail_open: false,
             pending_open: None,
-            reader_dropped: Arc::new(AtomicBool::new(false)),
+            reader_dropped: Arc::new(tokio::sync::Notify::new()),
             reader_opened: tokio::sync::Notify::new(),
         }
     }
@@ -952,11 +950,7 @@ async fn dropping_the_sse_body_drops_its_reader() {
         Some("bootstrap")
     );
     drop(body);
-    tokio::task::yield_now().await;
-    assert!(
-        reader_dropped.load(Ordering::SeqCst),
-        "response cancellation releases its owned reader task"
-    );
+    reader_dropped.notified().await;
 }
 
 #[tokio::test]
@@ -1107,12 +1101,9 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             let mut body = Vec::new();
             if cursor_kind != "known" {
                 loop {
-                    let frame = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                        .await
-                        .unwrap_or_else(|_| {
-                            panic!("bootstrap stalled: disk={disk}, cursor={cursor_kind}")
-                        })
-                        .unwrap();
+                    let frame = stream.next().await.unwrap_or_else(|| {
+                        panic!("stream ended before bootstrap: disk={disk}, cursor={cursor_kind}")
+                    });
                     let bootstrap = frame.event.as_deref() == Some("bootstrap");
                     body.push(frame);
                     if bootstrap {
@@ -1144,11 +1135,7 @@ async fn bootstrap_fallback_restores_middleware_before_post_cut_facts() {
             )
             .await;
             closing.send(true).unwrap();
-            body.extend(
-                tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
-                    .await
-                    .expect("post-cut facts drain before shutdown"),
-            );
+            body.extend(stream.collect::<Vec<_>>().await);
             let snapshots = frames(&body, "middleware_state_snapshot");
             assert_eq!(
                 snapshots.len(),
@@ -1264,14 +1251,15 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
-    tokio::task::yield_now().await;
-    assert!(reader_dropped.load(Ordering::SeqCst));
-    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
-        .await
-        .unwrap();
+    probe.dropped.notified().await;
+    reader_dropped.notified().await;
 
     let system = SystemId::new();
-    let journal = Arc::new(ScriptedJournal::new(system));
+    let mut journal = ScriptedJournal::new(system);
+    let catch_up = Arc::new(PendingOpen::default());
+    journal.pending_read = Some(catch_up.clone());
+    journal.pending_read_from = 64;
+    let journal = Arc::new(journal);
     for _ in 0..256 {
         append(
             journal.as_ref(),
@@ -1284,26 +1272,18 @@ async fn pending_reads_and_catch_up_are_owned_and_cancellable_by_the_body() {
     }
     let (endpoint, _closing) = self::endpoint(journal.clone(), vec![]);
     let mut body = open(&endpoint, None).await;
-    let reads = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            assert!(
-                futures::poll!(body.next()).is_pending(),
-                "ready history must yield before exhausting the tape"
-            );
-            tokio::task::yield_now().await;
-            let reads = journal.reads.load(Ordering::SeqCst);
-            if reads > 0 {
-                break reads;
-            }
-        }
-    })
-    .await
-    .expect("catch-up begins before cancellation");
+    // Cancel at a witnessed read inside the initial prefix, independent of how
+    // many polls or worker turns were needed to reach it.
+    tokio::select! {
+        _ = body.next() => panic!("bootstrap cannot pass the held prefix read"),
+        _ = catch_up.entered.notified() => {}
+    }
+    let reads = journal.reads.load(Ordering::SeqCst);
+    assert_eq!(reads, 65);
     assert!(reads < 256);
     drop(body);
-    tokio::task::yield_now().await;
-    assert!(journal.reader_dropped.load(Ordering::SeqCst));
-    tokio::task::yield_now().await;
+    catch_up.dropped.notified().await;
+    journal.reader_dropped.notified().await;
     assert_eq!(journal.reads.load(Ordering::SeqCst), reads);
 }
 
@@ -1505,18 +1485,13 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
 
     // Do not read Studio again until the breaker has opened and recovered.
     // All transitions must survive independently of measurement deadlines.
-    tokio::time::timeout(Duration::from_secs(15), handle.run())
-        .await
-        .expect("source finishes while Studio is unread")
-        .unwrap();
+    handle.run().await.unwrap();
     println!(
         "Studio middleware proof: flow settled after {:?}",
         started.elapsed()
     );
     closing.send(true).unwrap();
-    let body: Vec<_> = tokio::time::timeout(Duration::from_secs(2), stream.collect())
-        .await
-        .unwrap();
+    let body: Vec<_> = stream.collect().await;
     let changes = frames(&body, "middleware_lifecycle");
     println!(
         "Studio middleware proof: unread stream drained after {:?}",
@@ -1616,6 +1591,17 @@ async fn source_middleware_transitions_survive_unread_stream_and_reconnect() {
     let (fresh_endpoint, fresh_closing) = self::endpoint(journal, vec![]);
     let fresh_endpoint = fresh_endpoint.with_live_journals(stage_journals, system_journals);
     let fresh = collect_closing(&fresh_endpoint, fresh_closing, None).await;
+    for (phase, frames) in [("unread", &body), ("resumed", &resumed), ("fresh", &fresh)] {
+        assert!(
+            self::frames(frames, "error").is_empty(),
+            "{phase}: {frames:?}"
+        );
+        assert_eq!(
+            frames.last().unwrap().event.as_deref(),
+            Some("server_shutdown"),
+            "{phase}: terminal history must drain before the response closes"
+        );
+    }
     let snapshot = frame_payload(frames(&fresh, "middleware_state_snapshot")[0]);
     let middleware = snapshot["middleware"].as_array().unwrap();
     assert_eq!(middleware.len(), 1);
@@ -1714,8 +1700,125 @@ async fn terminal_flow_totals_reach_sse_independently_of_metrics_reporting() {
     }
 }
 
+struct ComposedEvidence(Option<tempfile::TempDir>);
+impl ComposedEvidence {
+    fn new() -> Self {
+        let base = std::env::var_os("OBZENFLOW_TEST_ARTIFACTS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("target/studio-test-evidence"));
+        std::fs::create_dir_all(&base).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("composed-studio-")
+            .tempdir_in(base)
+            .unwrap();
+        eprintln!("composed artifacts={}", directory.path().display());
+        Self(Some(directory))
+    }
+    fn path(&self) -> &std::path::Path {
+        self.0.as_ref().unwrap().path()
+    }
+}
+impl Drop for ComposedEvidence {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let retained = self.0.take().unwrap().keep();
+            eprintln!(
+                "composed: retained failure journals at {}",
+                retained.display()
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ComposedProgress {
+    disk: bool,
+    stages: usize,
+    sources: Vec<std::sync::atomic::AtomicU8>,
+    sink: AtomicUsize,
+    frames: AtomicUsize,
+    cursor: std::sync::Mutex<String>,
+    waiting: tokio::sync::Notify,
+}
+impl ComposedProgress {
+    fn new(disk: bool, stages: usize) -> Self {
+        Self {
+            disk,
+            stages,
+            sources: (0..stages - 1)
+                .map(|_| std::sync::atomic::AtomicU8::new(0))
+                .collect(),
+            sink: AtomicUsize::new(0),
+            frames: AtomicUsize::new(0),
+            cursor: Default::default(),
+            waiting: Default::default(),
+        }
+    }
+    fn snapshot(
+        &self,
+        state: &tokio::sync::watch::Receiver<obzenflow_runtime::pipeline::PipelineState>,
+    ) -> String {
+        let mut counts = [0usize; 4];
+        let mut unfinished = Vec::new();
+        for (index, value) in self.sources.iter().enumerate() {
+            let phase = value.load(Ordering::Relaxed) as usize;
+            counts[phase] += 1;
+            if phase != 3 && unfinished.len() < 16 {
+                unfinished.push((index, ["unpolled", "waiting", "emitted", "eof"][phase]));
+            }
+        }
+        let cursor = self
+            .cursor
+            .try_lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|_| "<busy>".into());
+        format!("pipeline={:?}, source_unpolled={}, source_waiting={}, source_emitted={}, source_eof={}, unfinished_sources_first_16={unfinished:?}, sink_callbacks={}, studio_frames={}, last_cursor_prefix={cursor}",
+            *state.borrow(), counts[0], counts[1], counts[2], counts[3],
+            self.sink.load(Ordering::Relaxed), self.frames.load(Ordering::Relaxed))
+    }
+}
+
+async fn composed_wait<F: std::future::Future>(
+    phase: &str,
+    budget: Duration,
+    progress: &ComposedProgress,
+    state: &tokio::sync::watch::Receiver<obzenflow_runtime::pipeline::PipelineState>,
+    future: F,
+) -> Result<F::Output, String> {
+    let started = std::time::Instant::now();
+    let deadline = tokio::time::sleep(budget);
+    let period = Duration::from_secs(5);
+    let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tokio::pin!(future, deadline);
+    let case = format!(
+        "composed backend={}, stages={}, phase={phase}",
+        if progress.disk { "disk" } else { "memory" },
+        progress.stages
+    );
+    eprintln!("{case}, budget={budget:?}");
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            _ = &mut deadline => return Err(format!("{case} exceeded {budget:?}; elapsed={:?}, {}", started.elapsed(), progress.snapshot(state))),
+            _ = heartbeat.tick() => eprintln!("{case}, elapsed={:?}, {}", started.elapsed(), progress.snapshot(state)),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
+    for (disk, stages) in [(false, 2), (false, 10), (false, 100), (true, 10)] {
+        composed_case(disk, stages, false).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn composed_stall_reports_source_progress_before_recovery() {
+    composed_case(false, 2, true).await;
+}
+
+async fn composed_case(disk: bool, stages: usize, control_stall: bool) {
     use obzenflow_adapters::monitoring::MetricsReadModel;
     use obzenflow_core::event::CausalCoordinate;
     use obzenflow_dsl::dsl::{composition::IntoFlowMember, topology::AuthoredConnection};
@@ -1734,26 +1837,32 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
     struct GatedSource {
         gate: Arc<tokio::sync::Semaphore>,
         emitted: bool,
+        index: usize,
+        progress: Arc<ComposedProgress>,
     }
     #[async_trait::async_trait]
     impl TypedAsyncFiniteSourceHandler for GatedSource {
         type Output = Item;
         async fn next(&mut self) -> Result<Option<Vec<Item>>, SourceError> {
             if self.emitted {
+                self.progress.sources[self.index].store(3, Ordering::Relaxed);
                 return Ok(None);
             }
+            self.progress.sources[self.index].store(1, Ordering::Relaxed);
+            self.progress.waiting.notify_one();
             self.gate.acquire().await.unwrap().forget();
             self.emitted = true;
+            self.progress.sources[self.index].store(2, Ordering::Relaxed);
             Ok(Some(vec![Item]))
         }
     }
 
     // Exercise the ordinary lowering/materialisation path with a generated
-    // fan-in. Disk's large-reader fairness is separately tested in
-    // supervision_journals; this composition also runs its real 10-stage path.
-    for (disk, stages) in [(false, 2), (false, 10), (false, 100), (true, 10)] {
+    // fan-in, retaining both memory and disk cases and their journal oracles.
+    {
+        let progress = Arc::new(ComposedProgress::new(disk, stages));
         eprintln!("composed backend={disk}, stages={stages}, phase=build");
-        let directory = tempfile::tempdir().unwrap();
+        let directory = ComposedEvidence::new();
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let mut members = HashMap::new();
         let mut connections = Vec::new();
@@ -1762,6 +1871,8 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
             let handler = GatedSource {
                 gate: gate.clone(),
                 emitted: false,
+                index,
+                progress: progress.clone(),
             };
             let mut descriptor = async_source!(Item => handler);
             descriptor.set_name(name.clone());
@@ -1772,7 +1883,14 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
                 obzenflow_topology::EdgeKind::Forward,
             ));
         }
-        let output_handler = SinkTyped::new(|_: Item| async {}).idempotent();
+        let sink_progress = progress.clone();
+        let output_handler = SinkTyped::new(move |_: Item| {
+            let progress = sink_progress.clone();
+            async move {
+                progress.sink.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .idempotent();
         let mut output = sink!(Item => output_handler);
         output.set_name("output".into());
         members.insert("output".into(), output.into_flow_member());
@@ -1801,36 +1919,92 @@ async fn many_stage_pipeline_metrics_and_studio_settle_owned_journals() {
         }
         .unwrap();
         let handle = built.into_handle();
+        let state = handle.state_receiver();
         let pipeline = handle.system_journal().unwrap();
         let journals = handle.stage_journals();
         let metrics = handle.metrics_journals().unwrap();
         let (endpoint, closing) = endpoint(pipeline.clone(), vec![]);
         let endpoint = endpoint.with_live_journals(journals.clone(), handle.system_journals());
-        let mut stream = open(&endpoint, None).await;
-        while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {}
+        let mut stream = composed_wait(
+            "open-studio",
+            Duration::from_secs(5),
+            &progress,
+            &state,
+            open(&endpoint, None),
+        )
+        .await
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
+        composed_wait(
+            "bootstrap",
+            Duration::from_secs(5),
+            &progress,
+            &state,
+            async { while stream.next().await.unwrap().event.as_deref() != Some("bootstrap") {} },
+        )
+        .await
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
         let started = std::time::Instant::now();
-        let delivery = tokio::spawn(async move { stream.collect::<Vec<_>>().await });
-        gate.add_permits(stages - 1);
-        // Temporary merge accommodation for the 100-stage case. FLOWIP-145i
-        // restores local failure attribution; 145h-part-2 owns capacity evidence.
+        let delivery_progress = progress.clone();
+        let delivery = tokio::spawn(async move {
+            stream
+                .inspect(|frame| {
+                    delivery_progress.frames.fetch_add(1, Ordering::Relaxed);
+                    if let Some(cursor) = &frame.id {
+                        // This fixture-owned lock is never held over I/O. Failure
+                        // capture uses try_lock and never waits for the consumer.
+                        *delivery_progress.cursor.lock().unwrap() =
+                            cursor.chars().take(2048).collect();
+                    }
+                })
+                .collect::<Vec<_>>()
+                .await
+        });
+        // Existing hang budgets remain; performance/capacity acceptance belongs
+        // to 145i's separate measured workloads, not this elapsed-time guard.
         let run_budget = Duration::from_secs(if stages == 100 { 60 } else { 15 });
-        eprintln!("composed backend={disk}, stages={stages}, phase=run, budget={run_budget:?}");
-        tokio::time::timeout(run_budget, handle.run())
+        let run = handle.run();
+        tokio::pin!(run);
+        if control_stall {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = progress.waiting.notified() => {},
+                    result = &mut run => panic!("flow settled before controlled source wait: {result:?}"),
+                }
+            }).await.expect("the source must reach its real gate");
+            let diagnostic = composed_wait(
+                "run",
+                Duration::from_millis(20),
+                &progress,
+                &state,
+                &mut run,
+            )
             .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "composed backend={disk}, stages={stages}, phase=run exceeded {run_budget:?}; elapsed={:?}",
-                    started.elapsed()
-                )
-            })
+            .expect_err("an unreleased source cannot settle");
+            assert!(diagnostic.contains("phase=run"), "{diagnostic}");
+            assert!(diagnostic.contains("source_waiting=1"), "{diagnostic}");
+            assert!(diagnostic.contains("sink_callbacks=0"), "{diagnostic}");
+            assert!(diagnostic.contains("pipeline="), "{diagnostic}");
+            eprintln!("controlled stall: {diagnostic}");
+        }
+        gate.add_permits(stages - 1);
+        composed_wait("run", run_budget, &progress, &state, &mut run)
+            .await
+            .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
             .unwrap();
         let settled = started.elapsed();
         closing.send(true).unwrap();
         eprintln!("composed backend={disk}, stages={stages}, phase=studio, settlement={settled:?}");
-        let frames = tokio::time::timeout(Duration::from_secs(5), delivery)
-            .await
-            .unwrap()
-            .unwrap();
+        let frames = composed_wait(
+            "studio",
+            Duration::from_secs(5),
+            &progress,
+            &state,
+            delivery,
+        )
+        .await
+        .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+        .unwrap();
+        assert_eq!(progress.sink.load(Ordering::Relaxed), stages - 1);
         assert_eq!(
             frames.last().unwrap().event.as_deref(),
             Some("server_shutdown")
@@ -1965,9 +2139,7 @@ async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observa
         let (endpoint, closing) = endpoint(journals, vec![]);
         let stream = open(&endpoint, None).await;
         closing.send(true).unwrap();
-        let body = tokio::time::timeout(Duration::from_secs(2), stream.collect::<Vec<_>>())
-            .await
-            .unwrap();
+        let body = stream.collect::<Vec<_>>().await;
         let stages = frames(&body, "stage_lifecycle");
         assert_eq!(stages.len(), 1);
         assert_eq!(frame_payload(stages[0])["stage_id"], owner.to_string());
@@ -1986,27 +2158,26 @@ async fn forwarded_stage_facts_advance_the_cursor_without_becoming_owner_observa
 
 #[tokio::test]
 async fn an_issued_read_settles_while_the_client_stops_polling() {
-    use futures::FutureExt;
     let probe = Arc::new(PendingOpen::default());
     let mut journal = ScriptedJournal::new(SystemId::new());
     journal.pending_read = Some(probe.clone());
+    let reader_dropped = journal.reader_dropped.clone();
     let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
     let mut body = open(&endpoint, None).await;
     assert_eq!(
         body.next().await.unwrap().event.as_deref(),
         Some("bootstrap")
     );
-    assert!(body.next().now_or_never().is_none());
-    tokio::time::timeout(Duration::from_secs(2), probe.entered.notified())
-        .await
-        .unwrap();
+    tokio::select! {
+        _ = body.next() => panic!("the held read cannot produce a frame"),
+        _ = probe.entered.notified() => {}
+    }
     // Finishing the underlying I/O must release its operation guard even though
     // this connection does not poll the returned read result again.
     probe.release.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), probe.dropped.notified())
-        .await
-        .expect("a paused client cannot retain a settled read's resources");
+    probe.dropped.notified().await;
     drop(body);
+    reader_dropped.notified().await;
 }
 
 #[tokio::test]
@@ -2027,10 +2198,7 @@ async fn ready_records_are_delivered_before_a_later_pending_read_settles() {
     let reader_dropped = journal.reader_dropped.clone();
     let (endpoint, _closing) = endpoint(Arc::new(journal), vec![]);
     let mut body = open(&endpoint, Some("jr1:{}")).await;
-    let frame = tokio::time::timeout(Duration::from_secs(1), body.next())
-        .await
-        .expect("a pending tail read cannot withhold the preceding committed record")
-        .unwrap();
+    let frame = body.next().await.unwrap();
     assert_eq!(frame.event.as_deref(), Some("flow_lifecycle"));
     assert_eq!(frame.id, Some(cursor(&record)));
     tokio::select! {
@@ -2038,8 +2206,6 @@ async fn ready_records_are_delivered_before_a_later_pending_read_settles() {
         _ = probe.entered.notified() => {}
     }
     drop(body);
-    tokio::time::timeout(Duration::from_secs(1), probe.dropped.notified())
-        .await
-        .expect("response drop cancels the pending read after an emitted record");
-    assert!(reader_dropped.load(Ordering::SeqCst));
+    probe.dropped.notified().await;
+    reader_dropped.notified().await;
 }

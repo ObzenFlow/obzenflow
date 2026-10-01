@@ -5,15 +5,13 @@
 //! Private current-schema storage adapter for the current Core provenance schema.
 //! See README.md for the wire contract and scalar-preservation invariants.
 
-#[cfg(feature = "test-support")]
-pub(crate) mod benchmark;
 mod definitions;
 mod deserialize;
 pub(crate) mod frame;
 mod layout;
-#[cfg(test)]
-mod performance_tests;
 mod primitives;
+#[cfg(test)]
+mod reconstruction_tests;
 mod routing;
 mod serialize;
 #[cfg(test)]
@@ -64,8 +62,6 @@ fn read_payload<P: JournalPayload>(provenance: &P::Provenance, bytes: &[u8]) -> 
     if bytes.len() > obzenflow_core::journal::limits::MAX_RECORD_BYTES {
         return Err(invalid("payload byte budget exceeded"));
     }
-    #[cfg(feature = "bench-instrumentation")]
-    obzenflow_core::benchmark::payload_decode(provenance);
     let payload: serde_json::Value = serde_json::from_slice(bytes)?;
     let payload = P::decode(provenance, payload)?;
     payload.validate(provenance)?;
@@ -182,10 +178,6 @@ pub(crate) struct FrameSizes {
 }
 
 impl Decoder {
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn cache_stats(&self) -> definitions::StoreStats {
-        self.store.stats()
-    }
     pub(crate) fn new(path: &Path) -> Self {
         Self {
             path: path.into(),

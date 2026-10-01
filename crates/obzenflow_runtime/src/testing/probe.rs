@@ -9,16 +9,17 @@
 //! case. FLOWIP-114n extends the surface with explicit semantics for:
 //! - fan-in (vector-clock component observation vs author attribution),
 //! - direct-parent lineage matching,
-//! - cycle-depth filtering (`cycle_scc_id` + `cycle_depth`),
-//! - paused-time no-event assertions that advance virtual time explicitly.
+//! - cycle-depth filtering (`cycle_scc_id` + `cycle_depth`).
+//!
+//! Counts and snapshots describe observed records. Absence requires independently
+//! completing the relevant producers and their accepted journal publications.
 //!
 //! The probe counts *data envelopes* only (by `ChainPayload::Data`), and it
 //! counts them regardless of `processing_info.status`. Error-marked data events
 //! are therefore counted by default.
 
 use crate::testing::stage_journal::StageJournalLookupError;
-use crate::testing::test_clock::{SettleSchedulerError, TestClockError};
-use crate::testing::{FlowTestHarness, TestClock};
+use crate::testing::FlowTestHarness;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
 use obzenflow_core::event::{ChainPayload, EventId, WriterId};
@@ -59,18 +60,6 @@ pub enum JournalProbeError {
         observed: u64,
     },
 
-    /// `expect_no_event_within(...)` observed a data envelope after the
-    /// scheduler barrier completed.
-    #[error(
-        "expected no data event within {window:?} on stage `{stage}`, \
-         but observed {observed} envelope(s)"
-    )]
-    UnexpectedEvent {
-        stage: String,
-        window: Duration,
-        observed: u64,
-    },
-
     /// The observed envelope vector clock did not include the target stage's
     /// writer component.
     #[error(
@@ -82,14 +71,6 @@ pub enum JournalProbeError {
         writer_key: String,
         event_id: EventId,
     },
-
-    /// A paused-time assertion was attempted without a paused Tokio runtime.
-    #[error(transparent)]
-    Clock(#[from] TestClockError),
-
-    /// Scheduler barrier failed to reach a stable observation under paused time.
-    #[error(transparent)]
-    SchedulerBarrier(#[from] SettleSchedulerError),
 }
 
 /// One observed data envelope and its derived stage-writer sequence number.
@@ -173,7 +154,7 @@ impl JournalProbe {
     ) -> Result<Self, JournalProbeError> {
         let (stage_id, journal) = handle.stage_journal_for_test(stage_name)?;
         Ok(Self {
-            stage_name: stage_name.to_string(),
+            stage_name: stage_name.to_owned(),
             stage_id,
             journal,
         })
@@ -403,85 +384,23 @@ impl JournalProbe {
             .count() as u64)
     }
 
-    /// Assert no data envelope arrives within `window`.
-    ///
-    /// Under paused time, this sleeps for `window`, then runs a scheduler
-    /// barrier that yields until the runtime reports no scheduled work,
-    /// before reading the journal. This pins the boundary-instant case: a
-    /// task scheduled exactly at the boundary is fully polled before the
-    /// final read.
-    pub async fn expect_no_event_within(&self, window: Duration) -> Result<(), JournalProbeError> {
-        let baseline = self.events_received_so_far().await?;
-        tokio::time::sleep(window).await;
-        let observed = TestClock::settle_scheduler(|| self.events_received_so_far()).await?;
-        let delta = observed.saturating_sub(baseline);
-        if delta == 0 {
-            Ok(())
-        } else {
-            Err(JournalProbeError::UnexpectedEvent {
-                stage: self.stage_name.clone(),
-                window,
-                observed: delta,
-            })
-        }
-    }
-
-    /// Assert that no additional data events appear after a paused-time scheduler settle.
-    ///
-    /// This does not advance time; it is intended for cycle-aware tests that control
-    /// virtual time advancement explicitly and need a stable post-advance boundary.
-    pub async fn expect_no_event_after_settle(&self) -> Result<(), JournalProbeError> {
-        let baseline = self.events_received_so_far().await?;
-        let observed = TestClock::settle_scheduler(|| self.events_received_so_far()).await?;
-        let delta = observed.saturating_sub(baseline);
-        if delta == 0 {
-            Ok(())
-        } else {
-            Err(JournalProbeError::UnexpectedEvent {
-                stage: self.stage_name.clone(),
-                window: Duration::ZERO,
-                observed: delta,
-            })
-        }
-    }
-
-    /// Assert that no additional data events appear while advancing paused Tokio time by `window`.
-    ///
-    /// The caller supplies a [`TestClock`] so the API is explicit about paused-time usage.
-    pub async fn expect_no_event_during(
-        &self,
-        clock: &TestClock,
-        window: Duration,
-    ) -> Result<(), JournalProbeError> {
-        let baseline = self.events_received_so_far().await?;
-        clock.advance(window).await?;
-        let observed = TestClock::settle_scheduler(|| self.events_received_so_far()).await?;
-        let delta = observed.saturating_sub(baseline);
-        if delta == 0 {
-            Ok(())
-        } else {
-            Err(JournalProbeError::UnexpectedEvent {
-                stage: self.stage_name.clone(),
-                window,
-                observed: delta,
-            })
-        }
-    }
-
     async fn read_all_envelopes(
         &self,
     ) -> Result<Vec<JournalRecord<ChainPayload>>, JournalProbeError> {
-        let mut reader = self
-            .journal
-            .reader()
-            .await
-            .map_err(|e| JournalProbeError::JournalRead(e.to_string()))?;
+        let mut reader = self.journal.reader().await.map_err(|e| {
+            JournalProbeError::JournalRead(format!("stage `{}`: {e}", self.stage_name))
+        })?;
         let mut envelopes = Vec::new();
         loop {
             match reader.next().await {
                 Ok(Some(env)) => envelopes.push(env),
                 Ok(None) => return Ok(envelopes),
-                Err(e) => return Err(JournalProbeError::JournalRead(e.to_string())),
+                Err(e) => {
+                    return Err(JournalProbeError::JournalRead(format!(
+                        "stage `{}`: {e}",
+                        self.stage_name
+                    )))
+                }
             }
         }
     }
@@ -512,7 +431,6 @@ mod tests {
     use obzenflow_core::journal::Journal;
     use obzenflow_topology::TopologyBuilder;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     fn test_scc_id(n: u128) -> SccId {
         SccId::from_ulid(obzenflow_core::Ulid::from(n))
@@ -772,92 +690,48 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn expect_no_event_within_fails_when_event_written_at_boundary_instant() {
-        let mut topology_builder = TopologyBuilder::new();
-        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
-        topology_builder.add_stage(Some("sink".to_string()));
-        let topology = topology_builder.build_unchecked().expect("topology");
-        let topology = Arc::new(topology);
-
-        let stage_id = StageId::from_topology_id(stage_topo_id);
-        let writer_id = WriterId::from(stage_id);
-
-        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
-        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
-
-        let harness =
-            harness_with_stage_journal("stage", stage_id, stage_journal.clone(), topology);
-        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
-
-        let window = Duration::from_secs(1);
-        tokio::spawn({
-            let stage_journal = stage_journal.clone();
+    #[tokio::test]
+    async fn positive_wait_covers_late_sibling_output_after_equal_samples() {
+        let journal: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
+        let stage = StageId::new();
+        let probe = JournalProbe::on_journal("siblings", stage, journal.clone());
+        let first = journal
+            .append(
+                ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let sibling = tokio::spawn({
+            let journal = journal.clone();
             async move {
-                tokio::time::sleep(window).await;
-                stage_journal
+                entered.send(()).unwrap();
+                released.await.unwrap();
+                journal
                     .append(
-                        ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                        ChainEventFactory::data_event(stage.into(), "late", serde_json::json!({})),
                         Default::default(),
                     )
                     .await
-                    .expect("append data at boundary");
+                    .unwrap()
             }
         });
-
-        let err = probe
-            .expect_no_event_within(window)
-            .await
-            .expect_err("expected boundary instant event to be observed");
-        assert!(
-            matches!(err, JournalProbeError::UnexpectedEvent { .. }),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn expect_no_event_within_fails_on_chained_wakeup() {
-        let mut topology_builder = TopologyBuilder::new();
-        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
-        topology_builder.add_stage(Some("sink".to_string()));
-        let topology = topology_builder.build_unchecked().expect("topology");
-        let topology = Arc::new(topology);
-
-        let stage_id = StageId::from_topology_id(stage_topo_id);
-        let writer_id = WriterId::from(stage_id);
-
-        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
-        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
-
-        let harness =
-            harness_with_stage_journal("stage", stage_id, stage_journal.clone(), topology);
-        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
-
-        let window = Duration::from_secs(1);
-        tokio::spawn({
-            let stage_journal = stage_journal.clone();
-            async move {
-                tokio::time::sleep(window).await;
-                tokio::spawn(async move {
-                    stage_journal
-                        .append(
-                            ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                            Default::default(),
-                        )
-                        .await
-                        .expect("append chained data");
-                });
-            }
-        });
-
-        let err = probe
-            .expect_no_event_within(window)
-            .await
-            .expect_err("expected chained wakeup event to be observed");
-        assert!(
-            matches!(err, JournalProbeError::UnexpectedEvent { .. }),
-            "unexpected error: {err:?}"
-        );
+        entering.await.unwrap();
+        assert_eq!(probe.events_received_so_far().await.unwrap(), 1);
+        assert_eq!(probe.events_received_so_far().await.unwrap(), 1);
+        // Equal samples and the first producer's completed append leave the
+        // sibling open. A positive wait must still wait for its publication.
+        let second = probe.expect_event(2);
+        tokio::pin!(second);
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        release.send(()).unwrap();
+        let committed = sibling.await.unwrap();
+        let observed = second.await.unwrap();
+        assert_ne!(first.id(), committed.id());
+        assert_eq!(observed.envelope().id(), committed.id());
+        assert_eq!(probe.events_received_so_far().await.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -1135,96 +1009,6 @@ mod tests {
             ProcessingStatus::Error { .. }
         ));
         assert_eq!(observed.envelope().envelope.provenance.event.id, err.id);
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn expect_no_event_during_advances_time_and_observes_boundary_instant_events() {
-        let clock = TestClock::new().await.expect("paused runtime");
-
-        let mut topology_builder = TopologyBuilder::new();
-        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
-        topology_builder.add_stage(Some("sink".to_string()));
-        let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
-
-        let stage_id = StageId::from_topology_id(stage_topo_id);
-        let writer_id = WriterId::from(stage_id);
-
-        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
-        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
-
-        let harness =
-            harness_with_stage_journal("stage", stage_id, stage_journal.clone(), topology);
-        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
-
-        let window = Duration::from_secs(1);
-        tokio::spawn({
-            let stage_journal = stage_journal.clone();
-            async move {
-                tokio::time::sleep(window).await;
-                stage_journal
-                    .append(
-                        ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                        Default::default(),
-                    )
-                    .await
-                    .expect("append data at boundary");
-            }
-        });
-
-        let err = probe
-            .expect_no_event_during(&clock, window)
-            .await
-            .expect_err("boundary instant event should be observed");
-        assert!(
-            matches!(err, JournalProbeError::UnexpectedEvent { .. }),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn expect_no_event_during_observes_chained_wakeup_events() {
-        let clock = TestClock::new().await.expect("paused runtime");
-
-        let mut topology_builder = TopologyBuilder::new();
-        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
-        topology_builder.add_stage(Some("sink".to_string()));
-        let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
-
-        let stage_id = StageId::from_topology_id(stage_topo_id);
-        let writer_id = WriterId::from(stage_id);
-
-        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
-        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
-
-        let harness =
-            harness_with_stage_journal("stage", stage_id, stage_journal.clone(), topology);
-        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
-
-        let window = Duration::from_secs(1);
-        tokio::spawn({
-            let stage_journal = stage_journal.clone();
-            async move {
-                tokio::time::sleep(window).await;
-                tokio::spawn(async move {
-                    stage_journal
-                        .append(
-                            ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
-                            Default::default(),
-                        )
-                        .await
-                        .expect("append chained data");
-                });
-            }
-        });
-
-        let err = probe
-            .expect_no_event_during(&clock, window)
-            .await
-            .expect_err("chained wakeup event should be observed");
-        assert!(
-            matches!(err, JournalProbeError::UnexpectedEvent { .. }),
-            "unexpected error: {err:?}"
-        );
     }
 
     #[tokio::test]

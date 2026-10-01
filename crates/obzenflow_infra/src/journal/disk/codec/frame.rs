@@ -108,12 +108,6 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<&[u8], FrameProblem> {
     {
         return Err(FrameProblem::Corrupt("frame body checksum mismatch".into()));
     }
-    #[cfg(feature = "bench-instrumentation")]
-    {
-        use obzenflow_core::benchmark::{add, Counter};
-        add(Counter::VerifiedFrames, 1);
-        add(Counter::VerifiedFrameBytes, bytes.len() as u64);
-    }
     Ok(&bytes[HEADER_LEN..trailer])
 }
 

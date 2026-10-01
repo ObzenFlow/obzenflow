@@ -139,14 +139,22 @@ fn latest_run_dir(base: &Path) -> PathBuf {
     entries.pop().expect("run should have produced an archive")
 }
 
-#[cfg(feature = "web-host")]
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_writer_columns_use_journaled_registration() {
     use obzenflow::journal::read::{RunRecordData, SupervisionMode, SupervisorKind, SystemPayload};
     let temp = tempfile::tempdir().unwrap();
+    let definition = build_flow(temp.path().to_owned());
+    let definition = FlowDefinition::new(move |context| async move {
+        // Writer registration needs the existing metrics exporter, not an HTTP host.
+        let metrics =
+            std::sync::Arc::new(obzenflow_adapters::monitoring::MetricsReadModel::default());
+        definition
+            .build(context.with_metrics_exporter(metrics))
+            .await
+    });
     FlowApplication::builder()
-        .with_cli_args(["writer-registration", "--server", "--server-port", "0"])
-        .run_async(build_flow(temp.path().to_owned()))
+        .with_cli_args(["writer-registration"])
+        .run_async(definition)
         .await
         .unwrap();
     let run = latest_run_dir(temp.path());
@@ -1370,17 +1378,31 @@ mod control_client {
 
     // A scripted HTTP peer tests transport failures at the executable boundary.
     // None drops the connection after receiving a request, modelling a lost reply.
-    async fn peer(
-        replies: Vec<(u16, Option<Value>)>,
-    ) -> (String, tokio::task::JoinHandle<Vec<RecordedRequest>>) {
+    struct PeerRequests {
+        finished: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<Vec<RecordedRequest>>,
+    }
+    impl PeerRequests {
+        // Called only after the CLI child has exited and been joined. Drain the
+        // already admitted requests, then join the observer owning the listener.
+        async fn finish(self) -> Vec<RecordedRequest> {
+            self.finished.send(()).unwrap();
+            self.task.await.unwrap()
+        }
+    }
+
+    async fn peer(replies: Vec<(u16, Option<Value>)>) -> (String, PeerRequests) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let (finished, mut finish) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let mut requests = vec![];
             let mut replies = replies.into_iter();
-            while let Ok(Ok((stream, _))) =
-                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
-            {
+            loop {
+                let (stream, _) = tokio::select! { biased;
+                    accepted = listener.accept() => accepted.unwrap(),
+                    _ = &mut finish => break,
+                };
                 let mut reader = BufReader::new(stream);
                 let mut first = String::new();
                 reader.read_line(&mut first).await.unwrap();
@@ -1420,7 +1442,7 @@ mod control_client {
             }
             requests
         });
-        (url, task)
+        (url, PeerRequests { finished, task })
     }
 
     fn start_command(url: &str, follow: bool) -> tokio::process::Command {
@@ -1460,7 +1482,7 @@ mod control_client {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests = requests.await.unwrap();
+        let requests = requests.finish().await;
         assert_eq!(requests.len(), 2);
         assert!(requests[0].request_line.starts_with("GET /api/flow/run "));
         assert!(requests[1]
@@ -1501,13 +1523,14 @@ mod control_client {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests = requests.await.unwrap();
+        let requests = requests.finish().await;
         assert_eq!(requests.len(), 2);
         assert!(requests.iter().all(|request| !request.authorization));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), proxy.accept())
-                .await
-                .is_err()
+        // The client has exited, closing its complete request scope. Inspect
+        // the owned listener's backlog without inventing a time-based absence.
+        assert_eq!(
+            proxy.into_std().unwrap().accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
         );
     }
 
@@ -1517,7 +1540,7 @@ mod control_client {
         let output = start(&format!("{url}/not-an-origin"), false).await;
         assert_eq!(output.status.code(), Some(4));
         assert!(String::from_utf8_lossy(&output.stderr).contains("loopback HTTP origin"));
-        assert!(requests.await.unwrap().is_empty());
+        assert!(requests.finish().await.is_empty());
     }
 
     #[tokio::test]
@@ -1535,7 +1558,7 @@ mod control_client {
             assert_eq!(output.status.code(), Some(4));
             assert!(output.stdout.is_empty());
             assert_eq!(
-                requests.await.unwrap().len(),
+                requests.finish().await.len(),
                 1,
                 "no legacy or unconditional Play fallback"
             );
@@ -1575,7 +1598,7 @@ mod control_client {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(
-                requests.await.unwrap().len(),
+                requests.finish().await.len(),
                 2,
                 "control is never retried or retargeted"
             );
@@ -1596,7 +1619,7 @@ mod control_client {
         let output = start(&url, true).await;
         assert_eq!(output.status.code(), Some(4));
         assert!(String::from_utf8_lossy(&output.stderr).contains("identity does not match"));
-        assert_eq!(requests.await.unwrap().len(), 1);
+        assert_eq!(requests.finish().await.len(), 1);
     }
 }
 
@@ -1610,6 +1633,77 @@ mod hosted {
 
     const HOST_ROOT: &str = "OBZENFLOW_CLI_TEST_HOST_ROOT";
     const HOST_PORT: &str = "OBZENFLOW_CLI_TEST_HOST_PORT";
+
+    struct LifetimeEvidence {
+        directory: Option<tempfile::TempDir>,
+        mode: &'static str,
+        phase: &'static str,
+    }
+    impl LifetimeEvidence {
+        fn new(mode: &'static str) -> Self {
+            let base = std::env::var_os("OBZENFLOW_TEST_ARTIFACTS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target/hosted-test-evidence"));
+            std::fs::create_dir_all(&base).unwrap();
+            let directory = tempfile::Builder::new()
+                .prefix(&format!("cli-{mode}-"))
+                .tempdir_in(base)
+                .unwrap();
+            let mut evidence = Self {
+                directory: Some(directory),
+                mode,
+                phase: "create",
+            };
+            evidence.phase("host-start");
+            evidence
+        }
+        fn path(&self) -> &std::path::Path {
+            self.directory.as_ref().unwrap().path()
+        }
+        fn phase(&mut self, phase: &'static str) {
+            self.phase = phase;
+            eprintln!(
+                "hosted lifetime: mode={}, phase={phase}, artifacts={}",
+                self.mode,
+                self.path().display()
+            );
+        }
+    }
+    impl Drop for LifetimeEvidence {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                return;
+            }
+            use std::io::{Read, Seek, SeekFrom};
+            eprintln!(
+                "hosted lifetime failed: mode={}, phase={}; retaining {}",
+                self.mode,
+                self.phase,
+                self.path().display()
+            );
+            for name in ["host.log", "viewer.stderr", "viewer.jsonl"] {
+                let Ok(mut file) = std::fs::File::open(self.path().join(name)) else {
+                    continue;
+                };
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                let _ = file.seek(SeekFrom::Start(metadata.len().saturating_sub(8192)));
+                let mut tail = Vec::new();
+                if file.take(8192).read_to_end(&mut tail).is_ok() {
+                    eprintln!(
+                        "{name}: total_bytes={}, final_bytes={}\n{}",
+                        metadata.len(),
+                        tail.len(),
+                        String::from_utf8_lossy(&tail)
+                    );
+                }
+            }
+            // A hard runner timeout also leaves this target-directory fixture
+            // available to the owner's artifact upload, without a journal scan.
+            let _ = self.directory.take().unwrap().keep();
+        }
+    }
 
     #[test]
     #[ignore = "subprocess fixture launched by independent_lifetimes"]
@@ -1652,10 +1746,13 @@ mod hosted {
     }
 
     async fn wait(child: &mut tokio::process::Child) -> std::process::ExitStatus {
-        tokio::time::timeout(Duration::from_secs(15), child.wait())
+        let pid = child.id();
+        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
             .await
             .expect("process exits within lifecycle budget")
-            .unwrap()
+            .unwrap();
+        eprintln!("hosted lifetime: child_pid={pid:?}, exit={status}");
+        status
     }
 
     async fn discover(
@@ -1711,227 +1808,284 @@ mod hosted {
     // The application and viewer are independent children of this test. Neither
     // launches the other; these are real OS signals through the production host.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn independent_lifetimes_cover_detach_sigint_sigterm_and_sigkill() {
-        for mode in ["detach", "reader_error", "sigint", "sigterm", "sigkill"] {
-            eprintln!("hosted lifetime: mode={mode}");
-            let dir = tempfile::tempdir().unwrap();
-            let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = reservation.local_addr().unwrap().port();
-            drop(reservation);
-            let url = format!("http://127.0.0.1:{port}");
-            let host_log = dir.path().join("host.log");
-            let host_output = std::fs::File::create(&host_log).unwrap();
-            let mut application = tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "hosted::child_application",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(HOST_ROOT, dir.path().join("journals"))
-                .env(HOST_PORT, port.to_string())
-                .stdout(host_output.try_clone().unwrap())
-                .stderr(host_output)
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()
-                .unwrap();
-            let discovery = discover(&client, &url, &mut application).await;
-            let RunArchive::LocalDisk { flow_id, path } = &discovery.archive else {
-                panic!("host must admit its archive: {discovery:?}");
-            };
-            let path = path.decode().unwrap();
-            let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
-                .arg("show")
-                .arg(&path)
-                .arg("--jsonl")
-                .current_dir(dir.path())
+    async fn independent_lifetimes_detach() {
+        independent_lifetimes("detach").await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_lifetimes_reader_error() {
+        independent_lifetimes("reader_error").await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_lifetimes_sigint() {
+        independent_lifetimes("sigint").await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_lifetimes_sigterm() {
+        independent_lifetimes("sigterm").await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn independent_lifetimes_sigkill() {
+        independent_lifetimes("sigkill").await;
+    }
+
+    async fn independent_lifetimes(mode: &'static str) {
+        let mut dir = LifetimeEvidence::new(mode);
+        let host_log = dir.path().join("host.log");
+        let host_output = std::fs::File::create(&host_log).unwrap();
+        let mut application = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "hosted::child_application",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(HOST_ROOT, dir.path().join("journals"))
+            .env(HOST_PORT, "0")
+            .env("RUST_LOG", "info")
+            .env("NO_COLOR", "1")
+            .stdout(host_output.try_clone().unwrap())
+            .stderr(host_output)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        dir.phase("host-discovery");
+        // The production startup diagnostic reports the retained listener's
+        // actual address after bind; no released port reservation is involved.
+        let url = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                assert!(
+                    application.try_wait().unwrap().is_none(),
+                    "application exited before bind"
+                );
+                let log = std::fs::read_to_string(&host_log).unwrap();
+                if let Some(address) = log.lines().find_map(|line| {
+                    line.split_once("Web server started on http://")
+                        .map(|(_, rest)| {
+                            rest.split(|ch: char| ch.is_whitespace() || ch == '\u{001b}')
+                                .next()
+                                .unwrap()
+                                .to_owned()
+                        })
+                }) {
+                    let bound: std::net::SocketAddr = address.parse().expect("bound host address");
+                    assert_ne!(bound.port(), 0);
+                    break format!("http://127.0.0.1:{}", bound.port());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("owned listener admission");
+        let discovery = discover(&client, &url, &mut application).await;
+        let RunArchive::LocalDisk { flow_id, path } = &discovery.archive else {
+            panic!("host must admit its archive: {discovery:?}");
+        };
+        let path = path.decode().unwrap();
+        dir.phase("initial-snapshot");
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+            .arg("show")
+            .arg(&path)
+            .arg("--jsonl")
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let mut snapshot = open_disk_run(&path).await.unwrap();
+        assert_eq!(snapshot.identity().flow_id.to_string(), *flow_id);
+        assert_eq!(
+            snapshot.identity().pipeline_writer_id,
+            discovery.target.pipeline_writer_id
+        );
+        while let Some(row) = snapshot.next().await.unwrap() {
+            assert_ne!(
+                row.kind,
+                RunRecordKind::SourceFact,
+                "manual host must not run before Play"
+            );
+        }
+        assert_eq!(
+            client
+                .get(format!("{url}/ready"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
+        let rows = dir.path().join("viewer.jsonl");
+        let diagnostics = dir.path().join("viewer.stderr");
+        let observer_path = if mode == "reader_error" {
+            // Share the live inodes through separate observer-only names.
+            // Replacing one of these names must not replace a required
+            // application journal, which correctly fails its own readers.
+            let observer = dir.path().join("observer");
+            std::fs::create_dir(&observer).unwrap();
+            for entry in std::fs::read_dir(&path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_file() {
+                    std::fs::hard_link(entry.path(), observer.join(entry.file_name())).unwrap();
+                }
+            }
+            observer
+        } else {
+            path.clone()
+        };
+        let mut view_command = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"));
+        if mode == "reader_error" {
+            view_command.arg("show").arg(&observer_path);
+        } else {
+            view_command.args(["start", "--server", &url]);
+        }
+        let mut viewer = view_command
+            .args(["--follow", "--jsonl", "--include-runtime"])
+            .stdout(std::fs::File::create(&rows).unwrap())
+            .stderr(std::fs::File::create(&diagnostics).unwrap())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        if mode == "reader_error" {
+            // Control still targets the real host; only this viewer's
+            // filesystem namespace is used for fault injection.
+            let started = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
+                .args(["start", "--server", &url])
                 .output()
                 .await
                 .unwrap();
-            assert_eq!(output.status.code(), Some(0));
-            let mut snapshot = open_disk_run(&path).await.unwrap();
-            assert_eq!(snapshot.identity().flow_id.to_string(), *flow_id);
             assert_eq!(
-                snapshot.identity().pipeline_writer_id,
-                discovery.target.pipeline_writer_id
+                started.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&started.stderr)
             );
-            while let Some(row) = snapshot.next().await.unwrap() {
-                assert_ne!(
-                    row.kind,
-                    RunRecordKind::SourceFact,
-                    "manual host must not run before Play"
-                );
-            }
-            assert_eq!(
-                client
-                    .get(format!("{url}/ready"))
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                503
-            );
-            let rows = dir.path().join("viewer.jsonl");
-            let diagnostics = dir.path().join("viewer.stderr");
-            let observer_path = if mode == "reader_error" {
-                // Share the live inodes through separate observer-only names.
-                // Replacing one of these names must not replace a required
-                // application journal, which correctly fails its own readers.
-                let observer = dir.path().join("observer");
-                std::fs::create_dir(&observer).unwrap();
-                for entry in std::fs::read_dir(&path).unwrap() {
-                    let entry = entry.unwrap();
-                    if entry.file_type().unwrap().is_file() {
-                        std::fs::hard_link(entry.path(), observer.join(entry.file_name())).unwrap();
-                    }
-                }
-                observer
-            } else {
-                path.clone()
-            };
-            let mut view_command = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"));
-            if mode == "reader_error" {
-                view_command.arg("show").arg(&observer_path);
-            } else {
-                view_command.args(["start", "--server", &url]);
-            }
-            let mut viewer = view_command
-                .args(["--follow", "--jsonl", "--include-runtime"])
-                .stdout(std::fs::File::create(&rows).unwrap())
-                .stderr(std::fs::File::create(&diagnostics).unwrap())
-                .kill_on_drop(true)
-                .spawn()
-                .unwrap();
-            if mode == "reader_error" {
-                // Control still targets the real host; only this viewer's
-                // filesystem namespace is used for fault injection.
-                let started = tokio::process::Command::new(env!("CARGO_BIN_EXE_obzenflow"))
-                    .args(["start", "--server", &url])
-                    .output()
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    started.status.code(),
-                    Some(0),
-                    "{}",
-                    String::from_utf8_lossy(&started.stderr)
-                );
-            }
-            first_fact(&rows, &mut viewer).await;
-            assert_eq!(
-                client
-                    .get(format!("{url}/ready"))
-                    .send()
-                    .await
-                    .unwrap()
-                    .status(),
-                200
-            );
-            let guidance = std::fs::read_to_string(&host_log).unwrap();
-            let pid = application.id().unwrap();
-            assert!(
-                guidance.contains(&format!("kill -TERM {pid}"))
-                    && guidance.contains(&format!("kill -KILL {pid}"))
-            );
-            match mode {
-                "detach" => {
-                    signal(&viewer, Signal::Interrupt);
-                    assert_eq!(wait(&mut viewer).await.code(), Some(0));
-                    assert!(application.try_wait().unwrap().is_none());
-                    assert_eq!(
-                        client
-                            .get(format!("{url}/ready"))
-                            .send()
-                            .await
-                            .unwrap()
-                            .status(),
-                        200
-                    );
-                    signal(&application, Signal::Term);
-                }
-                "sigint" => signal(&application, Signal::Interrupt),
-                "reader_error" => {
-                    use std::os::unix::fs::MetadataExt;
-                    let live_system = path.join("system.log");
-                    let original_inode = std::fs::metadata(&live_system).unwrap().ino();
-                    let system = observer_path.join("system.log");
-                    assert_eq!(std::fs::metadata(&system).unwrap().ino(), original_inode);
-                    let replacement = observer_path.join("system.observer-copy");
-                    std::fs::copy(&system, &replacement).unwrap();
-                    std::fs::rename(&replacement, &system).unwrap();
-                    assert_eq!(
-                        std::fs::metadata(&live_system).unwrap().ino(),
-                        original_inode
-                    );
-                    assert_eq!(wait(&mut viewer).await.code(), Some(4));
-                    assert!(std::fs::read_to_string(&diagnostics)
-                        .unwrap()
-                        .contains("run_observation_failed"));
-                    let status = application.try_wait().unwrap();
-                    assert!(
-                        status.is_none(),
-                        "observer-only failure stopped application: {status:?}\n{}",
-                        std::fs::read_to_string(&host_log).unwrap()
-                    );
-                    assert_eq!(
-                        client
-                            .get(format!("{url}/ready"))
-                            .send()
-                            .await
-                            .unwrap()
-                            .status(),
-                        200
-                    );
-                    signal(&application, Signal::Term);
-                }
-                "sigterm" => signal(&application, Signal::Term),
-                "sigkill" => application.start_kill().unwrap(),
-                _ => unreachable!(),
-            }
-            let _ = wait(&mut application).await;
-            let mut tail = open_disk_run(&path).await.unwrap().into_tail();
-            while matches!(tail.read_next().await.unwrap(), TailRead::Record(_)) {}
-            if mode == "sigkill" {
-                assert!(tail.progress().settled_prefix.is_none());
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                assert!(
-                    viewer.try_wait().unwrap().is_none(),
-                    "SIGKILL cannot manufacture settlement"
-                );
+        }
+        dir.phase("first-viewer-fact");
+        first_fact(&rows, &mut viewer).await;
+        assert_eq!(
+            client
+                .get(format!("{url}/ready"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        let guidance = std::fs::read_to_string(&host_log).unwrap();
+        let pid = application.id().unwrap();
+        assert!(
+            guidance.contains(&format!("kill -TERM {pid}"))
+                && guidance.contains(&format!("kill -KILL {pid}"))
+        );
+        dir.phase("fault-or-signal");
+        match mode {
+            "detach" => {
                 signal(&viewer, Signal::Interrupt);
-            } else {
-                assert!(
-                    tail.progress().settled_prefix.is_some(),
-                    "{mode}: {:?}",
-                    tail.progress()
-                );
-                if mode == "sigint" {
-                    assert!(matches!(
-                        tail.progress().outcome.as_ref().unwrap().outcome,
-                        RunOutcome::Cancelled { .. }
-                    ));
-                }
-            }
-            if mode != "detach" && mode != "reader_error" {
+                assert_eq!(wait(&mut viewer).await.code(), Some(0));
+                assert!(application.try_wait().unwrap().is_none());
                 assert_eq!(
-                    wait(&mut viewer).await.code(),
-                    Some(0),
-                    "{mode}: {}",
-                    std::fs::read_to_string(&diagnostics).unwrap()
+                    client
+                        .get(format!("{url}/ready"))
+                        .send()
+                        .await
+                        .unwrap()
+                        .status(),
+                    200
                 );
+                signal(&application, Signal::Term);
             }
-            let stdout = std::fs::read_to_string(&rows).unwrap();
-            for line in stdout.lines() {
-                serde_json::from_str::<RunRecord>(line).expect("stdout contains records only");
+            "sigint" => signal(&application, Signal::Interrupt),
+            "reader_error" => {
+                use std::os::unix::fs::MetadataExt;
+                let live_system = path.join("system.log");
+                let original_inode = std::fs::metadata(&live_system).unwrap().ino();
+                let system = observer_path.join("system.log");
+                assert_eq!(std::fs::metadata(&system).unwrap().ino(), original_inode);
+                let replacement = observer_path.join("system.observer-copy");
+                std::fs::copy(&system, &replacement).unwrap();
+                std::fs::rename(&replacement, &system).unwrap();
+                assert_eq!(
+                    std::fs::metadata(&live_system).unwrap().ino(),
+                    original_inode
+                );
+                assert_eq!(wait(&mut viewer).await.code(), Some(4));
+                assert!(std::fs::read_to_string(&diagnostics)
+                    .unwrap()
+                    .contains("run_observation_failed"));
+                let status = application.try_wait().unwrap();
+                assert!(
+                    status.is_none(),
+                    "observer-only failure stopped application: {status:?}\n{}",
+                    std::fs::read_to_string(&host_log).unwrap()
+                );
+                assert_eq!(
+                    client
+                        .get(format!("{url}/ready"))
+                        .send()
+                        .await
+                        .unwrap()
+                        .status(),
+                    200
+                );
+                signal(&application, Signal::Term);
             }
-            if mode != "reader_error" {
-                assert_json_summary(&stdout, &std::fs::read_to_string(&diagnostics).unwrap());
+            "sigterm" => signal(&application, Signal::Term),
+            "sigkill" => application.start_kill().unwrap(),
+            _ => unreachable!(),
+        }
+        dir.phase("host-settlement");
+        let _ = wait(&mut application).await;
+        let mut tail = open_disk_run(&path).await.unwrap().into_tail();
+        while matches!(tail.read_next().await.unwrap(), TailRead::Record(_)) {}
+        if mode == "sigkill" {
+            assert!(tail.progress().settled_prefix.is_none());
+            signal(&viewer, Signal::Interrupt);
+        } else {
+            assert!(
+                tail.progress().settled_prefix.is_some(),
+                "{mode}: {:?}",
+                tail.progress()
+            );
+            if mode == "sigint" {
+                assert!(matches!(
+                    tail.progress().outcome.as_ref().unwrap().outcome,
+                    RunOutcome::Cancelled { .. }
+                ));
             }
         }
+        dir.phase("viewer-settlement");
+        if mode != "detach" && mode != "reader_error" {
+            assert_eq!(
+                wait(&mut viewer).await.code(),
+                Some(0),
+                "{mode}: {}",
+                std::fs::read_to_string(&diagnostics).unwrap()
+            );
+        }
+        let stdout = std::fs::read_to_string(&rows).unwrap();
+        for line in stdout.lines() {
+            serde_json::from_str::<RunRecord>(line).expect("stdout contains records only");
+        }
+        if mode != "reader_error" {
+            let diagnostics = std::fs::read_to_string(&diagnostics).unwrap();
+            assert_json_summary(&stdout, &diagnostics);
+            if mode == "sigkill" {
+                let summary: serde_json::Value = diagnostics
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                    .find(|record| record["event"] == "run_observation_summary")
+                    .unwrap();
+                assert_eq!(
+                    summary["reason"],
+                    "detached; application execution is independent"
+                );
+                assert!(summary["progress"]["settled_prefix"].is_null());
+            }
+        }
+        dir.phase("verified");
     }
 }

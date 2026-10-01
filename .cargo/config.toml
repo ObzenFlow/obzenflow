@@ -1,6 +1,6 @@
 [alias]
 tokio-console-run = "run --package obzenflow --features tokio-console"
-xtask = "run --package xtask --"
+xtask = "run --locked --package xtask --"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

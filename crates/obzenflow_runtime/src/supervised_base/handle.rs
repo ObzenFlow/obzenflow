@@ -366,10 +366,12 @@ where
 
     async fn abort_and_wait(&self) -> Result<(), Self::Error> {
         self.abort();
-        let exit = self.completion.clone().await;
-        match exit.as_ref() {
-            SupervisorExit::Aborted => Ok(()),
-            _ => exit.result(),
+        // Emergency teardown accepts cancellation, never a failure already
+        // acknowledged by the FSM or an accepted publication. Use the same
+        // retained result as ordinary observers after physical settlement.
+        match self.join().await {
+            Err(HandleError::SupervisorAborted) => Ok(()),
+            result => result,
         }
     }
 }
@@ -581,6 +583,113 @@ mod completion_tests {
         Abort,
     }
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("accepted sibling publication failed")]
+    struct PublicationFailure;
+
+    fn has_publication_failure(mut error: &(dyn Error + 'static)) -> bool {
+        loop {
+            if error.is::<PublicationFailure>() {
+                return true;
+            }
+            match error.source() {
+                Some(source) => error = source,
+                None => return false,
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aborted_execution_joins_every_accepted_sibling_and_retains_publication_failure() {
+        for fails in [false, true] {
+            let publications = PublicationScope::concurrent();
+            let (release_first, first_gate) = tokio::sync::oneshot::channel();
+            let (release_second, second_gate) = tokio::sync::oneshot::channel();
+            let first = publications
+                .enqueue(async move {
+                    let _ = first_gate.await;
+                    Ok(())
+                })
+                .unwrap();
+            let second = publications
+                .enqueue(async move {
+                    let _ = second_gate.await;
+                    if fails {
+                        Err(Box::new(PublicationFailure) as publication::BoxError)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap();
+            let (sender, _receiver, watcher) = ChannelBuilder::<(), bool>::new().build(false);
+            let (entered, started) = tokio::sync::oneshot::channel();
+            let (destroyed, stopped) = tokio::sync::oneshot::channel();
+            struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+            impl Drop for OnDrop {
+                fn drop(&mut self) {
+                    let _ = self.0.take().unwrap().send(());
+                }
+            }
+            let task = tokio::spawn(async move {
+                let _drop = OnDrop(Some(destroyed));
+                let _ = entered.send(());
+                std::future::pending().await
+            });
+            let handle = HandleBuilder::new()
+                .with_event_sender(sender)
+                .with_state_watcher(watcher)
+                .with_supervisor_task(SupervisorTask {
+                    task,
+                    publications,
+                    lifecycle: LifecycleResults::new(),
+                })
+                .build_standard()
+                .unwrap();
+            started.await.unwrap();
+            handle.abort();
+            stopped.await.unwrap();
+            while handle.is_running() {
+                tokio::task::yield_now().await;
+            }
+            // Physical task destruction cannot stand in for accepted work.
+            let mut joined = Box::pin(handle.join());
+            assert!(poll!(joined.as_mut()).is_pending());
+            release_first.send(()).unwrap();
+            first.await.unwrap();
+            assert!(
+                poll!(joined.as_mut()).is_pending(),
+                "the delayed sibling still owns work"
+            );
+            drop(joined); // A cancelled observer must not lose either result.
+            release_second.send(()).unwrap();
+            let publication = second.await;
+            assert_eq!(publication.is_err(), fails);
+            for _ in 0..2 {
+                let result = handle.join().await;
+                if fails {
+                    let Err(HandleError::SupervisorFailed(cause)) = result else {
+                        panic!("{result:?}");
+                    };
+                    assert!(
+                        has_publication_failure(cause.as_ref()),
+                        "original publication cause: {cause:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(HandleError::SupervisorAborted)),
+                        "{result:?}"
+                    );
+                }
+            }
+            let teardown = handle.abort_and_wait().await;
+            assert_eq!(
+                teardown.is_err(),
+                fails,
+                "teardown retains accepted failures: {teardown:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn parked_dropped_and_late_observers_share_every_completion_path() {
         for exit in [Exit::Success, Exit::Failure, Exit::Panic, Exit::Abort] {
@@ -646,6 +755,12 @@ mod completion_tests {
                 assert_eq!(
                     format!("{:?}", handle.wait_for_completion().await),
                     format!("{result:?}")
+                );
+                handle.abort();
+                assert_eq!(
+                    format!("{:?}", handle.join().await),
+                    format!("{result:?}"),
+                    "late abort cannot rewrite retained completion"
                 );
             }
         }

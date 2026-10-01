@@ -128,6 +128,8 @@ impl Drop for PipelineContext {
     fn drop(&mut self) {
         // A cancelled or panicking supervisor cannot execute its cleanup actions.
         // These requests also cover failure before the application receives a handle.
+        // This owner runs after the parent's active poll, so emergency child
+        // cancellation cannot be fed back into a still-executing parent FSM.
         for stage in self
             .stage_supervisors
             .values()

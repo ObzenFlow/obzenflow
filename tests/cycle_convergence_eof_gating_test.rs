@@ -5,7 +5,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
-use obzenflow_core::event::ChainEvent;
+use obzenflow_core::event::{
+    ChainEvent, PipelineLifecycleEvent, PipelineStopAdmission, SystemPayload,
+};
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{CycleDepth, StageOutputs};
@@ -20,7 +22,7 @@ use obzenflow_runtime::stages::common::handlers::{
     TypedTransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_runtime::testing::{JournalProbe, TestClock};
+use obzenflow_runtime::testing::{BackpressureAckGate, JournalProbe};
 use serde::{Deserialize, Serialize};
 
 /// File-local payload for the cycle-convergence test. The JSON shape
@@ -44,7 +46,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use tokio::sync::Notify;
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
@@ -292,11 +294,11 @@ impl InlineSink for DoneCounterSink {
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
-
     let journal_root = unique_journal_dir("cycle_buffers_external_eof");
+    let gate =
+        BackpressureAckGate::install("eof_entry", "eof_iter", 0).map_err(anyhow::Error::msg)?;
 
     let target_iterations = 5u64;
     let entry_processed = Arc::new(AtomicU64::new(0));
@@ -312,48 +314,52 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let harness = test_flow! {
         name: "cycle_buffers_external_eof_until_scc_quiescent",
         journals: disk_journals(journal_root),
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1).stall_timeout_ms(5_000),
 
         stages: {
             src = async_source!(SeedEvent => source);
-            entry = transform!(SeedEvent -> SeedEvent => entry);
-            iter = transform!(SeedEvent -> SeedEvent => iter);
+            eof_entry = transform!(SeedEvent -> SeedEvent => entry);
+            eof_iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
         topology: {
-            src |> entry;
-            entry |> iter;
-            entry <| iter;
-            entry |> snk;
+            src |> eof_entry;
+            eof_entry |> eof_iter;
+            eof_entry <| eof_iter;
+            eof_entry |> snk;
         }
     }
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    let probe = JournalProbe::try_on_stage(&harness, "entry")?;
+    let probe = JournalProbe::try_on_stage(&harness, "eof_entry")?;
+    let (_, source_journal) = harness.stage_journal_for_test("src")?;
     let handle = harness.into_inner();
-    let run = tokio::spawn(handle.run());
-
-    // Disk I/O runs outside Tokio's paused clock. As in the cycle guard test,
-    // bound the scheduler with a wall-clock watchdog: a fixed yield count can
-    // expire before blocking I/O completes when other test binaries are busy.
-    let scheduler_deadline = Instant::now() + Duration::from_secs(10);
-    while !run.is_finished() && Instant::now() < scheduler_deadline {
-        clock.advance(Duration::from_millis(50)).await?;
-        for _ in 0..16 {
-            if run.is_finished() {
-                break;
+    handle.start().await?;
+    eprintln!("cycle EOF: waiting for withheld internal-edge acknowledgement");
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_for_withheld(1)).await?;
+    // The adjacent EOF caller also used virtual-time advances to pump physical
+    // disk I/O. Establish the committed EOF with real cycle work held instead.
+    eprintln!("cycle EOF: waiting for the source's committed EOF");
+    let mut reader = source_journal.reader().await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(record) = reader.next().await? {
+                if record.is_eof() {
+                    return Ok::<(), obzenflow_core::journal::JournalError>(());
+                }
+            } else {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
         }
-    }
-    assert!(
-        run.is_finished(),
-        "flow did not terminate before the scheduler deadline under paused time"
-    );
-    run.await
-        .expect("join handle")
-        .map_err(|e| anyhow::anyhow!("flow run failed: {e}"))?;
+    })
+    .await??;
+    assert_eq!(iter_processed.load(Ordering::Relaxed), 1);
+    assert_eq!(done_count.load(Ordering::Relaxed), 0);
+    gate.open();
+    eprintln!("cycle EOF: released work; waiting for committed convergence");
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion()).await??;
 
     assert_eq!(
         done_count.load(Ordering::Relaxed),
@@ -459,11 +465,14 @@ impl TypedFiniteSourceHandler for DualSeedSource {
     }
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
-    let clock = TestClock::new().await.expect("paused runtime");
-
     let journal_root = unique_journal_dir("cycle_buffers_drain");
+    // Withhold the first real internal-edge acknowledgement. A one-row credit
+    // window holds the next publication, so drain admission must occur while
+    // cycle work is still outstanding. The gate never blocks a runtime worker.
+    let gate =
+        BackpressureAckGate::install("drain_entry", "drain_iter", 0).map_err(anyhow::Error::msg)?;
 
     let target_iterations = 5u64;
     let entry_processed = Arc::new(AtomicU64::new(0));
@@ -471,75 +480,96 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let entry_processed_for_flow = entry_processed.clone();
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
-    let iteration_started = Arc::new(Notify::new());
     let source = SeedThenDrainSource::new(target_iterations);
     let entry = EntryConvergeTransform::new(entry_processed_for_flow);
-    let iter = IterationTransform::new(
-        iter_processed_for_flow,
-        Some(Arc::clone(&iteration_started)),
-    );
+    let iter = IterationTransform::new(iter_processed_for_flow, None);
 
     let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
         journals: disk_journals(journal_root),
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(1).stall_timeout_ms(5_000),
 
         stages: {
             src = async_infinite_source!(SeedEvent => source);
-            entry = transform!(SeedEvent -> SeedEvent => entry);
-            iter = transform!(SeedEvent -> SeedEvent => iter);
+            drain_entry = transform!(SeedEvent -> SeedEvent => entry);
+            drain_iter = transform!(SeedEvent -> SeedEvent => iter);
             snk = sink!(SeedEvent => sink);
         },
 
         topology: {
-            src |> entry;
-            entry |> iter;
-            entry <| iter;
-            entry |> snk;
+            src |> drain_entry;
+            drain_entry |> drain_iter;
+            drain_entry <| drain_iter;
+            drain_entry |> snk;
         }
     }
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    let probe = JournalProbe::try_on_stage(&harness, "entry")?;
+    let probe = JournalProbe::try_on_stage(&harness, "drain_entry")?;
     let handle = harness.into_inner();
+    let system_journal = handle.system_journal().expect("durable system journal");
     handle
         .start()
         .await
         .map_err(|e| anyhow::anyhow!("flow start failed: {e}"))?;
 
-    // Wait for the transform itself to report that the cycle is in flight,
-    // then request the runtime-owned drain. A polling loop over paused time can
-    // outrun executor scheduling and spuriously observe zero iterations.
-    tokio::time::timeout(Duration::from_secs(5), iteration_started.notified())
+    eprintln!("cycle drain: waiting for withheld internal-edge acknowledgement");
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_for_withheld(1))
         .await
-        .map_err(|_| anyhow::anyhow!("cycle did not enter its first iteration before drain"))?;
-    assert!(iter_processed.load(Ordering::Relaxed) > 0);
+        .map_err(|_| anyhow::anyhow!("cycle did not reach the acknowledgement gate"))?;
+    assert_eq!(iter_processed.load(Ordering::Relaxed), 1);
+    assert_eq!(done_count.load(Ordering::Relaxed), 0);
     handle
         .stop_graceful(Duration::from_secs(5))
         .await
         .map_err(|e| anyhow::anyhow!("graceful stop failed: {e}"))?;
 
-    // Drive paused time until the flow terminates.
-    for _ in 0..400 {
-        if !handle.is_running() {
-            break;
-        }
-        clock.advance(Duration::from_millis(50)).await?;
-        for _ in 0..16 {
-            if !handle.is_running() {
-                break;
+    // Submission is not admission. Read the committed stop before releasing
+    // work, rather than relying on a sleep or a number of scheduler yields.
+    eprintln!("cycle drain: waiting for durable graceful-stop admission");
+    let mut reader = system_journal.reader().await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(record) = reader.next().await? {
+                if matches!(
+                    record.payload,
+                    SystemPayload::PipelineLifecycle(PipelineLifecycleEvent::StopAdmitted {
+                        admission: PipelineStopAdmission::Graceful { .. }
+                    })
+                ) {
+                    return Ok::<(), obzenflow_core::journal::JournalError>(());
+                }
+            } else {
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
         }
-    }
-    assert!(
-        !handle.is_running(),
-        "flow did not terminate under paused time"
-    );
-    handle
-        .wait_for_completion()
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("graceful stop was not durably admitted"))??;
+    assert_eq!(iter_processed.load(Ordering::Relaxed), 1);
+    assert_eq!(done_count.load(Ordering::Relaxed), 0);
+    gate.open();
+
+    // Disk completion advances in real time. Deadline correctness has its own
+    // controlled-clock test; this outer timeout is only a hang watchdog.
+    eprintln!("cycle drain: released work; waiting for committed convergence");
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
-        .map_err(|e| anyhow::anyhow!("flow run failed: {e}"))?;
+        .map_err(|_| anyhow::anyhow!("cycle did not settle after gate release"))??;
+    let facts = system_journal.read_all_unordered().await?;
+    let terminal = facts.iter().find_map(|record| match &record.payload {
+        SystemPayload::PipelineLifecycle(
+            event @ (PipelineLifecycleEvent::Cancelled { .. }
+            | PipelineLifecycleEvent::Completed { .. }
+            | PipelineLifecycleEvent::Failed { .. }),
+        ) => Some(event),
+        _ => None,
+    });
+    assert!(
+        matches!(terminal, Some(PipelineLifecycleEvent::Cancelled { reason, .. }) if reason == "user_stop"),
+        "graceful cycle drain must finish as user_stop, not deadline cancellation: {terminal:?}"
+    );
 
     assert_eq!(
         done_count.load(Ordering::Relaxed),

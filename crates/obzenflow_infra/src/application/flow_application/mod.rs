@@ -60,6 +60,8 @@ struct LaunchParams {
     #[cfg(all(test, feature = "warp-server"))]
     test_shutdown_signal: Option<tokio::sync::oneshot::Receiver<ShutdownSignal>>,
     #[cfg(all(test, feature = "warp-server"))]
+    test_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
+    #[cfg(all(test, feature = "warp-server"))]
     test_host_task: Option<(
         futures::future::BoxFuture<
             'static,
@@ -168,6 +170,8 @@ pub struct FlowApplicationBuilder {
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
     cli_args: Option<Vec<OsString>>,
+    #[cfg(all(test, feature = "warp-server"))]
+    test_bound_address: Option<tokio::sync::oneshot::Sender<std::net::SocketAddr>>,
 }
 
 impl FlowApplicationBuilder {
@@ -359,6 +363,8 @@ impl FlowApplicationBuilder {
             flow_handle_hooks,
             presentation,
             cli_args,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_bound_address,
             ..
         } = self;
 
@@ -375,6 +381,8 @@ impl FlowApplicationBuilder {
                 cli_args,
                 #[cfg(all(test, feature = "warp-server"))]
                 test_shutdown_signal: None,
+                #[cfg(all(test, feature = "warp-server"))]
+                test_bound_address,
                 #[cfg(all(test, feature = "warp-server"))]
                 test_host_task: None,
             },
@@ -396,6 +404,8 @@ impl FlowApplicationBuilder {
             flow_handle_hooks,
             presentation,
             cli_args,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_bound_address,
             ..
         } = self;
 
@@ -412,6 +422,8 @@ impl FlowApplicationBuilder {
                 cli_args,
                 #[cfg(all(test, feature = "warp-server"))]
                 test_shutdown_signal: None,
+                #[cfg(all(test, feature = "warp-server"))]
+                test_bound_address,
                 #[cfg(all(test, feature = "warp-server"))]
                 test_host_task: None,
             },
@@ -638,6 +650,8 @@ impl FlowApplication {
             cli_args,
             #[cfg(all(test, feature = "warp-server"))]
             test_shutdown_signal,
+            #[cfg(all(test, feature = "warp-server"))]
+            test_bound_address,
             #[cfg(all(test, feature = "warp-server"))]
             test_host_task,
         } = params;
@@ -956,6 +970,12 @@ impl FlowApplication {
                     }
                 };
 
+                // Tests connect to the listener we actually own instead of
+                // reserving and dropping an unrelated ephemeral port first.
+                #[cfg(test)]
+                if let Some(address) = test_bound_address {
+                    let _ = address.send(host.address());
+                }
                 #[cfg(any(test, feature = "studio-registration"))]
                 let mut host = host;
                 #[cfg(test)]

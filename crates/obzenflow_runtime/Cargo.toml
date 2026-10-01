@@ -25,7 +25,6 @@ doctest = false
 
 [features]
 test-support = ["tokio/test-util"]
-bench-instrumentation = ["obzenflow_core/bench-instrumentation"]
 
 [dependencies]
 # Internal dependencies
