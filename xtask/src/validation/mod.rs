@@ -3,13 +3,14 @@
 // https://obzenflow.dev
 
 //! Repository validation owns selection and acceptance, never test execution.
+pub(crate) mod dependencies;
 mod launcher;
 mod performance;
 mod plan;
 pub(crate) mod prerequisites;
 mod process;
 mod report;
-mod source;
+pub(crate) mod source;
 
 #[cfg(test)]
 mod tests;
@@ -71,6 +72,8 @@ struct RunReport {
     requested_scope: String,
     not_requested: Vec<Lane>,
     policy: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dependency_preparation: Option<Outcome>,
     lanes: Vec<LaneResult>,
     outcome: Outcome,
 }
@@ -91,6 +94,23 @@ fn run_native(
     options: Options,
     policy: Policy,
     summary_path: Option<&Path>,
+    execute_lane: impl FnMut(&Path, &Policy, Lane, &[String], &Path, &launcher::Launcher) -> Result<()>,
+) -> Result<()> {
+    run_native_with_preparation(
+        root,
+        options,
+        policy,
+        summary_path,
+        execute_lane,
+        dependencies::prepare,
+    )
+}
+
+fn run_native_with_preparation(
+    root: &Path,
+    options: Options,
+    policy: Policy,
+    summary_path: Option<&Path>,
     mut execute_lane: impl FnMut(
         &Path,
         &Policy,
@@ -99,6 +119,7 @@ fn run_native(
         &Path,
         &launcher::Launcher,
     ) -> Result<()>,
+    mut prepare: impl FnMut(&Path, &Policy, &Path) -> Result<()>,
 ) -> Result<()> {
     let _lock = process::lock(root)?;
     let _signals = process::SignalGuard::install()?;
@@ -106,7 +127,7 @@ fn run_native(
     let directory = root.join("target/test-runs").join(&run_id);
     fs::create_dir(&directory)?;
     let mut report = RunReport {
-        version: 3,
+        version: 4,
         run_id,
         started_at_unix_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -120,6 +141,16 @@ fn run_native(
             .filter(|lane| !options.lanes.contains(lane))
             .collect(),
         policy: native_policy(&policy),
+        dependency_preparation: options
+            .lanes
+            .iter()
+            .any(|lane| {
+                matches!(
+                    lane,
+                    Lane::Default | Lane::ProductionFeatures | Lane::TestSupport
+                )
+            })
+            .then_some(Outcome::Pending),
         lanes: options
             .lanes
             .iter()
@@ -181,6 +212,18 @@ fn run_native(
             return Err(failure);
         }
     };
+    if report.dependency_preparation.is_some() {
+        report.dependency_preparation = Some(Outcome::Running);
+        save(&directory, &report)?;
+        report.dependency_preparation = Some(match prepare(root, &policy, &directory) {
+            Ok(()) => Outcome::Passed,
+            Err(failure) => {
+                eprintln!("validation: dependency preparation incomplete: {failure}; continuing independent checks");
+                Outcome::Incomplete(failure.to_string())
+            }
+        });
+        save(&directory, &report)?;
+    }
     for (index, lane) in options.lanes.iter().copied().enumerate() {
         if process::was_interrupted() {
             break;
@@ -218,6 +261,14 @@ fn run_native(
     });
     report.outcome = if let Err(failure) = source_check {
         Outcome::Incomplete(failure.to_string())
+    } else if report
+        .dependency_preparation
+        .as_ref()
+        .is_some_and(|outcome| !matches!(outcome, Outcome::Passed))
+    {
+        Outcome::Incomplete(
+            "dependency preparation did not complete; lane results remain available".into(),
+        )
     } else if report
         .lanes
         .iter()
@@ -283,6 +334,9 @@ fn summary(report: &RunReport, path: Option<&Path>) -> Result<()> {
     writeln!(output, "### Validation: {}\n", report.requested_scope)?;
     writeln!(output, "Outcome: {:?}\n", report.outcome)?;
     writeln!(output, "Source: `{}`\n", report.source.content_sha256)?;
+    if let Some(preparation) = &report.dependency_preparation {
+        writeln!(output, "Dependency preparation: {preparation:?}\n")?;
+    }
     writeln!(output, "| Lane | Outcome |\n|---|---|")?;
     for lane in &report.lanes {
         writeln!(output, "| {} | {:?} |", lane.lane.name(), lane.outcome)?;
@@ -329,19 +383,59 @@ fn run_lane(
             }
         }
         Lane::Postgres => {
-            let status = process::execute(
-                process::command(root, policy, launcher.path()).args(["postgres", "test"]),
+            let invocation = uuid::Uuid::new_v4().to_string();
+            let source = source::identity(root)?;
+            let execution = process::execute(
+                process::command(root, policy, launcher.path())
+                    .arg("__postgres-test")
+                    .arg(directory)
+                    .arg(&invocation)
+                    .arg(&source.content_sha256),
                 directory,
                 "postgres",
                 Duration::from_secs(policy.command_watchdog_seconds),
-            )?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(error("PostgreSQL coordinator did not complete acceptance"))
-            }
+            );
+            // Even interruption or a failed wrapper can leave completed failed
+            // targets. Import those facts before deciding overall acceptance.
+            let evidence = crate::postgres::evidence::read_validated(
+                directory,
+                &invocation,
+                &source.content_sha256,
+            );
+            postgres_acceptance(execution, evidence)
         }
         Lane::Performance => performance::run(root, policy, directory),
+    }
+}
+
+pub(super) fn postgres_acceptance(
+    execution: Result<std::process::ExitStatus>,
+    evidence: Result<crate::postgres::evidence::Report>,
+) -> Result<()> {
+    let report = evidence.map_err(|failure| {
+        error(format!(
+        "PostgreSQL coordinator evidence unavailable or invalid: {failure}; execution={execution:?}"
+    ))
+    })?;
+    let failures = report.known_failures();
+    let mut unfinished = report.unfinished_obligations();
+    match execution {
+        Ok(status) if status.success() && report.passed() => return Ok(()),
+        Ok(status) if !status.success() && report.passed() => {
+            unfinished.push(format!(
+                "coordinator exited {status} despite passing target evidence"
+            ));
+        }
+        Ok(_) => {}
+        Err(failure) => unfinished.push(format!("coordinator execution: {failure}")),
+    }
+    let detail = format!(
+        "PostgreSQL known failures={failures:?}; unfinished obligations={unfinished:?}; see coordinator.json"
+    );
+    if unfinished.is_empty() && !failures.is_empty() {
+        Err(failed(detail))
+    } else {
+        Err(error(detail))
     }
 }
 

@@ -4,25 +4,25 @@
 
 use crate::{error, Result};
 use ring::digest::{Context, SHA256};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{fs, io::Read, path::Path, process::Command};
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
-pub(super) struct SourceIdentity {
-    pub(super) commit: String,
-    pub(super) content_sha256: String,
-    pub(super) files: usize,
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SourceIdentity {
+    pub(crate) commit: String,
+    pub(crate) content_sha256: String,
+    pub(crate) files: usize,
 }
 
 impl SourceIdentity {
-    pub(super) fn same_contents_as(&self, other: &Self) -> bool {
+    pub(crate) fn same_contents_as(&self, other: &Self) -> bool {
         // Committing the tested checkout changes provenance, not executable
         // inputs. The digest includes paths, bytes, modes and symlink targets.
         self.content_sha256 == other.content_sha256 && self.files == other.files
     }
 }
 
-pub(super) fn identity(root: &Path) -> Result<SourceIdentity> {
+pub(crate) fn identity(root: &Path) -> Result<SourceIdentity> {
     let head = Command::new("git")
         .current_dir(root)
         .args(["rev-parse", "HEAD"])

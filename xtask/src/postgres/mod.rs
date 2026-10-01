@@ -7,6 +7,7 @@ mod compose;
 mod config;
 mod credentials;
 mod environment;
+pub(crate) mod evidence;
 mod fixtures;
 mod managed_fs;
 mod state;
@@ -264,9 +265,74 @@ fn test(flags: &[String]) -> Result<()> {
         return Ok(());
     }
     let root = super::workspace_root()?;
-    let compose = Compose::preflight()?;
-    report_existing_test_sessions(&root, &compose)?;
-    acceptance::run(root, compose)
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let artifacts = root
+        .join("target/test-runs")
+        .join(format!("postgres-{invocation_id}"));
+    let source = crate::validation::source::identity(&root)?;
+    run_validation(&root, &artifacts, &invocation_id, &source.content_sha256)
+}
+
+/// Private subprocess entry shared by native validation and the ordinary
+/// PostgreSQL command. It owns evidence; the service owner still owns cleanup.
+pub(crate) fn run_validation(
+    root: &Path,
+    artifacts: &Path,
+    invocation_id: &str,
+    source_sha256: &str,
+) -> Result<()> {
+    uuid::Uuid::parse_str(invocation_id)?;
+    fs::create_dir_all(artifacts)?;
+    let source = crate::validation::source::identity(root)?;
+    let mut report = evidence::Report::new(invocation_id, source);
+    // Never adopt evidence from an earlier or concurrent invocation.
+    let mut initial = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(artifacts.join(evidence::REPORT_FILE))?;
+    use std::io::Write;
+    initial.write_all(&serde_json::to_vec_pretty(&report)?)?;
+    drop(initial);
+    eprintln!(
+        "PostgreSQL coordinator evidence: {}",
+        artifacts.join(evidence::REPORT_FILE).display()
+    );
+    let execution = if report.source.content_sha256 != source_sha256 {
+        let failure =
+            error("PostgreSQL delegate source differs from the requesting validation run");
+        report.setup = evidence::Phase::incomplete(&failure);
+        Err(failure)
+    } else {
+        acceptance::run(root, artifacts, &mut report)
+    };
+    let source_check = match crate::validation::source::identity(root) {
+        Ok(source) => {
+            let same = report.source.same_contents_as(&source);
+            report.final_source = Some(source);
+            if same {
+                Ok(())
+            } else {
+                Err(error("source changed during PostgreSQL validation"))
+            }
+        }
+        Err(failure) => Err(failure),
+    };
+    report.finished = true;
+    let saved = report.save(artifacts);
+    let failures = report.known_failures();
+    let unfinished = report.unfinished_obligations();
+    eprintln!("PostgreSQL coordinator: failures={failures:?}; unfinished={unfinished:?}");
+    let errors = [execution, source_check, saved]
+        .into_iter()
+        .filter_map(std::result::Result::err)
+        .map(|failure| failure.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() && report.passed() {
+        println!("PostgreSQL required target commands passed and owned service cleanup completed");
+        Ok(())
+    } else {
+        Err(error(format!("PostgreSQL acceptance did not pass; failures={failures:?}; unfinished={unfinished:?}; errors={errors:?}; evidence={}", artifacts.join(evidence::REPORT_FILE).display())))
+    }
 }
 
 fn logs(flags: &[String]) -> Result<()> {

@@ -132,6 +132,9 @@ fn run() -> Result<()> {
         [cmd, rest @ ..] if cmd == "studio-jobs" => run_studio_jobs(rest),
         [cmd, rest @ ..] if cmd == "postgres" => postgres::run(rest),
         [cmd, rest @ ..] if cmd == "test" => validation::run(&workspace_root()?, rest),
+        [cmd, artifacts, invocation, source] if cmd == "__postgres-test" => {
+            postgres::run_validation(&workspace_root()?, Path::new(artifacts), invocation, source)
+        }
         [cmd, capability, artifacts] if cmd == "__test-prerequisite" => {
             validation::prerequisites::child(capability, Path::new(artifacts))
         }
