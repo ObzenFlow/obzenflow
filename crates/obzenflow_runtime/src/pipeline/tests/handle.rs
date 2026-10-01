@@ -39,34 +39,12 @@ fn empty_extras() -> FlowHandleExtras {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execution_guard_is_independent_of_completion_observers_and_handle_ownership() {
-    use crate::pipeline::tests::support::{owned_test_stage, ShutdownProbe};
-    use obzenflow_core::event::context::StageType;
-    use std::sync::atomic::Ordering;
-
     for disarm in [false, true] {
         let (sender, _receiver, watcher) =
             ChannelBuilder::<PipelineFsmEvent, PipelineState>::new().build(PipelineState::Created);
         let task = tokio::spawn(std::future::pending::<
             Result<(), Box<dyn std::error::Error + Send + Sync>>,
         >());
-        let probes = [
-            ShutdownProbe::default(),
-            ShutdownProbe::default(),
-            ShutdownProbe::default(),
-        ];
-        let mut extras = empty_extras();
-        // One source and both independent fan-out siblings must receive the
-        // owner's request before the resource join can assist cancellation.
-        for (kind, probe) in [StageType::InfiniteSource, StageType::Sink, StageType::Sink]
-            .into_iter()
-            .zip(&probes)
-        {
-            extras.stage_cleanup.push(Arc::new(owned_test_stage(
-                obzenflow_core::StageId::new(),
-                kind,
-                Some(probe.clone()),
-            )));
-        }
         let flow = Arc::new(FlowHandle::new(
             HandleBuilder::new()
                 .with_event_sender(sender)
@@ -74,7 +52,7 @@ async fn execution_guard_is_independent_of_completion_observers_and_handle_owner
                 .with_supervisor_task(task)
                 .build_standard()
                 .unwrap(),
-            extras,
+            empty_extras(),
         ));
         let guard = lifecycle::guard_execution(&flow);
         assert_eq!(
@@ -92,12 +70,6 @@ async fn execution_guard_is_independent_of_completion_observers_and_handle_owner
         if disarm {
             guard.disarm();
             assert!(
-                probes
-                    .iter()
-                    .all(|probe| probe.request_abort_count.load(Ordering::Relaxed) == 0),
-                "disarmed ownership supplies no cancellation witness"
-            );
-            assert!(
                 flow.is_running(),
                 "releasing the fallback must not request cancellation"
             );
@@ -105,12 +77,6 @@ async fn execution_guard_is_independent_of_completion_observers_and_handle_owner
         } else {
             drop(guard);
         }
-        let owned_requests = probes
-            .each_ref()
-            .map(|probe| probe.request_abort_count.load(Ordering::Relaxed));
-        let assisting_joins = probes
-            .each_ref()
-            .map(|probe| probe.abort_and_join_count.load(Ordering::Relaxed));
         for _ in 0..2 {
             let error = tokio::time::timeout(Duration::from_secs(1), lifecycle::wait(&flow))
                 .await
@@ -126,14 +92,8 @@ async fn execution_guard_is_independent_of_completion_observers_and_handle_owner
                 "{error:?}"
             );
         }
-        assert_eq!(
-            owned_requests, [1; 3],
-            "later cleanup cannot repair missing original witnesses"
-        );
-        assert_eq!(
-            assisting_joins, [0; 3],
-            "observe the owner before assistance"
-        );
+        // Child ownership is exercised with a real PipelineContext in the held
+        // parent-poll regression, rather than adding children to a bare task.
         assert!(!flow.is_running());
         assert_eq!(flow.current_state(), PipelineState::Created);
     }

@@ -163,11 +163,7 @@ impl FlowHandle {
     }
 
     pub(crate) fn execution_guard(&self) -> crate::__private::lifecycle::ExecutionGuard {
-        crate::__private::lifecycle::ExecutionGuard::new(
-            self.handle.abort_handle(),
-            self.stage_cleanup.clone(),
-            self.metrics.clone(),
-        )
+        crate::__private::lifecycle::ExecutionGuard::new(self.handle.abort_handle())
     }
 
     /// Every flow completion path joins first, then interprets the same

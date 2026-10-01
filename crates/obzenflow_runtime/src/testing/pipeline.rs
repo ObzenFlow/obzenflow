@@ -20,6 +20,7 @@ pub use crate::pipeline::tests::metrics::{
     stage_cleanup_keeps_metrics_alive_until_the_terminal_fact,
 };
 pub use crate::pipeline::tests::shutdown::{
+    application_abort_does_not_turn_owned_child_cancellation_into_failure,
     contract_failure_cause_survives_child_observation_order,
     expired_graceful_stop_aborts_and_joins_without_a_fresh_cleanup_budget,
     failure_remains_observable_while_child_cleanup_is_blocked,

@@ -15,6 +15,11 @@ fn journals() -> Box<dyn FlowJournalFactory> {
     Box::new(MemoryJournalFactory::new(FlowId::new()))
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn application_abort_does_not_turn_owned_child_cancellation_into_failure() {
+    pipeline::application_abort_does_not_turn_owned_child_cancellation_into_failure(journals).await;
+}
+
 #[tokio::test]
 async fn controlled_journal_preserves_causality_groups_and_live_readers() {
     pipeline::controlled_journal_preserves_causality_groups_and_live_readers(journals).await;
