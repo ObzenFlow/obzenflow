@@ -297,6 +297,25 @@ pub(super) fn event_type(record: &RunRecord) -> &str {
     }
 }
 
+pub(super) fn descriptor_label(record: &RunRecord) -> String {
+    let (event_kind, payload_schema_version) = match &record.record {
+        RunRecordData::Chain(row) => (
+            row.envelope.provenance.event.event_kind,
+            row.envelope.provenance.event.payload_schema_version,
+        ),
+        RunRecordData::System(row) => (
+            row.envelope.provenance.event.event_kind,
+            row.envelope.provenance.event.payload_schema_version,
+        ),
+    };
+    obzenflow_core::EventDescriptor {
+        event_kind,
+        event_type: event_type(record).into(),
+        payload_schema_version,
+    }
+    .to_string()
+}
+
 pub(super) fn event_id(record: &RunRecord) -> String {
     match &record.record {
         RunRecordData::Chain(row) => row.id().to_string(),

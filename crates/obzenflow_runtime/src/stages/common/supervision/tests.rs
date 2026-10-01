@@ -798,8 +798,12 @@ async fn missing_or_saturated_observations_do_not_gate_fact_commit_or_terminal_a
 
     let stage = StageId::new();
     let flow = FlowId::new();
-    let event =
-        ChainEventFactory::data_event(stage.into(), "business.null.v1", serde_json::Value::Null);
+    let event = ChainEventFactory::data_event(
+        stage.into(),
+        "business.null",
+        std::num::NonZeroU32::MIN,
+        serde_json::Value::Null,
+    );
     let journal: Arc<dyn Journal<ChainEvent>> =
         Arc::new(NoopJournal::new(JournalOwner::stage(stage)));
     let mut protected = Vec::new();
@@ -919,7 +923,12 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
     pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(t), "x", json!({"n": 1})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(t),
+                "x",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
     );
@@ -981,6 +990,7 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
 fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
     StageOutputContract {
         outputs: vec![PayloadTypeDescriptor {
+            event_kind: Some(obzenflow_core::event::payloads::chain_payload::EventKind::Fact),
             type_hint: TypeHintInfo::exact("test::Declared"),
             event_type: Some(event_type.to_string()),
             schema_version: Some(1),
@@ -1034,21 +1044,24 @@ async fn atomic_group_accounts_every_member_in_its_owned_history() {
                     observer_scope: MiddlewareExecutionScope::LiveHandler,
                 };
                 let mut entries = vec![AtomicCommitEntry {
-                    event: ChainEventFactory::create_event(
+                    event: ChainEventFactory::execution_event(
                         stage.into(),
-                        ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                            CircuitBreakerFact::Closed {
-                                success_count: 1,
-                                recovery_duration_ms: 1,
-                            },
-                        )),
+                        ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+                            success_count: 1,
+                            recovery_duration_ms: 1,
+                        }),
                     ),
                     options: CommitOptions::default(),
                     intent: StageAppendIntent::FrameworkObservability,
                 }];
                 for n in 0..2 {
                     entries.push(AtomicCommitEntry {
-                        event: ChainEventFactory::data_event(stage.into(), "x", json!({"n":n})),
+                        event: ChainEventFactory::data_event(
+                            stage.into(),
+                            "x",
+                            std::num::NonZeroU32::MIN,
+                            json!({"n":n}),
+                        ),
                         options: CommitOptions {
                             count_output: true,
                             validate_output_contract: false,
@@ -1106,7 +1119,12 @@ async fn atomic_group_accounts_every_member_in_its_owned_history() {
         instrumentation.events_emitted_total.load(Ordering::Relaxed),
         2
     );
-    assert_eq!(instrumentation.data_writer_seq_by_event_type()["x"].0, 2);
+    assert_eq!(
+        instrumentation.data_writer_seq_by_event_type()
+            [&crate::testing::causal_fixture::fact_descriptor("x", 1)]
+            .0,
+        2
+    );
     assert_eq!(writer.min_downstream_credit(), 0);
     scope.close();
     scope.join().await.unwrap();
@@ -1161,6 +1179,7 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                             event: ChainEventFactory::data_event(
                                 WriterId::from(stage_id),
                                 "x",
+                                std::num::NonZeroU32::MIN,
                                 json!({"n":1}),
                             ),
                             scope: MiddlewareExecutionScope::LiveHandler,
@@ -1219,7 +1238,12 @@ async fn cancelled_pending_output_retains_commit_accounting_and_reservation() {
                     instrumentation.events_emitted_total.load(Ordering::Relaxed),
                     1
                 );
-                assert_eq!(instrumentation.data_writer_seq_by_event_type()["x"].0, 1);
+                assert_eq!(
+                    instrumentation.data_writer_seq_by_event_type()
+                        [&crate::testing::causal_fixture::fact_descriptor("x", 1)]
+                        .0,
+                    1
+                );
                 assert_eq!(writer.min_downstream_credit(), 0);
             }
             CommitResult::Rejected => {
@@ -1263,7 +1287,12 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
-    let event = ChainEventFactory::data_event(WriterId::from(stage_id), "x", json!({"n": 1}));
+    let event = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        "x",
+        std::num::NonZeroU32::MIN,
+        json!({"n": 1}),
+    );
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
@@ -1317,10 +1346,14 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
-    let output_contract = output_contract_for_event_type("semantic.test.v1");
+    let output_contract = output_contract_for_event_type("semantic.test");
 
-    let event =
-        ChainEventFactory::data_event(WriterId::from(stage_id), "semantic.test", json!({"n": 1}));
+    let event = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        "semantic.test",
+        std::num::NonZeroU32::MIN,
+        json!({"n": 1}),
+    );
 
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
@@ -1371,10 +1404,14 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
     let mut pulse = BackpressureActivityPulse::new();
     let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
-    let output_contract = output_contract_for_event_type("declared.v1");
+    let output_contract = output_contract_for_event_type("declared");
 
-    let event =
-        ChainEventFactory::data_event(WriterId::from(stage_id), "undeclared.v1", json!({"n": 1}));
+    let event = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        "undeclared",
+        std::num::NonZeroU32::MIN,
+        json!({"n": 1}),
+    );
 
     let err = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
@@ -1398,7 +1435,7 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
     .expect_err("undeclared output must fail closed");
 
     assert!(
-        err.to_string().contains("undeclared.v1"),
+        err.to_string().contains("undeclared"),
         "error should identify undeclared event type: {err}"
     );
     assert_eq!(writer.min_downstream_credit(), 1);
@@ -1487,7 +1524,8 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
     for n in 0..5 {
         let fact = ChainEventFactory::data_event(
             WriterId::from(stage_id),
-            "test.joined.v1",
+            "test.joined",
+            std::num::NonZeroU32::MIN,
             json!({"n": n}),
         );
         last_fact_id = Some(fact.id);
@@ -1545,7 +1583,10 @@ async fn drain_one_pending_seals_a_local_terminal_at_the_committed_data_frontier
     assert_eq!(*writer_id, Some(WriterId::from(stage_id)));
     assert_eq!(*writer_seq, Some(obzenflow_core::event::types::SeqNo(5)));
     assert_eq!(
-        writer_seq_by_event_type.get("test.joined.v1"),
+        writer_seq_by_event_type.get(&crate::testing::causal_fixture::fact_descriptor(
+            "test.joined",
+            1
+        )),
         Some(&obzenflow_core::event::types::SeqNo(5))
     );
     assert_eq!(*last_event_id, last_fact_id);
@@ -1568,8 +1609,12 @@ async fn drain_one_pending_rejects_conflicting_terminal_frontier_evidence() {
     ));
     let data_journal: Arc<dyn Journal<ChainEvent>> = journal.clone();
     let instrumentation = Arc::new(StageInstrumentation::new());
-    let fact =
-        ChainEventFactory::data_event(WriterId::from(stage_id), "test.joined.v1", json!({"n": 1}));
+    let fact = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        "test.joined",
+        std::num::NonZeroU32::MIN,
+        json!({"n": 1}),
+    );
     instrumentation.record_output_event(&fact);
 
     let mut terminal = ChainEventFactory::eof_event_with_kind(
@@ -1690,7 +1735,12 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
     let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
 
-    let event = ChainEventFactory::data_event(WriterId::from(stage_id), "x", json!({"n": 1}));
+    let event = ChainEventFactory::data_event(
+        WriterId::from(stage_id),
+        "x",
+        std::num::NonZeroU32::MIN,
+        json!({"n": 1}),
+    );
     let id = event.id;
 
     let outcome = drain_one_pending(
@@ -1774,7 +1824,12 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 1})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(s),
+                "x",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             scope,
         },
         &flow_context,
@@ -1839,7 +1894,12 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(scope: MiddlewareExe
     let outcome2 = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 2})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(s),
+                "x",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 2}),
+            ),
             scope,
         },
         &flow_context,
@@ -1918,7 +1978,12 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         let outcome = drain_one_pending(
             crate::stages::common::supervision::backpressure_drain::PendingOutput {
                 causal: crate::supervised_base::publication::capture(),
-                event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": n })),
+                event: ChainEventFactory::data_event(
+                    WriterId::from(s),
+                    "x",
+                    std::num::NonZeroU32::MIN,
+                    json!({ "n": n }),
+                ),
                 scope: MiddlewareExecutionScope::ResumeHandler,
             },
             &flow_context,
@@ -1953,7 +2018,12 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     let outcome = drain_one_pending(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": 99 })),
+            event: ChainEventFactory::data_event(
+                WriterId::from(s),
+                "x",
+                std::num::NonZeroU32::MIN,
+                json!({ "n": 99 }),
+            ),
             scope: MiddlewareExecutionScope::LiveHandler,
         },
         &flow_context,

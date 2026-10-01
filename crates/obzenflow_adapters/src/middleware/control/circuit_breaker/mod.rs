@@ -19,8 +19,8 @@ use obzenflow_core::event::payloads::execution_payload::{
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{
-    ChainEventFactory, ChainPayload, CircuitBreakerOpenedEventParams, EffectFailureCode,
-    EffectFailureSource, RetryDisposition,
+    ChainEventFactory, CircuitBreakerOpenedEventParams, EffectFailureCode, EffectFailureSource,
+    RetryDisposition,
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::cb_state;
@@ -796,40 +796,34 @@ impl CircuitBreakerMiddleware {
                     evidence.into_event_params(self.cooldown),
                 )
             }
-            (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::create_event(
+            (CircuitState::Open, CircuitState::HalfOpen) => ChainEventFactory::execution_event(
                 self.writer_id,
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                    CircuitBreakerFact::HalfOpen {
-                        test_request_count: 0,
-                    },
-                )),
+                ExecutionPayload::CircuitBreaker(CircuitBreakerFact::HalfOpen {
+                    test_request_count: 0,
+                }),
             ),
             (CircuitState::HalfOpen, CircuitState::Closed) => {
                 let success_count = self.success_count.load(Ordering::Relaxed) as u64;
                 let recovery_duration_ms = elapsed_in_old_state.as_millis() as u64;
 
-                ChainEventFactory::create_event(
+                ChainEventFactory::execution_event(
                     self.writer_id,
-                    ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                        CircuitBreakerFact::Closed {
-                            success_count,
-                            recovery_duration_ms,
-                        },
-                    )),
+                    ExecutionPayload::CircuitBreaker(CircuitBreakerFact::Closed {
+                        success_count,
+                        recovery_duration_ms,
+                    }),
                 )
             }
-            _ => ChainEventFactory::create_event(
+            _ => ChainEventFactory::execution_event(
                 self.writer_id,
-                ChainPayload::Execution(ExecutionPayload::CircuitBreaker(
-                    CircuitBreakerFact::StateChanged {
-                        from_state: old_state.into(),
-                        to_state: new_state.into(),
-                        timestamp: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                    },
-                )),
+                ExecutionPayload::CircuitBreaker(CircuitBreakerFact::StateChanged {
+                    from_state: old_state.into(),
+                    to_state: new_state.into(),
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                }),
             ),
         };
 
@@ -1162,7 +1156,12 @@ mod tests {
     use serde_json::json;
 
     fn event() -> ChainEvent {
-        ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}))
+        ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.input",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        )
     }
 
     #[derive(Debug, PartialEq)]

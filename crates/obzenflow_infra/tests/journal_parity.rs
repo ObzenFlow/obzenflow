@@ -35,10 +35,30 @@ async fn test_journal_parity() {
     let writer1 = WriterId::from(StageId::new());
     let writer2 = WriterId::from(StageId::new());
 
-    let event1 = ChainEventFactory::data_event(writer1, "test.first", json!({ "value": 42 }));
-    let event2 = ChainEventFactory::data_event(writer1, "test.second", json!({ "value": 84 }));
-    let event3 = ChainEventFactory::data_event(writer2, "test.parallel", json!({ "value": 100 }));
-    let event4 = ChainEventFactory::data_event(writer1, "test.third", json!({ "value": 168 }));
+    let event1 = ChainEventFactory::data_event(
+        writer1,
+        "test.first",
+        std::num::NonZeroU32::new(37).unwrap(),
+        json!({ "value": 42 }),
+    );
+    let event2 = ChainEventFactory::data_event(
+        writer1,
+        "test.second",
+        std::num::NonZeroU32::MIN,
+        json!({ "value": 84 }),
+    );
+    let event3 = ChainEventFactory::data_event(
+        writer2,
+        "test.parallel",
+        std::num::NonZeroU32::MIN,
+        json!({ "value": 100 }),
+    );
+    let event4 = ChainEventFactory::data_event(
+        writer1,
+        "test.third",
+        std::num::NonZeroU32::MIN,
+        json!({ "value": 168 }),
+    );
 
     // Test both journals with identical operations
     for journal in [&disk_journal, &memory_journal] {
@@ -92,6 +112,27 @@ async fn test_journal_parity() {
             disk_event.event_type(),
             memory_event.event_type(),
             "Event type mismatch at index {i}"
+        );
+
+        assert_eq!(
+            disk_event.envelope.provenance.event.payload_schema_version,
+            memory_event
+                .envelope
+                .provenance
+                .event
+                .payload_schema_version
+        );
+        let jsonl = serde_json::to_string(disk_event).unwrap();
+        let decoded: obzenflow_core::JournalRecord<obzenflow_core::event::ChainPayload> =
+            serde_json::from_str(&jsonl).unwrap();
+        assert_eq!(
+            decoded
+                .envelope
+                .provenance
+                .event
+                .payload_schema_version
+                .get(),
+            if i == 0 { 37 } else { 1 }
         );
 
         assert_eq!(
@@ -156,10 +197,20 @@ async fn test_journal_physical_order_precedes_event_id_across_authors() {
     let writer_a = WriterId::from(StageId::new());
     let writer_b = WriterId::from(StageId::new());
 
-    let mut a = ChainEventFactory::data_event(writer_a, "test.concurrent", json!({ "i": 1 }));
+    let mut a = ChainEventFactory::data_event(
+        writer_a,
+        "test.concurrent",
+        std::num::NonZeroU32::MIN,
+        json!({ "i": 1 }),
+    );
     a.id = EventId::new();
 
-    let mut b = ChainEventFactory::data_event(writer_b, "test.concurrent", json!({ "i": 0 }));
+    let mut b = ChainEventFactory::data_event(
+        writer_b,
+        "test.concurrent",
+        std::num::NonZeroU32::MIN,
+        json!({ "i": 0 }),
+    );
     b.id = EventId::new();
 
     let (low, high) = if a.id < b.id { (a, b) } else { (b, a) };
@@ -225,9 +276,24 @@ async fn test_read_causally_after_matches_slice_across_event_authors() {
     let writer_a = WriterId::from(StageId::new());
     let writer_b = WriterId::from(StageId::new());
 
-    let event_a = ChainEventFactory::data_event(writer_a, "test.a", json!({ "seq": "a" }));
-    let event_b = ChainEventFactory::data_event(writer_b, "test.b", json!({ "seq": "b" }));
-    let event_c = ChainEventFactory::data_event(writer_a, "test.c", json!({ "seq": "c" }));
+    let event_a = ChainEventFactory::data_event(
+        writer_a,
+        "test.a",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": "a" }),
+    );
+    let event_b = ChainEventFactory::data_event(
+        writer_b,
+        "test.b",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": "b" }),
+    );
+    let event_c = ChainEventFactory::data_event(
+        writer_a,
+        "test.c",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": "c" }),
+    );
 
     for journal in [&disk_journal, &memory_journal] {
         let env_a = journal
@@ -294,20 +360,44 @@ async fn test_diamond_like_dag_respects_causality_and_event_id() {
     let writer_right = WriterId::from(StageId::new());
     let writer_join = WriterId::from(StageId::new());
 
-    let mut root = ChainEventFactory::data_event(writer_root, "test.root", json!({ "n": 0 }));
+    let mut root = ChainEventFactory::data_event(
+        writer_root,
+        "test.root",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 0 }),
+    );
     root.id = EventId::from_string("11111111111111111111111111").unwrap();
 
-    let mut left = ChainEventFactory::data_event(writer_left, "test.left", json!({ "n": 1 }));
+    let mut left = ChainEventFactory::data_event(
+        writer_left,
+        "test.left",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 1 }),
+    );
     left.id = EventId::from_string("00000000000000000000000000").unwrap();
 
-    let mut right = ChainEventFactory::data_event(writer_right, "test.right", json!({ "n": 2 }));
+    let mut right = ChainEventFactory::data_event(
+        writer_right,
+        "test.right",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 2 }),
+    );
     right.id = EventId::from_string("ZZZZZZZZZZZZZZZZZZZZZZZZZZ").unwrap();
 
-    let mut merge_left =
-        ChainEventFactory::data_event(writer_join, "test.merge_left", json!({ "n": 3 }));
+    let mut merge_left = ChainEventFactory::data_event(
+        writer_join,
+        "test.merge_left",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 3 }),
+    );
     merge_left.id = EventId::from_string("22222222222222222222222222").unwrap();
 
-    let mut join = ChainEventFactory::data_event(writer_join, "test.join", json!({ "n": 4 }));
+    let mut join = ChainEventFactory::data_event(
+        writer_join,
+        "test.join",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 4 }),
+    );
     join.id = EventId::from_string("33333333333333333333333333").unwrap();
 
     for [root_journal, left_journal, right_journal, join_journal] in
@@ -411,20 +501,44 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
     let writer_right = WriterId::from(StageId::new());
     let writer_join = WriterId::from(StageId::new());
 
-    let mut root = ChainEventFactory::data_event(writer_root, "test.root", json!({ "n": 0 }));
+    let mut root = ChainEventFactory::data_event(
+        writer_root,
+        "test.root",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 0 }),
+    );
     root.id = EventId::from_string("11111111111111111111111111").unwrap();
 
-    let mut left = ChainEventFactory::data_event(writer_left, "test.left", json!({ "n": 1 }));
+    let mut left = ChainEventFactory::data_event(
+        writer_left,
+        "test.left",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 1 }),
+    );
     left.id = EventId::from_string("00000000000000000000000000").unwrap();
 
-    let mut right = ChainEventFactory::data_event(writer_right, "test.right", json!({ "n": 2 }));
+    let mut right = ChainEventFactory::data_event(
+        writer_right,
+        "test.right",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 2 }),
+    );
     right.id = EventId::from_string("ZZZZZZZZZZZZZZZZZZZZZZZZZZ").unwrap();
 
-    let mut merge_left =
-        ChainEventFactory::data_event(writer_join, "test.merge_left", json!({ "n": 3 }));
+    let mut merge_left = ChainEventFactory::data_event(
+        writer_join,
+        "test.merge_left",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 3 }),
+    );
     merge_left.id = EventId::from_string("22222222222222222222222222").unwrap();
 
-    let mut join = ChainEventFactory::data_event(writer_join, "test.join", json!({ "n": 4 }));
+    let mut join = ChainEventFactory::data_event(
+        writer_join,
+        "test.join",
+        std::num::NonZeroU32::MIN,
+        json!({ "n": 4 }),
+    );
     join.id = EventId::from_string("33333333333333333333333333").unwrap();
 
     for [root_journal, left_journal, right_journal, join_journal] in
@@ -504,7 +618,14 @@ async fn test_reader_surface_parity() {
     // The same chained sequence goes to both, so event ids match across backends
     // and a single writer makes append order the unambiguous read order.
     let events: Vec<ChainEvent> = (0..N)
-        .map(|i| ChainEventFactory::data_event(writer, "reader.surface", json!({ "i": i })))
+        .map(|i| {
+            ChainEventFactory::data_event(
+                writer,
+                "reader.surface",
+                std::num::NonZeroU32::MIN,
+                json!({ "i": i }),
+            )
+        })
         .collect();
     let ids: Vec<_> = events.iter().map(|e| e.id).collect();
 

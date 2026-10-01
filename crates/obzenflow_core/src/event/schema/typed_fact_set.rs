@@ -18,6 +18,7 @@ pub struct TypedFactType {
     pub type_id: TypeId,
     pub display_name: String,
     pub event_type: EventType,
+    pub event_kind: crate::event::payloads::chain_payload::EventKind,
     pub schema_version: u32,
 }
 
@@ -29,8 +30,9 @@ impl TypedFactType {
         Self {
             type_id: TypeId::of::<T>(),
             display_name: type_name::<T>().to_string(),
-            event_type: EventType::from(T::versioned_event_type()),
-            schema_version: T::SCHEMA_VERSION,
+            event_type: EventType::from(T::event_type_name()),
+            event_kind: T::EVENT_KIND,
+            schema_version: T::payload_schema_version().get(),
         }
     }
 }
@@ -39,16 +41,26 @@ impl TypedFactType {
 #[derive(Clone, Debug)]
 pub struct TypedFact {
     pub event_type: EventType,
+    pub payload_schema_version: std::num::NonZeroU32,
     pub payload: ChainPayload,
 }
 
 impl TypedFact {
+    pub fn descriptor(&self) -> crate::event::types::EventDescriptor {
+        crate::event::types::EventDescriptor {
+            event_kind: self.payload.kind(),
+            event_type: self.event_type.clone(),
+            payload_schema_version: self.payload_schema_version,
+        }
+    }
+
     pub fn from_payload<T>(payload: T) -> Result<Self, TypedFactSetError>
     where
         T: TypedPayload,
     {
         Ok(Self {
-            event_type: EventType::from(T::versioned_event_type()),
+            event_type: EventType::from(T::event_type_name()),
+            payload_schema_version: T::payload_schema_version(),
             payload: payload
                 .into_chain_payload()
                 .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
@@ -58,6 +70,7 @@ impl TypedFact {
     pub fn from_event(event: &ChainEvent) -> Option<Self> {
         event.is_typed_input().then(|| Self {
             event_type: EventType::from(event.event_type()),
+            payload_schema_version: event.payload_schema_version,
             payload: event.payload.clone(),
         })
     }
@@ -68,15 +81,23 @@ impl TypedFact {
         parent: &ChainEvent,
         lineage: LineagePolicy,
     ) -> ChainEvent {
-        let mut event = ChainEventFactory::derived_event(writer_id, parent, self.payload, lineage);
-        event.envelope.provenance.event.event_type = self.event_type.to_string();
-        event
+        ChainEventFactory::derived_event(
+            writer_id,
+            parent,
+            self.payload,
+            self.event_type,
+            self.payload_schema_version,
+            lineage,
+        )
     }
 
     pub fn into_event(self, writer_id: WriterId) -> ChainEvent {
-        let mut event = ChainEventFactory::create_event(writer_id, self.payload);
-        event.envelope.provenance.event.event_type = self.event_type.to_string();
-        event
+        ChainEventFactory::create_event(
+            writer_id,
+            self.payload,
+            self.event_type,
+            self.payload_schema_version,
+        )
     }
 }
 
@@ -125,7 +146,10 @@ pub fn missing_fact_group_error(declared: &[TypedFactType]) -> TypedFactSetError
 /// (FLOWIP-120m).
 #[doc(hidden)]
 pub fn sum_group_arity_error(first: &TypedFact, rest: &[TypedFact]) -> TypedFactSetError {
-    if rest.iter().any(|fact| fact.event_type == first.event_type) {
+    if rest
+        .iter()
+        .any(|fact| fact.descriptor() == first.descriptor())
+    {
         TypedFactSetError::DuplicateFact {
             event_type: first.event_type.clone(),
         }
@@ -189,10 +213,7 @@ fn decode_fact<T>(facts: &[TypedFact]) -> Result<T, TypedFactSetError>
 where
     T: TypedPayload,
 {
-    if let Some(unexpected) = facts
-        .iter()
-        .find(|fact| !T::event_type_matches(fact.event_type.as_str()))
-    {
+    if let Some(unexpected) = facts.iter().find(|fact| !T::matches_fact(fact)) {
         return Err(TypedFactSetError::UnexpectedFact {
             event_type: unexpected.event_type.clone(),
         });
@@ -213,17 +234,15 @@ pub fn decode_member_fact<T>(facts: &[TypedFact]) -> Result<T, TypedFactSetError
 where
     T: TypedPayload,
 {
-    let mut matches = facts
-        .iter()
-        .filter(|fact| T::event_type_matches(fact.event_type.as_str()));
+    let mut matches = facts.iter().filter(|fact| T::matches_fact(fact));
     let fact = matches
         .next()
         .ok_or_else(|| TypedFactSetError::MissingFact {
-            event_type: EventType::from(T::versioned_event_type()),
+            event_type: EventType::from(T::event_type_name()),
         })?;
     if matches.next().is_some() {
         return Err(TypedFactSetError::DuplicateFact {
-            event_type: EventType::from(T::versioned_event_type()),
+            event_type: EventType::from(T::event_type_name()),
         });
     }
     serde_json::from_value(
@@ -259,7 +278,7 @@ mod tests {
             .expect("scalar fact set serializes");
 
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].event_type, "fact.first.v1");
+        assert_eq!(facts[0].event_type, "fact.first");
         assert_eq!(
             serde_json::to_value(&facts[0].payload).unwrap(),
             serde_json::json!({ "value": 7 })
@@ -299,7 +318,7 @@ mod tests {
         assert!(matches!(
             err,
             TypedFactSetError::UnexpectedFact { ref event_type }
-                if event_type.as_str() == "fact.second.v1"
+                if event_type.as_str() == "fact.second"
         ));
     }
 
@@ -360,17 +379,17 @@ mod tests {
         }
 
         fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
-            if let Some(unexpected) = facts.iter().find(|fact| {
-                !First::event_type_matches(fact.event_type.as_str())
-                    && !Second::event_type_matches(fact.event_type.as_str())
-            }) {
+            if let Some(unexpected) = facts
+                .iter()
+                .find(|fact| !First::matches_fact(fact) && !Second::matches_fact(fact))
+            {
                 return Err(TypedFactSetError::UnexpectedFact {
                     event_type: unexpected.event_type.clone(),
                 });
             }
             match facts {
                 [single] => {
-                    if First::event_type_matches(single.event_type.as_str()) {
+                    if First::matches_fact(single) {
                         return Ok(Self::First(decode_member_fact::<First>(facts)?));
                     }
                     Ok(Self::Second(decode_member_fact::<Second>(facts)?))
@@ -378,8 +397,8 @@ mod tests {
                 [] => Err(TypedFactSetError::MissingFact {
                     event_type: EventType::from(format!(
                         "{} | {}",
-                        First::versioned_event_type(),
-                        Second::versioned_event_type()
+                        First::event_type_name(),
+                        Second::event_type_name()
                     )),
                 }),
                 [first, ..] => Err(TypedFactSetError::DuplicateFact {
@@ -423,7 +442,8 @@ mod tests {
         ));
 
         let unknown = vec![TypedFact {
-            event_type: EventType::from("fact.unknown.v1"),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+            event_type: EventType::from("fact.unknown"),
             payload: ChainPayload::Fact(serde_json::json!({})),
         }];
         assert!(matches!(
@@ -452,10 +472,10 @@ mod tests {
         }
 
         fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
-            if let Some(unexpected) = facts.iter().find(|fact| {
-                !First::event_type_matches(fact.event_type.as_str())
-                    && !Second::event_type_matches(fact.event_type.as_str())
-            }) {
+            if let Some(unexpected) = facts
+                .iter()
+                .find(|fact| !First::matches_fact(fact) && !Second::matches_fact(fact))
+            {
                 return Err(TypedFactSetError::UnexpectedFact {
                     event_type: unexpected.event_type.clone(),
                 });
@@ -503,7 +523,8 @@ mod tests {
 
         let mut with_unknown = carrier.into_facts().expect("product serializes");
         with_unknown.push(TypedFact {
-            event_type: EventType::from("fact.unknown.v1"),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+            event_type: EventType::from("fact.unknown"),
             payload: ChainPayload::Fact(serde_json::json!({})),
         });
         assert!(matches!(

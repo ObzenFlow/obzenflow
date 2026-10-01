@@ -294,7 +294,7 @@ impl Renderer {
             .unwrap_or(0)
             .max(5);
         let minimums = [1, 1, 1];
-        let mut widths = [10, 6, 11]; // Event type, Author, Author type.
+        let mut widths = [10, 6, 11]; // Descriptor, Author, Author type.
         for (event_type, writer) in counts.event_types.keys() {
             let kind = self
                 .context
@@ -323,7 +323,7 @@ impl Renderer {
             output,
             MUTED,
             "Count",
-            ["Event type", "Author", "Author type"],
+            ["Descriptor", "Author", "Author type"],
             count_width,
             widths,
         )?;

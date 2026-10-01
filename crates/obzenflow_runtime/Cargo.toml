@@ -21,7 +21,7 @@ include = [
 ]
 
 [lib]
-doctest = false
+doctest = true
 
 [features]
 test-support = ["tokio/test-util"]

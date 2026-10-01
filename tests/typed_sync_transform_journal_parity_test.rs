@@ -290,7 +290,7 @@ fn triage_projection(events: &[JournalRecord<ChainPayload>]) -> Vec<serde_json::
         .iter()
         .filter_map(|envelope| match &envelope.payload {
             ChainPayload::Fact(payload)
-                if TriagedTicket::event_type_matches(&envelope.event_type()) =>
+                if TriagedTicket::matches_event_type(&envelope.event_type()) =>
             {
                 Some(payload.clone())
             }
@@ -312,7 +312,7 @@ fn chunk_journal_sequence(events: &[JournalRecord<ChainPayload>]) -> Vec<&'stati
         .filter_map(|envelope| match &envelope.payload {
             ChainPayload::Execution(ExecutionPayload::AiChunkingPlanned(_)) => Some("snapshot"),
             ChainPayload::Fact(_)
-                if ChunkEnvelope::<String>::event_type_matches(&envelope.event_type()) =>
+                if ChunkEnvelope::<String>::matches_event_type(&envelope.event_type()) =>
             {
                 Some("chunk")
             }
@@ -381,10 +381,10 @@ fn assert_canonical_event_type_and_eof<T: TypedPayload>(
     events: &[JournalRecord<ChainPayload>],
     expected_data_rows: usize,
 ) {
-    let canonical = T::versioned_event_type();
+    let canonical = T::event_type_name();
     let rows = events
         .iter()
-        .filter(|envelope| T::event_type_matches(&envelope.event_type()))
+        .filter(|envelope| T::matches_event_type(&envelope.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), expected_data_rows);
     assert!(rows
@@ -403,23 +403,26 @@ fn assert_canonical_event_type_and_eof<T: TypedPayload>(
         })
         .expect("typed transform journal contains EOF evidence");
     if expected_data_rows == 0 {
-        assert!(!eof_keys.keys().any(|key| key.as_str() == canonical));
+        assert!(!eof_keys.keys().any(|key| *key == T::descriptor()));
     } else {
         let matching = eof_keys
             .iter()
-            .filter(|(key, _)| T::event_type_matches(key.as_str()))
+            .filter(|(key, _)| **key == T::descriptor())
             .collect::<Vec<_>>();
         assert_eq!(
             matching.len(),
             1,
             "one canonical event-type bucket appears in EOF evidence: {eof_keys:?}"
         );
-        assert_eq!(matching[0].0.as_str(), canonical);
+        assert_eq!(*matching[0].0, T::descriptor());
         assert_eq!(matching[0].1 .0, expected_data_rows as u64);
     }
     assert!(
-        eof_keys.keys().all(|key| key.as_str() != T::EVENT_TYPE),
-        "legacy semantic keys must not appear in migrated EOF maps"
+        eof_keys.keys().all(|key| !key
+            .event_type
+            .as_str()
+            .ends_with(&format!(".v{}", T::SCHEMA_VERSION))),
+        "version suffixes must not appear in EOF descriptors"
     );
 }
 
@@ -442,7 +445,7 @@ fn assert_derived_stage_authorship<T: TypedPayload>(
         .collect::<std::collections::HashMap<_, _>>();
     for output in output_events
         .iter()
-        .filter(|envelope| T::event_type_matches(&envelope.event_type()))
+        .filter(|envelope| T::matches_event_type(&envelope.event_type()))
     {
         assert_eq!(output.envelope.provenance.event.writer_id, writer);
         let parent_id = output
@@ -626,7 +629,7 @@ async fn scalar_and_dynamic_typed_outputs_have_live_replay_journal_parity() {
         .expect("source journal contains rejected try-map input");
     let error_parent = live_try_map_errors
         .iter()
-        .find(|envelope| TryMapRecord::event_type_matches(&envelope.event_type()))
+        .find(|envelope| TryMapRecord::matches_event_type(&envelope.event_type()))
         .expect("try-map error journal contains rejected parent");
     assert_eq!(
         error_parent.envelope.provenance.event.id,

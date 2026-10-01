@@ -561,36 +561,30 @@ impl Contract for DeliveryContract {
             return;
         }
 
-        let mut matched_any = false;
-        for parent_id in &event.causality.parent_ids {
-            if st.pending.remove(parent_id) {
-                matched_any = true;
-                st.receipted_total = st.receipted_total.saturating_add(1);
-            } else {
-                st.orphan_deliveries = st.orphan_deliveries.saturating_add(1);
-            }
+        if !event
+            .causality
+            .parent_ids
+            .contains(&payload.subject.input.event_id)
+        {
+            return;
         }
-
-        if !matched_any {
+        if st.pending.remove(&payload.subject.input.event_id) {
+            st.receipted_total = st.receipted_total.saturating_add(1);
+        } else {
+            st.orphan_deliveries = st.orphan_deliveries.saturating_add(1);
             return;
         }
 
         match &payload.result {
             DeliveryResult::Buffered { .. } => {}
             DeliveryResult::Success { .. } => {
-                st.success_count = st
-                    .success_count
-                    .saturating_add(event.causality.parent_ids.len() as u64);
+                st.success_count = st.success_count.saturating_add(1);
             }
             DeliveryResult::Partial { .. } => {
-                st.partial_count = st
-                    .partial_count
-                    .saturating_add(event.causality.parent_ids.len() as u64);
+                st.partial_count = st.partial_count.saturating_add(1);
             }
-            DeliveryResult::Failed { .. } => {
-                st.failed_count = st
-                    .failed_count
-                    .saturating_add(event.causality.parent_ids.len() as u64);
+            DeliveryResult::Failed { .. } | DeliveryResult::Rejected { .. } => {
+                st.failed_count = st.failed_count.saturating_add(1);
             }
         }
     }
@@ -933,7 +927,7 @@ impl Contract for DivergenceContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use crate::event::payloads::delivery_payload::DeliveryMethod;
     use crate::event::provenance::causality_context::CausalityContext;
     use crate::event::types::SeqNo;
     use crate::event::{ChainEventFactory, ConsumptionProgressEventParams};
@@ -965,8 +959,12 @@ mod tests {
         let contract = DeliveryContract::default();
         let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
-        let consumed =
-            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"a": 1}));
+        let consumed = ChainEventFactory::data_event(
+            WriterId::from(upstream),
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({"a": 1}),
+        );
         contract.on_read(&consumed, &mut read_ctx);
 
         let ctx = ContractContext {
@@ -996,15 +994,25 @@ mod tests {
         let contract = DeliveryContract::default();
         let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
-        let consumed =
-            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"a": 1}));
+        let consumed = ChainEventFactory::data_event(
+            WriterId::from(upstream),
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({"a": 1}),
+        );
         let parent_id = consumed.id;
         contract.on_read(&consumed, &mut read_ctx);
 
-        let receipt_payload = DeliveryPayload::failed(DeliveryMethod::Noop, "sink_error", "boom");
-        let receipt =
-            ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
-                .with_causality(CausalityContext::with_parent(parent_id));
+        let receipt_payload = crate::event::payloads::delivery_payload::DeliveryOutcome::failed(
+            DeliveryMethod::Noop,
+            "sink_error",
+            "boom",
+        );
+        let receipt = ChainEventFactory::delivery_event(
+            WriterId::from(downstream),
+            crate::event::payloads::delivery_payload::test_receipt(parent_id, receipt_payload),
+        )
+        .with_causality(CausalityContext::with_parent(parent_id));
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -1022,16 +1030,24 @@ mod tests {
         let contract = DeliveryContract::default();
         let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
-        let consumed =
-            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"a": 1}));
+        let consumed = ChainEventFactory::data_event(
+            WriterId::from(upstream),
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({"a": 1}),
+        );
         let parent_id = consumed.id;
         contract.on_read(&consumed, &mut read_ctx);
 
-        let receipt_payload =
-            DeliveryPayload::buffered(DeliveryMethod::Noop, /* bytes */ None);
-        let receipt =
-            ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
-                .with_causality(CausalityContext::with_parent(parent_id));
+        let receipt_payload = crate::event::payloads::delivery_payload::DeliveryOutcome::buffered(
+            DeliveryMethod::Noop,
+            /* bytes */ None,
+        );
+        let receipt = ChainEventFactory::delivery_event(
+            WriterId::from(downstream),
+            crate::event::payloads::delivery_payload::test_receipt(parent_id, receipt_payload),
+        )
+        .with_causality(CausalityContext::with_parent(parent_id));
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -1058,23 +1074,34 @@ mod tests {
     }
 
     #[test]
-    fn delivery_contract_multi_parent_receipt_clears_all_parents() {
+    fn delivery_contract_extra_dependencies_do_not_settle_other_inputs() {
         let contract = DeliveryContract::default();
         let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
-        let consumed_a =
-            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"a": 1}));
-        let consumed_b =
-            ChainEventFactory::data_event(WriterId::from(upstream), "test.event", json!({"b": 2}));
+        let consumed_a = ChainEventFactory::data_event(
+            WriterId::from(upstream),
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({"a": 1}),
+        );
+        let consumed_b = ChainEventFactory::data_event(
+            WriterId::from(upstream),
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({"b": 2}),
+        );
         contract.on_read(&consumed_a, &mut read_ctx);
         contract.on_read(&consumed_b, &mut read_ctx);
 
-        let receipt_payload = DeliveryPayload::success(DeliveryMethod::Noop, /* bytes */ None);
-        let receipt =
-            ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
-                .with_causality(
-                    CausalityContext::with_parent(consumed_a.id).add_parent(consumed_b.id),
-                );
+        let receipt_payload = crate::event::payloads::delivery_payload::DeliveryOutcome::success(
+            DeliveryMethod::Noop,
+            /* bytes */ None,
+        );
+        let receipt = ChainEventFactory::delivery_event(
+            WriterId::from(downstream),
+            crate::event::payloads::delivery_payload::test_receipt(consumed_a.id, receipt_payload),
+        )
+        .with_causality(CausalityContext::with_parent(consumed_a.id).add_parent(consumed_b.id));
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -1084,7 +1111,16 @@ mod tests {
             write_state: &write_ctx.state,
             read_state: &read_ctx.state,
         };
-        assert!(matches!(contract.verify(&ctx), ContractResult::Passed(_)));
+        assert!(matches!(
+            contract.verify(&ctx),
+            ContractResult::Failed(ContractViolation {
+                cause: ViolationCause::DeliveryMismatch {
+                    missing_deliveries: 1,
+                    orphan_deliveries: 0
+                },
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1092,11 +1128,17 @@ mod tests {
         let contract = DeliveryContract::default();
         let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
+        let parent_id = EventId::new();
         // No consumed event observed, but a receipt arrives.
-        let receipt_payload = DeliveryPayload::success(DeliveryMethod::Noop, /* bytes */ None);
-        let receipt =
-            ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
-                .with_causality(CausalityContext::with_parent(EventId::new()));
+        let receipt_payload = crate::event::payloads::delivery_payload::DeliveryOutcome::success(
+            DeliveryMethod::Noop,
+            /* bytes */ None,
+        );
+        let receipt = ChainEventFactory::delivery_event(
+            WriterId::from(downstream),
+            crate::event::payloads::delivery_payload::test_receipt(parent_id, receipt_payload),
+        )
+        .with_causality(CausalityContext::with_parent(parent_id));
 
         contract.on_write(&receipt, &mut write_ctx);
 
@@ -1142,6 +1184,7 @@ mod tests {
         let data = ChainEventFactory::data_event(
             crate::WriterId::from(upstream),
             "test.event",
+            std::num::NonZeroU32::MIN,
             json!({"a": 1}),
         );
         contract.on_read(&data, &mut read_ctx);
@@ -1300,8 +1343,12 @@ mod tests {
         let contract = DivergenceContract::with_thresholds(scc_id, thresholds);
         let (write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
-        let mut data =
-            ChainEventFactory::data_event(crate::WriterId::from(upstream), "test.event", json!({}));
+        let mut data = ChainEventFactory::data_event(
+            crate::WriterId::from(upstream),
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        );
         data.cycle_scc_id = Some(scc_id);
         data.cycle_depth = Some(CycleDepth::new(4));
 
@@ -1351,6 +1398,7 @@ mod tests {
             let data = ChainEventFactory::data_event(
                 crate::WriterId::from(upstream),
                 "test.event",
+                std::num::NonZeroU32::MIN,
                 json!({"a": 1}),
             );
             contract.on_read(&data, &mut read_ctx);
@@ -1387,6 +1435,7 @@ mod tests {
         let data = ChainEventFactory::data_event(
             crate::WriterId::from(upstream),
             "test.event",
+            std::num::NonZeroU32::MIN,
             json!({"a": 1}),
         );
         contract.on_read(&data, &mut read_ctx);

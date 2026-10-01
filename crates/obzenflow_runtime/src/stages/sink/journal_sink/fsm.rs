@@ -38,7 +38,7 @@ use crate::supervised_base::publication::{self, BoxError};
 use crate::supervised_base::with_external_events::ExternalControlEvent;
 use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::provenance::causality_context::CausalityContext;
 use obzenflow_core::event::provenance::FlowContext;
@@ -444,7 +444,7 @@ pub struct JournalSinkResources<H: UnifiedSinkHandler> {
 
     /// Single-writer receipt identity (FLOWIP-120s): the handler's declared
     /// destination family, else the stage name. Stamped on every journalled
-    /// `DeliveryPayload`.
+    /// `DeliveryOutcome`.
     pub receipt_destination: String,
 
     /// Connector-described method used for runtime-authored failure receipts.
@@ -797,17 +797,28 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                             let Some((_upstream_stage, parent_envelope)) =
                                 ctx.subscription.as_ref().and_then(|subscription| {
                                     subscription.pending_receipt_envelope(
-                                        commit.parent_event_id,
+                                        commit.subject.input,
                                         &ctx.contract_state[..],
                                     )
                                 })
                             else {
                                 return Err(FsmError::HandlerError(format!(
-                                    "FlushBuffers: commit receipt parent {} is not pending",
-                                    commit.parent_event_id
+                                    "FlushBuffers: commit receipt parent {:?} is not pending",
+                                    commit.subject.input
                                 ))
                                 .into());
                             };
+                            if !commit.subject.matches_record(parent_envelope.record()) {
+                                return Err(FsmError::HandlerError(
+                                    "sink receipt subject descriptor does not match retained input"
+                                        .to_string(),
+                                )
+                                .into());
+                            }
+                            commit
+                                .payload
+                                .validate()
+                                .map_err(|error| FsmError::HandlerError(error.to_string()))?;
                             prepared_commits.push((parent_envelope, commit.payload.clone()));
                         }
                         report.commit_settlements().map_err(|error| {
@@ -834,9 +845,10 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                                 stage_type: StageType::Sink,
                             };
 
-                            let evt = journalled_delivery_event(
+                            let evt = super::journalled_sink_audit(
                                 writer_id,
                                 &ctx.receipt_destination,
+                                obzenflow_core::event::payloads::delivery_payload::SinkLifecycleOperation::Flush,
                                 payload,
                             )
                             .with_flow_context(flow_ctx);
@@ -1001,16 +1013,23 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         let Some((_upstream_stage, parent_envelope)) =
                             ctx.subscription.as_ref().and_then(|subscription| {
                                 subscription.pending_receipt_envelope(
-                                    commit.parent_event_id,
+                                    commit.subject.input,
                                     &ctx.contract_state[..],
                                 )
                             })
                         else {
                             return Err(FsmError::HandlerError(format!(
-                                "DrainWriter: commit receipt parent {} is not pending",
-                                commit.parent_event_id
+                                "DrainWriter: commit receipt parent {:?} is not pending",
+                                commit.subject.input
                             )));
                         };
+                        if !commit.subject.matches_record(parent_envelope.record()) {
+                            return Err(FsmError::HandlerError(
+                                "sink receipt subject descriptor does not match retained input".to_string(),
+                            ));
+                        }
+                        commit.payload.validate()
+                            .map_err(|error| FsmError::HandlerError(error.to_string()))?;
                         prepared_commits.push((parent_envelope, commit.payload.clone()));
                     }
                     drain_result.commit_settlements().map_err(|error| {
@@ -1039,7 +1058,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkAction<H> {
                         };
 
                         let evt =
-                            journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
+                            super::journalled_sink_audit(writer_id, &ctx.receipt_destination, obzenflow_core::event::payloads::delivery_payload::SinkLifecycleOperation::Drain, payload)
                                 .with_flow_context(flow_ctx);
                         let evt = ctx.instrumentation.capture_accounting().attach_to(evt);
 
@@ -1129,7 +1148,7 @@ async fn record_sink_lifecycle_fatal<H: UnifiedSinkHandler + Send + Sync + 'stat
 async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkResources<H>,
     parent_envelope: &DeliveredRecord<ChainPayload>,
-    payload: DeliveryPayload,
+    payload: DeliveryOutcome,
 ) -> Result<(), FsmError> {
     let writer_id = ctx
         .writer_id
@@ -1142,13 +1161,18 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
         stage_type: StageType::Sink,
     };
 
-    let evt = journalled_delivery_event(writer_id, &ctx.receipt_destination, payload)
-        .with_flow_context(flow_ctx)
-        .with_causality(CausalityContext::with_parent(
-            parent_envelope.envelope.provenance.event.id,
-        ))
-        .with_correlation_from(&parent_envelope.authored())
-        .with_cycle_state_from(&parent_envelope.authored());
+    let evt = journalled_delivery_event(
+        writer_id,
+        &ctx.receipt_destination,
+        parent_envelope,
+        payload,
+    )
+    .with_flow_context(flow_ctx)
+    .with_causality(CausalityContext::with_parent(
+        parent_envelope.envelope.provenance.event.id,
+    ))
+    .with_correlation_from(&parent_envelope.authored())
+    .with_cycle_state_from(&parent_envelope.authored());
     let evt = evt
         .try_with_composite_activations(parent_envelope.composite_activations().to_vec())
         .map_err(|error| FsmError::HandlerError(error.to_string()))?;
@@ -1198,7 +1222,7 @@ mod tests {
     use crate::stages::common::stage_handle::FORCE_SHUTDOWN_MESSAGE;
     use crate::stages::sink::journal_sink::supervisor::JournalSinkSupervisor;
     use crate::stages::source::finite::fsm::tests::TestJournal;
-    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
     use obzenflow_core::event::payloads::flow_control_payload::EofKind;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::EventId;
@@ -1226,25 +1250,25 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SinkHandler for AuditSink {
-        async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryOutcome, HandlerError> {
             self.0.consumes.fetch_add(1, Ordering::SeqCst);
             self.0.consuming.notify_one();
             if self.0.block_consume.load(Ordering::SeqCst) {
                 self.0.release_consume.notified().await;
             }
-            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
+            Ok(DeliveryOutcome::success(DeliveryMethod::Noop, None))
         }
 
-        async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+        async fn flush(&mut self) -> Result<Option<DeliveryOutcome>, HandlerError> {
             self.0.flushes.fetch_add(1, Ordering::SeqCst);
             self.0.flushing.notify_one();
             if self.0.block_flush.load(Ordering::SeqCst) {
                 self.0.release_flush.notified().await;
             }
-            Ok(Some(DeliveryPayload::success(DeliveryMethod::Noop, None)))
+            Ok(Some(DeliveryOutcome::success(DeliveryMethod::Noop, None)))
         }
 
-        async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+        async fn drain(&mut self) -> Result<Option<DeliveryOutcome>, HandlerError> {
             self.0.drains.fetch_add(1, Ordering::SeqCst);
             Ok(None)
         }
@@ -1514,7 +1538,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .filter(|record| matches!(record.payload, ChainPayload::Delivery(_)))
+                .filter(|record| matches!(record.payload, ChainPayload::Execution(obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SinkAudit(_))))
                 .count(),
             1
         );
@@ -1547,6 +1571,7 @@ mod tests {
                 ChainEventFactory::data_event(
                     fixture.upstream_id.into(),
                     "audit.input",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"item": 1}),
                 ),
                 Default::default(),
@@ -1730,10 +1755,10 @@ mod tests {
 
     fn lifecycle_report(parent_event_id: EventId) -> SinkLifecycleReport {
         let mut report = SinkLifecycleReport::default();
-        report.audit_payload = Some(DeliveryPayload::success(DeliveryMethod::Noop, None));
+        report.audit_payload = Some(DeliveryOutcome::success(DeliveryMethod::Noop, None));
         report.commit_receipts = vec![CommitReceipt {
-            parent_event_id,
-            payload: DeliveryPayload::success(DeliveryMethod::Noop, None),
+            subject: crate::testing::causal_fixture::delivery_subject(parent_event_id),
+            payload: DeliveryOutcome::success(DeliveryMethod::Noop, None),
         }];
         report
     }
@@ -1750,7 +1775,10 @@ mod tests {
                 apply_terminal_eof_audit_gate(lifecycle_report(parent_event_id), Some(kind));
             assert_eq!(report.audit_payload.is_some(), expects_audit, "{kind:?}");
             assert_eq!(report.commit_receipts.len(), 1, "{kind:?}");
-            assert_eq!(report.commit_receipts[0].parent_event_id, parent_event_id);
+            assert_eq!(
+                report.commit_receipts[0].subject.input.event_id,
+                parent_event_id
+            );
         }
     }
 

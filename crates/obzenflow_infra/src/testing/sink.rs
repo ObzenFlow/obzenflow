@@ -624,7 +624,10 @@ fn is_failed_receipt(event: &ChainEvent) -> bool {
     matches!(
         &event.payload,
         ChainPayload::Delivery(DeliveryPayload {
-            result: DeliveryResult::Failed { .. },
+            outcome: obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome {
+                result: DeliveryResult::Failed { .. },
+                ..
+            },
             ..
         })
     )
@@ -772,7 +775,11 @@ fn event_error_kind(event: &ChainEvent) -> Option<&ErrorKind> {
 
 fn failed_receipt_disposition(event: &ChainEvent) -> Option<SinkWriteFailureDisposition> {
     let ChainPayload::Delivery(DeliveryPayload {
-        result: DeliveryResult::Failed { error_type, .. },
+        outcome:
+            obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome {
+                result: DeliveryResult::Failed { error_type, .. },
+                ..
+            },
         ..
     }) = &event.payload
     else {
@@ -1839,22 +1846,39 @@ mod tests {
         };
         let mut input = ChainEventFactory::data_event(
             WriterId::from(source_stage),
-            "failure.projection.input.v1",
+            "failure.projection.input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"id": 7}),
         )
         .with_flow_context(context("inputs", source_stage, StageType::FiniteSource));
         input.admission_seq = Some(AdmissionSeq(1));
 
-        let mut receipt_payload = DeliveryPayload::failed(
-            DeliveryMethod::Noop,
-            "sink_materialisation_poisoned",
-            "redacted failure",
-        );
+        let mut receipt_payload =
+            obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome::failed(
+                DeliveryMethod::Noop,
+                "sink_materialisation_poisoned",
+                "redacted failure",
+            );
         receipt_payload.destination = "projection-output".to_string();
-        let mut receipt =
-            ChainEventFactory::delivery_event(WriterId::from(sink_stage), receipt_payload)
-                .with_flow_context(context("output", sink_stage, StageType::Sink))
-                .with_causality(CausalityContext::with_parent(input.id));
+        let mut receipt = ChainEventFactory::delivery_event(
+            WriterId::from(sink_stage),
+            DeliveryPayload {
+                subject: obzenflow_core::event::payloads::delivery_payload::DeliverySubject {
+                    input: obzenflow_core::event::JournalCommitRef {
+                        run_id: obzenflow_core::FlowId::new(),
+                        journal_writer_id: obzenflow_core::JournalWriterId::new(),
+                        sequence: 1,
+                        event_id: input.id,
+                    },
+                    event_kind: input.event_kind,
+                    event_type: input.event_type.clone().into(),
+                    payload_schema_version: input.payload_schema_version,
+                },
+                outcome: receipt_payload,
+            },
+        )
+        .with_flow_context(context("output", sink_stage, StageType::Sink))
+        .with_causality(CausalityContext::with_parent(input.id));
         receipt.admission_seq = Some(AdmissionSeq(2));
 
         let operation = SinkOperationFailed {
@@ -1872,7 +1896,8 @@ mod tests {
         };
         let mut operation_event = ChainEventFactory::data_event(
             WriterId::from(sink_stage),
-            SinkOperationFailed::versioned_event_type(),
+            SinkOperationFailed::event_type_name(),
+            SinkOperationFailed::payload_schema_version(),
             serde_json::to_value(&operation).expect("operation serialises"),
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
@@ -1882,7 +1907,8 @@ mod tests {
 
         let mut route = ChainEventFactory::data_event(
             WriterId::from(sink_stage),
-            "failure.projection.input.v1",
+            "failure.projection.input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"id": 7}),
         )
         .with_flow_context(context("output", sink_stage, StageType::Sink))
@@ -1946,7 +1972,7 @@ mod tests {
         ));
 
         let mut wrong_type = fixture.route.clone();
-        wrong_type.event_type = "failure.projection.wrong.v1".to_string();
+        wrong_type.event_type = "failure.projection.wrong".to_string();
         assert!(!write_failure_route_matches(
             &fixture.input,
             &fixture.receipt,

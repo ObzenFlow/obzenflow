@@ -444,8 +444,12 @@ mod tests {
             flow_id: FlowId::new(),
             resume_generation: Default::default(),
         };
-        let source =
-            ChainEventFactory::data_event(writer, "application.null.v1", serde_json::Value::Null);
+        let source = ChainEventFactory::data_event(
+            writer,
+            "application.null",
+            std::num::NonZeroU32::MIN,
+            serde_json::Value::Null,
+        );
         let partial = AiMapReduceTaggedPartial {
             job_key: source.id,
             chunk_index: 0,
@@ -453,11 +457,11 @@ mod tests {
             partial: serde_json::json!({"execution_type": "business-value", "items": [1, null]}),
         }
         .to_event(writer);
-        let progress = ChainEventFactory::create_event(
+        let progress = ChainEventFactory::execution_event(
             writer,
-            ChainPayload::Execution(ExecutionPayload::AccumulatorProgress {
+            ExecutionPayload::AccumulatorProgress {
                 inputs_since_last_report: 100,
-            }),
+            },
         );
         let mut events = vec![source, partial, progress];
         for (index, event) in events.iter_mut().enumerate() {

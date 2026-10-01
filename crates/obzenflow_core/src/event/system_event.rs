@@ -70,6 +70,7 @@ impl SystemEvent {
             writer_id,
             event_kind: EventKind::System,
             event_type: event.event_type().to_string(),
+            payload_schema_version: SystemPayload::SCHEMA_VERSION,
             timestamp: current_timestamp(),
         };
         Self {

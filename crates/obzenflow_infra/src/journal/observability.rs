@@ -146,14 +146,19 @@ pub(crate) mod tests {
             in_flight: Some(seq as u32),
             ..Default::default()
         });
-        ChainEventFactory::data_event(stage.into(), "sparse.fact", serde_json::json!({"seq": seq}))
-            .with_runtime_provenance(RuntimeProvenance {
-                accounting: ExecutionAccounting {
-                    events_processed_total: seq,
-                    ..Default::default()
-                },
-            })
-            .with_observability_context(packet)
+        ChainEventFactory::data_event(
+            stage.into(),
+            "sparse.fact",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({"seq": seq}),
+        )
+        .with_runtime_provenance(RuntimeProvenance {
+            accounting: ExecutionAccounting {
+                events_processed_total: seq,
+                ..Default::default()
+            },
+        })
+        .with_observability_context(packet)
     }
 
     async fn conformance(

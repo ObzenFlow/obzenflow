@@ -843,7 +843,8 @@ mod tests {
     fn contract_violation_uses_stage_fatal_error_transition() {
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            "test.input.v1",
+            "test.input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         let error = HandlerError::ContractViolation(
@@ -867,7 +868,8 @@ mod tests {
     fn ordinary_handler_error_is_not_promoted_to_stage_fatal() {
         let input = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            "test.input.v1",
+            "test.input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
 

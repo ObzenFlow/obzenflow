@@ -8,6 +8,138 @@ use obzenflow_core::id::StageId;
 use serde_json::json;
 
 #[test]
+fn receipt_and_lifecycle_names_validate_subjects_and_partial_counts() {
+    use obzenflow_core::event::payloads::delivery_payload::{
+        DeliveryMethod, DeliveryOutcome, DeliveryPayload, DeliveryResult, DeliverySubject,
+        SinkAuditPayload, SinkLifecycleOperation,
+    };
+    use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::{ChainEvent, JournalRecord, JournalWriterId};
+
+    let writer = WriterId::from(StageId::new());
+    let input = JournalRecord::new(
+        JournalWriterId::new(),
+        ChainEventFactory::data_event(
+            writer,
+            "order.ready",
+            std::num::NonZeroU32::new(7).unwrap(),
+            json!({"id": 1}),
+        ),
+    );
+    let subject = DeliverySubject::from_record(&input);
+    let mut partial = DeliveryOutcome::success(DeliveryMethod::Noop, None).with_items(2);
+    partial.result = DeliveryResult::Partial {
+        successful_count: 2,
+        failed_count: 1,
+        error_summary: "one item failed".into(),
+        failed_items: None,
+    };
+    for (name, outcome) in [
+        (
+            "delivery.buffered",
+            DeliveryOutcome::buffered(DeliveryMethod::Noop, None),
+        ),
+        (
+            "delivery.succeeded",
+            DeliveryOutcome::success(DeliveryMethod::Noop, None),
+        ),
+        ("delivery.partially_succeeded", partial.clone()),
+        (
+            "delivery.failed",
+            DeliveryOutcome::failed(DeliveryMethod::Noop, "timeout", "unknown completion"),
+        ),
+        (
+            "delivery.rejected",
+            DeliveryOutcome::rejected(DeliveryMethod::Noop, "quota", "full"),
+        ),
+    ] {
+        let event = ChainEventFactory::delivery_event(
+            writer,
+            DeliveryPayload {
+                subject: subject.clone(),
+                outcome,
+            },
+        );
+        assert_eq!(event.event_type(), name);
+        let exported = serde_json::to_value(&event).unwrap();
+        let decoded: ChainEvent = serde_json::from_value(exported.clone()).unwrap();
+        let ChainPayload::Delivery(receipt) = decoded.payload else {
+            panic!("receipt family")
+        };
+        assert!(receipt.subject.matches_record(&input));
+        assert_eq!(exported["payload"]["subject"]["payload_schema_version"], 7);
+
+        let mut wrong_name = exported.clone();
+        wrong_name["envelope"]["provenance"]["event"]["event_type"] = json!("sink.delivery");
+        assert!(serde_json::from_value::<ChainEvent>(wrong_name).is_err());
+        let mut wrong_parent = exported.clone();
+        wrong_parent["envelope"]["provenance"]["event"]["causality"]["parent_ids"] = json!([]);
+        assert!(serde_json::from_value::<ChainEvent>(wrong_parent).is_err());
+        let mut uncommitted_subject = exported;
+        uncommitted_subject["payload"]["subject"]["input"]["sequence"] = json!(0);
+        assert!(serde_json::from_value::<ChainEvent>(uncommitted_subject).is_err());
+    }
+
+    for (operation, success_name, partial_name) in [
+        (
+            SinkLifecycleOperation::Flush,
+            "sink.flush_succeeded",
+            "sink.flush_partially_succeeded",
+        ),
+        (
+            SinkLifecycleOperation::Drain,
+            "sink.drain_succeeded",
+            "sink.drain_partially_succeeded",
+        ),
+    ] {
+        for (name, outcome) in [
+            (
+                success_name,
+                DeliveryOutcome::success(DeliveryMethod::Noop, None),
+            ),
+            (partial_name, partial.clone()),
+        ] {
+            let audit = ChainEventFactory::execution_event(
+                writer,
+                ExecutionPayload::SinkAudit(SinkAuditPayload { operation, outcome }),
+            );
+            assert_eq!(audit.event_type(), name);
+            let mut exported = serde_json::to_value(&audit).unwrap();
+            assert!(exported["payload"].get("subject").is_none());
+            serde_json::from_value::<ChainEvent>(exported.clone()).unwrap();
+            exported["payload"]["operation"] =
+                json!(if operation == SinkLifecycleOperation::Flush {
+                    "drain"
+                } else {
+                    "flush"
+                });
+            assert!(serde_json::from_value::<ChainEvent>(exported).is_err());
+        }
+    }
+
+    for (successful, failed, items) in [(0, 1, None), (1, 0, None), (2, 1, Some(3))] {
+        let mut outcome = partial.clone();
+        outcome.result = DeliveryResult::Partial {
+            successful_count: successful,
+            failed_count: failed,
+            error_summary: String::new(),
+            failed_items: None,
+        };
+        outcome.items_delivered = items;
+        let event = ChainEventFactory::delivery_event(
+            writer,
+            DeliveryPayload {
+                subject: subject.clone(),
+                outcome,
+            },
+        );
+        assert!(serde_json::to_value(event)
+            .and_then(serde_json::from_value::<ChainEvent>)
+            .is_err());
+    }
+}
+
+#[test]
 fn test_control_event_type_strings() {
     let writer_id = WriterId::from(StageId::new());
 
@@ -48,8 +180,12 @@ fn test_is_control_detection() {
     assert!(eof_event.is_eof());
 
     // Test data event
-    let data_event =
-        ChainEventFactory::data_event(writer_id, "user.data.processed", json!({"value": 42}));
+    let data_event = ChainEventFactory::data_event(
+        writer_id,
+        "user.data.processed",
+        std::num::NonZeroU32::MIN,
+        json!({"value": 42}),
+    );
     assert!(!data_event.is_control());
     assert!(!data_event.is_eof());
     assert!(data_event.consumes_data_credit());
@@ -210,7 +346,12 @@ fn test_data_vs_control_events() {
     ];
 
     for event_type in data_types {
-        let event = ChainEventFactory::data_event(writer_id, event_type, json!({"test": true}));
+        let event = ChainEventFactory::data_event(
+            writer_id,
+            event_type,
+            std::num::NonZeroU32::MIN,
+            json!({"test": true}),
+        );
         assert!(event.consumes_data_credit());
         assert!(!event.is_control());
         assert!(!event.is_eof());
@@ -235,9 +376,9 @@ fn test_data_vs_control_events() {
 #[test]
 fn test_direct_chain_event_construction() {
     // Test that we can still create events directly using the new structure
-    let event = ChainEventFactory::create_event(
+    let event = ChainEventFactory::flow_signal_event(
         WriterId::from(StageId::new()),
-        ChainPayload::FlowControl(FlowControlPayload::Eof {
+        FlowControlPayload::Eof {
             kind: EofKind::Natural,
             timestamp: 12345,
             writer_id: Some(WriterId::from(StageId::new())),
@@ -245,7 +386,7 @@ fn test_direct_chain_event_construction() {
             writer_seq_by_event_type: Default::default(),
             vector_clock: None,
             last_event_id: None,
-        }),
+        },
     );
 
     assert!(event.is_control());

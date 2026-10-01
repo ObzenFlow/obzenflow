@@ -431,7 +431,12 @@ mod tests {
         let mut guard = CycleGuard::new(MaxIterations::new(2), test_scc_id(1), true, "stage_a");
 
         let writer_id = WriterId::from(StageId::new());
-        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+        let mut event = ChainEventFactory::data_event(
+            writer_id,
+            "t",
+            std::num::NonZeroU32::MIN,
+            json!({"x": 1}),
+        );
 
         // First pass: depth set to 1, scc_id set to 1.
         assert!(guard.check_data(&mut event).is_ok());
@@ -457,7 +462,12 @@ mod tests {
         let mut guard = CycleGuard::new(MaxIterations::new(1), test_scc_id(1), false, "stage_b");
 
         let writer_id = WriterId::from(StageId::new());
-        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+        let mut event = ChainEventFactory::data_event(
+            writer_id,
+            "t",
+            std::num::NonZeroU32::MIN,
+            json!({"x": 1}),
+        );
         event.cycle_depth = Some(CycleDepth::new(5));
         event.cycle_scc_id = Some(test_scc_id(1));
 
@@ -475,7 +485,12 @@ mod tests {
         let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(2), true, "stage_c");
 
         let writer_id = WriterId::from(StageId::new());
-        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+        let mut event = ChainEventFactory::data_event(
+            writer_id,
+            "t",
+            std::num::NonZeroU32::MIN,
+            json!({"x": 1}),
+        );
         // Simulate event arriving from a different SCC.
         event.cycle_depth = Some(CycleDepth::new(8));
         event.cycle_scc_id = Some(test_scc_id(1));
@@ -498,7 +513,12 @@ mod tests {
         let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(1), true, "stage_a");
 
         let writer_id = WriterId::from(StageId::new());
-        let mut event = ChainEventFactory::data_event(writer_id, "t", json!({"x": 1}));
+        let mut event = ChainEventFactory::data_event(
+            writer_id,
+            "t",
+            std::num::NonZeroU32::MIN,
+            json!({"x": 1}),
+        );
 
         assert!(guard.check_data(&mut event).is_ok());
         assert_eq!(event.cycle_depth, Some(CycleDepth::first()));

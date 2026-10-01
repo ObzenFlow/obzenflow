@@ -50,7 +50,7 @@ impl EffectInvocationContextBuilder {
         );
         let parent = JournalRecord::new(
             JournalWriterId::from(*data_journal.id()),
-            ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
+            ChainEventFactory::data_event(writer_id, "test.parent", std::num::NonZeroU32::MIN, json!({})),
         );
 
         Self {

@@ -14,11 +14,111 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Exact committed input that this receipt settles. Additional causal parents
+/// are dependencies only and never grant settlement authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverySubject {
+    pub input: crate::event::JournalCommitRef,
+    pub event_kind: super::chain_payload::EventKind,
+    pub event_type: crate::EventType,
+    pub payload_schema_version: std::num::NonZeroU32,
+}
+
+impl DeliverySubject {
+    pub fn from_record(record: &crate::event::JournalRecord<super::ChainPayload>) -> Self {
+        let provenance = &record.envelope.provenance.event;
+        Self {
+            input: record.commitment(),
+            event_kind: provenance.event_kind,
+            event_type: provenance.event_type.clone().into(),
+            payload_schema_version: provenance.payload_schema_version,
+        }
+    }
+    pub fn matches_record(
+        &self,
+        record: &crate::event::JournalRecord<super::ChainPayload>,
+    ) -> bool {
+        self == &Self::from_record(record)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryPayload {
+    pub subject: DeliverySubject,
+    #[serde(flatten)]
+    pub outcome: DeliveryOutcome,
+}
+
+impl std::ops::Deref for DeliveryPayload {
+    type Target = DeliveryOutcome;
+    fn deref(&self) -> &Self::Target {
+        &self.outcome
+    }
+}
+
+impl DeliveryPayload {
+    pub fn event_type(&self) -> &'static str {
+        match self.result {
+            DeliveryResult::Buffered { .. } => "delivery.buffered",
+            DeliveryResult::Success { .. } => "delivery.succeeded",
+            DeliveryResult::Partial { .. } => "delivery.partially_succeeded",
+            DeliveryResult::Failed { .. } => "delivery.failed",
+            DeliveryResult::Rejected { .. } => "delivery.rejected",
+        }
+    }
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.subject.input.sequence == 0 {
+            return Err("delivery subject must be committed");
+        }
+        self.outcome.validate()
+    }
+}
+
+/// A lifecycle audit describes an operation, without any input settlement authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SinkAuditPayload {
+    pub operation: SinkLifecycleOperation,
+    #[serde(flatten)]
+    pub outcome: DeliveryOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkLifecycleOperation {
+    Flush,
+    Drain,
+}
+
+impl SinkAuditPayload {
+    pub fn event_type(&self) -> &'static str {
+        match (self.operation, &self.outcome.result) {
+            (SinkLifecycleOperation::Flush, DeliveryResult::Partial { .. }) => {
+                "sink.flush_partially_succeeded"
+            }
+            (SinkLifecycleOperation::Drain, DeliveryResult::Partial { .. }) => {
+                "sink.drain_partially_succeeded"
+            }
+            (SinkLifecycleOperation::Flush, _) => "sink.flush_succeeded",
+            (SinkLifecycleOperation::Drain, _) => "sink.drain_succeeded",
+        }
+    }
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !matches!(
+            self.outcome.result,
+            DeliveryResult::Success { .. } | DeliveryResult::Partial { .. }
+        ) {
+            return Err("sink audit requires success or partial success");
+        }
+        self.outcome.validate()
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Core payload
 // ────────────────────────────────────────────────────────────────────────────
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeliveryPayload {
+pub struct DeliveryOutcome {
     /// Delivery outcome
     pub result: DeliveryResult,
 
@@ -73,6 +173,10 @@ pub enum DeliveryResult {
         #[serde(skip_serializing_if = "Option::is_none")]
         response_headers: Option<HashMap<String, String>>,
     },
+    Rejected {
+        policy: String,
+        reason: String,
+    },
     Failed {
         error_type: String,
         error_message: String,
@@ -89,7 +193,7 @@ pub enum DeliveryResult {
 // ────────────────────────────────────────────────────────────────────────────
 // Convenience builders
 // ────────────────────────────────────────────────────────────────────────────
-impl DeliveryPayload {
+impl DeliveryOutcome {
     // The `destination` field is framework-stamped at journalling time from
     // the sink's declared delivery type, else the stage name (FLOWIP-120s);
     // constructors leave it empty.
@@ -192,7 +296,7 @@ impl DeliveryPayload {
 }
 
 // Builder-style methods for enhancing payloads
-impl DeliveryPayload {
+impl DeliveryOutcome {
     /// Update the middleware context (builder style)
     pub fn with_middleware_context(mut self, context: Value) -> Self {
         self.middleware_context = Some(context);
@@ -209,5 +313,57 @@ impl DeliveryPayload {
     pub fn with_items(mut self, items: u64) -> Self {
         self.items_delivered = Some(items);
         self
+    }
+}
+
+impl DeliveryOutcome {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if let DeliveryResult::Partial {
+            successful_count,
+            failed_count,
+            ..
+        } = &self.result
+        {
+            if *successful_count == 0 || *failed_count == 0 {
+                return Err("partial delivery requires positive successful and failed counts");
+            }
+            if self
+                .items_delivered
+                .is_some_and(|items| items != *successful_count)
+            {
+                return Err("partial delivery items_delivered disagrees with successful_count");
+            }
+        }
+        Ok(())
+    }
+    pub fn rejected(
+        method: DeliveryMethod,
+        policy: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        let mut outcome = Self::success(method, None);
+        outcome.result = DeliveryResult::Rejected {
+            policy: policy.into(),
+            reason: reason.into(),
+        };
+        outcome
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_receipt(input: crate::EventId, outcome: DeliveryOutcome) -> DeliveryPayload {
+    DeliveryPayload {
+        subject: DeliverySubject {
+            input: crate::event::JournalCommitRef {
+                run_id: crate::FlowId::new(),
+                journal_writer_id: crate::JournalWriterId::new(),
+                sequence: 1,
+                event_id: input,
+            },
+            event_kind: super::chain_payload::EventKind::Fact,
+            event_type: "test.event".into(),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+        },
+        outcome,
     }
 }

@@ -806,9 +806,9 @@ fn durable_inference_ids(events: &[ChainEvent]) -> Vec<EventId> {
     let mut ids = events
         .iter()
         .filter(|event| {
-            EffectAttemptStarted::event_type_matches(&event.event_type())
+            EffectAttemptStarted::matches_event_type(&event.event_type())
                 || successful_chat_record(event).is_some()
-                || DecisionBrief::event_type_matches(&event.event_type())
+                || DecisionBrief::matches_event_type(&event.event_type())
         })
         .map(|event| event.id)
         .collect::<Vec<_>>();
@@ -979,7 +979,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
         manifest["bounded_direct_fact_admission"],
         serde_json::json!([{
             "stage_key": "brief",
-            "input_event_type": ReducedEvidence::versioned_event_type(),
+            "input_event_type": ReducedEvidence::event_type_name(),
             "max_live_data_rows": 3,
         }])
     );
@@ -997,7 +997,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
     assert_eq!(
         live_data
             .iter()
-            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .filter(|event| EffectAttemptStarted::matches_event_type(&event.event_type()))
             .count(),
         1
     );
@@ -1035,7 +1035,7 @@ async fn one_shot_inference_live_and_replay_closure_use_three_rows_without_live_
     assert_eq!(
         live_data
             .iter()
-            .filter(|event| DecisionBrief::event_type_matches(&event.event_type()))
+            .filter(|event| DecisionBrief::matches_event_type(&event.event_type()))
             .count(),
         1
     );
@@ -1465,7 +1465,7 @@ async fn cancelling_an_active_inference_leaves_only_committed_physical_debt() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .filter(|event| EffectAttemptStarted::matches_event_type(&event.event_type()))
             .count(),
         1,
         "the durable attempt start remains physical debt"
@@ -1479,7 +1479,7 @@ async fn cancelling_an_active_inference_leaves_only_committed_physical_debt() {
     assert!(
         events
             .iter()
-            .all(|event| !DecisionBrief::event_type_matches(&event.event_type())),
+            .all(|event| !DecisionBrief::matches_event_type(&event.event_type())),
         "cancellation commits no domain output"
     );
 }
@@ -1566,7 +1566,7 @@ async fn resume_after_a_durable_reply_reinterprets_without_another_chat_call() {
     assert_eq!(
         cut_events
             .iter()
-            .filter(|event| EffectAttemptStarted::event_type_matches(&event.event_type()))
+            .filter(|event| EffectAttemptStarted::matches_event_type(&event.event_type()))
             .count(),
         1
     );
@@ -1580,7 +1580,7 @@ async fn resume_after_a_durable_reply_reinterprets_without_another_chat_call() {
     assert!(
         cut_events
             .iter()
-            .all(|event| !DecisionBrief::event_type_matches(&event.event_type())),
+            .all(|event| !DecisionBrief::matches_event_type(&event.event_type())),
         "the process cut occurs after reply durability and before domain emission"
     );
 

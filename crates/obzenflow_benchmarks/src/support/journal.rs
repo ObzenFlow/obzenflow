@@ -6,18 +6,15 @@ pub use super::{runtime, DEADLINE};
 use obzenflow_core::event::journal_record::ChainJournalRecord;
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{CausalFrontier, ChainEventFactory, ChainPayload};
+use obzenflow_core::event::{CausalFrontier, ChainEventFactory};
 use obzenflow_core::journal::AppendOptions;
 use obzenflow_core::{ChainEvent, FlowId, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use std::sync::Arc;
 
 pub fn execution(stage: StageId, payload: ExecutionPayload) -> ChainEvent {
-    ChainEventFactory::create_with_context(
-        stage.into(),
-        ChainPayload::Execution(payload),
-        FlowContext::new("benchmark_child", stage),
-    )
+    ChainEventFactory::execution_event(stage.into(), payload)
+        .with_flow_context(FlowContext::new("benchmark_child", stage))
 }
 
 pub fn running(stage: StageId) -> ChainEvent {
@@ -42,6 +39,7 @@ pub fn business(stage: StageId, payload_bytes: usize) -> ChainEvent {
     ChainEventFactory::data_event(
         stage.into(),
         "bench.business",
+        std::num::NonZeroU32::MIN,
         serde_json::json!({"body":"x".repeat(payload_bytes)}),
     )
 }

@@ -154,6 +154,11 @@ impl TerminalRenderer {
         )?;
         self.spans(output, &palette, &relation_spans)?;
         writeln!(output, "{}", self.clock(&view.clock(), &header))?;
+        writeln!(
+            output,
+            "payload schema version: {}",
+            view.payload_schema_version()
+        )?;
         if let Some(message) = relation.processing_error {
             for line in wrap_fields(
                 &[format!("processing error: {}", safe_text(message))],

@@ -33,7 +33,9 @@ pub use event::envelope::EventEnvelope;
 pub use event::journal_record::JournalRecord;
 pub use event::payloads::JournalPayload;
 pub use event::EventId;
-pub use event::{AdmissionSeq, EventType, JournalWriterId, ReaderGeneration, WriterId};
+pub use event::{
+    AdmissionSeq, EventDescriptor, EventType, JournalWriterId, ReaderGeneration, WriterId,
+};
 pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;

@@ -12,7 +12,7 @@ use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
 use obzenflow_core::event::{
     ChainEvent, ChainPayload, JournalRecord, StageFatalCode, StageFatalReason, StageFatalRecorded,
 };
-use obzenflow_core::{EventId, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source, FlowBuildError, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
@@ -241,25 +241,28 @@ fn delivery_evidence(
         .iter()
         .filter_map(|envelope| {
             SinkRecord::from_event(&envelope.authored())
-                .map(|record| (envelope.envelope.provenance.event.id, record.id))
+                .map(|record| (envelope.commitment(), (envelope, record.id)))
         })
-        .collect::<HashMap<EventId, u64>>();
+        .collect::<HashMap<_, _>>();
 
     sink.iter()
         .filter_map(|envelope| {
             let ChainPayload::Delivery(payload) = &envelope.payload else {
                 return None;
             };
+            let (input, record_id) = inputs
+                .get(&payload.subject.input)
+                .expect("receipt names an exact committed source input");
+            assert!(payload.subject.matches_record(input));
+            assert!(envelope
+                .envelope
+                .provenance
+                .event
+                .causality
+                .parent_ids
+                .contains(input.id()));
             Some(DeliveryEvidence {
-                parent_record: envelope
-                    .envelope
-                    .provenance
-                    .event
-                    .causality
-                    .parent_ids
-                    .first()
-                    .and_then(|parent| inputs.get(parent))
-                    .copied(),
+                parent_record: Some(*record_id),
                 result: serde_json::to_value(&payload.result).expect("result serializes"),
                 destination: payload.destination.clone(),
                 method: serde_json::to_value(&payload.delivery_method)
@@ -268,6 +271,30 @@ fn delivery_evidence(
                 items_delivered: payload.items_delivered,
                 middleware_context: payload.middleware_context.clone(),
             })
+        })
+        .collect()
+}
+
+fn audit_evidence(sink: &[JournalRecord<ChainPayload>]) -> Vec<serde_json::Value> {
+    sink.iter()
+        .filter_map(|record| {
+            let ChainPayload::Execution(
+                obzenflow_core::event::payloads::execution_payload::ExecutionPayload::SinkAudit(
+                    audit,
+                ),
+            ) = &record.payload
+            else {
+                return None;
+            };
+            let mut value = serde_json::to_value(audit).expect("audit serializes");
+            value.as_object_mut().unwrap().remove("processed_at");
+            assert!(
+                value.get("subject").is_none(),
+                "audit grants no settlement authority"
+            );
+            Some(
+                serde_json::json!({"descriptor": record.authored().descriptor(), "payload": value}),
+            )
         })
         .collect()
 }
@@ -303,7 +330,15 @@ async fn buffered_csv_and_named_sink_have_live_replay_journal_parity() {
     let live_named_evidence = delivery_evidence(&live_source, &live_named);
     let live_file = std::fs::read_to_string(&csv_path).expect("live CSV is readable");
 
-    assert_eq!(live_csv_evidence.len(), 8);
+    assert_eq!(live_csv_evidence.len(), 6);
+    let live_audits = audit_evidence(&live_csv);
+    assert_eq!(
+        live_audits
+            .iter()
+            .map(|row| row["descriptor"]["event_type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["sink.flush_succeeded", "sink.drain_succeeded"]
+    );
     assert_eq!(
         live_csv_evidence
             .iter()
@@ -386,6 +421,7 @@ async fn buffered_csv_and_named_sink_have_live_replay_journal_parity() {
     let replay_source = read_stage(&replay, "records").await;
     let replay_csv = read_stage(&replay, "csv_out").await;
     let replay_named = read_stage(&replay, "named_out").await;
+    assert_eq!(audit_evidence(&replay_csv), live_audits);
     assert_eq!(
         delivery_evidence(&replay_source, &replay_csv),
         live_csv_evidence

@@ -288,7 +288,8 @@ async fn effect_context(
         .append(
             ChainEventFactory::data_event(
                 writer_id,
-                TransactionProbeInput::versioned_event_type(),
+                TransactionProbeInput::event_type_name(),
+                TransactionProbeInput::payload_schema_version(),
                 json!(TransactionProbeInput),
             ),
             Default::default(),

@@ -10,8 +10,9 @@ pub mod csv;
 pub mod postgres;
 
 pub use console::{
-    ConsoleSink, DebugFormatter, Formatter, JsonFormatter, JsonPrettyFormatter, OutputDestination,
-    SnapshotTableFormatter, TableFormatter,
+    ConsoleFormatError, ConsoleOutput, ConsoleSink, DebugFormatter, Formatter, JsonFormatter,
+    JsonPrettyFormatter, OutputDestination, SnapshotTableFormatter, TableConsoleSink,
+    TableFormatter,
 };
 
 pub use csv::{CsvProjection, CsvSink, CsvSinkBuilder};
@@ -65,7 +66,7 @@ where
 }
 
 /// Construct a buffered table-formatted console sink.
-pub fn table<T, E>(columns: &[&str], extractor: E) -> ConsoleSink<T, TableFormatter<T, E>>
+pub fn table<T, E>(columns: &[&str], extractor: E) -> TableConsoleSink<T, E>
 where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     E: Fn(&T) -> Vec<String> + Send + Sync + Clone,

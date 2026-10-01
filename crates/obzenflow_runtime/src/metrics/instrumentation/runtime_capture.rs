@@ -212,9 +212,13 @@ mod tests {
             in_flight: Some(9),
             ..Default::default()
         });
-        let event =
-            ChainEventFactory::data_event(stage.into(), "test.fact", serde_json::Value::Null)
-                .with_observability_context(foreign);
+        let event = ChainEventFactory::data_event(
+            stage.into(),
+            "test.fact",
+            std::num::NonZeroU32::MIN,
+            serde_json::Value::Null,
+        )
+        .with_observability_context(foreign);
         capture.project_emission(&event);
         let event = capture.attach_to(event);
         let packet = event.envelope.observability.as_ref().unwrap();
@@ -266,6 +270,7 @@ mod tests {
         let event = capture.attach_to(ChainEventFactory::data_event(
             stage.into(),
             "test.fact",
+            std::num::NonZeroU32::MIN,
             serde_json::Value::Null,
         ));
         assert!(event.envelope.observability.is_none());

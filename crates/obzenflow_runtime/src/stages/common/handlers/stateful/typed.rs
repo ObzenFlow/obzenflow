@@ -417,7 +417,8 @@ mod tests {
     fn input_event(value: u32) -> ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            Input::versioned_event_type(),
+            Input::event_type_name(),
+            Input::payload_schema_version(),
             serde_json::json!(Input { value }),
         )
     }
@@ -438,7 +439,7 @@ mod tests {
         assert_eq!(state.trace.parent_ids(), vec![parent.id]);
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].writer_id, writer_id);
-        assert_eq!(outputs[0].event_type(), Output::versioned_event_type());
+        assert_eq!(outputs[0].event_type(), Output::event_type_name());
         assert_eq!(outputs[0].causality.parent_ids, vec![parent.id]);
         assert_eq!(Output::from_event(&outputs[0]), Some(Output { value: 7 }));
     }
@@ -495,7 +496,8 @@ mod tests {
         let mut state = StatefulHandler::initial_state(&adapter);
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            PanicOnDecode::versioned_event_type(),
+            PanicOnDecode::event_type_name(),
+            PanicOnDecode::payload_schema_version(),
             serde_json::json!({}),
         );
 

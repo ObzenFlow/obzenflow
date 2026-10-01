@@ -34,14 +34,13 @@ pub use types::{
 
 use crate::contracts::ContractChain;
 use crate::control_plane::ControlPlaneProvider;
-use crate::feed_plan::declared_event_type_matches;
 use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, JournalEvent, JournalRecord};
 use obzenflow_core::journal::reader::JournalReader;
-use obzenflow_core::{AdmissionSeq, EventId, EventType, ReaderGeneration, StageId};
+use obzenflow_core::{AdmissionSeq, EventId, ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -84,49 +83,28 @@ fn record_receipt(
         return None;
     }
 
-    let Some(parent_id) = receipt.causality.parent_ids.first().copied() else {
-        tracing::warn!(
-            owner = %owner_label,
-            receipt_id = %receipt.id,
-            "record_delivery_receipt: receipt missing parent causality"
-        );
-        return None;
-    };
-
-    let Some(index) = reader_progress
-        .iter()
-        .enumerate()
-        .find_map(|(index, progress)| {
-            progress
-                .pending_delivery_inputs
-                .contains_key(&parent_id)
-                .then_some(index)
-        })
-    else {
-        tracing::warn!(
-            owner = %owner_label,
-            receipt_id = %receipt.id,
-            ?parent_id,
-            "record_delivery_receipt: no pending delivered input for parent"
-        );
-        return None;
-    };
-
-    let upstream_stage = reader_progress[index].stage_id;
     let ChainPayload::Delivery(payload) = &receipt.payload else {
-        tracing::warn!(
-            owner = %owner_label,
-            receipt_id = %receipt.id,
-            ?upstream_stage,
-            ?parent_id,
-            "record_delivery_receipt: non-delivery event passed to receipt recorder"
-        );
         return None;
     };
+    let subject = &payload.subject;
+    let parent_id = subject.input.event_id;
+    if !receipt.causality.parent_ids.contains(&parent_id) || payload.validate().is_err() {
+        return None;
+    }
+    let Some(index) = reader_progress.iter().position(|progress| {
+        progress
+            .pending_delivery_inputs
+            .get(&subject.input)
+            .is_some_and(|record| subject.matches_record(record.record()))
+    }) else {
+        tracing::warn!(owner = %owner_label, receipt_id = %receipt.id, "receipt has no exact pending input");
+        return None;
+    };
+    let upstream_stage = reader_progress[index].stage_id;
 
     let is_accounted_receipt = reader_progress[index]
         .pending_receipts
-        .contains_key(&parent_id);
+        .contains_key(&subject.input);
     if is_accounted_receipt {
         if let Some(reader_stage) = reader_stage {
             if let Some(slot) = upstreams.iter().position(|id| *id == upstream_stage) {
@@ -143,7 +121,7 @@ fn record_receipt(
 
     reader_progress[index]
         .pending_delivery_inputs
-        .remove(&parent_id);
+        .remove(&subject.input);
 
     if !is_accounted_receipt {
         tracing::debug!(
@@ -156,7 +134,7 @@ fn record_receipt(
     }
 
     let previous_seq = reader_progress[index].receipted_seq;
-    if reader_progress[index].mark_receipted(parent_id) {
+    if reader_progress[index].mark_receipted(subject.input) {
         reader_progress[index].last_read_instant = Some(Instant::now());
         if reader_progress[index].receipted_seq != previous_seq {
             if let (Some(event_id), Some(vector_clock)) = (
@@ -284,7 +262,7 @@ where
     ///
     /// When populated for a reader, non-selected Data events are consumed from
     /// the journal but not delivered to the stage handler.
-    selected_event_types_by_stage: HashMap<StageId, HashSet<EventType>>,
+    selected_event_types_by_stage: HashMap<StageId, HashSet<obzenflow_core::EventDescriptor>>,
 
     /// Selected logical feed metadata by upstream reader stage.
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
@@ -497,15 +475,15 @@ where
             .is_some_and(|selected| !selected.is_empty())
     }
 
-    fn data_event_selected_for_stage(&self, stage_id: StageId, event_type: &str) -> bool {
+    fn data_event_selected_for_stage(
+        &self,
+        stage_id: StageId,
+        descriptor: &obzenflow_core::EventDescriptor,
+    ) -> bool {
         self.selected_event_types_by_stage
             .get(&stage_id)
             .filter(|selected| !selected.is_empty())
-            .map(|selected| {
-                selected.iter().any(|selected_event_type| {
-                    declared_event_type_matches(selected_event_type.as_str(), event_type, None)
-                })
-            })
+            .map(|selected| selected.contains(descriptor))
             .unwrap_or(true)
     }
 
@@ -523,35 +501,25 @@ where
     fn selected_writer_seq_from_eof_map(
         &self,
         stage_id: StageId,
-        writer_seq_by_event_type: &BTreeMap<EventType, SeqNo>,
+        writer_seq_by_event_type: &BTreeMap<obzenflow_core::EventDescriptor, SeqNo>,
     ) -> Option<SeqNo> {
         let selected = self.selected_event_types_by_stage.get(&stage_id)?;
         if selected.is_empty() || writer_seq_by_event_type.is_empty() {
             return None;
         }
 
-        // One semantic feed can be represented by more than one physical
-        // event-type spelling. In particular, an in-band error row retains
-        // its legacy input spelling while successful typed outputs use the
-        // canonical `.vN` spelling. Count every matching physical key once;
-        // selecting only the first match under-advertises the EOF position.
         let selected_total = writer_seq_by_event_type
             .iter()
-            .filter(|(actual_event_type, _)| {
-                selected.iter().any(|selected_event_type| {
-                    declared_event_type_matches(
-                        selected_event_type.as_str(),
-                        actual_event_type.as_str(),
-                        None,
-                    )
-                })
-            })
+            .filter(|(descriptor, _)| selected.contains(*descriptor))
             .fold(0u64, |total, (_, seq)| total.saturating_add(seq.0));
         Some(SeqNo(selected_total))
     }
 
-    fn selected_feed_matches_event_type(feed: &SelectedFeedMetadata, event_type: &str) -> bool {
-        feed.matches_event_type(event_type)
+    fn selected_feed_matches_event_type(
+        feed: &SelectedFeedMetadata,
+        descriptor: &obzenflow_core::EventDescriptor,
+    ) -> bool {
+        feed.matches_descriptor(descriptor)
     }
 
     fn selected_reader_seq_for_feed(
@@ -579,7 +547,7 @@ where
         &self,
         stage_id: StageId,
     ) -> (
-        Option<obzenflow_core::EventType>,
+        Option<obzenflow_core::EventDescriptor>,
         Option<obzenflow_core::event::payloads::system_payload::SystemFeedRole>,
     ) {
         let Some(feeds) = self.selected_feeds_by_stage.get(&stage_id) else {
@@ -594,7 +562,7 @@ where
             return (None, None);
         }
 
-        (Some(first.event_type().clone()), first.system_feed_role())
+        (Some(first.descriptor().clone()), first.system_feed_role())
     }
 
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`
@@ -693,17 +661,14 @@ where
 
     pub fn pending_receipt_envelope(
         &self,
-        parent_event_id: EventId,
+        input: obzenflow_core::event::JournalCommitRef,
         reader_progress: &[ReaderProgress],
     ) -> Option<(StageId, DeliveredRecord<ChainPayload>)> {
         reader_progress.iter().find_map(|progress| {
-            progress
-                .pending_delivery_inputs
-                .get(&parent_event_id)
-                .map(|pending| {
-                    let envelope = pending.clone();
-                    (progress.stage_id, envelope)
-                })
+            progress.pending_delivery_inputs.get(&input).map(|pending| {
+                let envelope = pending.clone();
+                (progress.stage_id, envelope)
+            })
         })
     }
 

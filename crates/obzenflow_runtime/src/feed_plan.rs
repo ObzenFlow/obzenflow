@@ -51,6 +51,7 @@ pub enum FactVisibility {
 pub struct PayloadTypeDescriptor {
     pub type_hint: TypeHintInfo,
     pub event_type: Option<String>,
+    pub event_kind: Option<obzenflow_core::event::EventKind>,
     pub schema_version: Option<u32>,
     pub visibility: FactVisibility,
 }
@@ -60,14 +61,23 @@ impl PayloadTypeDescriptor {
         Self {
             type_hint,
             event_type: None,
+            event_kind: None,
             schema_version: None,
             visibility,
         }
     }
 
+    pub fn descriptor(&self) -> Option<obzenflow_core::EventDescriptor> {
+        Some(obzenflow_core::EventDescriptor {
+            event_kind: self.event_kind?,
+            event_type: self.event_type.as_ref()?.clone().into(),
+            payload_schema_version: std::num::NonZeroU32::new(self.schema_version?)?,
+        })
+    }
+
     pub fn payload_key(&self) -> String {
-        self.event_type
-            .clone()
+        self.descriptor()
+            .map(|descriptor| descriptor.to_string())
             .unwrap_or_else(|| payload_key_from_type_hint(&self.type_hint))
     }
 
@@ -112,20 +122,16 @@ impl StageOutputContract {
             .find(|output| output.payload_key() == payload_key)
     }
 
-    pub fn contains_event_type(&self, event_type: &str) -> bool {
-        self.outputs.iter().any(|output| {
-            output.event_type.as_deref().is_some_and(|declared| {
-                declared_event_type_matches(declared, event_type, output.schema_version)
-            })
-        })
+    pub fn contains_descriptor(&self, descriptor: &obzenflow_core::EventDescriptor) -> bool {
+        self.outputs
+            .iter()
+            .any(|output| output.descriptor().as_ref() == Some(descriptor))
     }
 
-    pub fn is_routable_event_type(&self, event_type: &str) -> bool {
+    pub fn is_routable_descriptor(&self, descriptor: &obzenflow_core::EventDescriptor) -> bool {
         self.outputs.iter().any(|output| {
             output.visibility == FactVisibility::Routable
-                && output.event_type.as_deref().is_some_and(|declared| {
-                    declared_event_type_matches(declared, event_type, output.schema_version)
-                })
+                && output.descriptor().as_ref() == Some(descriptor)
         })
     }
 
@@ -250,52 +256,6 @@ pub fn payload_key_from_type_hint(type_hint: &TypeHintInfo) -> String {
     }
 }
 
-pub fn declared_event_type_matches(
-    declared_event_type: &str,
-    observed_event_type: &str,
-    schema_version: Option<u32>,
-) -> bool {
-    if declared_event_type == observed_event_type {
-        return true;
-    }
-
-    let declared_semantic = schema_version
-        .and_then(|version| strip_exact_version_suffix(declared_event_type, version))
-        .unwrap_or(declared_event_type);
-    let observed_semantic = schema_version
-        .and_then(|version| strip_exact_version_suffix(observed_event_type, version))
-        .unwrap_or(observed_event_type);
-
-    if declared_semantic == observed_semantic {
-        return true;
-    }
-
-    match (
-        split_version_suffix(declared_event_type),
-        split_version_suffix(observed_event_type),
-    ) {
-        (Some((declared_base, declared_version)), Some((observed_base, observed_version))) => {
-            declared_base == observed_base && declared_version == observed_version
-        }
-        (Some((declared_base, _)), None) => declared_base == observed_event_type,
-        (None, Some((observed_base, _))) => declared_event_type == observed_base,
-        (None, None) => false,
-    }
-}
-
-fn strip_exact_version_suffix(event_type: &str, schema_version: u32) -> Option<&str> {
-    let suffix = format!(".v{schema_version}");
-    event_type.strip_suffix(&suffix)
-}
-
-fn split_version_suffix(event_type: &str) -> Option<(&str, &str)> {
-    let (base, version) = event_type.rsplit_once(".v")?;
-    if base.is_empty() || version.is_empty() || !version.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    Some((base, version))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,17 +300,21 @@ mod tests {
     }
 
     #[test]
-    fn output_contract_accepts_semantic_and_versioned_event_type_forms() {
-        let contract = StageOutputContract::single(PayloadTypeDescriptor {
+    fn output_contract_requires_exact_descriptor() {
+        let payload = PayloadTypeDescriptor {
             type_hint: TypeHintInfo::exact("crate::PaymentAuthorized"),
-            event_type: Some("payment.authorized.v1".to_string()),
-            schema_version: Some(1),
+            event_kind: Some(obzenflow_core::event::payloads::chain_payload::EventKind::Fact),
+            event_type: Some("payment.authorized".to_string()),
+            schema_version: Some(2),
             visibility: FactVisibility::Routable,
-        });
-
-        assert!(contract.contains_event_type("payment.authorized"));
-        assert!(contract.contains_event_type("payment.authorized.v1"));
-        assert!(!contract.contains_event_type("payment.authorized.v2"));
-        assert!(!contract.contains_event_type("payment.declined"));
+        };
+        let mut descriptor = payload.descriptor().unwrap();
+        let contract = StageOutputContract::single(payload);
+        assert!(contract.contains_descriptor(&descriptor));
+        descriptor.payload_schema_version = std::num::NonZeroU32::MIN;
+        assert!(!contract.contains_descriptor(&descriptor));
+        descriptor.event_kind =
+            obzenflow_core::event::payloads::chain_payload::EventKind::Execution;
+        assert!(!contract.contains_descriptor(&descriptor));
     }
 }

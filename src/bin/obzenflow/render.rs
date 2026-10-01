@@ -22,7 +22,7 @@ mod summary;
 mod terminal;
 #[path = "render/view.rs"]
 mod view;
-use context::{event_id, event_type, parent_ids, writer_id, Context};
+use context::{event_id, parent_ids, writer_id, Context};
 use payload::{pretty, safe_text, wrap_fields};
 use terminal::{OutputMode, RenderOptions, TerminalRenderer};
 use view::{fact_error, replay_note, stage_heading, Category, EventView};
@@ -182,11 +182,11 @@ impl Renderer {
         if self.visible(&record) {
             self.shown_records += 1;
             *self.shown_journals.entry(journal).or_default() += 1;
-            let event_type = event_type(&record);
-            if let Some(count) = self.event_types.get_mut(event_type) {
+            let descriptor = context::descriptor_label(&record);
+            if let Some(count) = self.event_types.get_mut(&descriptor) {
                 *count += 1;
             } else if self.event_types.len() < 1024 {
-                self.event_types.insert(event_type.into(), 1);
+                self.event_types.insert(descriptor, 1);
             } else {
                 self.other_event_types += 1;
             }
@@ -316,7 +316,9 @@ impl Renderer {
     }
 
     fn visible(&self, record: &RunRecord) -> bool {
-        self.include_runtime || Category::of(record) != Category::Runtime
+        self.include_runtime
+            || Category::of(record) != Category::Runtime
+            || matches!(&record.record, RunRecordData::Chain(row) if matches!(&row.payload, ChainPayload::Execution(ExecutionPayload::StageFatalRecorded(_) | ExecutionPayload::SinkOperationFailed(_))))
     }
 
     fn dim(&self, text: &str) -> String {

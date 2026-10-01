@@ -21,15 +21,19 @@ use obzenflow_core::journal::{Journal, JournalError};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{oneshot, Semaphore};
 
 pub(crate) type BoxError = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 #[error("publication admission is closed")]
-pub(crate) struct AdmissionClosed;
+pub(crate) struct AdmissionClosed {
+    owner: Weak<PublicationScope>,
+    cancelled_task: Option<tokio::task::Id>,
+}
 
+#[cfg(test)]
 pub(crate) fn is_admission_closed(mut error: &(dyn Error + 'static)) -> bool {
     loop {
         if error.is::<AdmissionClosed>() {
@@ -107,6 +111,7 @@ struct Operation {
 enum Admission {
     Open,
     Closed,
+    Cancelled(tokio::task::Id),
     Poisoned,
 }
 
@@ -230,13 +235,76 @@ impl PublicationScope {
     /// Synchronous admission closure always precedes aborting stage execution.
     /// Accepted work is not aborted, including work awaiting its predecessor.
     pub(crate) fn close(&self) {
+        self.close_admission(None);
+    }
+
+    pub(crate) fn cancel(&self, task: tokio::task::Id) {
+        self.close_admission(Some(task));
+    }
+
+    fn close_admission(&self, cancelled_task: Option<tokio::task::Id>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.admission == Admission::Open {
-            state.admission = Admission::Closed;
+            state.admission = cancelled_task.map_or(Admission::Closed, Admission::Cancelled);
         }
         self.slots.close();
         self.control_slots.close();
         self.host_slots.close();
+    }
+
+    fn rejection_for(self: &Arc<Self>, admission: Admission) -> BoxError {
+        Box::new(AdmissionClosed {
+            owner: Arc::downgrade(self),
+            cancelled_task: match admission {
+                Admission::Cancelled(task) => Some(task),
+                _ => None,
+            },
+        })
+    }
+
+    fn rejection(self: &Arc<Self>) -> BoxError {
+        self.rejection_for(
+            self.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .admission,
+        )
+    }
+
+    fn cancelled_task(&self, mut error: &(dyn Error + 'static)) -> Option<tokio::task::Id> {
+        loop {
+            if let Some(rejected) = error.downcast_ref::<AdmissionClosed>() {
+                return std::ptr::eq(rejected.owner.as_ptr(), self)
+                    .then_some(rejected.cancelled_task)
+                    .flatten();
+            }
+            match error.source() {
+                Some(source) => error = source,
+                None => return None,
+            }
+        }
+    }
+
+    pub(crate) fn is_cancelled_admission(&self, error: &(dyn Error + 'static)) -> bool {
+        self.cancelled_task(error).is_some()
+    }
+
+    /// An active supervisor poll can reach admission after its owner requests
+    /// abort. Yield that poll before the rejection becomes an FSM failure.
+    /// Accepted work and callers using another owner still receive the error.
+    pub(crate) async fn relinquish_cancelled_admission(
+        &self,
+        error: &(dyn Error + Send + Sync + 'static),
+    ) {
+        let owns_execution = CURRENT
+            .try_with(|context| !context.accepted && std::ptr::eq(context.scope.as_ref(), self))
+            .unwrap_or(false);
+        let cancelled_task = self.cancelled_task(error);
+        if owns_execution && cancelled_task.is_some() && cancelled_task == tokio::task::try_id() {
+            // Only ExecutionCancellation creates this closure reason. Its
+            // synchronous abort request will destroy this now-yielded future.
+            std::future::pending::<()>().await;
+        }
     }
 
     pub(crate) fn first_failure(&self) -> Option<SharedError> {
@@ -321,13 +389,23 @@ impl PublicationScope {
         let scope = self.clone();
         let operation = operation.boxed();
         async move {
-            let slot = scope
-                .slots
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| AdmissionClosed)?;
-            scope.register(slot, operation, snapshot)?.await
+            let admitted = async {
+                let slot = scope
+                    .slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| scope.rejection())?;
+                scope.register(slot, operation, snapshot)
+            }
+            .await;
+            match admitted {
+                Ok(receipt) => receipt.await,
+                Err(error) => {
+                    scope.relinquish_cancelled_admission(error.as_ref()).await;
+                    Err(error)
+                }
+            }
         }
         .boxed()
     }
@@ -342,13 +420,23 @@ impl PublicationScope {
         let scope = self.clone();
         let frontier = self.capture();
         async move {
-            let slot = scope
-                .host_slots
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| Box::new(AdmissionClosed) as BoxError)?;
-            scope.register(slot, operation, frontier)?.await
+            let admitted = async {
+                let slot = scope
+                    .host_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| scope.rejection())?;
+                scope.register(slot, operation, frontier)
+            }
+            .await;
+            match admitted {
+                Ok(receipt) => receipt.await,
+                Err(error) => {
+                    scope.relinquish_cancelled_admission(error.as_ref()).await;
+                    Err(error)
+                }
+            }
         }
         .boxed()
     }
@@ -364,7 +452,7 @@ impl PublicationScope {
             .clone()
             .try_acquire_owned()
             .map_err(|error| match error {
-                tokio::sync::TryAcquireError::Closed => Box::new(AdmissionClosed) as BoxError,
+                tokio::sync::TryAcquireError::Closed => self.rejection(),
                 error => Box::new(error) as BoxError,
             })?;
         self.register(slot, operation, self.capture())
@@ -381,7 +469,7 @@ impl PublicationScope {
             .clone()
             .try_acquire_owned()
             .map_err(|error| match error {
-                tokio::sync::TryAcquireError::Closed => Box::new(AdmissionClosed) as BoxError,
+                tokio::sync::TryAcquireError::Closed => self.rejection(),
                 error => Box::new(error) as BoxError,
             })?;
         self.register(slot, operation, self.capture())
@@ -399,7 +487,7 @@ impl PublicationScope {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             Self::reap(&mut state);
             if state.admission != Admission::Open {
-                return Err(AdmissionClosed.into());
+                return Err(self.rejection_for(state.admission));
             }
             let id = state.next_id;
             state.next_id = state
@@ -756,6 +844,7 @@ mod tests {
             obzenflow_core::event::ChainEventFactory::data_event(
                 obzenflow_core::StageId::new().into(),
                 "publication.input",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({}),
             ),
         )
@@ -896,24 +985,42 @@ mod tests {
 
     #[tokio::test]
     async fn captured_owner_rejects_closed_admission_under_another_scope() {
-        let owner = PublicationScope::new();
-        let ambient = PublicationScope::new();
-        let executed = Arc::new(AtomicUsize::new(0));
-        owner.close();
+        for cancelled in [false, true] {
+            let owner = PublicationScope::new();
+            let ambient = PublicationScope::new();
+            let executed = Arc::new(AtomicUsize::new(0));
+            let execution = tokio::spawn(async {});
+            if cancelled {
+                owner.cancel(execution.id());
+            } else {
+                owner.close();
+                // A subsequent abort must not retroactively change why
+                // admission was closed.
+                owner.cancel(execution.id());
+            }
+            execution.await.unwrap();
 
-        let count = executed.clone();
-        let error = ambient
-            .enter(commit_in(Some(owner.clone()), async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }))
-            .await
-            .unwrap_err();
+            for entered in [&ambient, &owner] {
+                let count = executed.clone();
+                let error = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    entered.enter(commit_in(Some(owner.clone()), async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    })),
+                )
+                .await
+                .expect("a borrowed scope must not park an uncancelled caller")
+                .unwrap_err();
 
-        assert!(is_admission_closed(error.as_ref()));
-        assert_eq!(executed.load(Ordering::Relaxed), 0);
-        owner.join().await.unwrap();
-        ambient.join().await.unwrap();
+                assert!(is_admission_closed(error.as_ref()));
+                assert_eq!(owner.is_cancelled_admission(error.as_ref()), cancelled);
+                assert!(!ambient.is_cancelled_admission(error.as_ref()));
+                assert_eq!(executed.load(Ordering::Relaxed), 0);
+            }
+            owner.join().await.unwrap();
+            ambient.join().await.unwrap();
+        }
     }
 
     #[tokio::test]

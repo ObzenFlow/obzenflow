@@ -447,7 +447,7 @@ async fn typed_try_map_success_and_failure_use_the_supervisor_journal_contract()
         .await?
         .into_iter()
         .map(|envelope| envelope.authored())
-        .filter(|event| TransformStageEvent::event_type_matches(&event.event_type()))
+        .filter(|event| TransformStageEvent::matches_event_type(&event.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(successful_events.len(), 1);
     assert_eq!(

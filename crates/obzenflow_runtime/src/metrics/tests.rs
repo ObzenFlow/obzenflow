@@ -157,8 +157,12 @@ fn stage_journal(
     )
 }
 fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent {
-    let mut event =
-        ChainEventFactory::data_event(writer, "metrics.fact", serde_json::json!({"total": total}));
+    let mut event = ChainEventFactory::data_event(
+        writer,
+        "metrics.fact",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({"total": total}),
+    );
     event.flow_context.stage_id = stage;
     event.runtime = Some(RuntimeProvenance {
         accounting: ExecutionAccounting {
@@ -222,7 +226,12 @@ fn fact(stage: StageId, writer: WriterId, total: u64, gauge: u32) -> ChainEvent 
 }
 
 fn noise(stage: StageId) -> ChainEvent {
-    ChainEventFactory::data_event(stage.into(), "metrics.no_snapshot", serde_json::json!({}))
+    ChainEventFactory::data_event(
+        stage.into(),
+        "metrics.no_snapshot",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    )
 }
 
 async fn context(
@@ -824,7 +833,12 @@ pub async fn metrics_folds_check_eligibility_before_causal_incorporation(
     let owner = FlowContext::new("eligible", stage);
     let mut ignored = Vec::new();
     for event in [
-        ChainEventFactory::data_event(stage.into(), "ordinary.business", serde_json::json!({})),
+        ChainEventFactory::data_event(
+            stage.into(),
+            "ordinary.business",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        ),
         ChainEventFactory::stage_running(foreign.into(), stage),
         ChainEventFactory::stage_running(stage.into(), foreign),
     ] {

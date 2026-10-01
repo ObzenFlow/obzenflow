@@ -826,25 +826,37 @@ impl OutputCommitter<'_> {
             .flow_context
             .is_none_or(|context| event_is_authored_by_stage(event, context, self.observer_scope))
         {
-            let event_type = event.event_type();
+            let descriptor = event.descriptor();
             if let Some(count) = snapshot
                 .accounting
                 .data_outputs_by_event_type
                 .iter_mut()
-                .find(|count| count.event_type.as_str() == event_type)
+                .find(|count| {
+                    count.event_kind == descriptor.event_kind
+                        && count.event_type == descriptor.event_type
+                        && count.payload_schema_version == descriptor.payload_schema_version
+                })
             {
                 count.total = count.total.saturating_add(1);
             } else {
                 snapshot.accounting.data_outputs_by_event_type.push(
                     obzenflow_core::event::provenance::EventTypeCountContext {
-                        event_type: event_type.into(),
+                        event_kind: descriptor.event_kind,
+                        event_type: descriptor.event_type,
+                        payload_schema_version: descriptor.payload_schema_version,
                         total: 1,
                     },
                 );
                 snapshot
                     .accounting
                     .data_outputs_by_event_type
-                    .sort_by(|left, right| left.event_type.cmp(&right.event_type));
+                    .sort_by_key(|count| {
+                        (
+                            count.event_kind,
+                            count.event_type.clone(),
+                            count.payload_schema_version,
+                        )
+                    });
             }
         }
     }
@@ -905,7 +917,7 @@ impl OutputCommitter<'_> {
         }
 
         let event_type = event.event_type();
-        if output_contract.contains_event_type(&event_type) {
+        if output_contract.contains_descriptor(&event.descriptor()) {
             return Ok(());
         }
 
@@ -1009,6 +1021,7 @@ mod tests {
         let mut event = ChainEventFactory::data_event(
             WriterId::from(stage),
             "application.input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"id": 1}),
         );
         apply_runtime_journey_identity(&mut event, &flow);

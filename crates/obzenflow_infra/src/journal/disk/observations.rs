@@ -845,6 +845,7 @@ mod tests {
                             ChainEventFactory::data_event(
                                 stage.into(),
                                 "test.noise",
+                                std::num::NonZeroU32::MIN,
                                 serde_json::json!({}),
                             )
                         })

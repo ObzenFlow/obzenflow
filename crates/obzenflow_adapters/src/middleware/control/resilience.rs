@@ -2036,7 +2036,8 @@ mod tests {
         let breaker = Arc::new(CircuitBreakerMiddleware::new(5));
         let event = ChainEventFactory::data_event(
             obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
-            "test.effect_input.v1",
+            "test.effect_input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         let result = Err(EffectError::target_invariant_violation(

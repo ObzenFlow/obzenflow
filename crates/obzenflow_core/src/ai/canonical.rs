@@ -5,8 +5,7 @@
 use crate::event::provenance::CompositeActivationContext;
 use serde_json::{Map, Value};
 
-pub const AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V1: &str =
-    "obzenflow.ai_map_reduce.collector_fact.v1";
+pub const AI_MAP_REDUCE_COLLECTOR_FACT_FORMAT_V1: &str = "obzenflow.ai_map_reduce.collector_fact";
 
 /// Canonical byte representation used for AI map-reduce collector equality.
 ///
@@ -85,7 +84,7 @@ mod tests {
             42,
         );
         let bytes = canonical_json_bytes_v1(
-            "example.v1",
+            "example",
             &activation,
             json!({"z": {"b": 2, "a": 1}, "a": [3, 2, 1]}),
         )
@@ -94,7 +93,7 @@ mod tests {
 
         assert_eq!(
             encoded,
-            r#"{"activation":{"activation":"00000000000000000000000001","composite_id":"map-reduce","entered_at_ms":42,"entry_port":"in"},"event_type":"example.v1","format":"obzenflow.ai_map_reduce.collector_fact.v1","payload":{"a":[3,2,1],"z":{"a":1,"b":2}}}"#
+            r#"{"activation":{"activation":"00000000000000000000000001","composite_id":"map-reduce","entered_at_ms":42,"entry_port":"in"},"event_type":"example","format":"obzenflow.ai_map_reduce.collector_fact","payload":{"a":[3,2,1],"z":{"a":1,"b":2}}}"#
         );
     }
 }

@@ -26,39 +26,42 @@ pub enum CompositeDataPayload {
 }
 
 impl CompositeDataPayload {
+    pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
+        match self {
+            Self::ReduceInput(_) | Self::ChunkFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
+            _ => std::num::NonZeroU32::MIN,
+        }
+    }
+
     pub const fn event_type(&self) -> &'static str {
         match self {
-            Self::MapInput(_) => "ai.map_reduce.map_input.v1",
-            Self::PlanningManifest(_) => "ai.map_reduce.planning_manifest.v1",
-            Self::TaggedPartial(_) => "ai.map_reduce.tagged_partial.v1",
-            Self::ReduceInput(_) => "ai.map_reduce.reduce_input.v2",
-            Self::PlanningFailed(_) => "ai.map_reduce.planning_failed.v1",
-            Self::ChunkFailed(_) => "ai.map_reduce.chunk_failed.v2",
-            Self::JobFailed(_) => "ai.map_reduce.job_failed.v1",
-            Self::FinaliseFailed(_) => "ai.map_reduce.finalise_failed.v1",
+            Self::MapInput(_) => "ai.map_reduce.map_input",
+            Self::PlanningManifest(_) => "ai.map_reduce.planning_manifest",
+            Self::TaggedPartial(_) => "ai.map_reduce.tagged_partial",
+            Self::ReduceInput(_) => "ai.map_reduce.reduce_input",
+            Self::PlanningFailed(_) => "ai.map_reduce.planning_failed",
+            Self::ChunkFailed(_) => "ai.map_reduce.chunk_failed",
+            Self::JobFailed(_) => "ai.map_reduce.job_failed",
+            Self::FinaliseFailed(_) => "ai.map_reduce.finalise_failed",
         }
     }
 
     pub fn decode(event_type: &str, payload: Value) -> Result<Self, serde_json::Error> {
         match event_type {
-            "ai.map_reduce.map_input.v1" => serde_json::from_value(payload).map(Self::MapInput),
-            "ai.map_reduce.planning_manifest.v1" => {
+            "ai.map_reduce.map_input" => serde_json::from_value(payload).map(Self::MapInput),
+            "ai.map_reduce.planning_manifest" => {
                 serde_json::from_value(payload).map(Self::PlanningManifest)
             }
-            "ai.map_reduce.tagged_partial.v1" => {
+            "ai.map_reduce.tagged_partial" => {
                 serde_json::from_value(payload).map(Self::TaggedPartial)
             }
-            "ai.map_reduce.reduce_input.v2" => {
-                serde_json::from_value(payload).map(Self::ReduceInput)
-            }
-            "ai.map_reduce.planning_failed.v1" => {
+            "ai.map_reduce.reduce_input" => serde_json::from_value(payload).map(Self::ReduceInput),
+            "ai.map_reduce.planning_failed" => {
                 serde_json::from_value(payload).map(Self::PlanningFailed)
             }
-            "ai.map_reduce.chunk_failed.v2" => {
-                serde_json::from_value(payload).map(Self::ChunkFailed)
-            }
-            "ai.map_reduce.job_failed.v1" => serde_json::from_value(payload).map(Self::JobFailed),
-            "ai.map_reduce.finalise_failed.v1" => {
+            "ai.map_reduce.chunk_failed" => serde_json::from_value(payload).map(Self::ChunkFailed),
+            "ai.map_reduce.job_failed" => serde_json::from_value(payload).map(Self::JobFailed),
+            "ai.map_reduce.finalise_failed" => {
                 serde_json::from_value(payload).map(Self::FinaliseFailed)
             }
             _ => Err(<serde_json::Error as serde::de::Error>::custom(

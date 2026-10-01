@@ -8,11 +8,12 @@ use super::{
     SelectedFeedRole, StageInputPosition, UpstreamSubscription,
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
+use crate::testing::causal_fixture::fact_descriptor;
 use async_trait::async_trait;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::journal_record::JournalRecord;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
 use obzenflow_core::event::payloads::effect_payload::{EffectFactOwner, EffectProvenance};
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -907,8 +908,18 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
     });
 
     let writer_id = WriterId::from(upstream_stage);
-    let first = ChainEventFactory::data_event(writer_id, "test.event", json!({"seq": 1}));
-    let second = ChainEventFactory::data_event(writer_id, "test.event", json!({"seq": 2}));
+    let first = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({"seq": 1}),
+    );
+    let second = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({"seq": 2}),
+    );
 
     let mut clock_1 = VectorClock::new();
     clock_1
@@ -920,18 +931,24 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
         .insert(crate::testing::causal_fixture::coordinate("upstream"), 2);
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    let first_record = committed_input(first.clone(), clock_1.clone());
+    let second_record = committed_input(second.clone(), clock_2.clone());
     reader_progress[0].reader_seq = SeqNo(1);
-    reader_progress[0]
-        .track_pending_delivery_input(committed_input(first.clone(), clock_1.clone()).into());
-    reader_progress[0].track_pending_receipt(first.id, clock_1);
+    reader_progress[0].track_pending_delivery_input(first_record.clone().into());
+    reader_progress[0].track_pending_receipt(first_record.commitment(), clock_1);
     reader_progress[0].reader_seq = SeqNo(2);
-    reader_progress[0]
-        .track_pending_delivery_input(committed_input(second.clone(), clock_2.clone()).into());
-    reader_progress[0].track_pending_receipt(second.id, clock_2.clone());
+    reader_progress[0].track_pending_delivery_input(second_record.clone().into());
+    reader_progress[0].track_pending_receipt(second_record.commitment(), clock_2.clone());
 
     let second_receipt = ChainEventFactory::delivery_event(
         WriterId::from(contract_stage),
-        DeliveryPayload::success(DeliveryMethod::Noop, None),
+        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
+            subject:
+                obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
+                    &second_record,
+                ),
+            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
+        },
     )
     .with_causality(CausalityContext::with_parent(second.id));
 
@@ -942,7 +959,13 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
 
     let first_receipt = ChainEventFactory::delivery_event(
         WriterId::from(contract_stage),
-        DeliveryPayload::success(DeliveryMethod::Noop, None),
+        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
+            subject:
+                obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
+                    &first_record,
+                ),
+            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
+        },
     )
     .with_causality(CausalityContext::with_parent(first.id));
 
@@ -957,6 +980,68 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
     assert!(reader_progress[0].pending_delivery_inputs.is_empty());
     assert!(reader_progress[0].pending_receipts.is_empty());
     assert!(reader_progress[0].committed_out_of_order.is_empty());
+}
+
+#[test]
+fn reconverging_forwarded_identity_requires_the_exact_receipt_subject() {
+    use obzenflow_core::event::payloads::delivery_payload::{DeliveryPayload, DeliverySubject};
+    let event = ChainEventFactory::data_event(
+        StageId::new().into(),
+        "forwarded",
+        std::num::NonZeroU32::new(2).unwrap(),
+        json!({}),
+    );
+    let records = [
+        JournalRecord::new(JournalWriterId::new(), event.clone()),
+        JournalRecord::new(JournalWriterId::new(), event),
+    ];
+    let upstreams = [StageId::new(), StageId::new()];
+    let mut progress = upstreams.map(ReaderProgress::new);
+    for (progress, record) in progress.iter_mut().zip(&records) {
+        progress.reader_seq = SeqNo(1);
+        progress.track_pending_delivery_input(record.clone().into());
+        progress.track_pending_receipt(
+            record.commitment(),
+            record.envelope.provenance.journal.vector_clock.clone(),
+        );
+    }
+    let mut receipt = ChainEventFactory::delivery_event(
+        StageId::new().into(),
+        DeliveryPayload {
+            subject: DeliverySubject::from_record(&records[1]),
+            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
+        },
+    );
+    let mut chains = [None, None];
+    assert!(super::record_receipt(
+        &receipt,
+        "test",
+        true,
+        None,
+        &upstreams,
+        &mut chains,
+        &mut progress
+    )
+    .is_some());
+    assert_eq!(progress[0].receipted_seq, SeqNo(0));
+    assert_eq!(progress[0].pending_delivery_inputs.len(), 1);
+    assert_eq!(progress[1].receipted_seq, SeqNo(1));
+    let ChainPayload::Delivery(payload) = &mut receipt.payload else {
+        unreachable!()
+    };
+    payload.subject = DeliverySubject::from_record(&records[0]);
+    payload.subject.payload_schema_version = std::num::NonZeroU32::MIN;
+    assert!(super::record_receipt(
+        &receipt,
+        "test",
+        true,
+        None,
+        &upstreams,
+        &mut chains,
+        &mut progress
+    )
+    .is_none());
+    assert_eq!(progress[0].pending_delivery_inputs.len(), 1);
 }
 
 #[tokio::test]
@@ -987,19 +1072,26 @@ async fn forwarded_sink_input_settles_without_entering_authored_delivery_contrac
     let forwarded = ChainEventFactory::data_event(
         WriterId::from(source_stage),
         "forwarded.event",
+        std::num::NonZeroU32::MIN,
         json!({"value": 1}),
     );
     let mut clock = VectorClock::new();
     clock
         .clocks
         .insert(crate::testing::causal_fixture::coordinate("source"), 1);
+    let forwarded_record = committed_input(forwarded.clone(), clock);
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    reader_progress[0]
-        .track_pending_delivery_input(committed_input(forwarded.clone(), clock).into());
+    reader_progress[0].track_pending_delivery_input(forwarded_record.clone().into());
 
     let receipt = ChainEventFactory::delivery_event(
         WriterId::from(sink_stage),
-        DeliveryPayload::success(DeliveryMethod::Noop, None),
+        obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
+            subject:
+                obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
+                    &forwarded_record,
+                ),
+            outcome: DeliveryOutcome::success(DeliveryMethod::Noop, None),
+        },
     )
     .with_causality(CausalityContext::with_parent(forwarded.id));
 
@@ -1299,7 +1391,12 @@ async fn build_upstream_with_seq_divergence(
 
     // One data event followed by EOF that advertises more events than read.
     let writer_id = WriterId::Stage(upstream_stage);
-    let data_event = ChainEventFactory::data_event(writer_id, "test.event", json!({}));
+    let data_event = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     upstream_journal
         .append(data_event, Default::default())
         .await
@@ -1520,7 +1617,12 @@ async fn transport_only_skips_observability_events() {
 
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.event",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             Default::default(),
         )
         .await
@@ -1628,14 +1730,24 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.ignored.v1", json!({"n": 1})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.ignored",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.selected.v1", json!({"n": 2})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.selected",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 2}),
+            ),
             Default::default(),
         )
         .await
@@ -1643,7 +1755,12 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     upstream_journal
         .append(
             // One semantic selected feed may span compatible physical keys.
-            ChainEventFactory::data_event(writer_id, "test.selected", json!({"n": 3})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.selected",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 3}),
+            ),
             Default::default(),
         )
         .await
@@ -1657,9 +1774,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     }) = &mut eof_event.payload
     {
         *writer_seq = Some(SeqNo(3));
-        writer_seq_by_event_type.insert("test.ignored.v1".into(), SeqNo(1));
-        writer_seq_by_event_type.insert("test.selected.v1".into(), SeqNo(1));
-        writer_seq_by_event_type.insert("test.selected".into(), SeqNo(1));
+        writer_seq_by_event_type.insert(fact_descriptor("test.ignored", 1), SeqNo(1));
+        writer_seq_by_event_type.insert(fact_descriptor("test.selected", 1), SeqNo(2));
     }
     upstream_journal
         .append(eof_event, Default::default())
@@ -1671,11 +1787,11 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     selected_feeds.insert(
         upstream_stage,
         vec![
-            SelectedFeedMetadata::new(EventType::from("test.selected.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(fact_descriptor("test.selected", 1), SelectedFeedRole::Input),
             // A second logical feed shares this same physical reader edge.
             // It must not multiply completion for the ignored physical row.
             SelectedFeedMetadata::new(
-                EventType::from("test.second_selected.v1"),
+                fact_descriptor("test.second_selected", 1),
                 SelectedFeedRole::Stream,
             ),
         ],
@@ -1727,7 +1843,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     match selected {
         PollResult::Event(env) => match &env.payload {
             ChainPayload::Fact(_) => {
-                assert_eq!(env.event_type(), "test.selected.v1");
+                assert_eq!(env.event_type(), "test.selected");
             }
             other => panic!("expected selected Data event, got {other:?}"),
         },
@@ -1798,8 +1914,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             reason,
         }) if *upstream == upstream_stage
             && *reader == reader_stage
-            && selected_event_type.as_ref().map(|event_type| event_type.as_str())
-                == Some("test.selected.v1")
+            && selected_event_type.as_ref().map(|descriptor| descriptor.event_type.as_str())
+                == Some("test.selected")
             && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
             && *pass
             && *reader_seq == Some(SeqNo(2))
@@ -1827,7 +1943,8 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     for n in 0..2 {
         let mut replayed = ChainEventFactory::data_event(
             WriterId::Stage(lineage_root_stage),
-            "test.joined.v1",
+            "test.joined",
+            std::num::NonZeroU32::MIN,
             json!({"n": n}),
         );
         replayed.replay_context = Some(ReplayContext {
@@ -1843,7 +1960,8 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
 
     let mut forwarded_error = ChainEventFactory::data_event(
         WriterId::Stage(foreign_author),
-        "test.joined.v1",
+        "test.joined",
+        std::num::NonZeroU32::MIN,
         json!({"foreign": true}),
     );
     forwarded_error.processing.status = ProcessingStatus::error("forwarded pre-error row");
@@ -1873,7 +1991,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     }) = &mut local_terminal.payload
     {
         *writer_seq = Some(SeqNo(2));
-        writer_seq_by_event_type.insert("test.joined.v1".into(), SeqNo(2));
+        writer_seq_by_event_type.insert(fact_descriptor("test.joined", 1), SeqNo(2));
     }
     upstream_journal
         .append(local_terminal, Default::default())
@@ -1885,7 +2003,7 @@ async fn contract_prefix_resolves_replay_alias_and_excludes_forwarded_rows_symme
     selected_feeds.insert(
         upstream_stage,
         vec![SelectedFeedMetadata::new(
-            EventType::from("test.joined.v1"),
+            fact_descriptor("test.joined", 1),
             SelectedFeedRole::Input,
         )],
     );
@@ -1981,14 +2099,24 @@ async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
         Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
     let writer_id = WriterId::Stage(upstream_stage);
 
-    let mut ignored = ChainEventFactory::data_event(writer_id, "checkout.other.v1", json!({}));
+    let mut ignored = ChainEventFactory::data_event(
+        writer_id,
+        "checkout.other",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     ignored.processing.event_time = 100;
     upstream_journal
         .append(ignored, Default::default())
         .await
         .unwrap();
 
-    let mut admitted = ChainEventFactory::data_event(writer_id, "checkout.command.v1", json!({}));
+    let mut admitted = ChainEventFactory::data_event(
+        writer_id,
+        "checkout.command",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     admitted.processing.event_time = 123;
     let admitted_id = admitted.id;
     upstream_journal
@@ -2003,7 +2131,7 @@ async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
         vec![CompositeEntrySpec {
             composite_id: CompositeId::new("saga:checkout"),
             port_name: "commands".to_string(),
-            event_types: vec![EventType::from("checkout.command.v1")],
+            event_types: vec![EventType::from("checkout.command")],
         }],
     );
     let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
@@ -2048,14 +2176,24 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
     let writer_id = WriterId::Stage(upstream_stage);
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.first",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.second",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 2}),
+            ),
             Default::default(),
         )
         .await
@@ -2071,8 +2209,8 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
         // Aggregate selected count is 2, but the per-feed evidence is deliberately
         // inconsistent: first advertises 2 while second advertises 0.
         *writer_seq = Some(SeqNo(2));
-        writer_seq_by_event_type.insert("test.first.v1".into(), SeqNo(2));
-        writer_seq_by_event_type.insert("test.second.v1".into(), SeqNo(0));
+        writer_seq_by_event_type.insert(fact_descriptor("test.first", 1), SeqNo(2));
+        writer_seq_by_event_type.insert(fact_descriptor("test.second", 1), SeqNo(0));
     }
     upstream_journal
         .append(eof_event, Default::default())
@@ -2084,9 +2222,9 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
     selected_feeds.insert(
         upstream_stage,
         vec![
-            SelectedFeedMetadata::new(EventType::from("test.first.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(fact_descriptor("test.first", 1), SelectedFeedRole::Input),
             SelectedFeedMetadata::new(
-                EventType::from("test.second.v1"),
+                fact_descriptor("test.second", 1),
                 SelectedFeedRole::Reference,
             ),
         ],
@@ -2139,14 +2277,14 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             match (
                 selected_event_type
                     .as_ref()
-                    .map(|event_type| event_type.as_str()),
+                    .map(|descriptor| descriptor.event_type.as_str()),
                 feed_role.as_ref().map(|role| role.as_str()),
             ) {
-                (Some("test.first.v1"), Some("input")) => {
+                (Some("test.first"), Some("input")) => {
                     first_status =
                         Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
                 }
-                (Some("test.second.v1"), Some("reference")) => {
+                (Some("test.second"), Some("reference")) => {
                     second_status =
                         Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
                 }
@@ -2202,14 +2340,24 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
     let writer_id = WriterId::Stage(upstream_stage);
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.first",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             Default::default(),
         )
         .await
         .unwrap();
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.second",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 2}),
+            ),
             Default::default(),
         )
         .await
@@ -2220,9 +2368,9 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
     selected_feeds.insert(
         upstream_stage,
         vec![
-            SelectedFeedMetadata::new(EventType::from("test.first.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(fact_descriptor("test.first", 1), SelectedFeedRole::Input),
             SelectedFeedMetadata::new(
-                EventType::from("test.second.v1"),
+                fact_descriptor("test.second", 1),
                 SelectedFeedRole::Reference,
             ),
         ],
@@ -2250,7 +2398,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .await;
     assert!(matches!(
         first,
-        PollResult::Event(ref record) if record.is_fact() && record.event_type() == "test.first.v1"
+        PollResult::Event(ref record) if record.is_fact() && record.event_type() == "test.first"
     ));
 
     let status = subscription.check_contracts(&mut reader_progress).await;
@@ -2277,8 +2425,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 }) if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
-                        == Some("test.first.v1")
+                    && selected_event_type.as_ref().map(|descriptor| descriptor.event_type.as_str())
+                        == Some("test.first")
                     && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
                     && contract_name.as_str() == TransportContract::NAME
                     && *status == ContractResultStatusLabel::Healthy
@@ -2300,8 +2448,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 }) if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
-                        == Some("test.second.v1")
+                    && selected_event_type.as_ref().map(|descriptor| descriptor.event_type.as_str())
+                        == Some("test.second")
                     && feed_role.as_ref().map(|role| role.as_str()) == Some("reference")
             )
         })
@@ -2330,7 +2478,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         .await;
     assert!(matches!(
         second,
-        PollResult::Event(ref record) if record.is_fact() && record.event_type() == "test.second.v1"
+        PollResult::Event(ref record) if record.is_fact() && record.event_type() == "test.second"
     ));
 
     let status = subscription.check_contracts(&mut reader_progress).await;
@@ -2353,8 +2501,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 }) if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
-                        == Some("test.first.v1")
+                    && selected_event_type.as_ref().map(|descriptor| descriptor.event_type.as_str())
+                        == Some("test.first")
                     && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
             )
         })
@@ -2376,8 +2524,8 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 }) if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
-                        == Some("test.second.v1")
+                    && selected_event_type.as_ref().map(|descriptor| descriptor.event_type.as_str())
+                        == Some("test.second")
                     && feed_role.as_ref().map(|role| role.as_str()) == Some("reference")
                     && contract_name.as_str() == TransportContract::NAME
                     && *status == ContractResultStatusLabel::Healthy
@@ -2398,6 +2546,8 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
 
     let writer_id = WriterId::Stage(upstream_stage);
     let effect_record = obzenflow_core::event::payloads::effect_payload::EffectRecord {
+        observation:
+            obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_success(),
         cursor: obzenflow_core::event::payloads::effect_payload::EffectCursor::new(
             "recorded-flow",
             "gateway",
@@ -2420,10 +2570,15 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
 
     upstream_journal
         .append(
-            ChainEventFactory::derived_event(
+            ChainEventFactory::derived_execution_event(
                 writer_id,
-                &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-                ChainPayload::Execution(ExecutionPayload::EffectRecord(effect_record.clone())),
+                &ChainEventFactory::data_event(
+                    writer_id,
+                    "test.parent",
+                    std::num::NonZeroU32::MIN,
+                    json!({}),
+                ),
+                ExecutionPayload::EffectRecord(effect_record.clone()),
                 obzenflow_core::config::LineagePolicy::default(),
             )
             .with_effect_provenance(EffectProvenance::from_record(
@@ -2437,7 +2592,12 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
 
     upstream_journal
         .append(
-            ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
+            ChainEventFactory::data_event(
+                writer_id,
+                "test.event",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             Default::default(),
         )
         .await
@@ -2508,7 +2668,12 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
 
     upstream_journal
         .append(
-            ChainEventFactory::data_event(upstream_writer_id, "test.event", json!({"n": 1})),
+            ChainEventFactory::data_event(
+                upstream_writer_id,
+                "test.event",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 1}),
+            ),
             Default::default(),
         )
         .await
@@ -2529,7 +2694,12 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
     // If the forwarded EOF were treated as terminal, this would never be observed.
     upstream_journal
         .append(
-            ChainEventFactory::data_event(upstream_writer_id, "test.event", json!({"n": 2})),
+            ChainEventFactory::data_event(
+                upstream_writer_id,
+                "test.event",
+                std::num::NonZeroU32::MIN,
+                json!({"n": 2}),
+            ),
             Default::default(),
         )
         .await
@@ -2740,7 +2910,12 @@ impl obzenflow_core::journal::JournalStorage<ChainEvent> for SharedTestJournal {
 }
 
 fn merge_data(writer: StageId, event_type: &str) -> ChainEvent {
-    ChainEventFactory::data_event(WriterId::Stage(writer), event_type, json!({}))
+    ChainEventFactory::data_event(
+        WriterId::Stage(writer),
+        event_type,
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    )
 }
 
 fn merge_authored_eof(writer: StageId) -> ChainEvent {
@@ -2780,13 +2955,14 @@ fn merge_clock(entries: &[(obzenflow_core::event::CausalCoordinate, u64)]) -> Ve
 /// A catch-up watermark row (FLOWIP-120n) in `writer`'s journal, announcing
 /// `generation` with the given replay-stable payload stage key.
 fn merge_catch_up(writer: StageId, generation: u64, stage_key: &str) -> ChainEvent {
-    ChainEventFactory::source_event(
+    ChainEventFactory::flow_signal_event(
         WriterId::Stage(writer),
-        ChainPayload::FlowControl(FlowControlPayload::CatchUpComplete {
+        FlowControlPayload::CatchUpComplete {
             generation: ReaderGeneration(generation),
             stage_key: obzenflow_core::StageKey::from(stage_key),
-        }),
+        },
     )
+    .with_new_correlation()
 }
 
 async fn canonical_pair(
@@ -3254,7 +3430,7 @@ async fn canonical_merge_filtered_events_take_no_ordinals() {
     let mut selected = HashMap::new();
     selected.insert(
         stage_a,
-        [EventType::from("sel.event")].into_iter().collect(),
+        [fact_descriptor("sel.event", 1)].into_iter().collect(),
     );
     let mut subscription = subscription
         .with_selected_event_types(selected)
@@ -3309,7 +3485,7 @@ async fn long_filtered_run_yields_bounded_cursor_progress_before_delivery() {
     selected.insert(
         upstream,
         vec![SelectedFeedMetadata::new(
-            EventType::from("test.selected"),
+            fact_descriptor("test.selected", 1),
             SelectedFeedRole::Input,
         )],
     );
@@ -3559,14 +3735,14 @@ async fn feed_role_distinguishes_tiebreak_identity() {
     selected_feeds.insert(
         stage_a,
         vec![SelectedFeedMetadata::new(
-            EventType::from("shared.event"),
+            fact_descriptor("shared.event", 1),
             SelectedFeedRole::Reference,
         )],
     );
     selected_feeds.insert(
         stage_b,
         vec![SelectedFeedMetadata::new(
-            EventType::from("shared.event"),
+            fact_descriptor("shared.event", 1),
             SelectedFeedRole::Stream,
         )],
     );
@@ -3588,14 +3764,14 @@ async fn feed_role_distinguishes_tiebreak_identity() {
     assert_eq!(
         keys[0].feed_identity,
         FeedIdentity::from_feeds(&[SelectedFeedMetadata::new(
-            EventType::from("shared.event"),
+            fact_descriptor("shared.event", 1),
             SelectedFeedRole::Reference,
         )])
     );
     assert_eq!(
         keys[1].feed_identity,
         FeedIdentity::from_feeds(&[SelectedFeedMetadata::new(
-            EventType::from("shared.event"),
+            fact_descriptor("shared.event", 1),
             SelectedFeedRole::Stream,
         )])
     );
@@ -3623,6 +3799,7 @@ async fn delivered_upstream_identity_ignores_event_writer() {
             ChainEventFactory::data_event(
                 WriterId::Stage(foreign_author),
                 "test.forwarded",
+                std::num::NonZeroU32::MIN,
                 json!({"n": 1}),
             ),
             Default::default(),
@@ -4144,7 +4321,12 @@ async fn source_warning_cannot_mask_another_inputs_contract_failure() {
                 let writer = WriterId::from(id);
                 journal
                     .append(
-                        ChainEventFactory::data_event(writer, "input.v1", json!({})),
+                        ChainEventFactory::data_event(
+                            writer,
+                            "input",
+                            std::num::NonZeroU32::MIN,
+                            json!({}),
+                        ),
                         Default::default(),
                     )
                     .await

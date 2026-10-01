@@ -674,6 +674,7 @@ mod tests {
         let event = obzenflow_core::event::ChainEventFactory::data_event(
             obzenflow_core::StageId::new().into(),
             "carrier",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         let record =

@@ -658,6 +658,7 @@ async fn deferred_commands_keep_payloads_and_causal_context_until_admission() {
         ChainEventFactory::data_event(
             StageId::new().into(),
             "command.first",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         ),
     );
@@ -666,6 +667,7 @@ async fn deferred_commands_keep_payloads_and_causal_context_until_admission() {
         ChainEventFactory::data_event(
             StageId::new().into(),
             "command.second",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         ),
     );

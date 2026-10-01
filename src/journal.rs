@@ -34,7 +34,7 @@ pub use obzenflow_infra::journal::{
 
 // Read-only evidence vocabulary used when inspecting recorded runs.
 pub use obzenflow_core::event::payloads::effect_payload::{
-    EffectOutcomePayload, EffectRecord, EFFECT_RECORD_EVENT_TYPE,
+    EffectOutcomePayload, EffectRecord, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 pub use obzenflow_core::event::status::processing_status::ProcessingStatus;
 pub use obzenflow_core::event::{ChainPayload, StageFatalRecorded};

@@ -7,6 +7,11 @@ pub(super) fn effect_record_from_event(
     event: &ChainEvent,
 ) -> Result<Option<EffectRecord>, EffectError> {
     use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
+    use obzenflow_core::event::payloads::journal_payload::JournalPayload;
+    event
+        .payload
+        .validate(&event.envelope.provenance.event)
+        .map_err(|error| EffectError::EffectProvenanceMismatch(error.to_string()))?;
     match &event.payload {
         ChainPayload::Execution(
             ExecutionPayload::EffectAttemptStarted(_)
@@ -49,9 +54,11 @@ pub(super) fn effect_record_from_event(
                 cursor: provenance.cursor.clone(),
                 descriptor_hash: provenance.descriptor_hash.clone(),
                 descriptor: provenance.descriptor.clone(),
+                observation: EffectObservation::returned_success(),
                 outcome: EffectOutcomePayload::SucceededFact {
                     event_kind: event.payload.kind(),
                     event_type: event.event_type().into(),
+                    payload_schema_version: event.payload_schema_version,
                     output: event.payload(),
                     outcome_fact_ordinal,
                     outcome_fact_count,
@@ -119,7 +126,17 @@ fn validate_effect_record_provenance(
     record: &EffectRecord,
     provenance: &EffectProvenance,
 ) -> Result<(), EffectError> {
-    let expected_event_type = framework_effect_event_type(&record.descriptor.effect_type);
+    record
+        .validate()
+        .map_err(|error| EffectError::EffectProvenanceMismatch(error.to_string()))?;
+    if matches!(record.observation, EffectObservation::ExecutionRejected {})
+        && provenance.attempt.is_some()
+    {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "zero-call rejection cannot settle a recorded admission".to_string(),
+        ));
+    }
+    let expected_event_type = record.event_type();
     if event_type != expected_event_type {
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "reserved framework effect event type `{event_type}` does not match record descriptor `{}` (expected `{expected_event_type}`)",
@@ -161,6 +178,11 @@ fn validate_effect_record_provenance(
 }
 
 pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result<(), EffectError> {
+    for record in records {
+        record
+            .validate()
+            .map_err(|error| EffectError::EffectProvenanceMismatch(error.to_string()))?;
+    }
     let Some(first) = records.first() else {
         return Ok(());
     };
@@ -288,12 +310,19 @@ where
                 EffectOutcomePayload::SucceededFact {
                     event_kind,
                     event_type,
+                    payload_schema_version,
                     output,
                     ..
                 } => Ok(TypedFact {
                     event_type: event_type.clone(),
-                    payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
-                        .map_err(|error| EffectError::Serialization(error.to_string()))?,
+                    payload_schema_version: *payload_schema_version,
+                    payload: ChainPayload::decode(
+                        *event_kind,
+                        event_type.as_str(),
+                        *payload_schema_version,
+                        output.clone(),
+                    )
+                    .map_err(|error| EffectError::Serialization(error.to_string()))?,
                 }),
                 _ => Err(EffectError::EffectProvenanceMismatch(
                     "multi-fact effect outcome group contains a non-domain-success record"
@@ -308,28 +337,24 @@ where
         EffectOutcomePayload::SucceededFact {
             event_kind,
             event_type,
+            payload_schema_version,
             output,
             ..
         } => T::try_from_facts(&[TypedFact {
             event_type: event_type.clone(),
-            payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
-                .map_err(|error| EffectError::Serialization(error.to_string()))?,
+            payload_schema_version: *payload_schema_version,
+            payload: ChainPayload::decode(
+                *event_kind,
+                event_type.as_str(),
+                *payload_schema_version,
+                output.clone(),
+            )
+            .map_err(|error| EffectError::Serialization(error.to_string()))?,
         }])
         .map_err(effect_fact_set_error),
-        EffectOutcomePayload::Succeeded { output } => {
-            let fact_types = T::fact_types();
-            let [fact_type] = fact_types.as_slice() else {
-                return Err(EffectError::EffectProvenanceMismatch(
-                    "legacy single-payload effect success cannot reconstruct a multi-fact output"
-                        .to_string(),
-                ));
-            };
-            T::try_from_facts(&[TypedFact {
-                event_type: fact_type.event_type.clone(),
-                payload: ChainPayload::Fact(output.clone()),
-            }])
-            .map_err(effect_fact_set_error)
-        }
+        EffectOutcomePayload::Succeeded { .. } => Err(EffectError::EffectProvenanceMismatch(
+            "opaque effect success cannot reconstruct typed facts".to_string(),
+        )),
         EffectOutcomePayload::Failed { .. } => recorded_failure_from_outcome(&single.outcome),
     }
 }
@@ -377,6 +402,7 @@ pub(super) fn effect_record_group_materialization(
             let EffectOutcomePayload::SucceededFact {
                 event_kind,
                 event_type,
+                payload_schema_version,
                 output,
                 ..
             } = &record.outcome
@@ -388,8 +414,14 @@ pub(super) fn effect_record_group_materialization(
             };
             facts.push(TypedFact {
                 event_type: event_type.clone(),
-                payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
-                    .map_err(|error| EffectError::Serialization(error.to_string()))?,
+                payload_schema_version: *payload_schema_version,
+                payload: ChainPayload::decode(
+                    *event_kind,
+                    event_type.as_str(),
+                    *payload_schema_version,
+                    output.clone(),
+                )
+                .map_err(|error| EffectError::Serialization(error.to_string()))?,
             });
         }
         return Ok(EffectRecordMaterialization::DomainFacts { facts, origin });
@@ -399,13 +431,20 @@ pub(super) fn effect_record_group_materialization(
         EffectOutcomePayload::SucceededFact {
             event_kind,
             event_type,
+            payload_schema_version,
             output,
             ..
         } => Ok(EffectRecordMaterialization::DomainFacts {
             facts: vec![TypedFact {
                 event_type: event_type.clone(),
-                payload: ChainPayload::decode(*event_kind, event_type.as_str(), output.clone())
-                    .map_err(|error| EffectError::Serialization(error.to_string()))?,
+                payload_schema_version: *payload_schema_version,
+                payload: ChainPayload::decode(
+                    *event_kind,
+                    event_type.as_str(),
+                    *payload_schema_version,
+                    output.clone(),
+                )
+                .map_err(|error| EffectError::Serialization(error.to_string()))?,
             }],
             origin: single.origin.clone(),
         }),
@@ -419,10 +458,10 @@ pub(super) fn effect_record_group_materialization(
 
 pub(super) fn is_routable_output_fact(
     output_contract: Option<&StageOutputContract>,
-    event_type: &str,
+    descriptor: &obzenflow_core::EventDescriptor,
 ) -> bool {
     match output_contract {
-        Some(contract) if !contract.is_empty() => contract.is_routable_event_type(event_type),
+        Some(contract) if !contract.is_empty() => contract.is_routable_descriptor(descriptor),
         _ => false,
     }
 }

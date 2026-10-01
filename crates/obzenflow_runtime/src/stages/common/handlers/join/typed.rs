@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(output.len(), 2);
         for (ordinal, event) in output.iter().enumerate() {
             assert_eq!(event.writer_id, join_writer);
-            assert_eq!(event.event_type(), TestOutput::versioned_event_type());
+            assert_eq!(event.event_type(), TestOutput::event_type_name());
             let value = TestOutput::try_from_event(event).expect("typed output");
             assert_eq!(value.ordinal, ordinal);
             assert_eq!(value.selected_values, vec!["one", "two"]);
@@ -795,7 +795,8 @@ mod tests {
         let writer = WriterId::from(StageId::new());
         let event = ChainEventFactory::data_event(
             writer,
-            DecodeProbe::versioned_event_type(),
+            DecodeProbe::event_type_name(),
+            DecodeProbe::payload_schema_version(),
             serde_json::json!({ "key": "k" }),
         );
 

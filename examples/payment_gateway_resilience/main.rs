@@ -43,7 +43,7 @@ use obzenflow::application::{
 fn banner_for(mode: &RunMode) -> Banner {
     match mode {
         RunMode::Replay(ctx) => Banner::new("Payment Gateway Resilience Demo (strict replay)")
-            .description("Reconstructing a recorded run from its journals; nothing external runs.")
+            .description("Reconstructing recorded outcomes with gateway calls suppressed.")
             .bullets(
                 "What this replay does",
                 [

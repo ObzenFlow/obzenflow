@@ -271,10 +271,7 @@ where
             return true;
         }
         if chain_event.consumes_data_credit()
-            && !self.data_event_selected_for_stage(
-                stage_id,
-                &chain_event.envelope.provenance.event.event_type,
-            )
+            && !self.data_event_selected_for_stage(stage_id, &chain_event.descriptor())
         {
             return true;
         }
@@ -625,7 +622,7 @@ where
         if !chain_event.consumes_data_credit() {
             return;
         }
-        let event_type = &chain_event.envelope.provenance.event.event_type;
+        let event_type = chain_event.descriptor();
         if let Some(selected_seq) = self.selected_data_seq_by_reader.get_mut(reader_index) {
             selected_seq.0 = selected_seq.0.saturating_add(1);
         }
@@ -669,7 +666,7 @@ where
                 }
                 if self.uses_receipt_watermark() {
                     progress.track_pending_receipt(
-                        *envelope.id(),
+                        envelope.commitment(),
                         envelope.envelope.provenance.journal.vector_clock.clone(),
                     );
                 } else {
@@ -777,7 +774,7 @@ where
 
         match &event.payload {
             payload if payload.consumes_data_credit() => {
-                let event_type = &event.envelope.provenance.event.event_type;
+                let event_type = &event.descriptor();
                 let feed_reads: Vec<(usize, SeqNo)> = self
                     .contract_feed_chains
                     .get(reader_index)
@@ -823,7 +820,7 @@ where
                             .filter(|(event_type, _)| {
                                 let is_match = Self::selected_feed_matches_event_type(
                                     &feed_chain.metadata,
-                                    event_type.as_str(),
+                                    event_type,
                                 );
                                 matched |= is_match;
                                 is_match

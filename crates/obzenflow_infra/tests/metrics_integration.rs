@@ -146,6 +146,7 @@ async fn publish_drain_complete_does_not_require_historical_coverage() {
     let last_event_id = ChainEventFactory::data_event(
         WriterId::from(stage_id),
         "test.event",
+        std::num::NonZeroU32::MIN,
         serde_json::json!({"value": 1}),
     )
     .id;

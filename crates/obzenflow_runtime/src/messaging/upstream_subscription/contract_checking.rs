@@ -9,8 +9,7 @@ use obzenflow_core::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
 use obzenflow_core::event::types::{
-    Count, DurationMs, EventType, JournalIndex, JournalPath, SeqNo,
-    ViolationCause as EventViolationCause,
+    Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::{
     ChainEventFactory, ConsumptionFinalEventParams, ConsumptionProgressEventParams, JournalEvent,
@@ -40,7 +39,7 @@ fn contract_result_labels_for_emission(
 
 #[derive(Clone, Debug)]
 struct DirectFeedContractEvidence {
-    event_type: EventType,
+    event_type: obzenflow_core::EventDescriptor,
     feed_role: Option<SystemFeedRole>,
     reader_seq: SeqNo,
     advertised_writer_seq: SeqNo,
@@ -52,7 +51,7 @@ struct DirectFeedContractEvidence {
 #[derive(Clone, Debug)]
 struct DirectFeedProgressEvidence {
     feed_index: usize,
-    event_type: EventType,
+    event_type: obzenflow_core::EventDescriptor,
     feed_role: Option<SystemFeedRole>,
     reader_seq: SeqNo,
     advertised_writer_seq: Option<SeqNo>,
@@ -176,7 +175,7 @@ where
                     None => (true, None),
                 };
                 DirectFeedContractEvidence {
-                    event_type: feed_chain.metadata.event_type().clone(),
+                    event_type: feed_chain.metadata.descriptor().clone(),
                     feed_role: feed_chain.metadata.system_feed_role(),
                     reader_seq,
                     advertised_writer_seq,
@@ -313,7 +312,7 @@ where
 
                 Some(DirectFeedProgressEvidence {
                     feed_index,
-                    event_type: feed_chain.metadata.event_type().clone(),
+                    event_type: feed_chain.metadata.descriptor().clone(),
                     feed_role: feed_chain.metadata.system_feed_role(),
                     reader_seq,
                     advertised_writer_seq: self

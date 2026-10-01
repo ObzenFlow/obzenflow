@@ -289,11 +289,7 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|t| t.event_type.as_str()).collect();
         assert_eq!(
             names,
-            vec![
-                "member_set.first.v1",
-                "member_set.second.v1",
-                "member_set.third.v1"
-            ]
+            vec!["member_set.first", "member_set.second", "member_set.third"]
         );
     }
 

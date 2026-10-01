@@ -667,7 +667,14 @@ mod tests {
         let journal =
             DiskJournal::<ChainEvent>::with_owner(path.clone(), JournalOwner::stage(stage))
                 .unwrap();
-        let event = || ChainEventFactory::data_event(stage.into(), "group", serde_json::json!({}));
+        let event = || {
+            ChainEventFactory::data_event(
+                stage.into(),
+                "group",
+                std::num::NonZeroU32::MIN,
+                serde_json::json!({}),
+            )
+        };
         let first = journal.append(event(), Default::default()).await.unwrap();
         let original_group = journal
             .append_group("gap", vec![event(), event(), event()], Default::default())
@@ -739,7 +746,12 @@ mod tests {
                 .unwrap();
         let expected = journal
             .append(
-                ChainEventFactory::data_event(stage.into(), "copied", serde_json::json!({})),
+                ChainEventFactory::data_event(
+                    stage.into(),
+                    "copied",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                ),
                 Default::default(),
             )
             .await
@@ -776,7 +788,12 @@ mod tests {
             .unwrap();
             let first = journal
                 .append(
-                    ChainEventFactory::data_event(stage.into(), "first", serde_json::json!({})),
+                    ChainEventFactory::data_event(
+                        stage.into(),
+                        "first",
+                        std::num::NonZeroU32::MIN,
+                        serde_json::json!({}),
+                    ),
                     Default::default(),
                 )
                 .await
@@ -786,6 +803,7 @@ mod tests {
                     ChainEventFactory::data_event(
                         stage.into(),
                         "large",
+                        std::num::NonZeroU32::MIN,
                         serde_json::json!({"body": "x".repeat(READ_BUFFER_BYTES * 3)}),
                     ),
                     Default::default(),
@@ -800,6 +818,7 @@ mod tests {
                             ChainEventFactory::data_event(
                                 stage.into(),
                                 "member",
+                                std::num::NonZeroU32::MIN,
                                 serde_json::json!({"i": i}),
                             )
                         })
@@ -884,8 +903,12 @@ mod tests {
             let mut previous = None;
             let stage = StageId::new();
             let mut make_record = || {
-                let event =
-                    ChainEventFactory::data_event(stage.into(), "tail", serde_json::json!({}));
+                let event = ChainEventFactory::data_event(
+                    stage.into(),
+                    "tail",
+                    std::num::NonZeroU32::MIN,
+                    serde_json::json!({}),
+                );
                 super::super::identity::fixture_record(identity, event, &mut previous)
             };
             let first = make_record();
@@ -985,6 +1008,7 @@ mod tests {
             let event = ChainEventFactory::data_event(
                 writer_id,
                 "test.event",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({"index": i}),
             );
             let record = super::super::identity::fixture_record(identity, event, &mut previous);
@@ -1026,6 +1050,7 @@ mod tests {
             let event = ChainEventFactory::data_event(
                 writer_id,
                 "test.event",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({"index": i}),
             );
             let record = super::super::identity::fixture_record(identity, event, &mut previous);

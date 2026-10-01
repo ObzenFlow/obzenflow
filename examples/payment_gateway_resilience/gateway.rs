@@ -8,7 +8,7 @@
 //! is expressed as an [`Effect`] (a value the stage returns) rather than inline
 //! I/O. The runtime owns one logical effect invocation, applies its configured
 //! retry policy to live physical calls, journals the one terminal outcome fact
-//! that happened (`payment.authorized.v1` or `payment.declined.v1`), and on
+//! that happened (`payment.authorized` or `payment.declined`), and on
 //! replay reconstructs that recorded outcome without calling the gateway again.
 //! That is the durable-execution property the tutorial teaches.
 //!
@@ -53,8 +53,8 @@ impl AuthorizePayment {
 
 /// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
 ///
-/// The variants are the facts the journal records (`payment.authorized.v1`,
-/// `payment.declined.v1`); the derive writes the marshalling. The carrier
+/// The variants are the facts the journal records (`payment.authorized`,
+/// `payment.declined`); the derive writes the marshalling. The carrier
 /// itself is transient `fx.perform` machinery the handler matches
 /// exhaustively. There is no persisted gateway-decision wrapper.
 #[derive(Debug, Clone, EffectOutcomeFacts)]

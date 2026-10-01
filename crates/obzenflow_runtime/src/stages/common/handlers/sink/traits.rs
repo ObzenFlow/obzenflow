@@ -16,7 +16,7 @@
 //! those facts. A duplicate-sensitive sink requires the archive gate's
 //! explicit operator opt-in before replay or resume re-performs its writes.
 //!
-//! The runtime journals each `DeliveryPayload`, stamping its `destination`
+//! The runtime journals each `DeliveryOutcome`, stamping its `destination`
 //! from the connector's snapshotted [`SinkDescription`]
 //! (else the stage name), so delivery success, partials, and failures are
 //! durable and queryable.
@@ -55,23 +55,23 @@
 use crate::effects::EffectInvocationContext;
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-use obzenflow_core::{ChainEvent, EventId};
+use obzenflow_core::event::payloads::delivery_payload::DeliveryOutcome;
+use obzenflow_core::ChainEvent;
 
 #[derive(Debug, Clone)]
 pub struct CommitReceipt {
-    pub parent_event_id: EventId,
-    pub payload: DeliveryPayload,
+    pub subject: obzenflow_core::event::payloads::delivery_payload::DeliverySubject,
+    pub payload: DeliveryOutcome,
 }
 
 pub struct SinkConsumeReport {
-    pub primary: DeliveryPayload,
+    pub primary: DeliveryOutcome,
     pub commit_receipts: Vec<CommitReceipt>,
     settlement: Option<Box<dyn SinkSettlementCommit>>,
 }
 
 impl SinkConsumeReport {
-    pub fn new(primary: DeliveryPayload) -> Self {
+    pub fn new(primary: DeliveryOutcome) -> Self {
         Self {
             primary,
             commit_receipts: Vec::new(),
@@ -117,7 +117,7 @@ impl std::fmt::Debug for SinkConsumeReport {
 
 #[derive(Default)]
 pub struct SinkLifecycleReport {
-    pub audit_payload: Option<DeliveryPayload>,
+    pub audit_payload: Option<DeliveryOutcome>,
     pub commit_receipts: Vec<CommitReceipt>,
     settlement: Option<Box<dyn SinkSettlementCommit>>,
 }
@@ -134,7 +134,7 @@ impl std::fmt::Debug for SinkLifecycleReport {
 
 impl SinkLifecycleReport {
     pub(crate) fn new(
-        audit_payload: Option<DeliveryPayload>,
+        audit_payload: Option<DeliveryOutcome>,
         commit_receipts: Vec<CommitReceipt>,
     ) -> Self {
         Self {
@@ -150,6 +150,30 @@ impl SinkLifecycleReport {
     }
 
     pub(crate) fn commit_settlements(&mut self) -> Result<(), HandlerError> {
+        if let Some(audit) = &self.audit_payload {
+            if !matches!(
+                audit.result,
+                obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Success { .. }
+                    | obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Partial { .. }
+            ) {
+                return Err(HandlerError::Validation(
+                    "lifecycle audit must report success or partial success".to_string(),
+                ));
+            }
+            audit
+                .validate()
+                .map_err(|error| HandlerError::Validation(error.to_string()))?;
+        }
+        let mut subjects = std::collections::HashSet::new();
+        for receipt in &self.commit_receipts {
+            receipt
+                .payload
+                .validate()
+                .map_err(|error| HandlerError::Validation(error.to_string()))?;
+            if !subjects.insert(receipt.subject.input) || matches!(receipt.payload.result, obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Buffered { .. } | obzenflow_core::event::payloads::delivery_payload::DeliveryResult::Rejected { .. }) {
+                return Err(HandlerError::Validation("invalid lifecycle settlement receipt".to_string()));
+            }
+        }
         match self.settlement.take() {
             Some(settlement) => settlement.commit(),
             None => Ok(()),
@@ -167,14 +191,14 @@ pub(crate) trait SinkSettlementCommit: Send + Sync {
 /// or `InlineSink`; the runtime owns the bridge to this trait.
 #[async_trait]
 pub trait SinkHandler: Send + Sync {
-    /// Consume a single event and return a `DeliveryPayload` describing
+    /// Consume a single event and return a `DeliveryOutcome` describing
     /// the outcome (success, partial, or failure).
     ///
     /// Returning `Err(HandlerError)` means the handler experienced a failure
     /// while processing this event (e.g., remote timeout, decode failure).
     /// The supervisor will turn this into an error-marked event using
     /// ErrorKind, route it appropriately, and keep the sink running.
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError>;
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryOutcome, HandlerError>;
 
     /// Extended consume hook for buffered sinks that may need to emit
     /// additional commit receipts after accepting the current event.
@@ -200,10 +224,21 @@ pub trait SinkHandler: Send + Sync {
         self.consume_report(event).await
     }
 
-    /// Flush in‑memory buffers **and optionally** emit a `DeliveryPayload`
+    /// Dispatch a retained journal input. Buffered adapters require its exact commitment.
+    #[doc(hidden)]
+    async fn consume_committed_report(
+        &mut self,
+        input: crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>,
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        self.consume_report_with_scope(input.authored(), scope)
+            .await
+    }
+
+    /// Flush in‑memory buffers **and optionally** emit a `DeliveryOutcome`
     /// capturing the flush action (e.g., `DeliveryResult::Success` for a batch
     /// commit).  Default impl returns `Ok(None)` so simple sinks can ignore it.
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+    async fn flush(&mut self) -> Result<Option<DeliveryOutcome>, HandlerError> {
         Ok(None)
     }
 
@@ -219,7 +254,7 @@ pub trait SinkHandler: Send + Sync {
     /// Draining hook called during graceful shutdown.
     /// Default behaviour delegates to `flush()` so most sinks only override
     /// one method.
-    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
+    async fn drain(&mut self) -> Result<Option<DeliveryOutcome>, HandlerError> {
         self.flush().await
     }
 
@@ -241,7 +276,7 @@ pub trait UnifiedSinkHandler: Send + Sync {
     /// handlers without middleware ignore it.
     async fn consume_report(
         &mut self,
-        event: ChainEvent,
+        event: crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>,
         effect_context: Option<EffectInvocationContext>,
         scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError>;
@@ -263,11 +298,11 @@ pub trait UnifiedSinkHandler: Send + Sync {
 impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
     async fn consume_report(
         &mut self,
-        event: ChainEvent,
+        event: crate::messaging::DeliveredRecord<obzenflow_core::event::ChainPayload>,
         _effect_context: Option<EffectInvocationContext>,
         scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        SinkHandler::consume_report_with_scope(self, event, scope).await
+        SinkHandler::consume_committed_report(self, event, scope).await
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {

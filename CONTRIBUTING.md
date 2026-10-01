@@ -71,8 +71,8 @@ and repository policy checks remain separate requirements.
 
 Omitting `--lane` requests all six correctness lanes. Repeat `--lane` to select
 exactly those lanes; the result certifies only that declared scope. Report version
-3 records unrequested lanes separately. Default success supplies no performance
-qualification. Independent lanes continue
+4 records unrequested lanes and dependency preparation separately. Default
+success supplies no performance qualification. Independent lanes continue
 after failures. Missing tools/services, unfinished reports, unexpected skips,
 changed source and incomplete coverage cannot pass. Installing the pinned
 `cargo-nextest` version from `.config/validation.toml` is required for native
@@ -125,8 +125,38 @@ The report records the actual platform; sharing a test contract does not claim
 identical hardware. Diagnose concrete failing orderings and durable outcomes
 before attributing a failure to platform differences.
 
+The existing `test-support` CI job starts its validation command with a fresh,
+per-run Cargo dependency home on both PRs and `main`. Rust and the pinned Nextest
+are installed first and remain on `PATH`; the workspace target directory is
+retained. The native validator prepares the locked dependency set explicitly, so
+an inherited registry cache is an optimisation rather than a prerequisite for
+its offline leak controls. Cargo may download host dependencies while building
+`xtask` before the native validator starts.
+
+To exercise the same cold-dependency invocation locally without deleting your
+normal Cargo cache or build output:
+
+```sh
+validation_cargo_home="$(mktemp -d "${TMPDIR:-/tmp}/obzenflow-cargo.XXXXXX")"
+CARGO_HOME="$validation_cargo_home" cargo xtask test --lane test-support
+```
+
+Keep the installed Cargo/Nextest tool directory on `PATH`. This command creates a
+separate dependency cache; it does not install a second toolchain or use a new
+target directory. The result still certifies only the requested test-support
+scope. Before directly invoking raw Cargo/Nextest test targets that include the
+validator's leak controls, run `cargo fetch --locked` with the same `CARGO_HOME`.
+The shared native command owns that preparation itself.
+
 The PostgreSQL lane retains the existing database-service coordinator and its
-prerequisites. It does not containerise the Rust test suite.
+prerequisites. It does not containerise the Rust test suite. Each invocation keeps
+`coordinator.json` with source/run identity, required command outcomes, setup,
+dependency preparation and cleanup. An unsuccessful xtask unit-conformance
+command remains a required failure while independent PostgreSQL targets run;
+service-dependent failures and interruption still stop subsequent dependent work.
+The report preserves failed commands alongside unfinished obligations. Cargo
+command status identifies the target, not the individual failed assertion; raw
+test output retains that diagnostic detail.
 
 Audit environmental dependencies before declaring them: remove incidental
 operations, retain ownership through completion, isolate concurrent instances,
@@ -149,7 +179,7 @@ own listener, directory and children. A successful probe followed by a test
 failure remains a failed execution.
 
 `prerequisites.json` retains operation, resource scope, OS error, affected case
-identities and duration. Native report version 3 distinguishes completed probes
+identities and duration. Native report version 4 distinguishes completed probes
 reporting unavailable capabilities from infrastructure failures that leave the
 capability unknown. Launch, execution and decoding failures retain the phase,
 executable and underlying error; process errors also have a `*.error.json`
@@ -200,7 +230,7 @@ Use shared-resource groups in `.config/nextest.toml` when tests contend for a ha
 
 Tier long-running e2e tests deliberately:
 
-- Keep automated regressions in both CI profiles. Give slow tests an explicit time budget instead of excluding them from PRs.
+- Keep automated regressions in the shared native acceptance selection, using `ci-fast` locally and on PRs and `main`. Give slow tests an explicit time budget instead of excluding them from PRs.
 - Use `#[ignore]` when the test should compile normally but run only on demand.
 - Use `cfg(feature = "e2e")` only when the whole test binary needs external services, credentials, heavyweight optional dependencies, or compile-time-gated setup.
 

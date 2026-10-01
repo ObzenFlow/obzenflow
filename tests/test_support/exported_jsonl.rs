@@ -7,17 +7,48 @@
 
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_infra::journal::disk::log_record::LogRecord;
+use serde::Deserialize;
+
+/// Read a placement key from an already exported row without re-decoding its
+/// payload. This projection does not admit evidence; typed checks remain with
+/// the caller and the public export validates the stored records.
+pub fn commitment(row: &serde_json::Value) -> obzenflow_core::event::JournalCommitRef {
+    use obzenflow_core::event::provenance::JournalProvenance;
+    use obzenflow_core::event::{CausalCoordinate, JournalCommitRef};
+    use obzenflow_core::EventId;
+
+    let provenance = &row["envelope"]["provenance"];
+    let journal = JournalProvenance::deserialize(&provenance["journal"])
+        .expect("complete exported journal provenance");
+    JournalCommitRef {
+        run_id: journal.run_id,
+        journal_writer_id: journal.journal_writer_id,
+        sequence: journal
+            .vector_clock
+            .get(&CausalCoordinate::new(journal.journal_writer_id)),
+        event_id: EventId::deserialize(&provenance["event"]["id"])
+            .expect("exported event identity"),
+    }
+}
 
 /// Decode the supported JSONL export without allowing a malformed typed row to
 /// disappear from an acceptance oracle. System rows are validated and skipped;
 /// every other row must be a complete chain-event log record.
 pub fn chain_events(jsonl: &str) -> Vec<ChainEvent> {
+    chain_records(jsonl)
+        .into_iter()
+        .map(|record| record.authored())
+        .collect()
+}
+
+/// Retain commitment evidence when an oracle checks exact delivery subjects.
+pub fn chain_records(jsonl: &str) -> Vec<LogRecord<ChainEvent>> {
     jsonl
         .lines()
         .enumerate()
         .filter_map(
             |(index, line)| match serde_json::from_str::<LogRecord<ChainEvent>>(line) {
-                Ok(record) => Some(record.authored()),
+                Ok(record) => Some(record),
                 Err(chain_error) => {
                     serde_json::from_str::<LogRecord<SystemEvent>>(line).unwrap_or_else(
                         |system_error| {

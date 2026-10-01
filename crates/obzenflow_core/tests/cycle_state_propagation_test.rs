@@ -13,7 +13,12 @@ fn test_scc_id(n: u128) -> SccId {
 #[test]
 fn derived_event_propagates_cycle_state() {
     let writer_id = WriterId::from(StageId::new());
-    let mut parent = ChainEventFactory::data_event(writer_id, "test.parent", json!({"x": 1}));
+    let mut parent = ChainEventFactory::data_event(
+        writer_id,
+        "test.parent",
+        std::num::NonZeroU32::MIN,
+        json!({"x": 1}),
+    );
     parent.cycle_depth = Some(CycleDepth::new(7));
     parent.cycle_scc_id = Some(test_scc_id(42));
 
@@ -21,6 +26,7 @@ fn derived_event_propagates_cycle_state() {
         writer_id,
         &parent,
         "test.child",
+        std::num::NonZeroU32::MIN,
         json!({"x": 2}),
         obzenflow_core::config::LineagePolicy::default(),
     );
@@ -32,12 +38,22 @@ fn derived_event_propagates_cycle_state() {
 #[test]
 fn with_cycle_state_from_propagates_cycle_state() {
     let writer_id = WriterId::from(StageId::new());
-    let mut parent = ChainEventFactory::data_event(writer_id, "test.parent", json!({"x": 1}));
+    let mut parent = ChainEventFactory::data_event(
+        writer_id,
+        "test.parent",
+        std::num::NonZeroU32::MIN,
+        json!({"x": 1}),
+    );
     parent.cycle_depth = Some(CycleDepth::new(3));
     parent.cycle_scc_id = Some(test_scc_id(9));
 
-    let child = ChainEventFactory::data_event(writer_id, "test.child", json!({"x": 2}))
-        .with_cycle_state_from(&parent);
+    let child = ChainEventFactory::data_event(
+        writer_id,
+        "test.child",
+        std::num::NonZeroU32::MIN,
+        json!({"x": 2}),
+    )
+    .with_cycle_state_from(&parent);
 
     assert_eq!(child.cycle_depth, Some(CycleDepth::new(3)));
     assert_eq!(child.cycle_scc_id, Some(test_scc_id(9)));

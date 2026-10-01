@@ -18,7 +18,7 @@ use obzenflow_core::event::observability::{
 };
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::delivery_payload::{
-    DeliveryMethod, DeliveryPayload, DeliveryResult,
+    DeliveryMethod, DeliveryOutcome, DeliveryPayload, DeliveryResult, DeliverySubject,
 };
 use obzenflow_core::event::provenance::{
     EventTypeCountContext, ExecutionAccounting, FlowContext, JournalProvenance, RuntimeProvenance,
@@ -62,14 +62,10 @@ impl Stage {
             Self::Source => (
                 "high_volume_source",
                 StageType::FiniteSource,
-                "data.request.v1",
+                "data.request",
             ),
-            Self::Transform => (
-                "error_processor",
-                StageType::Transform,
-                "processed.event.v1",
-            ),
-            Self::Receipt => ("completion_sink", StageType::Sink, "sink.delivery"),
+            Self::Transform => ("error_processor", StageType::Transform, "processed.event"),
+            Self::Receipt => ("completion_sink", StageType::Sink, "delivery.succeeded"),
         }
     }
 
@@ -140,19 +136,33 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
             "processing_stage": "error_prone_transform", "should_fail": false,
         })),
         Stage::Receipt => ChainPayload::Delivery(DeliveryPayload {
-            result: DeliveryResult::Success {
-                confirmation: None,
-                response_headers: None,
+            subject: DeliverySubject {
+                input: Stage::Transform.commitment(input),
+                event_kind: obzenflow_core::event::EventKind::Fact,
+                event_type: Stage::Transform.descriptor().2.into(),
+                payload_schema_version: std::num::NonZeroU32::MIN,
             },
-            destination: stage_name.into(),
-            delivery_method: DeliveryMethod::Custom("InMemory".into()),
-            bytes_processed: Some(1),
-            items_delivered: None,
-            processed_at: timestamp - Duration::nanoseconds(123),
-            middleware_context: None,
+            outcome: DeliveryOutcome {
+                result: DeliveryResult::Success {
+                    confirmation: None,
+                    response_headers: None,
+                },
+                destination: stage_name.into(),
+                delivery_method: DeliveryMethod::Custom("InMemory".into()),
+                bytes_processed: Some(1),
+                items_delivered: None,
+                processed_at: timestamp - Duration::nanoseconds(123),
+                middleware_context: None,
+            },
         }),
     };
-    let mut event = ChainEventFactory::create_event(writer, payload);
+    let mut event = match payload {
+        ChainPayload::Fact(body) => {
+            ChainEventFactory::data_event(writer, event_type, std::num::NonZeroU32::MIN, body)
+        }
+        ChainPayload::Delivery(receipt) => ChainEventFactory::delivery_event(writer, receipt),
+        _ => unreachable!("fixture has only facts and receipts"),
+    };
     event.id = stage.event_id(input);
     event.event_type = event_type.into();
     event.processing.event_time = event_time;
@@ -189,6 +199,8 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
         accounting
             .data_outputs_by_event_type
             .push(EventTypeCountContext {
+                event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+                payload_schema_version: std::num::NonZeroU32::MIN,
                 event_type: event_type.into(),
                 total: emitted,
             });
@@ -197,6 +209,8 @@ pub(super) fn record(stage: Stage, index: u64) -> JournalRecord<ChainPayload> {
         accounting
             .data_inputs_by_upstream_event_type
             .push(UpstreamEventTypeCountContext {
+                event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+                payload_schema_version: std::num::NonZeroU32::MIN,
                 upstream: upstream.id(),
                 event_type: upstream.descriptor().2.into(),
                 total: processed,

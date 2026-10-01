@@ -101,11 +101,18 @@ fn publish(
 impl FsmAction for PipelineAction {
     type Context = PipelineContext;
     async fn execute(&self, ctx: &mut PipelineContext) -> Result<(), FsmError> {
-        self.handoff(ctx).map_err(|error| {
-            let message = error.to_string();
-            ctx.resources.retain_failure(error);
-            FsmError::HandlerError(message)
-        })
+        match self.handoff(ctx) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                ctx.resources
+                    .publications
+                    .relinquish_cancelled_admission(error.as_ref())
+                    .await;
+                let message = error.to_string();
+                ctx.resources.retain_failure(error);
+                Err(FsmError::HandlerError(message))
+            }
+        }
     }
 }
 
@@ -316,6 +323,14 @@ impl PipelineAction {
                         Ok(())
                     }) {
                         Ok(receipt) => Some(receipt),
+                        Err(error)
+                            if ctx
+                                .resources
+                                .publications
+                                .is_cancelled_admission(error.as_ref()) =>
+                        {
+                            return Err(error);
+                        }
                         Err(error) => {
                             ctx.resources.retain_failure(error);
                             None
@@ -354,7 +369,7 @@ impl PipelineAction {
                     Some(scope.enqueue(async move {
                         publication::append_inline(&journal, event, Default::default()).await?;
                         Ok(())
-                    }))
+                    })?)
                 } else {
                     None
                 };
@@ -365,8 +380,7 @@ impl PipelineAction {
                     .push(
                         async move {
                             let append = match receipt {
-                                Some(Ok(receipt)) => receipt.await,
-                                Some(Err(error)) => Err(error),
+                                Some(receipt) => receipt.await,
                                 None => Ok(()),
                             };
                             let settlement = scope.join().await;

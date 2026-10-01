@@ -154,7 +154,12 @@ fn admission_rejects_legacy_keys_duplicate_coordinates_and_invalid_predecessors(
     use serde_json::json;
     let record = JournalRecord::new(
         JournalWriterId::new(),
-        ChainEventFactory::data_event(crate::StageId::new().into(), "test", json!({})),
+        ChainEventFactory::data_event(
+            crate::StageId::new().into(),
+            "test",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        ),
     );
     let clock = serde_json::to_value(&record.envelope.provenance.journal.vector_clock).unwrap();
     let entry = clock["entries"][0].clone();

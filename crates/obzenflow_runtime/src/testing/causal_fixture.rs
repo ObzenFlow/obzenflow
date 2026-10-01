@@ -78,3 +78,29 @@ pub(crate) fn commit<T: JournalEvent>(
         source: error.into(),
     })
 }
+
+#[cfg(test)]
+pub(crate) fn fact_descriptor(name: &str, version: u32) -> obzenflow_core::EventDescriptor {
+    obzenflow_core::EventDescriptor {
+        event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+        event_type: name.into(),
+        payload_schema_version: std::num::NonZeroU32::new(version)
+            .expect("positive fixture version"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn delivery_subject(
+    event_id: obzenflow_core::EventId,
+) -> obzenflow_core::event::payloads::delivery_payload::DeliverySubject {
+    let mut event = obzenflow_core::event::ChainEventFactory::data_event(
+        obzenflow_core::StageId::new().into(),
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    );
+    event.id = event_id;
+    obzenflow_core::event::payloads::delivery_payload::DeliverySubject::from_record(
+        &committed_input(obzenflow_core::JournalWriterId::new(), event),
+    )
+}

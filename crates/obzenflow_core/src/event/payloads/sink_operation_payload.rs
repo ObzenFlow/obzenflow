@@ -123,6 +123,22 @@ pub struct SinkOperationFailed {
 }
 
 impl TypedPayload for SinkOperationFailed {
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::Execution;
+    fn into_chain_payload(self) -> Result<crate::event::ChainPayload, serde_json::Error> {
+        Ok(crate::event::ChainPayload::Execution(
+            super::execution_payload::ExecutionPayload::SinkOperationFailed(self),
+        ))
+    }
+    fn accepts_payload(payload: &crate::event::ChainPayload) -> bool {
+        matches!(
+            payload,
+            crate::event::ChainPayload::Execution(
+                super::execution_payload::ExecutionPayload::SinkOperationFailed(_)
+            )
+        )
+    }
+
     const EVENT_TYPE: &'static str = "obzenflow.sink_operation_failed";
     const SCHEMA_VERSION: u32 = 2;
 }
@@ -177,8 +193,8 @@ mod tests {
     fn destination_code_is_absent_for_none_and_round_trips_when_present() {
         assert_eq!(SinkOperationFailed::SCHEMA_VERSION, 2);
         assert_eq!(
-            SinkOperationFailed::versioned_event_type(),
-            "obzenflow.sink_operation_failed.v2"
+            SinkOperationFailed::event_type_name(),
+            "obzenflow.sink_operation_failed"
         );
         let without = serde_json::to_value(operation_failure(None)).unwrap();
         assert!(without.get("destination_error_code").is_none());

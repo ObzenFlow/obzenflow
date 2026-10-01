@@ -180,7 +180,7 @@ impl EffectHistory {
                 ));
             }
             position = position.saturating_add(1);
-            if EffectAttemptStarted::event_type_matches(&envelope.event_type()) {
+            if EffectAttemptStarted::matches_event_type(&envelope.event_type()) {
                 let started = EffectAttemptStarted::try_from_event(&envelope.authored())
                     .map_err(|error| EffectError::Serialization(error.to_string()))?;
                 validate_attempt_event(&envelope.authored(), &started)?;
@@ -206,7 +206,7 @@ impl EffectHistory {
                     .push(started);
                 continue;
             }
-            if EffectRecoveryAbandoned::event_type_matches(&envelope.event_type()) {
+            if EffectRecoveryAbandoned::matches_event_type(&envelope.event_type()) {
                 let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.authored())
                     .map_err(|error| EffectError::Serialization(error.to_string()))?;
                 validate_abandonment_event(&envelope.authored(), &abandoned)?;
@@ -602,7 +602,7 @@ pub(crate) async fn current_cursor_history(
                 envelope.authored(),
             ));
         }
-        if EffectAttemptStarted::event_type_matches(&envelope.event_type()) {
+        if EffectAttemptStarted::matches_event_type(&envelope.event_type()) {
             let started = EffectAttemptStarted::try_from_event(&envelope.authored())
                 .map_err(|error| EffectError::Serialization(error.to_string()))?;
             validate_attempt_event(&envelope.authored(), &started)?;
@@ -623,7 +623,7 @@ pub(crate) async fn current_cursor_history(
             }
             continue;
         }
-        if EffectRecoveryAbandoned::event_type_matches(&envelope.event_type()) {
+        if EffectRecoveryAbandoned::matches_event_type(&envelope.event_type()) {
             let abandoned = EffectRecoveryAbandoned::try_from_event(&envelope.authored())
                 .map_err(|error| EffectError::Serialization(error.to_string()))?;
             if &abandoned.cursor == cursor {
@@ -815,7 +815,7 @@ pub(crate) fn validate_affine_terminal_group(
     let mut grouped_records = Vec::new();
     let mut grouped_abandonment = None;
     for event in &history.terminal_group_events {
-        if EffectRecoveryAbandoned::event_type_matches(&event.event_type()) {
+        if EffectRecoveryAbandoned::matches_event_type(&event.event_type()) {
             let abandonment = EffectRecoveryAbandoned::try_from_event(event)
                 .map_err(|error| EffectError::Serialization(error.to_string()))?;
             validate_abandonment_event(event, &abandonment)?;
@@ -1035,9 +1035,11 @@ fn validate_cursor_history(
 
     let recovery_abandoned = history.records.iter().any(|record| {
         matches!(
-            &record.outcome,
-            EffectOutcomePayload::Failed { error_type, .. }
-                if error_type.as_str() == "recovery_abandoned"
+            &record.observation,
+            EffectObservation::ExecutionUnresolved {
+                reason: EffectUnresolvedReason::RecoveryAbandoned { .. },
+                ..
+            }
         )
     });
     if recovery_abandoned {
@@ -1078,7 +1080,14 @@ fn validate_attempt_event(
 ) -> Result<(), EffectError> {
     let decoded = EffectAttemptStarted::try_from_event(event)
         .map_err(|error| EffectError::Serialization(error.to_string()))?;
-    if &decoded != started {
+    if &decoded != started
+        || event.id
+            != deterministic_effect_evidence_event_id(
+                &started.cursor,
+                &EffectAttemptStarted::descriptor(),
+                Some(started.attempt),
+            )
+    {
         return Err(EffectError::EffectProvenanceMismatch(
             "effect attempt start payload disagrees with its indexed history".to_string(),
         ));
@@ -1158,7 +1167,17 @@ fn validate_terminal_identity(
     abandonment: Option<&EffectRecoveryAbandoned>,
 ) -> Result<(), EffectError> {
     let Some(first) = starts.first() else {
-        if abandonment.is_some() {
+        if abandonment.is_some()
+            || records.iter().any(|record| {
+                matches!(
+                    record.observation,
+                    EffectObservation::ExecutionUnresolved {
+                        reason: EffectUnresolvedReason::RecoveryAbandoned { .. },
+                        ..
+                    }
+                )
+            })
+        {
             return Err(EffectError::EffectProvenanceMismatch(format!(
                 "effect cursor {cursor:?} has recovery abandonment without a Start"
             )));
@@ -1174,6 +1193,30 @@ fn validate_terminal_identity(
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "effect cursor {cursor:?} terminal disagrees with its Start identity"
         )));
+    }
+
+    for record in records {
+        if let EffectObservation::ExecutionUnresolved {
+            reason:
+                EffectUnresolvedReason::RecoveryAbandoned {
+                    admission_event_id,
+                    attempt,
+                },
+            ..
+        } = &record.observation
+        {
+            let highest = starts.last().expect("non-empty Start history").attempt;
+            let expected_id = deterministic_effect_evidence_event_id(
+                cursor,
+                &EffectAttemptStarted::descriptor(),
+                Some(highest),
+            );
+            if *attempt != highest || *admission_event_id != expected_id {
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "recovery terminal does not reference its highest admission".to_string(),
+                ));
+            }
+        }
     }
 
     if abandonment.is_some_and(|abandoned| {
@@ -1229,9 +1272,11 @@ fn validate_attempt_grammar(
             let recovery_abandoned = positions.iter().any(|position| {
                 records.get(*position).is_some_and(|record| {
                     matches!(
-                        &record.outcome,
-                        EffectOutcomePayload::Failed { error_type, .. }
-                            if error_type.as_str() == "recovery_abandoned"
+                        &record.observation,
+                        EffectObservation::ExecutionUnresolved {
+                            reason: EffectUnresolvedReason::RecoveryAbandoned { .. },
+                            ..
+                        }
                     )
                 })
             });
@@ -1265,6 +1310,13 @@ fn validate_attempt_grammar(
     }
 
     for cursor in terminals.keys() {
+        if !attempts.contains_key(cursor) {
+            let terminal_records: Vec<_> = terminals[cursor]
+                .iter()
+                .map(|position| records[*position].clone())
+                .collect();
+            validate_terminal_identity(cursor, &[], &terminal_records, abandonments.get(cursor))?;
+        }
         if !attempts.contains_key(cursor)
             && terminal_attempts.get(cursor).is_some_and(Option::is_some)
         {
@@ -1461,6 +1513,9 @@ mod tests {
 
     fn failed_record(cursor: EffectCursor) -> EffectRecord {
         EffectRecord {
+            observation:
+                obzenflow_core::event::payloads::effect_payload::EffectObservation::returned_failure(
+                ),
             cursor,
             descriptor_hash: EffectDescriptorHash::new("descriptor"),
             descriptor: descriptor(),

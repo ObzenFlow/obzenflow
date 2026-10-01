@@ -629,6 +629,17 @@ impl<H: UnifiedInfiniteSourceHandler + Send + Sync + 'static> HandlerSupervised
 
                     match next_result {
                         Ok(Some(event)) => {
+                            if matches!(
+                                event.event.payload,
+                                obzenflow_core::event::ChainPayload::Fact(_)
+                                    | obzenflow_core::event::ChainPayload::CompositeData(_)
+                            ) && !ctx.output_contract.is_empty()
+                                && !ctx
+                                    .output_contract
+                                    .contains_descriptor(&event.event.descriptor())
+                            {
+                                return Err(format!("source replay event descriptor {} does not match its output contract", event.event.descriptor()).into());
+                            }
                             let event = event.admit()?;
                             self.idle_backoff.reset();
                             ctx.instrumentation

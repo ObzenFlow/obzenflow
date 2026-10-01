@@ -302,7 +302,8 @@ mod direct_fact_continuation_tests {
     async fn panicking_generated_future_reports_failure_instead_of_hanging_supervision() {
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            "test.generated_input.v1",
+            "test.generated_input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         let envelope = JournalRecord::new(JournalWriterId::new(), event);
@@ -313,7 +314,7 @@ mod direct_fact_continuation_tests {
                 input_position: None,
                 scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 admission: DirectFactAdmission::new(
-                    EventType::from("test.generated_input.v1"),
+                    EventType::from("test.generated_input"),
                     NonZeroU64::new(3).expect("non-zero test bound"),
                 ),
                 poll_state: DirectFactPollState::LiveLeased,
@@ -334,7 +335,7 @@ mod direct_fact_continuation_tests {
         for poll_before_drop in [false, true] {
             let (registry, upstream, downstream, writer) = enforced_writer();
             let admission = DirectFactAdmission::new(
-                EventType::from("test.generated_input.v1"),
+                EventType::from("test.generated_input"),
                 NonZeroU64::new(3).expect("non-zero test bound"),
             );
             admission
@@ -351,7 +352,8 @@ mod direct_fact_continuation_tests {
 
             let event = ChainEventFactory::data_event(
                 WriterId::from(StageId::new()),
-                "test.generated_input.v1",
+                "test.generated_input",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({}),
             );
             let envelope = JournalRecord::new(JournalWriterId::new(), event);

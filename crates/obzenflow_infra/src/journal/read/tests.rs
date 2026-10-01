@@ -100,6 +100,7 @@ impl Run {
         ChainEventFactory::data_event(
             self.stage.into(),
             "reader.fact",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"index": index}),
         )
     }

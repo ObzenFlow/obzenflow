@@ -75,7 +75,12 @@ mod tests {
 
     #[test]
     fn dispatch_enrichment_preserves_original_committed_evidence() {
-        let event = ChainEventFactory::data_event(StageId::new().into(), "input", json!({}));
+        let event = ChainEventFactory::data_event(
+            StageId::new().into(),
+            "input",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        );
         let record = committed_input(JournalWriterId::new(), event);
         let original = serde_json::to_value(&record).unwrap();
         let commitment = JournalClock::from_record(&record).unwrap();

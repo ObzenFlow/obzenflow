@@ -15,7 +15,7 @@ use obzenflow_core::metrics::{
     CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
     CompositePortTraffic,
 };
-use obzenflow_core::{EventId, EventType};
+use obzenflow_core::EventId;
 
 fn assert_attribute_before(source: &str, declaration: &str, attribute: &str) {
     let declaration_offset = source
@@ -63,7 +63,11 @@ fn stable_facade_and_exporter_dtos_are_constructible_from_an_external_crate() {
         "out",
         StageId::new(),
         BoundaryDirection::Outbound,
-        Some(EventType::from("demo.output.v1")),
+        Some(obzenflow_core::EventDescriptor {
+            event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+            event_type: "demo.output".into(),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+        }),
         Some(SystemFeedRole::Input),
     );
 

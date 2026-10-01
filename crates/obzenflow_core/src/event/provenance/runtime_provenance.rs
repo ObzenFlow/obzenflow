@@ -33,6 +33,8 @@ pub struct ExecutionAccounting {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventTypeCountContext {
     pub event_type: EventType,
+    pub event_kind: crate::event::EventKind,
+    pub payload_schema_version: std::num::NonZeroU32,
     pub total: u64,
 }
 
@@ -40,5 +42,7 @@ pub struct EventTypeCountContext {
 pub struct UpstreamEventTypeCountContext {
     pub upstream: StageId,
     pub event_type: EventType,
+    pub event_kind: crate::event::EventKind,
+    pub payload_schema_version: std::num::NonZeroU32,
     pub total: u64,
 }

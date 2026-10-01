@@ -877,6 +877,7 @@ mod tests {
         let control_event = ChainEventFactory::data_event(
             WriterId::from(stage_id),
             "test.boundary_control",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"value": 1}),
         );
         let mut pending_outputs = VecDeque::new();
@@ -949,6 +950,7 @@ mod tests {
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.event",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"x": 1}),
                 ),
                 scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
@@ -1055,6 +1057,7 @@ mod tests {
                 event: ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.event",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"x": 1}),
                 ),
                 scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,

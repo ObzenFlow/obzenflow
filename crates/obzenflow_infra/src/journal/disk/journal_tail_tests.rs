@@ -40,6 +40,7 @@ impl Fixture {
         ChainEventFactory::data_event(
             self.writer,
             "tail.test",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({ "index": index, "padding": padding }),
         )
         .with_flow_context(obzenflow_core::event::provenance::FlowContext::new(

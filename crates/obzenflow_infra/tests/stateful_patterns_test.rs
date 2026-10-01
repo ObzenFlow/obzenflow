@@ -365,7 +365,7 @@ async fn counter_emits_single_event_on_drain() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == CountResult::versioned_event_type())
+        .filter(|e| e.event_type() == CountResult::event_type_name())
         .collect();
     assert_eq!(results.len(), 1);
     let total = results[0].payload()["total_count"].as_u64().unwrap();
@@ -405,7 +405,7 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == CollectedValue::versioned_event_type())
+        .filter(|e| e.event_type() == CollectedValue::event_type_name())
         .collect();
     assert_eq!(results.len(), 5);
 }
@@ -443,7 +443,7 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == SumResult::versioned_event_type())
+        .filter(|e| e.event_type() == SumResult::event_type_name())
         .collect();
     assert_eq!(results.len(), 1);
     let total = results[0].payload()["total_sum"].as_u64().unwrap();
@@ -492,7 +492,7 @@ async fn immediate_emitter_emits_during_accumulating() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == ProgressUpdate::versioned_event_type())
+        .filter(|e| e.event_type() == ProgressUpdate::event_type_name())
         .collect();
     assert_eq!(results.len(), 5);
     assert_eq!(
@@ -535,7 +535,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == CountResult::versioned_event_type())
+        .filter(|e| e.event_type() == CountResult::event_type_name())
         .collect();
     assert_eq!(results.len(), 1);
     let total = results[0].payload()["total_count"].as_u64().unwrap();

@@ -502,7 +502,7 @@ fn assert_journal_contract(run_dir: &Path, events: &[JournalRecord<ChainPayload>
         .collect::<Vec<_>>();
     assert!(authored.iter().all(|envelope| {
         envelope.envelope.provenance.event.writer_id == writer
-            && envelope.event_type() == JoinedFact::versioned_event_type()
+            && envelope.event_type() == JoinedFact::event_type_name()
     }));
 
     let local_eof = events
@@ -523,10 +523,10 @@ fn assert_journal_contract(run_dir: &Path, events: &[JournalRecord<ChainPayload>
     };
     let compatible = writer_seq_by_event_type
         .iter()
-        .filter(|(key, _)| JoinedFact::event_type_matches(key.as_str()))
+        .filter(|(key, _)| **key == JoinedFact::descriptor())
         .collect::<Vec<_>>();
     assert_eq!(compatible.len(), 1);
-    assert_eq!(compatible[0].0.as_str(), JoinedFact::versioned_event_type());
+    assert_eq!(*compatible[0].0, JoinedFact::descriptor());
     assert_eq!(compatible[0].1 .0, 5);
     assert_eq!(writer_seq.map(|seq| seq.0), Some(5));
     assert_eq!(
@@ -619,7 +619,7 @@ async fn typed_join_has_live_replay_journal_parity_and_zero_replay_reads() {
     assert_eq!(writer_seq.map(|seq| seq.0), Some(2));
     assert_eq!(
         writer_seq_by_event_type
-            .get(StreamItem::versioned_event_type().as_str())
+            .get(&StreamItem::descriptor())
             .map(|seq| seq.0),
         Some(2)
     );

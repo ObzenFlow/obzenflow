@@ -65,8 +65,12 @@ fn processing_status_kind_accessor_matches_variant() {
 #[test]
 fn chain_event_mark_as_error_sets_status_and_kind() {
     let writer_id = WriterId::from(StageId::new());
-    let base: ChainEvent =
-        ChainEventFactory::data_event(writer_id, "test.event", json!({ "key": "value" }));
+    let base: ChainEvent = ChainEventFactory::data_event(
+        writer_id,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        json!({ "key": "value" }),
+    );
 
     let err = base
         .clone()
@@ -86,7 +90,12 @@ fn chain_event_mark_as_error_sets_status_and_kind() {
 #[test]
 fn chain_event_validation_and_infra_helpers_set_expected_kinds() {
     let writer_id = WriterId::from(StageId::new());
-    let base: ChainEvent = ChainEventFactory::data_event(writer_id, "flight", json!({ "id": 1 }));
+    let base: ChainEvent = ChainEventFactory::data_event(
+        writer_id,
+        "flight",
+        std::num::NonZeroU32::MIN,
+        json!({ "id": 1 }),
+    );
 
     let validation = base.clone().mark_as_validation_error("bad input");
     match validation.processing.status {

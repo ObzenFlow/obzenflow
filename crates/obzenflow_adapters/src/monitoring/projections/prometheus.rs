@@ -345,8 +345,8 @@ impl PrometheusProjection {
                 let selected_event_type = cc
                     .selected_event_type
                     .as_ref()
-                    .map(|event_type| event_type.as_str())
-                    .unwrap_or("");
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
                 let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
                 for (contract, status, count) in &cc.results {
                     writeln!(
@@ -356,7 +356,7 @@ impl PrometheusProjection {
                         escape_label(&cc.port),
                         escape_label(&cc.peer.to_string()),
                         cc.direction.as_str(),
-                        escape_label(selected_event_type),
+                        escape_label(&selected_event_type),
                         escape_label(feed_role),
                         escape_label(contract.as_str()),
                         escape_label(status.as_str()),
@@ -378,8 +378,8 @@ impl PrometheusProjection {
                 let selected_event_type = cc
                     .selected_event_type
                     .as_ref()
-                    .map(|event_type| event_type.as_str())
-                    .unwrap_or("");
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
                 let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
                 for (contract, cause, count) in &cc.violations {
                     writeln!(
@@ -389,7 +389,7 @@ impl PrometheusProjection {
                         escape_label(&cc.port),
                         escape_label(&cc.peer.to_string()),
                         cc.direction.as_str(),
-                        escape_label(selected_event_type),
+                        escape_label(&selected_event_type),
                         escape_label(feed_role),
                         escape_label(contract.as_str()),
                         escape_label(cause.as_str()),
@@ -412,8 +412,8 @@ impl PrometheusProjection {
                     let selected_event_type = cc
                         .selected_event_type
                         .as_ref()
-                        .map(|event_type| event_type.as_str())
-                        .unwrap_or("");
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
                     let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
                     writeln!(
                         output,
@@ -422,7 +422,7 @@ impl PrometheusProjection {
                         escape_label(&cc.port),
                         escape_label(&cc.peer.to_string()),
                         cc.direction.as_str(),
-                        escape_label(selected_event_type),
+                        escape_label(&selected_event_type),
                         escape_label(feed_role),
                         seq
                     )?;
@@ -443,8 +443,8 @@ impl PrometheusProjection {
                     let selected_event_type = cc
                         .selected_event_type
                         .as_ref()
-                        .map(|event_type| event_type.as_str())
-                        .unwrap_or("");
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
                     let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
                     writeln!(
                         output,
@@ -453,7 +453,7 @@ impl PrometheusProjection {
                         escape_label(&cc.port),
                         escape_label(&cc.peer.to_string()),
                         cc.direction.as_str(),
-                        escape_label(selected_event_type),
+                        escape_label(&selected_event_type),
                         escape_label(feed_role),
                         seq
                     )?;
@@ -1765,7 +1765,7 @@ impl PrometheusProjection {
                         escape_label(labels.upstream_name),
                         escape_label(labels.downstream_name),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         escape_label(status),
                         count
@@ -1780,7 +1780,7 @@ impl PrometheusProjection {
                         escape_label(labels.upstream_name),
                         escape_label(labels.downstream_name),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         escape_label(status),
                         count
@@ -1812,7 +1812,7 @@ impl PrometheusProjection {
                         escape_label(labels.upstream_name),
                         escape_label(labels.downstream_name),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         escape_label(cause),
                         count
@@ -1827,7 +1827,7 @@ impl PrometheusProjection {
                         escape_label(labels.upstream_name),
                         escape_label(labels.downstream_name),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         escape_label(cause),
                         count
@@ -1856,7 +1856,7 @@ impl PrometheusProjection {
                         escape_label(&labels.upstream_id),
                         escape_label(&labels.downstream_id),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         seq
                     )?;
@@ -1868,7 +1868,7 @@ impl PrometheusProjection {
                         escape_label(&labels.upstream_id),
                         escape_label(&labels.downstream_id),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         seq
                     )?;
@@ -1899,7 +1899,7 @@ impl PrometheusProjection {
                         escape_label(&labels.upstream_id),
                         escape_label(&labels.downstream_id),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         seq
                     )?;
@@ -1911,7 +1911,7 @@ impl PrometheusProjection {
                         escape_label(&labels.upstream_id),
                         escape_label(&labels.downstream_id),
                         escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
+                        escape_label(&labels.selected_event_type),
                         escape_label(labels.feed_role),
                         seq
                     )?;
@@ -1944,7 +1944,7 @@ impl PrometheusProjection {
                             escape_label(&labels.upstream_id),
                             escape_label(&labels.downstream_id),
                             escape_label(labels.contract),
-                            escape_label(labels.selected_event_type),
+                            escape_label(&labels.selected_event_type),
                             escape_label(labels.feed_role),
                             lag
                         )?;
@@ -1956,7 +1956,7 @@ impl PrometheusProjection {
                             escape_label(&labels.upstream_id),
                             escape_label(&labels.downstream_id),
                             escape_label(labels.contract),
-                            escape_label(labels.selected_event_type),
+                            escape_label(&labels.selected_event_type),
                             escape_label(labels.feed_role),
                             lag
                         )?;
@@ -2697,7 +2697,7 @@ struct ContractMetricLabels<'a> {
     upstream_name: &'a str,
     downstream_name: &'a str,
     contract: &'a str,
-    selected_event_type: &'a str,
+    selected_event_type: String,
     feed_role: &'a str,
 }
 
@@ -2727,8 +2727,8 @@ impl<'a> ContractMetricLabels<'a> {
             selected_event_type: edge
                 .selected_event_type
                 .as_ref()
-                .map(|event_type| event_type.as_str())
-                .unwrap_or(""),
+                .map(ToString::to_string)
+                .unwrap_or_default(),
             feed_role: edge
                 .feed_role
                 .as_ref()
@@ -2861,7 +2861,6 @@ mod tests {
         CompositePortTraffic, ContractViolationCauseLabel, InfraMetricsSnapshot,
         SinkOperationFailureMetric,
     };
-    use obzenflow_core::EventType;
     use std::collections::HashMap;
 
     #[test]
@@ -3390,7 +3389,11 @@ mod tests {
             "completed",
             peer,
             BoundaryDirection::Outbound,
-            Some(EventType::from("checkout.completed.v1")),
+            Some(obzenflow_core::EventDescriptor {
+                event_kind: obzenflow_core::event::payloads::chain_payload::EventKind::Fact,
+                event_type: "checkout.completed".into(),
+                payload_schema_version: std::num::NonZeroU32::MIN,
+            }),
             Some(SystemFeedRole::Input),
         );
         contract.results.push((
@@ -3455,16 +3458,16 @@ mod tests {
         assert!(!output.contains("unbounded_user_text"));
         let peer = escape_label(&peer.to_string());
         assert!(output.contains(&format!(
-            "obzenflow_composite_contract_results_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\",contract=\"SinkContract\",status=\"passed\"}} 5"
+            "obzenflow_composite_contract_results_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"fact/checkout.completed@1\",feed_role=\"input\",contract=\"SinkContract\",status=\"passed\"}} 5"
         )));
         assert!(output.contains(&format!(
-            "obzenflow_composite_contract_violations_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\",contract=\"TransportContract\",cause=\"seq_divergence\"}} 2"
+            "obzenflow_composite_contract_violations_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"fact/checkout.completed@1\",feed_role=\"input\",contract=\"TransportContract\",cause=\"seq_divergence\"}} 2"
         )));
         assert!(output.contains(&format!(
-            "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\"}} 55"
+            "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"fact/checkout.completed@1\",feed_role=\"input\"}} 55"
         )));
         assert!(output.contains(&format!(
-            "obzenflow_composite_contract_advertised_writer_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\"}} 60"
+            "obzenflow_composite_contract_advertised_writer_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"fact/checkout.completed@1\",feed_role=\"input\"}} 60"
         )));
         assert!(output.contains(&format!(
             "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"failed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"\",feed_role=\"\"}} 0"

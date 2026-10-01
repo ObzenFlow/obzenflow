@@ -28,6 +28,7 @@ async fn test_journal_causal_ordering() {
     let source_event = ChainEventFactory::data_event(
         source_writer,
         "data.received",
+        std::num::NonZeroU32::MIN,
         json!({
             "sensor": "temperature",
             "value": 23.5
@@ -43,6 +44,7 @@ async fn test_journal_causal_ordering() {
     let transform_event = ChainEventFactory::data_event(
         transform_writer,
         "data.transformed",
+        std::num::NonZeroU32::MIN,
         json!({
             "sensor": "temperature",
             "celsius": 23.5,
@@ -62,6 +64,7 @@ async fn test_journal_causal_ordering() {
     let sink_event = ChainEventFactory::data_event(
         sink_writer,
         "data.stored",
+        std::num::NonZeroU32::MIN,
         json!({
             "location": "timeseries_db",
             "status": "success"
@@ -110,18 +113,21 @@ async fn test_journal_parallel_writers() {
     let event1 = ChainEventFactory::data_event(
         worker1,
         "work.started",
+        std::num::NonZeroU32::MIN,
         json!({"worker": 1, "task": "process_batch_1"}),
     );
 
     let event2 = ChainEventFactory::data_event(
         worker2,
         "work.started",
+        std::num::NonZeroU32::MIN,
         json!({"worker": 2, "task": "process_batch_2"}),
     );
 
     let event3 = ChainEventFactory::data_event(
         worker3,
         "work.started",
+        std::num::NonZeroU32::MIN,
         json!({"worker": 3, "task": "process_batch_3"}),
     );
 
@@ -134,6 +140,7 @@ async fn test_journal_parallel_writers() {
     let result_event = ChainEventFactory::data_event(
         worker2,
         "work.completed",
+        std::num::NonZeroU32::MIN,
         json!({"worker": 2, "result": "batch_2_processed"}),
     );
 
@@ -175,6 +182,7 @@ async fn test_journal_event_chain() {
         let event = ChainEventFactory::data_event(
             writer,
             "chain.link",
+            std::num::NonZeroU32::MIN,
             json!({
                 "sequence": i,
                 "data": format!("Event {}", i)

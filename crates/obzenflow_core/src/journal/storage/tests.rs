@@ -105,6 +105,7 @@ fn event() -> ChainEvent {
     ChainEventFactory::data_event(
         crate::StageId::new().into(),
         "candidate",
+        std::num::NonZeroU32::MIN,
         serde_json::json!({}),
     )
 }

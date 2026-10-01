@@ -180,7 +180,14 @@ jobs:
         with:
           tool: cargo-nextest@0.9.136
       - name: Validate test-support
-        run: cargo xtask test --lane test-support
+        # Exercise dependency preparation on PRs and main without an inherited
+        # registry cache. Installed tools remain on PATH; target stays in place.
+        env:
+          CARGO_HOME: ${{ runner.temp }}/obzenflow-cargo-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+        run: |
+          test ! -e "$CARGO_HOME"
+          mkdir "$CARGO_HOME"
+          cargo xtask test --lane test-support
       - name: Preserve validation reports and phase output
         if: always()
         uses: actions/upload-artifact@v4
@@ -314,6 +321,52 @@ jobs:
               assert.equal(requestsPerformance({event_name: event, ref}), expected);
             }
 
+            // Keep the existing required test-support job cold on both PR and
+            // main. Tool installation and restored build output precede the
+            // step-local Cargo home; no workflow preparation can warm it first.
+            const coldJob = workflow.split("\n  test-test-support:\n")[1]
+              .split(/\n  [a-zA-Z0-9_-]+:\n/)[0];
+            const expression = name => "$" + "{{ " + name + " }}";
+            const coldHome = expression("runner.temp") + "/obzenflow-cargo-"
+              + expression("github.run_id") + "-" + expression("github.run_attempt")
+              + "-" + expression("github.job");
+            function verifyColdDependencyJob(job) {
+              assert(!/^    if:/m.test(job), "cold coverage must run on PR and main");
+              const [configuration, ...steps] = job.split("\n      - ");
+              assert(!/CARGO_HOME/.test(configuration), "Cargo home is step-local");
+              const selected = steps.filter(step => /cargo xtask test --lane test-support/.test(step));
+              assert.equal(selected.length, 1, "one existing native lane invocation");
+              const validation = selected[0];
+              const index = steps.indexOf(validation);
+              assert(!/^        if:/m.test(validation), "cold validation is unconditional");
+              const rust = steps.findIndex(step => step.includes("dtolnay/rust-toolchain@"));
+              const nextest = steps.findIndex(step => step.includes("tool: cargo-nextest@"));
+              assert(rust >= 0 && rust < index, "install Rust before changing Cargo home");
+              assert(nextest >= 0 && nextest < index, "install Nextest before changing Cargo home");
+              assert(steps.every((step, position) => position === index || !/CARGO_HOME|obzenflow-cargo-/.test(step)),
+                "no other step can populate the isolated dependency home");
+              const environment = validation.match(/        env:\n((?:          .*\n)+)/)?.[1];
+              assert.deepEqual(environment?.trim().split(/\n\s*/), ["CARGO_HOME: " + coldHome],
+                "preserve installed tool PATH and existing target configuration");
+              const commands = validation.match(/        run: \|\n((?:          .*\n?)+)/)?.[1];
+              assert.deepEqual(commands?.trim().split(/\n\s*/), [
+                'test ! -e "$CARGO_HOME"',
+                'mkdir "$CARGO_HOME"',
+                "cargo xtask test --lane test-support",
+              ], "prove fresh state immediately before the unchanged native command");
+            }
+            verifyColdDependencyJob(coldJob);
+            for (const broken of [
+              "    if: github.event_name == 'push'\n" + coldJob,
+              coldJob.replace('          test ! -e "$CARGO_HOME"\n', ""),
+              coldJob.replace('          mkdir "$CARGO_HOME"', '          mkdir -p "$CARGO_HOME"'),
+              coldJob.replace("          cargo xtask test", "          cargo fetch --locked\n          cargo xtask test"),
+              coldJob.replace("        env:\n", "        env:\n          PATH: /tmp/tools\n"),
+              coldJob.replace("    steps:\n", "    env:\n      CARGO_HOME: shared-cache\n    steps:\n"),
+            ]) {
+              assert.throws(() => verifyColdDependencyJob(broken));
+            }
+
             // Execute the actual scripts embedded in both release consumers.
             // API responses are controlled; these checks neither publish nor
             // query another run, and need no extra test service or credentials.
@@ -378,7 +431,7 @@ jobs:
                 assert.deepEqual(outputs, {}, name);
               }
             }
-            core.info("Cadence matrix and exact-release evidence controls passed.");
+            core.info("Cadence, cold-dependency scope and exact-release evidence controls passed.");
 
       - name: Verify SPDX headers
         run: |

@@ -4,19 +4,17 @@
 
 use obzenflow_core::event::payloads::execution_payload::{ExecutionPayload, StageLifecycleFact};
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::{ChainEventFactory, ChainPayload};
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, Journal, JournalOwner, StageId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use std::sync::Arc;
 
 fn stage_running(stage: StageId) -> ChainEvent {
-    ChainEventFactory::create_with_context(
+    ChainEventFactory::execution_event(
         stage.into(),
-        ChainPayload::Execution(ExecutionPayload::StageLifecycle(
-            StageLifecycleFact::Running { stage_id: stage },
-        )),
-        FlowContext::new("child", stage),
+        ExecutionPayload::StageLifecycle(StageLifecycleFact::Running { stage_id: stage }),
     )
+    .with_flow_context(FlowContext::new("child", stage))
 }
 
 #[tokio::test]
@@ -47,6 +45,7 @@ async fn atomic_group_budgets_reject_before_commit_and_large_groups_stream_in_or
         let oversized = ChainEventFactory::data_event(
             stage.into(),
             "large",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"body": "x".repeat(MAX_RECORD_BYTES)}),
         );
         assert!(journal.append(oversized, Default::default()).await.is_err());
@@ -55,6 +54,7 @@ async fn atomic_group_budgets_reject_before_commit_and_large_groups_stream_in_or
                 ChainEventFactory::data_event(
                     stage.into(),
                     "large",
+                    std::num::NonZeroU32::MIN,
                     serde_json::json!({"body": "x".repeat(7 * 1024 * 1024)}),
                 )
             })

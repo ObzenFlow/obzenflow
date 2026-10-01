@@ -302,7 +302,7 @@ mod tests {
     }
 
     fn data(event_type: &str, payload: serde_json::Value) -> ChainEvent {
-        ChainEventFactory::data_event(writer(), event_type, payload)
+        ChainEventFactory::data_event(writer(), event_type, std::num::NonZeroU32::MIN, payload)
     }
 
     fn opts(mode: WalkMode) -> StageWalkOptions {
@@ -361,6 +361,21 @@ mod tests {
         .unwrap();
         assert_eq!(out.divergence_count, 1);
         assert_eq!(out.divergences[0].field, "missing_row");
+    }
+
+    #[test]
+    fn payload_version_only_change_is_a_verification_divergence() {
+        let baseline = data("order.ready", json!({"id": 1}));
+        let mut candidate = baseline.clone();
+        candidate.payload_schema_version = std::num::NonZeroU32::new(2).unwrap();
+        let out = walk_journal(
+            ok_rows(vec![baseline]),
+            ok_rows(vec![candidate]),
+            &opts(WalkMode::WholeRun),
+        )
+        .unwrap();
+        assert_eq!(out.divergence_count, 1);
+        assert_eq!(out.divergences[0].field, "kind");
     }
 
     #[test]

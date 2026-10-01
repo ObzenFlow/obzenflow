@@ -21,7 +21,7 @@ use obzenflow_core::event::payloads::composite_data_payload::CompositeDataPayloa
 use obzenflow_core::event::payloads::execution_payload::{AiChunkingPlannedFact, ExecutionPayload};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::id::CompositeId;
 use obzenflow_core::{ChainEvent, StageOutputs, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Serialize};
@@ -398,16 +398,14 @@ where
                     .map_err(|error| {
                         protocol_fatal(format!("planning failure serialization failed: {error}"))
                     })?;
-                return Ok(vec![ChainEventFactory::derived_event(
+                return Ok(vec![ChainEventFactory::derived_composite_event(
                     writer_id,
                     &event,
-                    ChainPayload::CompositeData(
-                        CompositeDataPayload::decode(
-                            &AiMapReducePlanningFailed::versioned_event_type(),
-                            payload,
-                        )
-                        .map_err(|e| protocol_fatal(e.to_string()))?,
-                    ),
+                    CompositeDataPayload::decode(
+                        &AiMapReducePlanningFailed::event_type_name(),
+                        payload,
+                    )
+                    .map_err(|e| protocol_fatal(e.to_string()))?,
                     self.lineage,
                 )]);
             }
@@ -427,16 +425,14 @@ where
                 serde_json::to_value(AiMapReduceMapInput { job_key, chunk }).map_err(|error| {
                     protocol_fatal(format!("generated map input serialization failed: {error}"))
                 })?;
-            outputs.push(ChainEventFactory::derived_event(
+            outputs.push(ChainEventFactory::derived_composite_event(
                 writer_id,
                 &event,
-                ChainPayload::CompositeData(
-                    CompositeDataPayload::decode(
-                        &AiMapReduceMapInput::<ChunkEnvelope<Item>>::versioned_event_type(),
-                        payload,
-                    )
-                    .map_err(|e| protocol_fatal(e.to_string()))?,
-                ),
+                CompositeDataPayload::decode(
+                    &AiMapReduceMapInput::<ChunkEnvelope<Item>>::event_type_name(),
+                    payload,
+                )
+                .map_err(|e| protocol_fatal(e.to_string()))?,
                 self.lineage,
             ));
         }
@@ -453,16 +449,11 @@ where
         let payload = serde_json::to_value(manifest).map_err(|error| {
             protocol_fatal(format!("planning manifest serialization failed: {error}"))
         })?;
-        outputs.push(ChainEventFactory::derived_event(
+        outputs.push(ChainEventFactory::derived_composite_event(
             writer_id,
             &event,
-            ChainPayload::CompositeData(
-                CompositeDataPayload::decode(
-                    &AiMapReducePlanningManifest::versioned_event_type(),
-                    payload,
-                )
+            CompositeDataPayload::decode(&AiMapReducePlanningManifest::event_type_name(), payload)
                 .map_err(|e| protocol_fatal(e.to_string()))?,
-            ),
             self.lineage,
         ));
         Ok(outputs)
@@ -494,6 +485,7 @@ mod tests {
         AiChunkingPlannedFact, ExecutionPayload,
     };
     use obzenflow_core::event::provenance::CompositeActivationContext;
+    use obzenflow_core::event::ChainPayload;
     use obzenflow_core::{EventId, StageId, WriterId};
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -549,7 +541,8 @@ mod tests {
     fn seed_event(items: Vec<String>) -> ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            Seed::versioned_event_type(),
+            Seed::event_type_name(),
+            Seed::payload_schema_version(),
             serde_json::json!(Seed { items }),
         )
     }
@@ -602,7 +595,7 @@ mod tests {
                 .map(|event| {
                     assert_eq!(
                         event.event_type(),
-                        ChunkEnvelope::<String>::versioned_event_type()
+                        ChunkEnvelope::<String>::event_type_name()
                     );
                     ChunkEnvelope::<String>::try_from_event(event).expect("chunk decodes")
                 })

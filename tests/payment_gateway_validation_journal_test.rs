@@ -89,19 +89,19 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
         .iter()
         .filter(|row| order_id(row) == Some("validation-valid-order"))
         .filter_map(|row| data_event_type(row))
-        .filter(|event_type| *event_type == "payment.order_validated.v1")
+        .filter(|event_type| *event_type == "payment.order_validated")
         .collect();
-    assert_eq!(valid_facts, ["payment.order_validated.v1"]);
+    assert_eq!(valid_facts, ["payment.order_validated"]);
 
     let invalid_validation_facts: Vec<_> = data_rows
         .iter()
         .filter(|row| order_id(row) == Some("validation-invalid-order"))
         .filter_map(|row| data_event_type(row))
-        .filter(|event_type| matches!(*event_type, "order.invalid.v1" | "order.cancelled.v1"))
+        .filter(|event_type| matches!(*event_type, "order.invalid" | "order.cancelled"))
         .collect();
     assert_eq!(
         invalid_validation_facts,
-        ["order.invalid.v1", "order.cancelled.v1"],
+        ["order.invalid", "order.cancelled"],
         "the product variant must commit its fields in declaration order"
     );
 
@@ -112,11 +112,11 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
     assert_eq!(
         distinct_data_types,
         BTreeSet::from([
-            "commerce.customer_order_placed.v1",
-            "order.cancelled.v1",
-            "order.invalid.v1",
-            "payment.authorized.v1",
-            "payment.order_validated.v1",
+            "commerce.customer_order_placed",
+            "order.cancelled",
+            "order.invalid",
+            "payment.authorized",
+            "payment.order_validated",
         ]),
         "no carrier, completion receipt, or declared-set wrapper may become an event"
     );
@@ -124,7 +124,7 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
     for row in data_rows.iter().filter(|row| {
         matches!(
             data_event_type(row),
-            Some("payment.order_validated.v1" | "order.invalid.v1" | "order.cancelled.v1")
+            Some("payment.order_validated" | "order.invalid" | "order.cancelled")
         )
     }) {
         assert!(
@@ -142,7 +142,7 @@ fn payment_gateway_validation_journal_contains_only_flat_declared_facts() {
 
     let authorized = data_rows
         .iter()
-        .find(|row| data_event_type(row) == Some("payment.authorized.v1"))
+        .find(|row| data_event_type(row) == Some("payment.authorized"))
         .expect("the valid order should be authorized");
     assert_eq!(
         authorized
@@ -214,13 +214,18 @@ mod shipping_adapter {
         };
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            PaymentAuthorized::versioned_event_type(),
+            PaymentAuthorized::event_type_name(),
+            PaymentAuthorized::payload_schema_version(),
             serde_json::to_value(authorized).expect("serialize payment"),
         );
         let stage_id = StageId::new();
         let mut adapter = SinkWriterAdapter::new(ShippingHandoff, stage_id);
         let report = adapter
-            .consume_report(event)
+            .consume_committed_report(
+                obzenflow_core::JournalRecord::new(obzenflow_core::JournalWriterId::new(), event)
+                    .into(),
+                Default::default(),
+            )
             .await
             .expect("shipping delivery");
 

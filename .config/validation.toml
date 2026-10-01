@@ -69,6 +69,20 @@ owner = "real_nextest_leaks_fail_acceptance_with_identity independent completion
 
 [[prerequisites]]
 binary = "xtask::bin/xtask"
+test = "postgres::acceptance::tests::unit_rejection_preserves_independent_targets_and_product_stop_boundary"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Owned subprocesses exercise target continuation after a real assertion rejection and retain the existing service-dependent stop boundary."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "postgres::evidence::tests::delegated_evidence_preserves_failure_scope_and_rejects_wrong_identity"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files"]
+rationale = "Owned temporary coordinator reports exercise source/run identity, required targets and preservation of failed and unfinished obligations."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
 test = "validation::tests::leaks::real_nextest_leaks_fail_acceptance_with_identity"
 lanes = ["default","production-features","test-support"]
 capabilities = ["temp-files","owned-child","owned-child-signals"]
@@ -661,6 +675,13 @@ test = "validation::prerequisites::tests::wholly_blocked_scope_and_invalid_decla
 lanes = ["default","production-features","test-support"]
 capabilities = ["temp-files"]
 rationale = "Injected operation results are persisted in owned temporary coverage artifacts."
+
+[[prerequisites]]
+binary = "xtask::bin/xtask"
+test = "validation::tests::dependency_preparation_preserves_failures_without_suppressing_independent_execution"
+lanes = ["default","production-features","test-support"]
+capabilities = ["temp-files","owned-child"]
+rationale = "Disposable source/output fixture and joined child commands preserve independent execution after dependency preparation fails."
 
 [[prerequisites]]
 binary = "xtask::bin/xtask"

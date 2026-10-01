@@ -69,8 +69,12 @@ mod tests {
 
         // Create the event with its own writer_id (who created the event)
         let event_writer = WriterId::from(StageId::new());
-        let event =
-            ChainEventFactory::data_event(event_writer, "test.event", serde_json::json!({}));
+        let event = ChainEventFactory::data_event(
+            event_writer,
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
 
         // Create the envelope with potentially different writer_id (who wrote to journal)
         let journal_writer = JournalWriterId::new();
@@ -88,8 +92,12 @@ mod tests {
         let observer: Arc<dyn MetricsObserver> = Arc::new(NoOpMetricsObserver::new());
 
         let event_writer = WriterId::from(StageId::new());
-        let event =
-            ChainEventFactory::data_event(event_writer, "test.event", serde_json::json!({}));
+        let event = ChainEventFactory::data_event(
+            event_writer,
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
 
         let journal_writer = JournalWriterId::new();
         let envelope = JournalRecord::new(journal_writer, event);

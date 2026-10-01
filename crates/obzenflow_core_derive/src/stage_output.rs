@@ -217,8 +217,8 @@ fn expand_enum(
     let dispatch_arms = shapes.iter().map(|shape| match shape {
         Shape::Unary { ident, member } => quote! {
             if facts.len() == 1
-                && <#member as #schema::TypedPayload>::event_type_matches(
-                    facts[0].event_type.as_str(),
+                && <#member as #schema::TypedPayload>::matches_fact(
+                    &facts[0],
                 )
             {
                 return ::std::result::Result::Ok(Self::#ident(
@@ -233,9 +233,7 @@ fn expand_enum(
             quote! {
                 if facts.len() == #arity
                     #( && facts.iter().any(|fact| {
-                        <#types as #schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        )
+                        <#types as #schema::TypedPayload>::matches_fact(fact)
                     }) )*
                 {
                     return ::std::result::Result::Ok(Self::#ident {
@@ -292,9 +290,7 @@ fn expand_enum(
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#leaf_union as #schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        ) )*;
+                        #( || <#leaf_union as #schema::TypedPayload>::matches_fact(fact) )*;
                     if !declared {
                         return ::std::result::Result::Err(
                             #schema::TypedFactSetError::UnexpectedFact {
@@ -306,7 +302,7 @@ fn expand_enum(
                 for (index, fact) in facts.iter().enumerate() {
                     if facts[index + 1..]
                         .iter()
-                        .any(|later| later.event_type == fact.event_type)
+                        .any(|later| later.descriptor() == fact.descriptor())
                     {
                         return ::std::result::Result::Err(
                             #schema::TypedFactSetError::DuplicateFact {
@@ -425,9 +421,7 @@ fn expand_struct(
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as #schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        ) )*;
+                        #( || <#members as #schema::TypedPayload>::matches_fact(fact) )*;
                     if !declared {
                         return ::std::result::Result::Err(
                             #schema::TypedFactSetError::UnexpectedFact {

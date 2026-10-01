@@ -570,16 +570,16 @@ async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
 
     assert_eq!(
         input.payload_event_types,
-        vec![BuildOnlySeed::versioned_event_type()]
+        vec![BuildOnlySeed::event_type_name()]
     );
     assert_eq!(
         output.payload_event_types,
-        vec![BuildOnlyOut::versioned_event_type()]
+        vec![BuildOnlyOut::event_type_name()]
     );
 
     let serialized = serde_json::to_string(&*topology).expect("topology serializes");
-    assert!(serialized.contains("regression.amr.seed.v1"));
-    assert!(serialized.contains("regression.amr.out.v1"));
+    assert!(serialized.contains("regression.amr.seed"));
+    assert!(serialized.contains("regression.amr.out"));
     assert!(
         !serialized.contains(".v1.v1"),
         "boundary payload event types must already be canonical: {serialized}"

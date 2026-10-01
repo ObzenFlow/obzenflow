@@ -13,7 +13,7 @@ use obzenflow_core::event::observability::{
 };
 use obzenflow_core::event::payloads::execution_payload::ExecutionPayload;
 use obzenflow_core::event::schema::{StageOutputFacts, TypedFactSet, TypedPayload};
-use obzenflow_core::event::{ChainEventFactory, ChainPayload, StageFatalCode, StageFatalReason};
+use obzenflow_core::event::{ChainEventFactory, StageFatalCode, StageFatalReason};
 use obzenflow_core::{ChainEvent, WriterId};
 use std::sync::Arc;
 
@@ -145,10 +145,10 @@ where
         let mut events =
             Vec::with_capacity(facts.len() + usize::from(framework_execution.is_some()));
         if let Some(observability) = framework_execution {
-            events.push(ChainEventFactory::derived_event(
+            events.push(ChainEventFactory::derived_execution_event(
                 writer_id,
                 &event,
-                ChainPayload::Execution(observability),
+                observability,
                 self.lineage,
             ));
         }
@@ -234,7 +234,8 @@ mod tests {
         let transform_writer_id = WriterId::from(StageId::new());
         let parent = ChainEventFactory::data_event(
             upstream_writer_id,
-            Input::versioned_event_type(),
+            Input::event_type_name(),
+            Input::payload_schema_version(),
             serde_json::json!(Input { value: 7 }),
         );
         let mut adapter = TypedTransformHandlerAdapter::new(Classifier);
@@ -243,8 +244,8 @@ mod tests {
         let outputs = TransformHandler::process(&adapter, parent.clone()).expect("classifies");
 
         assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].event_type(), First::versioned_event_type());
-        assert_eq!(outputs[1].event_type(), Second::versioned_event_type());
+        assert_eq!(outputs[0].event_type(), First::event_type_name());
+        assert_eq!(outputs[1].event_type(), Second::event_type_name());
         assert_eq!(First::from_event(&outputs[0]), Some(First { value: 7 }));
         assert_eq!(Second::from_event(&outputs[1]), Some(Second { value: 8 }));
         assert!(outputs
@@ -259,7 +260,8 @@ mod tests {
     fn adapter_fails_closed_without_runtime_writer_identity() {
         let parent = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            Input::versioned_event_type(),
+            Input::event_type_name(),
+            Input::payload_schema_version(),
             serde_json::json!(Input { value: 7 }),
         );
         let adapter = TypedTransformHandlerAdapter::new(Classifier);

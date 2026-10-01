@@ -36,6 +36,11 @@ async fn child_acknowledgement_carries_causality_to_parent_publication() {
 }
 
 #[tokio::test]
+async fn constructed_pipeline_keeps_startup_mode_when_bootstrap_changes() {
+    pipeline::constructed_pipeline_keeps_startup_mode_when_bootstrap_changes(journals).await;
+}
+
+#[tokio::test]
 async fn startup_waits_for_achieved_transitions_with_zero_child_journal_reads() {
     pipeline::startup_waits_for_achieved_transitions_with_zero_child_journal_reads(journals).await;
 }

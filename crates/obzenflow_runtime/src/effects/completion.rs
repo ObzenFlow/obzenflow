@@ -4,7 +4,7 @@
 
 //! Typed evidence returned by a completed effectful stage invocation.
 
-use obzenflow_core::{EventType, StageFactSet};
+use obzenflow_core::{EventDescriptor, StageFactSet};
 use std::marker::PhantomData;
 
 /// Evidence that one effectful handler invocation completed after authoring
@@ -17,12 +17,15 @@ use std::marker::PhantomData;
 #[derive(Debug)]
 pub struct StageCompletion<Output: StageFactSet> {
     committed_fact_count: usize,
-    committed_fact_types: Vec<EventType>,
+    committed_fact_types: Vec<EventDescriptor>,
     _output: PhantomData<fn() -> Output>,
 }
 
 impl<Output: StageFactSet> StageCompletion<Output> {
-    pub(super) fn new(committed_fact_count: usize, committed_fact_types: Vec<EventType>) -> Self {
+    pub(super) fn new(
+        committed_fact_count: usize,
+        committed_fact_types: Vec<EventDescriptor>,
+    ) -> Self {
         Self {
             committed_fact_count,
             committed_fact_types,
@@ -36,9 +39,9 @@ impl<Output: StageFactSet> StageCompletion<Output> {
         self.committed_fact_count
     }
 
-    /// User fact types in durable commit order, including repeated types.
+    /// Exact user fact descriptors in durable commit order, including repetitions.
     #[must_use]
-    pub fn committed_fact_types(&self) -> &[EventType] {
+    pub fn committed_fact_types(&self) -> &[EventDescriptor] {
         &self.committed_fact_types
     }
 }

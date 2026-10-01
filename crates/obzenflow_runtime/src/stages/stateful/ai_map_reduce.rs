@@ -401,7 +401,7 @@ impl<Partial, Seed, Collected> SeededCollectByInput<Partial, Seed, Collected> {
             })?;
         Self::ensure_fact_bound(&canonical)?;
 
-        if AiMapReducePlanningManifest::event_type_matches(event_type) {
+        if AiMapReducePlanningManifest::matches_event_type(event_type) {
             let manifest =
                 AiMapReducePlanningManifest::try_from_event(&event).map_err(|error| {
                     Self::protocol_fatal(format!(
@@ -457,7 +457,7 @@ impl<Partial, Seed, Collected> SeededCollectByInput<Partial, Seed, Collected> {
         }
 
         let (job_key, chunk_index, chunk_count, disposition) =
-            if AiMapReduceTaggedPartial::<serde_json::Value>::event_type_matches(event_type) {
+            if AiMapReduceTaggedPartial::<serde_json::Value>::matches_event_type(event_type) {
                 let tagged = AiMapReduceTaggedPartial::<serde_json::Value>::try_from_event(&event)
                     .map_err(|error| {
                         Self::protocol_fatal(format!(
@@ -470,7 +470,7 @@ impl<Partial, Seed, Collected> SeededCollectByInput<Partial, Seed, Collected> {
                     tagged.chunk_count,
                     StoredDispositionKind::Success(tagged.partial),
                 )
-            } else if AiMapReduceChunkFailed::event_type_matches(event_type) {
+            } else if AiMapReduceChunkFailed::matches_event_type(event_type) {
                 let failed = AiMapReduceChunkFailed::try_from_event(&event).map_err(|error| {
                     Self::protocol_fatal(format!(
                         "ai_map_reduce chunk failure decode failed: {error}"
@@ -894,7 +894,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].event_type(),
-            AiMapReduceReduceInput::<TestSeed, TestCollected>::versioned_event_type()
+            AiMapReduceReduceInput::<TestSeed, TestCollected>::event_type_name()
         );
 
         let decoded = AiMapReduceReduceInput::<TestSeed, TestCollected>::try_from_event(&out[0])

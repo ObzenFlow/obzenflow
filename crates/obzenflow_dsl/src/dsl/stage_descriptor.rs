@@ -1689,7 +1689,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     /// (FLOWIP-120c H7).
     effect_policies: Vec<EffectPolicyAttachment>,
     direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan,
-    pass_through_event_type: Option<obzenflow_core::EventType>,
+    pass_through_descriptor: Option<obzenflow_core::EventDescriptor>,
     generated_surface: Option<&'static str>,
     generated_owner_kind: &'static str,
     backpressure: Option<BackpressureClause>,
@@ -1715,7 +1715,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
             effect_policies,
             direct_fact_plan: obzenflow_runtime::stages::resources_builder::DirectFactPlan::default(
             ),
-            pass_through_event_type: None,
+            pass_through_descriptor: None,
             generated_surface: None,
             generated_owner_kind: "role",
             backpressure,
@@ -1773,9 +1773,7 @@ impl<H: EffectfulTransformHandler + 'static> EffectfulTransformDescriptor<H> {
     {
         let mut descriptor =
             Self::generated::<Input>(name, handler, effects, effect_policies, direct_bound);
-        descriptor.pass_through_event_type = Some(obzenflow_core::EventType::from(
-            PassThrough::versioned_event_type(),
-        ));
+        descriptor.pass_through_descriptor = Some(PassThrough::descriptor());
         descriptor
     }
 }
@@ -2016,8 +2014,8 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         let mut effectful_handler =
             EffectfulTransformHandlerAdapter::new(self.handler, effect_boundary);
-        if let Some(event_type) = self.pass_through_event_type {
-            effectful_handler = effectful_handler.with_exact_pass_through_event_type(event_type);
+        if let Some(descriptor) = self.pass_through_descriptor {
+            effectful_handler = effectful_handler.with_exact_pass_through_descriptor(descriptor);
         }
 
         let handle = TransformBuilder::new(effectful_handler, transform_config, resources)

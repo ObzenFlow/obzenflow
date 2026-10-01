@@ -276,8 +276,8 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
         "the stream contract and EOF each have one before-input signal callback"
     );
     for (side, event_type) in [
-        (JoinSide::Reference, Reference::versioned_event_type()),
-        (JoinSide::Stream, StreamInput::versioned_event_type()),
+        (JoinSide::Reference, Reference::event_type_name()),
+        (JoinSide::Stream, StreamInput::event_type_name()),
     ] {
         assert!(observations.contains(&Occurrence::Delivery {
             phase: Phase::Before,
@@ -298,7 +298,7 @@ async fn join_observer_distinguishes_deliveries_from_signals_without_synthetic_p
     assert!(observations.contains(&Occurrence::Delivery {
         phase: Phase::After,
         side: JoinSide::Stream,
-        event_type: StreamInput::versioned_event_type(),
+        event_type: StreamInput::event_type_name(),
         output_count: Some(1),
     }));
     assert!(observations.contains(&Occurrence::Signal {

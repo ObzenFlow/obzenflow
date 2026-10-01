@@ -47,7 +47,7 @@ impl DirectFactPlan {
     #[doc(hidden)]
     pub fn generated<T: obzenflow_core::TypedPayload>(bound: NonZeroU64) -> Self {
         let mut eligible_inputs = BTreeMap::new();
-        eligible_inputs.insert(EventType::from(T::versioned_event_type()), bound);
+        eligible_inputs.insert(EventType::from(T::event_type_name()), bound);
         Self { eligible_inputs }
     }
 
@@ -277,14 +277,14 @@ fn selected_feeds_by_upstream(
 ) -> HashMap<StageId, Vec<SelectedFeedMetadata>> {
     let mut selected: HashMap<StageId, Vec<SelectedFeedMetadata>> = HashMap::new();
     for feed in input_feeds {
-        let Some(event_type) = feed.selected_payload.event_type.clone() else {
+        let Some(descriptor) = feed.selected_payload.descriptor() else {
             continue;
         };
         selected
             .entry(feed.key.upstream_stage)
             .or_default()
             .push(SelectedFeedMetadata::new(
-                EventType::from(event_type),
+                descriptor,
                 SelectedFeedRole::from(feed.key.role),
             ));
     }

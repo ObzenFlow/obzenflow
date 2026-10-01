@@ -403,6 +403,175 @@ fn watchdog_expiry_is_incomplete_even_when_the_child_handles_termination_with_su
 }
 
 #[test]
+fn dependency_preparation_preserves_failures_without_suppressing_independent_execution() {
+    for (name, lanes, preparation_required, preparation_succeeds) in [
+        (
+            "failed-preparation",
+            vec![
+                Lane::Default,
+                Lane::ProductionFeatures,
+                Lane::TestSupport,
+                Lane::JournalFixtures,
+            ],
+            true,
+            false,
+        ),
+        (
+            "failed-preparation-and-lane",
+            vec![Lane::Default, Lane::JournalFixtures],
+            true,
+            false,
+        ),
+        (
+            "successful-preparation",
+            vec![
+                Lane::Default,
+                Lane::ProductionFeatures,
+                Lane::TestSupport,
+                Lane::JournalFixtures,
+            ],
+            true,
+            true,
+        ),
+        ("journal-only", vec![Lane::JournalFixtures], false, false),
+        ("doctest-only", vec![Lane::Doctest], false, false),
+    ] {
+        let known_failure = name == "failed-preparation-and-lane";
+        let fixture = fixture();
+        let root = fixture.path().canonicalize().unwrap();
+        let policy = Policy::read(&root).unwrap();
+        let arguments: Vec<String> = lanes
+            .iter()
+            .flat_map(|lane| ["--lane".into(), lane.name().into()])
+            .collect();
+        let preparation_calls = std::cell::Cell::new(0);
+        let mut executed = Vec::new();
+        let summary_path = root.join("target/summary.md");
+        let result = run_native_with_preparation(
+            &root,
+            Options::parse(&arguments).unwrap(),
+            policy,
+            Some(&summary_path),
+            |root, policy, lane, _, output, _| {
+                assert_eq!(
+                    preparation_calls.get(),
+                    usize::from(preparation_required),
+                    "{name}: preparation must precede execution and run only once"
+                );
+                executed.push(lane);
+                // Exercise the existing result consumer after a real child
+                // completes. Dependency failure cannot suppress this evidence.
+                fs::write(
+                    output.join("junit.xml"),
+                    if known_failure && lane == Lane::Default {
+                        EARLY_FAILURE
+                    } else {
+                        PASS
+                    },
+                )?;
+                let status = process::execute(
+                    &mut process::command(root, policy, "true"),
+                    output,
+                    "completed-independent-work",
+                    Duration::from_secs(5),
+                )?;
+                evaluate_nextest(
+                    output,
+                    &BTreeSet::from([plan::TestId {
+                        binary: "fixture".into(),
+                        test: "work_completed".into(),
+                    }]),
+                    status.success(),
+                )
+            },
+            |_, _, _| {
+                assert!(preparation_required, "{name}: preparation is unrequested");
+                preparation_calls.set(preparation_calls.get() + 1);
+                if preparation_succeeds {
+                    Ok(())
+                } else {
+                    Err(error("locked dependency unavailable during preparation"))
+                }
+            },
+        );
+        let preparation_failed = preparation_required && !preparation_succeeds;
+        assert_eq!(result.is_err(), preparation_failed, "{name}: {result:?}");
+        assert_eq!(executed, lanes, "{name}");
+        assert_eq!(
+            preparation_calls.get(),
+            usize::from(preparation_required),
+            "{name}"
+        );
+        let run = fs::read_dir(root.join("target/test-runs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        let report: Value =
+            serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
+        assert_eq!(report["version"], 4, "{name}");
+        assert_eq!(
+            report["outcome"]["status"],
+            if preparation_failed {
+                "incomplete"
+            } else {
+                "passed"
+            },
+            "{name}: {report}"
+        );
+        for lane in report["lanes"].as_array().unwrap() {
+            assert_eq!(
+                lane["outcome"]["status"],
+                if known_failure && lane["lane"] == "default" {
+                    "failed"
+                } else {
+                    "passed"
+                },
+                "{name}: {report}"
+            );
+        }
+        let summary = fs::read_to_string(summary_path).unwrap();
+        if known_failure {
+            assert!(report["lanes"][0]["outcome"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("work_completed"));
+            assert!(summary.contains("| default | Failed("));
+            assert!(summary.contains("work_completed"));
+            assert!(summary.contains("| journal-fixtures | Passed |"));
+        }
+        if preparation_required {
+            assert_eq!(
+                report["dependency_preparation"]["status"],
+                if preparation_failed {
+                    "incomplete"
+                } else {
+                    "passed"
+                },
+                "{name}: {report}"
+            );
+            assert!(summary.contains(if preparation_failed {
+                "Dependency preparation: Incomplete"
+            } else {
+                "Dependency preparation: Passed"
+            }));
+            if preparation_failed {
+                assert!(report["dependency_preparation"]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("locked dependency unavailable"));
+                assert!(summary.contains("locked dependency unavailable"));
+            }
+        } else {
+            assert!(
+                report["dependency_preparation"].is_null(),
+                "{name}: {report}"
+            );
+        }
+    }
+}
+
+#[test]
 fn default_and_explicit_performance_report_only_their_requested_scope() {
     for (arguments, scope, expected) in [
         (vec![], "correctness", Lane::correctness()),
@@ -447,7 +616,7 @@ fn default_and_explicit_performance_report_only_their_requested_scope() {
             .unwrap();
         let report: Value =
             serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
-        assert_eq!(report["version"], 3);
+        assert_eq!(report["version"], 4);
         assert_eq!(report["requested_scope"], scope);
         let unrequested: Vec<Lane> =
             serde_json::from_value(report["not_requested"].clone()).unwrap();

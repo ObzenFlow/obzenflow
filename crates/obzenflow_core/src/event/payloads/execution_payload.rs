@@ -16,7 +16,6 @@ use crate::ai::{ChunkExclusionReason, ChunkPlanningSummary, OversizePolicy};
 use crate::event::observability::{HttpPullState, WaitReason};
 use crate::event::provenance::ExecutionAccounting;
 use crate::event::status::processing_status::ErrorKind;
-use crate::event::types::EventType;
 use crate::event::types::{Count, DurationMs};
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::StageId;
@@ -48,7 +47,7 @@ pub enum ExecutionPayload {
         upstream: StageId,
         reader: StageId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        selected_event_type: Option<EventType>,
+        selected_event_type: Option<crate::EventDescriptor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feed_role: Option<SystemFeedRole>,
         pass: bool,
@@ -63,7 +62,7 @@ pub enum ExecutionPayload {
         upstream: StageId,
         reader: StageId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        selected_event_type: Option<EventType>,
+        selected_event_type: Option<crate::EventDescriptor>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feed_role: Option<SystemFeedRole>,
         contract_name: ContractName,
@@ -89,6 +88,9 @@ pub enum ExecutionPayload {
     JoinReferenceProgress {
         reference_inputs_since_last_report: u64,
     },
+    SinkAudit(super::delivery_payload::SinkAuditPayload),
+    StageFatalRecorded(super::stage_fatal_payload::StageFatalRecorded),
+    SinkOperationFailed(super::sink_operation_payload::SinkOperationFailed),
     EffectRecord(EffectRecord),
     EffectAttemptStarted(EffectAttemptStarted),
     EffectRecoveryAbandoned(EffectRecoveryAbandoned),
@@ -355,6 +357,13 @@ pub struct AiChunkingPlannedFact {
 }
 
 impl ExecutionPayload {
+    pub const fn payload_schema_version(&self) -> std::num::NonZeroU32 {
+        match self {
+            Self::SinkOperationFailed(_) => std::num::NonZeroU32::new(2).unwrap(),
+            _ => std::num::NonZeroU32::MIN,
+        }
+    }
+
     pub fn event_type(&self) -> &'static str {
         match self {
             Self::ReplayLifecycle(_) => "execution.replay.lifecycle",
@@ -393,9 +402,10 @@ impl ExecutionPayload {
             Self::AiChunkingPlanned(_) => "ai.chunking.planned",
             Self::AccumulatorProgress { .. } => "stateful.accumulation_progress",
             Self::JoinReferenceProgress { .. } => "join.reference_progress",
-            Self::EffectRecord(record) => {
-                super::effect_payload::framework_effect_event_type(&record.descriptor.effect_type)
-            }
+            Self::SinkAudit(audit) => audit.event_type(),
+            Self::StageFatalRecorded(_) => "obzenflow.stage_fatal_recorded",
+            Self::SinkOperationFailed(_) => "obzenflow.sink_operation_failed",
+            Self::EffectRecord(record) => record.event_type(),
             Self::EffectAttemptStarted(_) => {
                 super::effect_payload::EFFECT_ATTEMPT_STARTED_EVENT_TYPE
             }
@@ -409,10 +419,13 @@ impl ExecutionPayload {
     /// facts came from transport-excluded lifecycle records and remain uncharged.
     pub const fn consumes_data_credit(&self) -> bool {
         match self {
-            Self::EffectRecord(_)
+            Self::StageFatalRecorded(_)
+            | Self::SinkOperationFailed(_)
+            | Self::EffectRecord(_)
             | Self::EffectAttemptStarted(_)
             | Self::EffectRecoveryAbandoned(_) => true,
-            Self::ReplayLifecycle(_)
+            Self::SinkAudit(_)
+            | Self::ReplayLifecycle(_)
             | Self::SupervisorRegistered { .. }
             | Self::SupervisorCommandDiscarded { .. }
             | Self::SourceCleanupFailed { .. }
@@ -499,12 +512,16 @@ mod tests {
     }
     #[test]
     fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
-        use crate::event::types::{EventType, SeqNo};
+        use crate::event::types::SeqNo;
         use serde_json::json;
         let payload = ExecutionPayload::ContractResult {
             upstream: StageId::new(),
             reader: StageId::new(),
-            selected_event_type: Some(EventType::from("test.selected.v1")),
+            selected_event_type: Some(crate::EventDescriptor {
+                event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
+                event_type: "test.selected".into(),
+                payload_schema_version: std::num::NonZeroU32::MIN,
+            }),
             feed_role: Some(SystemFeedRole::Reference),
             contract_name: ContractName::from("TransportContract"),
             status: ContractResultStatusLabel::Healthy,
@@ -514,7 +531,10 @@ mod tests {
         };
 
         let serialized = serde_json::to_value(&payload).expect("execution fact should serialize");
-        assert_eq!(serialized["selected_event_type"], "test.selected.v1");
+        assert_eq!(
+            serialized["selected_event_type"],
+            json!({"event_kind":"fact", "event_type":"test.selected", "payload_schema_version":1})
+        );
         assert_eq!(serialized["feed_role"], "reference");
         assert_eq!(serialized["contract_name"], "TransportContract");
         assert_eq!(serialized["status"], "healthy");
@@ -523,7 +543,7 @@ mod tests {
             "execution_type": "contract_result",
             "upstream": serialized["upstream"].clone(),
             "reader": serialized["reader"].clone(),
-            "selected_event_type": "test.selected.v1",
+            "selected_event_type": serialized["selected_event_type"].clone(),
             "feed_role": "reference",
             "contract_name": "TransportContract",
             "status": "healthy",
@@ -542,7 +562,11 @@ mod tests {
             } => {
                 assert_eq!(
                     selected_event_type,
-                    Some(EventType::from("test.selected.v1"))
+                    Some(crate::EventDescriptor {
+                        event_kind: crate::event::payloads::chain_payload::EventKind::Fact,
+                        event_type: "test.selected".into(),
+                        payload_schema_version: std::num::NonZeroU32::MIN
+                    })
                 );
                 assert_eq!(feed_role, Some(SystemFeedRole::Reference));
                 assert_eq!(contract_name.as_str(), "TransportContract");

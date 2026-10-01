@@ -631,9 +631,9 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
         (
             "joined",
             if matches!(placement, Placement::Before) {
-                Seed::versioned_event_type()
+                Seed::descriptor()
             } else {
-                Row::versioned_event_type()
+                Row::descriptor()
             },
             if matches!(placement, Placement::Before) {
                 4
@@ -641,7 +641,7 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
                 3
             },
         ),
-        ("digest__finalize", Row::versioned_event_type(), 3),
+        ("digest__finalize", Row::descriptor(), 3),
     ] {
         let writer = WriterId::from(manifest.stages[stage].stage_id.parse::<StageId>().unwrap());
         let records = stage_records(run, stage).await;
@@ -663,15 +663,9 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
             .collect();
         assert_eq!(eofs.len(), 1);
         assert_eq!(*eofs[0].0, EofKind::Natural);
-        assert_eq!(eofs[0].1[&obzenflow_core::EventType::from(kind)].0, count);
+        assert_eq!(eofs[0].1[&kind].0, count);
         if stage == "digest__finalize" {
-            assert_eq!(
-                eofs[0].1[&obzenflow_core::EventType::from(
-                    AiMapReduceFinaliseFailed::versioned_event_type()
-                )]
-                    .0,
-                1
-            );
+            assert_eq!(eofs[0].1[&AiMapReduceFinaliseFailed::descriptor()].0, 1);
         }
     }
 
@@ -731,26 +725,26 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
         match placement {
             Placement::Before => (
                 "scales",
-                Scale::versioned_event_type(),
+                Scale::descriptor(),
                 3,
                 "seeds",
-                Seed::versioned_event_type(),
+                Seed::descriptor(),
                 4,
             ),
             Placement::Stream => (
                 "scales",
-                Scale::versioned_event_type(),
+                Scale::descriptor(),
                 3,
                 "digest__finalize",
-                Row::versioned_event_type(),
+                Row::descriptor(),
                 3,
             ),
             Placement::Catalog => (
                 "digest__finalize",
-                Row::versioned_event_type(),
+                Row::descriptor(),
                 3,
                 "queries",
-                Row::versioned_event_type(),
+                Row::descriptor(),
                 4,
             ),
         };
@@ -767,7 +761,7 @@ async fn assert_journals(run: &Path, placement: Placement) -> Vec<Row> {
         assert!(
             join_feeds.contains(&(
                 manifest.stages[stage].stage_id.parse().unwrap(),
-                kind.into(),
+                kind,
                 role,
                 count
             )),

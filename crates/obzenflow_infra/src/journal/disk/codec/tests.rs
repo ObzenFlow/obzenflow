@@ -13,6 +13,7 @@ fn record() -> JournalRecord<ChainPayload> {
     let mut event = ChainEventFactory::data_event(
         WriterId::from(StageId::new()),
         "application.value",
+        std::num::NonZeroU32::MIN,
         json!({
             "zero": -0.0, "integer": u64::MAX, "tiny": f64::MIN_POSITIVE,
             "nested": {"envelope": {"provenance": [null, true, "🙂\n\u{0}"]}},
@@ -241,7 +242,7 @@ fn optional_custom_json_preserves_missing_null_and_empty_through_disk_and_jsonl(
                 .unwrap()
                 .metadata = metadata.clone();
             if let ChainPayload::Delivery(delivery) = &mut record.payload {
-                delivery.middleware_context = metadata.clone();
+                delivery.outcome.middleware_context = metadata.clone();
             }
             let original = serde_json::to_vec(&serde_json::to_value(&record).unwrap()).unwrap();
             let (offset, bytes) = persist(&path, &record, store.clone());

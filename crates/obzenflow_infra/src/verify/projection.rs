@@ -78,6 +78,7 @@ pub enum RowKind {
     Payload {
         event_kind: EventKind,
         event_type: String,
+        payload_schema_version: std::num::NonZeroU32,
     },
     Watermark,
 }
@@ -117,6 +118,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                 kind: RowKind::Payload {
                     event_kind: payload.kind(),
                     event_type: event.event_type().to_owned(),
+                    payload_schema_version: event.payload_schema_version,
                 },
                 payload: comparable_data_payload(
                     matches!(payload, ChainPayload::CompositeData(_)),
@@ -141,7 +143,7 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
         }) => {
             let evidence = json!({
                 "kind": serde_json::to_value(kind).unwrap_or(Value::Null),
-                "counts": serde_json::to_value(writer_seq_by_event_type)
+                "counts": serde_json::to_value(writer_seq_by_event_type.iter().collect::<Vec<_>>())
                     .unwrap_or(Value::Null),
             });
             Some(ProjectedRow::EofEvidence(evidence))
@@ -214,7 +216,12 @@ mod tests {
 
     #[test]
     fn data_rows_project_positionally_with_type_and_payload() {
-        let event = ChainEventFactory::data_event(writer(), "order.placed", json!({"id": 7}));
+        let event = ChainEventFactory::data_event(
+            writer(),
+            "order.placed",
+            std::num::NonZeroU32::MIN,
+            json!({"id": 7}),
+        );
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
             panic!("data row must project positionally");
         };
@@ -222,7 +229,8 @@ mod tests {
             row.kind,
             RowKind::Payload {
                 event_kind: EventKind::Fact,
-                event_type: "order.placed".to_string()
+                event_type: "order.placed".to_string(),
+                payload_schema_version: std::num::NonZeroU32::MIN
             }
         );
         assert_eq!(row.payload, json!({"id": 7}));
@@ -258,7 +266,8 @@ mod tests {
     fn user_payload_job_keys_remain_comparable_domain_content() {
         let event = ChainEventFactory::data_event(
             writer(),
-            "orders.batch.v1",
+            "orders.batch",
+            std::num::NonZeroU32::MIN,
             json!({"job_key": "customer-visible-key"}),
         );
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
@@ -269,8 +278,13 @@ mod tests {
 
     #[test]
     fn error_status_projects_semantic_reason_only() {
-        let event = ChainEventFactory::data_event(writer(), "order.placed", json!({}))
-            .mark_as_validation_error("bad order");
+        let event = ChainEventFactory::data_event(
+            writer(),
+            "order.placed",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        )
+        .mark_as_validation_error("bad order");
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
             panic!("error data row must project positionally");
         };
@@ -292,8 +306,13 @@ mod tests {
             origin: None,
             attempt: None,
         };
-        let event = ChainEventFactory::data_event(writer(), "payment.authorized", json!({}))
-            .with_effect_provenance(provenance);
+        let event = ChainEventFactory::data_event(
+            writer(),
+            "payment.authorized",
+            std::num::NonZeroU32::MIN,
+            json!({}),
+        )
+        .with_effect_provenance(provenance);
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
             panic!("effect row must project positionally");
         };
@@ -335,7 +354,12 @@ mod tests {
 
     #[test]
     fn replay_context_does_not_change_the_projection() {
-        let live = ChainEventFactory::data_event(writer(), "order.placed", json!({"id": 1}));
+        let live = ChainEventFactory::data_event(
+            writer(),
+            "order.placed",
+            std::num::NonZeroU32::MIN,
+            json!({"id": 1}),
+        );
         let mut replayed = live.clone();
         replayed.replay_context = Some(ReplayContext {
             original_event_id: live.id,

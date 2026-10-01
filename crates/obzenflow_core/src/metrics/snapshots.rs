@@ -16,7 +16,6 @@ use crate::event::payloads::system_payload::{
     ContractName, ContractResultStatusLabel, SystemFeedRole,
 };
 use crate::event::status::processing_status::ErrorKind;
-use crate::event::types::EventType;
 use crate::event::SinkOperationPhase;
 use crate::id::{FlowId, StageId};
 use crate::ingress::IngressKey;
@@ -280,7 +279,7 @@ pub struct ContractMetricEdgeKey {
     pub downstream: StageId,
     pub contract: ContractName,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_event_type: Option<EventType>,
+    pub selected_event_type: Option<crate::EventDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_role: Option<SystemFeedRole>,
 }

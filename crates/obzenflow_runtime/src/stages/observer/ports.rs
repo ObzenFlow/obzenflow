@@ -560,6 +560,7 @@ mod tests {
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "test.input",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({}),
         );
         let position = StageInputPosition(7);

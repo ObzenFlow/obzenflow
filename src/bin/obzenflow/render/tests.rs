@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::context::writer_id;
+use super::context::{event_type, writer_id};
 use super::payload::{abbreviated, compact};
 use super::*;
 use obzenflow::journal::ProcessingStatus;
@@ -34,15 +34,10 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
             "thermometer",
             "FiniteSource",
             "source_fact",
-            "sensor.reading.v1",
+            "sensor.reading",
         )
     } else {
-        (
-            "classify",
-            "Transform",
-            "stage_output",
-            "sensor.classified.v1",
-        )
+        ("classify", "Transform", "stage_output", "sensor.classified")
     };
     serde_json::from_value(json!({
         "version": 3,
@@ -54,7 +49,7 @@ fn fact(stage: u64, event: u64, parents: &[u64], payload: Value) -> RunRecord {
             "envelope": {"provenance": {
                 "event": {
                     "id":id(event), "writer_id":{"type":"Stage", "id":id(stage)},
-                    "event_kind":"fact", "event_type":event_type,
+                    "event_kind":"fact", "event_type":event_type, "payload_schema_version":1,
                     "causality":{"parent_ids":parents.iter().map(|p| id(*p)).collect::<Vec<_>>()},
                     "flow_context":{"flow_name":"sensors", "flow_id":id(10), "stage_name":key, "stage_id":id(stage), "stage_type":stage_type},
                     "processing":{"event_time":0, "status":"Success"}, "composite_activations":[]
@@ -105,11 +100,33 @@ fn event_counts_keep_physical_journals_separate_for_the_same_event_type() {
             .find(|counts| counts.journal.id == record.journal.id)
             .unwrap();
         assert_eq!(
-            journal.event_types[&("sensor.reading.v1".into(), writer_id(record))],
+            journal.event_types[&("fact/sensor.reading@1".into(), writer_id(record))],
             expected
         );
         assert_eq!(journal.omitted, 0);
     }
+}
+
+#[test]
+fn event_counts_distinguish_payload_versions_with_identical_names_and_bodies() {
+    let first = fact(1, 100, &[], json!({"value": 1}));
+    let mut second = first.clone();
+    let RunRecordData::Chain(row) = &mut second.record else {
+        unreachable!()
+    };
+    row.envelope.provenance.event.payload_schema_version = std::num::NonZeroU32::new(2).unwrap();
+    let mut counts = event_counts::EventCounts::default();
+    counts.record(&first);
+    counts.record(&second);
+    let journal = counts.journals().next().unwrap();
+    assert_eq!(
+        journal.event_types[&("fact/sensor.reading@1".into(), writer_id(&first))],
+        1
+    );
+    assert_eq!(
+        journal.event_types[&("fact/sensor.reading@2".into(), writer_id(&second))],
+        1
+    );
 }
 
 #[test]
@@ -210,9 +227,7 @@ fn journal_summary_groups_data_and_errors_by_owner_not_forwarded_author() {
             assert_eq!(
                 transform_group
                     .lines()
-                    .filter(
-                        |line| line.contains("sensor.reading.v1") && line.contains("thermometer")
-                    )
+                    .filter(|line| line.contains("sensor.reading") && line.contains("thermometer"))
                     .count(),
                 2
             );
@@ -595,8 +610,203 @@ fn execution(event: u64, parents: &[u64], payload: ExecutionPayload) -> RunRecor
         row.envelope.provenance.event.event_kind = row.payload.kind();
         row.envelope.provenance.event.event_type =
             row.payload.framework_event_type().unwrap().into();
+        row.envelope.provenance.event.payload_schema_version =
+            row.payload.framework_schema_version().unwrap();
     }
     record
+}
+
+#[test]
+fn all_six_effect_occurrences_retain_their_names_and_evidence_in_human_and_jsonl() {
+    use obzenflow_core::event::payloads::effect_payload::{
+        EffectCursor, EffectDescriptor, EffectObservation, EffectOutcomePayload, EffectPortReturn,
+        EffectRecord, EffectUnresolvedReason, ExternalCompletion, RetryDisposition,
+    };
+    let cases = [
+        (
+            EffectObservation::ExecutionRejected {},
+            "effect.execution_rejected",
+            false,
+        ),
+        (
+            EffectObservation::returned_failure(),
+            "effect.execution_failed",
+            false,
+        ),
+        (
+            EffectObservation::OutcomePreparationFailed {},
+            "effect.outcome_preparation_failed",
+            false,
+        ),
+        (
+            EffectObservation::ExecutionUnresolved {
+                reason: EffectUnresolvedReason::MissingTransactionalSettlement {
+                    port_return: EffectPortReturn::Succeeded,
+                },
+                external_completion: ExternalCompletion::Unknown,
+            },
+            "effect.execution_unresolved",
+            false,
+        ),
+        (
+            EffectObservation::returned_success(),
+            "effect.execution_succeeded",
+            true,
+        ),
+        (
+            EffectObservation::ValueCaptured {},
+            "effect.value_captured",
+            true,
+        ),
+    ];
+    for (observation, name, success) in cases {
+        let captured = matches!(observation, EffectObservation::ValueCaptured {});
+        let body = EffectRecord {
+            observation: observation.clone(),
+            cursor: EffectCursor::new("flow", "classify", 1, 0),
+            descriptor_hash: "fixture".into(),
+            descriptor: EffectDescriptor::new(
+                if captured {
+                    "obzenflow.capture"
+                } else {
+                    "sensor.calibrate"
+                },
+                "calibrate",
+                1,
+                "1",
+                "input",
+            ),
+            outcome: if success {
+                EffectOutcomePayload::Succeeded { output: json!(7) }
+            } else {
+                EffectOutcomePayload::Failed {
+                    error_type: "arbitrary_dependency_code".into(),
+                    error_message: "diagnostic only".into(),
+                    retry: RetryDisposition::NotRetryable,
+                    cause: None,
+                    detail: None,
+                }
+            },
+            origin: None,
+        };
+        body.validate().unwrap();
+        let record = execution(100, &[], ExecutionPayload::EffectRecord(body));
+        for jsonl in [false, true] {
+            let view = ViewArgs {
+                jsonl,
+                ..ViewArgs::default()
+            };
+            let mut renderer = Renderer::new(&view, false, false, [&record.journal].into_iter());
+            let mut output = Vec::new();
+            renderer.record(&mut output, record.clone()).unwrap();
+            renderer.flush_pending(&mut output).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(name), "{output}");
+            if jsonl {
+                let row: RunRecord = serde_json::from_str(output.trim()).unwrap();
+                let RunRecordData::Chain(row) = row.record else {
+                    panic!("chain row")
+                };
+                let ChainPayload::Execution(ExecutionPayload::EffectRecord(body)) = &row.payload
+                else {
+                    panic!("effect row")
+                };
+                assert_eq!(body.observation, observation);
+            } else {
+                assert!(output.contains("payload schema version: 1"));
+                assert!(output.contains("\"observation\""), "{output}");
+            }
+        }
+    }
+}
+
+#[test]
+fn primary_execution_failures_remain_visible_in_default_human_and_jsonl_views() {
+    use obzenflow_core::event::{
+        SinkOperationFailed, SinkOperationPhase, StageFatalCode, StageFatalReason,
+        StageFatalRecorded, StageFatalSeverity,
+    };
+    let records = [
+        execution(
+            100,
+            &[],
+            ExecutionPayload::StageFatalRecorded(StageFatalRecorded {
+                severity: StageFatalSeverity::Primary,
+                stage_id: id(2).parse().unwrap(),
+                stage_key: "classify".into(),
+                causal_event_id: None,
+                input_position: None,
+                primary_cause_event_id: None,
+                code: StageFatalCode::Journal,
+                reason: StageFatalReason::JournalFailure,
+                detail: "journal append failed".into(),
+            }),
+        ),
+        execution(
+            101,
+            &[],
+            ExecutionPayload::SinkOperationFailed(SinkOperationFailed {
+                stage_id: id(2).parse().unwrap(),
+                stage_key: "classify".into(),
+                logical_destination: "console".into(),
+                causal_event_id: None,
+                input_position: None,
+                failed_delivery_event_id: None,
+                operation_subject_event_id: None,
+                phase: SinkOperationPhase::Flush,
+                kind: obzenflow_core::event::status::processing_status::ErrorKind::Remote,
+                destination_error_code: None,
+                detail: "stream flush failed".into(),
+            }),
+        ),
+    ];
+    for jsonl in [false, true] {
+        let view = ViewArgs {
+            jsonl,
+            ..ViewArgs::default()
+        };
+        let mut renderer = Renderer::new(
+            &view,
+            false,
+            false,
+            records.iter().map(|record| &record.journal),
+        );
+        let mut output = Vec::new();
+        for record in &records {
+            renderer.record(&mut output, record.clone()).unwrap();
+        }
+        renderer.flush_pending(&mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("obzenflow.stage_fatal_recorded"),
+            "{output}"
+        );
+        assert!(
+            output.contains("obzenflow.sink_operation_failed"),
+            "{output}"
+        );
+        if jsonl {
+            let rows: Vec<RunRecord> = output
+                .lines()
+                .map(|row| serde_json::from_str(row).unwrap())
+                .collect();
+            assert_eq!(rows.len(), 2);
+            for (row, version) in rows.iter().zip([1, 2]) {
+                let RunRecordData::Chain(record) = &row.record else {
+                    panic!("chain row")
+                };
+                assert_eq!(
+                    record
+                        .envelope
+                        .provenance
+                        .event
+                        .payload_schema_version
+                        .get(),
+                    version
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -656,8 +866,8 @@ fn human_and_jsonl_select_the_same_records() {
                 assert_eq!(positions, expected);
             } else {
                 assert_eq!(output.contains("RUNTIME"), include_runtime);
-                assert!(output.contains("sensor.reading.v1 ←"));
-                assert!(output.contains("sensor.classified.v1 ←"));
+                assert!(output.contains("sensor.reading ←"));
+                assert!(output.contains("sensor.classified ←"));
             }
         }
     }
@@ -688,13 +898,13 @@ fn hidden_runtime_records_preserve_parent_resolution_and_separate_fact_groups() 
     let text = String::from_utf8(output).unwrap();
     assert!(!text.contains("RUNTIME") && !text.contains("inputs_since_last_report"));
     assert_eq!(
-        text.matches("TRANSFORM (stage: classify, journal: 2)\nsensor.classified.v1 ← ")
+        text.matches("TRANSFORM (stage: classify, journal: 2)\nsensor.classified ← ")
             .count(),
         3,
         "a hidden journal boundary must still separate facts: {text}"
     );
     assert!(!text.contains(&format!("\n{progress_type} ← ")));
-    assert!(text.contains(&format!("sensor.classified.v1 ← classify({progress_type})")));
+    assert!(text.contains(&format!("sensor.classified ← classify({progress_type})")));
     assert!(
         !text.contains(&displayed_clock(2, 102)),
         "the hidden input clock is not repeated"
@@ -717,6 +927,7 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
                 "effect_type":"sensor.calibrate","label":"calibrate","schema_version":1,
                 "stage_logic_version":"v1","canonical_input_hash":"fixture","binding":{"mode":"portless"}
             },
+            "observation":{"observation":"execution_failed","authority":"port_return","external_completion":"unknown"},
             "outcome":{"outcome":"failed","error_type":"timeout","error_message":"calibration unavailable","retry":"retryable"}
         })).unwrap()),
     );
@@ -744,13 +955,13 @@ fn default_keeps_failed_effect_evidence_while_verbose_runtime_stays_gray() {
         }
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
-        assert!(text.contains("\x1b[38;5;217mEFFECT (stage: \x1b[0m\x1b[1;38;5;231mclassify\x1b[0m\x1b[38;5;217m, journal: 2)\x1b[0m\n\x1b[1;38;5;224mobzenflow.effect_record.v1\x1b[0m\x1b[38;5;217m ← classify(sensor.reading.v1)\x1b[0m"));
+        assert!(text.contains("\x1b[38;5;217mEFFECT (stage: \x1b[0m\x1b[1;38;5;231mclassify\x1b[0m\x1b[38;5;217m, journal: 2)\x1b[0m\n\x1b[1;38;5;224meffect.execution_failed\x1b[0m\x1b[38;5;217m ← classify(sensor.reading)\x1b[0m"));
         assert!(
             text.contains("\"outcome\": \"failed\"")
                 && text.contains("\"effect_type\": \"sensor.calibrate\"")
         );
         assert!(text.contains("\"error_message\": \"calibration unavailable\""));
-        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mclassify\x1b[0m\x1b[1;38;5;208m, journal: 2)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m"));
+        assert!(text.contains("\x1b[1;38;5;208mEFFECTFUL TRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mclassify\x1b[0m\x1b[1;38;5;208m, journal: 2)\x1b[0m\n\x1b[1;38;5;215msensor.classified\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading)\x1b[0m"));
         assert_eq!(text.contains("RUNTIME"), verbose);
         if verbose {
             let runtime = text
@@ -791,7 +1002,7 @@ fn declared_effectful_stage_kinds_apply_before_any_effect_has_run() {
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
-            "\x1b[1;38;5;{color}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter_color}mclassify\x1b[0m\x1b[1;38;5;{color}m, journal: 2)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified.v1\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading.v1)\x1b[0m"
+            "\x1b[1;38;5;{color}m{heading} (stage: \x1b[0m\x1b[1;38;5;{reporter_color}mclassify\x1b[0m\x1b[1;38;5;{color}m, journal: 2)\x1b[0m\n\x1b[1;38;5;{output_color}msensor.classified\x1b[0m\x1b[1;38;5;{color}m ← classify(sensor.reading)\x1b[0m"
         )), "{text}");
         assert!(
             !text.contains("mEFFECT (stage:"),
@@ -862,21 +1073,20 @@ fn stage_capability_comes_from_the_manifest_regardless_of_effect_provenance() {
 #[test]
 fn ninety_columns_keeps_long_output_expressions_together_and_narrow_views_still_wrap() {
     let expression =
-        "payment.authorization_unavailable.v1 ← authorize_payment(payment.order_validated.v1)";
-    for width in [80, 90] {
+        "payment.authorization_unavailable ← authorize_payment(payment.order_validated)";
+    for width in [60, 90] {
         let mut renderer = renderer();
         renderer.width = width;
         let mut input = fact(1, 100, &[], json!({}));
         if let RunRecordData::Chain(row) = &mut input.record {
-            row.envelope.provenance.event.event_type = "payment.order_validated.v1".into();
+            row.envelope.provenance.event.event_type = "payment.order_validated".into();
         }
         let mut result = fact(2, 101, &[100], json!({"reason":"unavailable"}));
         let stage = result.journal.stage.as_mut().unwrap();
         stage.key = "authorize_payment".into();
         stage.is_effectful = true;
         if let RunRecordData::Chain(row) = &mut result.record {
-            row.envelope.provenance.event.event_type =
-                "payment.authorization_unavailable.v1".into();
+            row.envelope.provenance.event.event_type = "payment.authorization_unavailable".into();
         }
         let mut output = Vec::new();
         renderer.record(&mut output, input).unwrap();
@@ -963,7 +1173,7 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         json!({"sensor":"A", "reason":{"cooling":"requested"}}),
     );
     if let RunRecordData::Chain(row) = &mut second.record {
-        row.envelope.provenance.event.event_type = "sensor.cooling_requested.v1".into();
+        row.envelope.provenance.event.event_type = "sensor.cooling_requested".into();
     }
     renderer.record(&mut output, first).unwrap();
     renderer.record(&mut output, second).unwrap();
@@ -978,21 +1188,21 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     let text = String::from_utf8(output).unwrap();
     assert!(
         text.contains(&format!(
-            "SOURCE (stage: thermometer, journal: 1)\nsensor.reading.v1 ← thermometer()\n{}",
+            "SOURCE (stage: thermometer, journal: 1)\nsensor.reading ← thermometer()\n{}",
             displayed_clock(1, 100)
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "TRANSFORM (stage: classify, journal: 2)\nsensor.classified.v1 ← classify(sensor.reading.v1)\n{}",
+            "TRANSFORM (stage: classify, journal: 2)\nsensor.classified ← classify(sensor.reading)\n{}",
             displayed_clock(2, 101)
         )),
         "{text}"
     );
     assert!(
         text.contains(&format!(
-            "TRANSFORM (stage: classify, journal: 2)\nsensor.cooling_requested.v1 ← classify(sensor.reading.v1)\n{}",
+            "TRANSFORM (stage: classify, journal: 2)\nsensor.cooling_requested ← classify(sensor.reading)\n{}",
             displayed_clock(2, 102)
         )),
         "{text}"
@@ -1012,7 +1222,7 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
     );
     let last_clock = text.find(&displayed_clock(2, 102)).unwrap();
     let last_fact = text
-        .find("sensor.cooling_requested.v1 ← classify(sensor.reading.v1)")
+        .find("sensor.cooling_requested ← classify(sensor.reading)")
         .unwrap();
     assert!(
         last_fact < last_clock,
@@ -1024,11 +1234,8 @@ fn multiple_outputs_each_lead_with_their_own_type_clock_and_payload_after_late_p
         "each fact keeps its own payload, even when fields match: {text}"
     );
     for (event_type, reason) in [
-        ("sensor.classified.v1", json!("too_hot")),
-        (
-            "sensor.cooling_requested.v1",
-            json!({"cooling":"requested"}),
-        ),
+        ("sensor.classified", json!("too_hot")),
+        ("sensor.cooling_requested", json!({"cooling":"requested"})),
     ] {
         let block = text
             .split("\n\n")
@@ -1064,7 +1271,7 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
     renderer.flush_pending(&mut output).unwrap();
     let text = String::from_utf8(output).unwrap();
     assert_eq!(
-        text.matches("TRANSFORM (stage: classify, journal: 2)\nsensor.classified.v1 ← ")
+        text.matches("TRANSFORM (stage: classify, journal: 2)\nsensor.classified ← ")
             .count(),
         2,
         "{text}"
@@ -1080,9 +1287,9 @@ fn missing_parents_flush_without_inventing_input_types_or_grouping_unrelated_fac
         3,
         "matching values do not establish shared parents"
     );
-    assert!(!text.contains("classify(sensor.reading.v1)"));
+    assert!(!text.contains("classify(sensor.reading)"));
     assert_eq!(
-        text.matches("sensor.classified.v1 ← classify(recorded input (unresolved))")
+        text.matches("sensor.classified ← classify(recorded input (unresolved))")
             .count(),
         2,
         "unknown inputs never replace the known output heading"
@@ -1277,10 +1484,10 @@ fn reporting_journal_highlight_uses_identity_and_row_color_instead_of_counter_si
         )));
     }
     assert!(text.contains(
-        "\x1b[1;38;5;208mSOURCE (stage: \x1b[0m\x1b[1;38;5;223mthermometer\x1b[0m\x1b[1;38;5;208m, journal: 1)\x1b[0m\n\x1b[1;38;5;215msensor.reading.v1\x1b[0m\x1b[1;38;5;208m ← thermometer()\x1b[0m"
+        "\x1b[1;38;5;208mSOURCE (stage: \x1b[0m\x1b[1;38;5;223mthermometer\x1b[0m\x1b[1;38;5;208m, journal: 1)\x1b[0m\n\x1b[1;38;5;215msensor.reading\x1b[0m\x1b[1;38;5;208m ← thermometer()\x1b[0m"
     ));
     assert!(
-        text.contains("\x1b[1;38;5;208mTRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mclassify\x1b[0m\x1b[1;38;5;208m, journal: 2)\x1b[0m\n\x1b[1;38;5;215msensor.classified.v1\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading.v1)\x1b[0m")
+        text.contains("\x1b[1;38;5;208mTRANSFORM (stage: \x1b[0m\x1b[1;38;5;223mclassify\x1b[0m\x1b[1;38;5;208m, journal: 2)\x1b[0m\n\x1b[1;38;5;215msensor.classified\x1b[0m\x1b[1;38;5;208m ← classify(sensor.reading)\x1b[0m")
     );
     for line in text.lines().filter(|line| !line.contains('⟨')) {
         assert!(
@@ -1317,7 +1524,7 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         renderer.color = true;
         let mut catalog = fact(1, 99, &[], json!({"offset":2}));
         if let RunRecordData::Chain(row) = &mut catalog.record {
-            row.envelope.provenance.event.event_type = "sensor.calibration.v1".into();
+            row.envelope.provenance.event.event_type = "sensor.calibration".into();
         }
         let mut result = fact(2, 101, &[99, 100], json!({"celsius":40}));
         result.journal.stage.as_mut().unwrap().stage_type = stage_type;
@@ -1331,7 +1538,7 @@ fn stateful_and_catalog_join_outputs_keep_recorded_inputs_with_green_styling() {
         renderer.flush_pending(&mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains(&format!(
-            "\x1b[1;38;5;114m{heading} (stage: \x1b[0m\x1b[1;38;5;194mclassify\x1b[0m\x1b[1;38;5;114m, journal: 2)\x1b[0m\n\x1b[1;38;5;157msensor.classified.v1\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration.v1, sensor.reading.v1)\x1b[0m"
+            "\x1b[1;38;5;114m{heading} (stage: \x1b[0m\x1b[1;38;5;194mclassify\x1b[0m\x1b[1;38;5;114m, journal: 2)\x1b[0m\n\x1b[1;38;5;157msensor.classified\x1b[0m\x1b[1;38;5;114m ← classify(sensor.calibration, sensor.reading)\x1b[0m"
         )), "{text}");
         assert!(text.contains("\x1b[1;4;38;5;157m101\x1b[0m"));
         assert!(text.contains("  \"celsius\": 40"));

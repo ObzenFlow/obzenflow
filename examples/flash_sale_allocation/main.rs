@@ -52,7 +52,9 @@ mod tests {
     use obzenflow::journal::JournalOwner;
     use obzenflow::journal::ProcessingStatus;
     use obzenflow::journal::StageFatalRecorded;
-    use obzenflow::journal::{EffectOutcomePayload, EffectRecord, EFFECT_RECORD_EVENT_TYPE};
+    use obzenflow::journal::{
+        EffectOutcomePayload, EffectRecord, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+    };
     use obzenflow::schema::ChainEvent;
     use obzenflow::schema::{StageId, TypedPayload};
     use std::ffi::OsString;
@@ -107,7 +109,7 @@ mod tests {
     fn count<T: TypedPayload>(events: &[ChainEvent]) -> usize {
         events
             .iter()
-            .filter(|event| event.event_type() == T::versioned_event_type())
+            .filter(|event| event.event_type() == T::event_type_name())
             .count()
     }
 
@@ -224,7 +226,7 @@ mod tests {
 
         let policy_rejections = events
             .iter()
-            .filter(|event| event.event_type() == EFFECT_RECORD_EVENT_TYPE)
+            .filter(|event| event.event_type() == EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE)
             .map(|event| {
                 serde_json::from_value::<EffectRecord>(
                     event.payload.contract_body().expect("effect record body"),

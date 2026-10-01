@@ -286,8 +286,42 @@ impl<C: SinkConnector> SetSinkRedeliverySafety for C {
 
 #[cfg(test)]
 mod tests {
+    #[async_trait::async_trait]
+    trait TestDispatch {
+        async fn report_test(
+            &mut self,
+            event: obzenflow_core::ChainEvent,
+        ) -> Result<
+            crate::stages::common::handlers::SinkConsumeReport,
+            crate::stages::common::HandlerError,
+        >;
+    }
+    #[async_trait::async_trait]
+    impl<W: crate::stages::common::handlers::SinkWriter> TestDispatch
+        for crate::stages::common::handlers::SinkWriterAdapter<W>
+    {
+        async fn report_test(
+            &mut self,
+            event: obzenflow_core::ChainEvent,
+        ) -> Result<
+            crate::stages::common::handlers::SinkConsumeReport,
+            crate::stages::common::HandlerError,
+        > {
+            let input = obzenflow_core::event::JournalRecord::new(
+                obzenflow_core::JournalWriterId::new(),
+                event,
+            );
+            crate::stages::common::handlers::SinkHandler::consume_committed_report(
+                self,
+                input.into(),
+                Default::default(),
+            )
+            .await
+        }
+    }
+
     use super::*;
-    use crate::stages::common::handlers::{SinkHandler, SinkWriterAdapter};
+    use crate::stages::common::handlers::SinkWriterAdapter;
     use crate::stages::sink::DeliveryProvenance;
     use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
     use obzenflow_core::event::ChainEventFactory;
@@ -307,7 +341,8 @@ mod tests {
     fn event(n: usize) -> obzenflow_core::ChainEvent {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
-            TestPayload::versioned_event_type(),
+            TestPayload::event_type_name(),
+            TestPayload::payload_schema_version(),
             serde_json::json!({ "n": n }),
         )
     }
@@ -343,7 +378,7 @@ mod tests {
         });
         let mut adapter = adapted(handler).await;
         let report = adapter
-            .consume_report(event(4))
+            .report_test(event(4))
             .await
             .expect("typed closure consumes");
         assert!(matches!(
@@ -362,7 +397,7 @@ mod tests {
     {
         let mut adapter = adapted(connector).await;
         let report = adapter
-            .consume_report(event(9))
+            .report_test(event(9))
             .await
             .expect("closure mode consumes");
         assert!(matches!(
@@ -411,7 +446,7 @@ mod tests {
             original_stage_id: StageId::new(),
         });
         adapter
-            .consume_report(replayed)
+            .report_test(replayed)
             .await
             .expect("replayed delivery consumes");
         assert_eq!(
@@ -438,7 +473,11 @@ mod tests {
 
         crate::stages::common::handlers::UnifiedSinkHandler::consume_report(
             &mut adapter,
-            fan_in_output_without_replay_context,
+            crate::testing::causal_fixture::committed_input(
+                obzenflow_core::JournalWriterId::new(),
+                fan_in_output_without_replay_context,
+            )
+            .into(),
             None,
             obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
         )

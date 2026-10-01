@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::observability::ObservationRecorder;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{StageFatalCode, StageFatalReason};
-use obzenflow_core::{ChainEvent, EventType, WriterId};
+use obzenflow_core::{ChainEvent, EventDescriptor, WriterId};
 use std::fmt;
 use std::sync::Arc;
 
@@ -249,7 +249,7 @@ pub trait EffectfulTransformHandler: Send + Sync {
 pub struct EffectfulTransformHandlerAdapter<H> {
     handler: H,
     effect_boundary: Arc<dyn EffectBoundary>,
-    pass_through_event_type: Option<EventType>,
+    pass_through_descriptor: Option<EventDescriptor>,
 }
 
 impl<H> EffectfulTransformHandlerAdapter<H> {
@@ -257,7 +257,7 @@ impl<H> EffectfulTransformHandlerAdapter<H> {
         Self {
             handler,
             effect_boundary,
-            pass_through_event_type: None,
+            pass_through_descriptor: None,
         }
     }
 
@@ -266,13 +266,13 @@ impl<H> EffectfulTransformHandlerAdapter<H> {
     /// events or an untyped dispatch hook.
     #[doc(hidden)]
     pub fn with_exact_pass_through<T: TypedPayload>(mut self) -> Self {
-        self.pass_through_event_type = Some(EventType::from(T::versioned_event_type()));
+        self.pass_through_descriptor = Some(T::descriptor());
         self
     }
 
     #[doc(hidden)]
-    pub fn with_exact_pass_through_event_type(mut self, event_type: EventType) -> Self {
-        self.pass_through_event_type = Some(event_type);
+    pub fn with_exact_pass_through_descriptor(mut self, descriptor: EventDescriptor) -> Self {
+        self.pass_through_descriptor = Some(descriptor);
         self
     }
 
@@ -297,7 +297,7 @@ impl<H: fmt::Debug> fmt::Debug for EffectfulTransformHandlerAdapter<H> {
             .debug_struct("EffectfulTransformHandlerAdapter")
             .field("handler", &self.handler)
             .field("effect_boundary", &"<required>")
-            .field("pass_through_event_type", &self.pass_through_event_type)
+            .field("pass_through_descriptor", &self.pass_through_descriptor)
             .finish()
     }
 }
@@ -331,9 +331,9 @@ where
         _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         if self
-            .pass_through_event_type
+            .pass_through_descriptor
             .as_ref()
-            .is_some_and(|event_type| event_type.as_str() == event.event_type())
+            .is_some_and(|descriptor| descriptor == &event.descriptor())
         {
             return Ok(vec![event]);
         }

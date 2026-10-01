@@ -133,6 +133,7 @@ impl SourcePolicyCtx {
             self.synthetic_event = Some(ChainEventFactory::data_event(
                 self.writer_id,
                 "system.source.next",
+                std::num::NonZeroU32::MIN,
                 serde_json::json!({
                     "source_type": "boundary",
                     "timestamp_ms": SystemTime::now()
@@ -346,6 +347,7 @@ mod tests {
         ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
             "test.source",
+            std::num::NonZeroU32::MIN,
             json!({ "value": 1 }),
         )
     }

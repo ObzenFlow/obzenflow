@@ -32,7 +32,7 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolver, EffectRegistrationBuilder, LogicalEffectBindingName,
-    ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    ResolvedEffectPort, SinkRedeliverySafety, EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -463,14 +463,14 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
             "obzenflow.ai.chat_completion",
             "standalone.chat_completion",
             3,
-            TicketSummarised::versioned_event_type(),
+            TicketSummarised::event_type_name(),
         ),
         (
             "embedding",
             "obzenflow.ai.embedding_generation",
             "standalone.embedding_generation",
             1,
-            TicketEmbedded::versioned_event_type(),
+            TicketEmbedded::event_type_name(),
         ),
     ] {
         let events = stage_events(&live_archive, stage).await;
@@ -478,7 +478,7 @@ async fn live_and_strict_replay_record_replies_and_replay_with_zero_authority() 
             .iter()
             .enumerate()
             .filter_map(|(position, event)| {
-                EffectAttemptStarted::event_type_matches(&event.event_type()).then_some(position)
+                EffectAttemptStarted::matches_event_type(&event.event_type()).then_some(position)
             })
             .collect::<Vec<_>>();
         assert_eq!(attempt_positions.len(), 1);

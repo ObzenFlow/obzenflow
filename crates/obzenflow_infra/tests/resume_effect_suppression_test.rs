@@ -295,7 +295,7 @@ async fn run_until_delivered(
 /// The user-owned effect outcome facts of a stage journal, in physical append
 /// order: `(recorded_flow_id, input_seq)` per fact.
 fn outcome_fact_cursors(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<(String, u64)> {
-    let outcome_type = EffectValue::versioned_event_type();
+    let outcome_type = EffectValue::event_type_name();
     envelopes
         .iter()
         .filter_map(|envelope| {
@@ -418,7 +418,7 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
     // The live facts land after the stage's authored catch-up watermark, the
     // structural witness that they were recorded in the live phase.
     let boundary = watermark_index(&resumed_envelopes, "enrich");
-    let outcome_type = EffectValue::versioned_event_type();
+    let outcome_type = EffectValue::event_type_name();
     let outcome_positions: Vec<usize> = resumed_envelopes
         .iter()
         .enumerate()

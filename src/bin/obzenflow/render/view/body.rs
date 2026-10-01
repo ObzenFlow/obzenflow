@@ -112,6 +112,7 @@ pub(in crate::render) enum MetricsExportView {
 #[derive(Serialize)]
 pub(in crate::render) struct EffectOutcomeView<'a> {
     pub effect_type: &'a EffectType,
+    pub observation: &'a obzenflow_core::event::payloads::effect_payload::EffectObservation,
     #[serde(flatten)]
     pub outcome: &'a EffectOutcomePayload,
 }
@@ -120,6 +121,7 @@ impl<'a> From<&'a EffectRecord> for EffectOutcomeView<'a> {
     fn from(record: &'a EffectRecord) -> Self {
         Self {
             effect_type: &record.descriptor.effect_type,
+            observation: &record.observation,
             outcome: &record.outcome,
         }
     }

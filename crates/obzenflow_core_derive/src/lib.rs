@@ -303,9 +303,7 @@ fn expand_enum(
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as #schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        ) )*;
+                        #( || <#members as #schema::TypedPayload>::matches_fact(fact) )*;
                     if !declared {
                         return ::std::result::Result::Err(
                             #schema::TypedFactSetError::UnexpectedFact {
@@ -317,9 +315,7 @@ fn expand_enum(
                 match facts {
                     [single] => {
                         #(
-                            if <#members as #schema::TypedPayload>::event_type_matches(
-                                single.event_type.as_str(),
-                            ) {
+                            if <#members as #schema::TypedPayload>::matches_fact(single) {
                                 return ::std::result::Result::Ok(Self::#variants(
                                     #schema::decode_member_fact::<#members>(facts)?,
                                 ));
@@ -401,9 +397,7 @@ fn expand_struct(
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as #schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        ) )*;
+                        #( || <#members as #schema::TypedPayload>::matches_fact(fact) )*;
                     if !declared {
                         return ::std::result::Result::Err(
                             #schema::TypedFactSetError::UnexpectedFact {

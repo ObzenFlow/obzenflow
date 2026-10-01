@@ -13,10 +13,10 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const EFFECT_RECORD_EVENT_TYPE: &str = "obzenflow.effect_record.v1";
-pub const CAPTURE_EVENT_TYPE: &str = "obzenflow.capture.v1";
-pub const EFFECT_ATTEMPT_STARTED_EVENT_TYPE: &str = "obzenflow.effect_attempt_started.v1";
-pub const EFFECT_RECOVERY_ABANDONED_EVENT_TYPE: &str = "obzenflow.effect_recovery_abandoned.v1";
+pub const EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE: &str = "effect.execution_succeeded";
+pub const CAPTURE_EVENT_TYPE: &str = "effect.value_captured";
+pub const EFFECT_ATTEMPT_STARTED_EVENT_TYPE: &str = "obzenflow.effect_attempt_started";
+pub const EFFECT_RECOVERY_ABANDONED_EVENT_TYPE: &str = "obzenflow.effect_recovery_abandoned";
 
 macro_rules! string_newtype {
     ($name:ident, $doc:literal) => {
@@ -569,6 +569,7 @@ pub enum EffectOutcomePayload {
     SucceededFact {
         event_kind: super::chain_payload::EventKind,
         event_type: EventType,
+        payload_schema_version: std::num::NonZeroU32,
         output: Value,
         outcome_fact_ordinal: OutcomeFactOrdinal,
         /// Cardinality of the outcome group this fact belongs to (FLOWIP-120q).
@@ -601,6 +602,9 @@ pub struct EffectAttemptStarted {
 impl TypedPayload for EffectAttemptStarted {
     const EVENT_TYPE: &'static str = "obzenflow.effect_attempt_started";
     const SCHEMA_VERSION: u32 = 1;
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::Execution;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
         Ok(ChainPayload::Execution(
             super::execution_payload::ExecutionPayload::EffectAttemptStarted(self),
@@ -634,6 +638,9 @@ pub struct EffectRecoveryAbandoned {
 impl TypedPayload for EffectRecoveryAbandoned {
     const EVENT_TYPE: &'static str = "obzenflow.effect_recovery_abandoned";
     const SCHEMA_VERSION: u32 = 1;
+    const EVENT_KIND: crate::event::payloads::chain_payload::EventKind =
+        crate::event::payloads::chain_payload::EventKind::Execution;
+
     fn into_chain_payload(self) -> Result<ChainPayload, serde_json::Error> {
         Ok(ChainPayload::Execution(
             super::execution_payload::ExecutionPayload::EffectRecoveryAbandoned(self),
@@ -649,8 +656,106 @@ impl TypedPayload for EffectRecoveryAbandoned {
     }
 }
 
+/// Evidence observed by the runtime for this invocation. These variants carry
+/// no permission to invoke an effect or repeat an attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "observation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectObservation {
+    ExecutionRejected {},
+    ExecutionFailed {
+        authority: EffectFailureAuthority,
+        external_completion: ExternalCompletion,
+    },
+    /// The port returned successfully; local replayable-outcome preparation failed.
+    OutcomePreparationFailed {},
+    ExecutionUnresolved {
+        reason: EffectUnresolvedReason,
+        external_completion: ExternalCompletion,
+    },
+    ExecutionSucceeded {
+        authority: EffectSuccessAuthority,
+    },
+    ValueCaptured {},
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectFailureAuthority {
+    PortReturn,
+    TransactionalSettlement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectSuccessAuthority {
+    PortReturn,
+    TransactionalSettlement,
+}
+
+/// A returned error or missing settlement cannot establish external completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCompletion {
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectPortReturn {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EffectUnresolvedReason {
+    MissingTransactionalSettlement {
+        port_return: EffectPortReturn,
+    },
+    RecoveryAbandoned {
+        admission_event_id: EventId,
+        attempt: EffectAttemptOrdinal,
+    },
+}
+
+impl EffectObservation {
+    pub const fn returned_failure() -> Self {
+        Self::ExecutionFailed {
+            authority: EffectFailureAuthority::PortReturn,
+            external_completion: ExternalCompletion::Unknown,
+        }
+    }
+    pub const fn returned_success() -> Self {
+        Self::ExecutionSucceeded {
+            authority: EffectSuccessAuthority::PortReturn,
+        }
+    }
+    pub const fn settled_failure() -> Self {
+        Self::ExecutionFailed {
+            authority: EffectFailureAuthority::TransactionalSettlement,
+            external_completion: ExternalCompletion::Unknown,
+        }
+    }
+    pub const fn settled_success() -> Self {
+        Self::ExecutionSucceeded {
+            authority: EffectSuccessAuthority::TransactionalSettlement,
+        }
+    }
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::ExecutionRejected {} => "effect.execution_rejected",
+            Self::ExecutionFailed { .. } => "effect.execution_failed",
+            Self::OutcomePreparationFailed {} => "effect.outcome_preparation_failed",
+            Self::ExecutionUnresolved { .. } => "effect.execution_unresolved",
+            Self::ExecutionSucceeded { .. } => EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
+            Self::ValueCaptured {} => CAPTURE_EVENT_TYPE,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectRecord {
+    pub observation: EffectObservation,
     pub cursor: EffectCursor,
     pub descriptor_hash: EffectDescriptorHash,
     pub descriptor: EffectDescriptor,
@@ -758,16 +863,58 @@ pub fn effect_escape_controls_group_id(
     ))
 }
 
-pub fn framework_effect_event_type(effect_type: impl AsRef<str>) -> &'static str {
-    if effect_type.as_ref() == "obzenflow.capture" {
-        CAPTURE_EVENT_TYPE
-    } else {
-        EFFECT_RECORD_EVENT_TYPE
+impl EffectRecord {
+    pub fn event_type(&self) -> &'static str {
+        self.observation.event_type()
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let capture = self.descriptor.effect_type.as_str() == "obzenflow.capture";
+        let valid = match (&self.observation, &self.outcome) {
+            (EffectObservation::ValueCaptured {}, EffectOutcomePayload::Succeeded { .. }) => {
+                capture
+            }
+            (
+                EffectObservation::ExecutionSucceeded { .. },
+                EffectOutcomePayload::Succeeded { .. } | EffectOutcomePayload::SucceededFact { .. },
+            ) => !capture,
+            (
+                EffectObservation::ExecutionRejected {}
+                | EffectObservation::ExecutionFailed { .. }
+                | EffectObservation::OutcomePreparationFailed {}
+                | EffectObservation::ExecutionUnresolved { .. },
+                EffectOutcomePayload::Failed { .. },
+            ) => !capture,
+            _ => false,
+        };
+        if !valid {
+            return Err(
+                "event descriptor does not match payload: contradictory effect observation",
+            );
+        }
+        if let EffectObservation::ExecutionUnresolved {
+            reason: EffectUnresolvedReason::RecoveryAbandoned { attempt, .. },
+            ..
+        } = &self.observation
+        {
+            if attempt.get() == 0 {
+                return Err("recovery abandonment requires an earlier admission");
+            }
+        }
+        Ok(())
     }
 }
 
 pub fn is_framework_effect_event_type(event_type: &str) -> bool {
-    event_type == EFFECT_RECORD_EVENT_TYPE || event_type == CAPTURE_EVENT_TYPE
+    matches!(
+        event_type,
+        "effect.execution_rejected"
+            | "effect.execution_failed"
+            | "effect.outcome_preparation_failed"
+            | "effect.execution_unresolved"
+            | "effect.execution_succeeded"
+            | "effect.value_captured"
+    )
 }
 
 #[cfg(test)]
@@ -777,6 +924,8 @@ mod tests {
 
     fn effect_record(cursor: EffectCursor) -> EffectRecord {
         EffectRecord {
+            observation:
+                crate::event::payloads::effect_payload::EffectObservation::returned_success(),
             cursor,
             descriptor_hash: "hash".into(),
             descriptor: EffectDescriptor::new("test.effect", "test", 1, "v1", "input"),
@@ -785,6 +934,70 @@ mod tests {
             },
             origin: None,
         }
+    }
+
+    #[test]
+    fn terminal_names_follow_typed_evidence_and_reject_contradictions() {
+        let failure = EffectOutcomePayload::Failed {
+            // Open dependency codes and diagnostic prose carry no occurrence authority.
+            error_type: "anything_including_recovery_abandoned".into(),
+            error_message: "success timeout rejected".into(),
+            retry: RetryDisposition::NotRetryable,
+            cause: None,
+            detail: None,
+        };
+        for (observation, expected) in [
+            (
+                EffectObservation::ExecutionRejected {},
+                "effect.execution_rejected",
+            ),
+            (
+                EffectObservation::returned_failure(),
+                "effect.execution_failed",
+            ),
+            (
+                EffectObservation::settled_failure(),
+                "effect.execution_failed",
+            ),
+            (
+                EffectObservation::OutcomePreparationFailed {},
+                "effect.outcome_preparation_failed",
+            ),
+            (
+                EffectObservation::ExecutionUnresolved {
+                    reason: EffectUnresolvedReason::MissingTransactionalSettlement {
+                        port_return: EffectPortReturn::Succeeded,
+                    },
+                    external_completion: ExternalCompletion::Unknown,
+                },
+                "effect.execution_unresolved",
+            ),
+        ] {
+            let mut record = effect_record(EffectCursor::new("flow", "stage", 1, 0));
+            record.observation = observation;
+            assert!(
+                record.validate().is_err(),
+                "failure evidence cannot accompany a success body"
+            );
+            record.outcome = failure.clone();
+            assert!(record.validate().is_ok());
+            assert_eq!(record.event_type(), expected);
+            record.descriptor.effect_type = "obzenflow.capture".into();
+            assert!(
+                record.validate().is_err(),
+                "a capture cannot claim execution failure"
+            );
+        }
+        let mut record = effect_record(EffectCursor::new("flow", "stage", 1, 0));
+        assert_eq!(record.event_type(), "effect.execution_succeeded");
+        record.observation = EffectObservation::ValueCaptured {};
+        assert!(record.validate().is_err());
+        record.descriptor.effect_type = "obzenflow.capture".into();
+        assert!(record.validate().is_ok());
+        assert_eq!(record.event_type(), "effect.value_captured");
+        let contradictory =
+            json!({"observation": "execution_rejected", "authority": "port_return"});
+        assert!(serde_json::from_value::<EffectObservation>(contradictory).is_err());
     }
 
     #[test]

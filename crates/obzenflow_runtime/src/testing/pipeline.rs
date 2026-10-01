@@ -29,6 +29,7 @@ pub use crate::pipeline::tests::shutdown::{
 pub use crate::pipeline::tests::startup::{
     blocked_ready_publication_exposes_pending_state_and_preserves_cancellation,
     blocked_registration_preserves_cancellation_and_cleanup,
+    constructed_pipeline_keeps_startup_mode_when_bootstrap_changes,
     startup_waits_for_achieved_transitions_with_zero_child_journal_reads,
 };
 pub use crate::pipeline::tests::supervisor::persistent_controls_cannot_starve_acknowledgements_or_child_termination;

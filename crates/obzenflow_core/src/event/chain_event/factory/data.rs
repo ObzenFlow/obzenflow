@@ -8,40 +8,53 @@ use crate::event::provenance::causality_context::CausalityContext;
 use crate::event::types::WriterId;
 use crate::event::{ChainEvent, ChainPayload};
 use serde_json::Value;
+use std::num::NonZeroU32;
 
 impl ChainEventFactory {
     /// Create a data event
     pub fn data_event(
         writer_id: WriterId,
         event_type: impl Into<String>,
+        payload_schema_version: NonZeroU32,
         payload: Value,
     ) -> ChainEvent {
-        let mut event = Self::create_event(writer_id, ChainPayload::Fact(payload));
-        event.event_type = event_type.into();
-        event
+        Self::create_event(
+            writer_id,
+            ChainPayload::Fact(payload),
+            event_type,
+            payload_schema_version,
+        )
     }
 
     /// Create a data event from a serializable struct
     pub fn data_event_from<T: serde::Serialize>(
         writer_id: WriterId,
         event_type: impl Into<String>,
+        payload_schema_version: NonZeroU32,
         data: &T,
     ) -> Result<ChainEvent, serde_json::Error> {
         let payload = serde_json::to_value(data)?;
-        Ok(Self::data_event(writer_id, event_type, payload))
+        Ok(Self::data_event(
+            writer_id,
+            event_type,
+            payload_schema_version,
+            payload,
+        ))
     }
 
     /// Create a derived event from a parent event (propagates correlation).
     ///
     /// FLOWIP-010 §7: the lineage policy is build-resolved data threaded by
     /// the caller; the data path performs no global config read.
-    pub fn derived_event(
+    pub(crate) fn derived_event(
         writer_id: WriterId,
         parent: &ChainEvent,
         content: ChainPayload,
+        event_type: impl Into<String>,
+        payload_schema_version: NonZeroU32,
         lineage: LineagePolicy,
     ) -> ChainEvent {
-        let mut event = Self::create_event(writer_id, content);
+        let mut event = Self::create_event(writer_id, content, event_type, payload_schema_version);
 
         event.correlation = parent.correlation.clone();
         event.composite_activations = parent.composite_activations().to_vec();
@@ -75,27 +88,28 @@ impl ChainEventFactory {
         writer_id: WriterId,
         parent: &ChainEvent,
         event_type: impl Into<String>,
+        payload_schema_version: NonZeroU32,
         payload: Value,
         lineage: LineagePolicy,
     ) -> ChainEvent {
-        let mut event =
-            Self::derived_event(writer_id, parent, ChainPayload::Fact(payload), lineage);
-        event.event_type = event_type.into();
-        event
-    }
-
-    /// Create an event for a source (flow entry point) with new correlation
-    pub fn source_event(writer_id: WriterId, content: ChainPayload) -> ChainEvent {
-        Self::create_event(writer_id, content).with_new_correlation()
+        Self::derived_event(
+            writer_id,
+            parent,
+            ChainPayload::Fact(payload),
+            event_type,
+            payload_schema_version,
+            lineage,
+        )
     }
 
     /// Create a data event from system component
     pub fn system_data_event(
         writer_id: WriterId,
         event_type: impl Into<String>,
+        payload_schema_version: NonZeroU32,
         payload: Value,
     ) -> ChainEvent {
-        Self::data_event(writer_id, event_type, payload)
+        Self::data_event(writer_id, event_type, payload_schema_version, payload)
     }
 }
 
@@ -111,18 +125,24 @@ mod tests {
     #[test]
     fn derived_event_propagates_ingress_context() {
         let writer_id = WriterId::from(StageId::new());
-        let parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}))
-            .with_ingress_context(IngressContext {
-                accepted_at_ns: 42,
-                ingress_key: "orders".into(),
-                batch_index: Some(3),
-                attempt_seq: crate::ingress::IngressAttemptSeq(0),
-            });
+        let parent = ChainEventFactory::data_event(
+            writer_id,
+            "parent.event",
+            std::num::NonZeroU32::MIN,
+            json!({"id": 1}),
+        )
+        .with_ingress_context(IngressContext {
+            accepted_at_ns: 42,
+            ingress_key: "orders".into(),
+            batch_index: Some(3),
+            attempt_seq: crate::ingress::IngressAttemptSeq(0),
+        });
 
         let child = ChainEventFactory::derived_data_event(
             writer_id,
             &parent,
             "child.event",
+            std::num::NonZeroU32::MIN,
             json!({}),
             LineagePolicy::default(),
         );
@@ -133,13 +153,19 @@ mod tests {
     #[test]
     fn derived_event_propagates_mixed_correlation_sample_metadata() {
         let writer_id = WriterId::from(StageId::new());
-        let mut parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}));
+        let mut parent = ChainEventFactory::data_event(
+            writer_id,
+            "parent.event",
+            std::num::NonZeroU32::MIN,
+            json!({"id": 1}),
+        );
         parent.set_correlation_sample(vec![CorrelationId::new()], true);
 
         let child = ChainEventFactory::derived_data_event(
             writer_id,
             &parent,
             "child.event",
+            std::num::NonZeroU32::MIN,
             json!({}),
             LineagePolicy::default(),
         );

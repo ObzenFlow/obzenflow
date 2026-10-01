@@ -315,21 +315,40 @@ async fn dropped_application_during_host_preparation_cancels_the_built_flow() {
         matches!(preparing, Ok(Ok(()))),
         "host preparation: {preparing:?}"
     );
-    assert!(matches!(ready, Ok(Ok(()))), "startup settlement: {ready:?}");
+    assert!(
+        matches!(ready, Ok(Ok(()))),
+        "ReadyForRun acknowledgement: {ready:?}"
+    );
     assert!(matches!(application_exit, Err(ref error) if error.is_cancelled()));
     assert!(
         stopped.is_ok(),
-        "application must terminate Runtime before assisting cleanup: {completed:?}"
+        "application must terminate the parent supervisor before assisting cleanup: {completed:?}"
     );
     assert_aborted(&completed.expect("bounded preparation cleanup"));
     assert!(!flow.is_running());
+    let facts = flow
+        .system_journal()
+        .unwrap()
+        .read_all_unordered()
+        .await
+        .unwrap();
+    assert!(
+        !facts.iter().any(|fact| matches!(
+            fact.event_type_name(),
+            "system.pipeline.starting"
+                | "system.pipeline.running"
+                | "system.pipeline.completed"
+                | "system.pipeline.cancelled"
+        )),
+        "dropping host preparation must not start input or invent a published outcome"
+    );
     let listener = released_listener(bound_rx.await.unwrap()).await;
     drop(listener);
 }
 
-// Keep the newly spawned pipeline parked until this fixture aborts it. A second
-// worker could run its FSM concurrently and legitimately select failure while
-// emergency teardown closes publication admission or aborts a child.
+// A single worker keeps the newly spawned pipeline parked until this fixture
+// aborts it, so the host observes physical runtime exit before readiness.
+// Concurrent cancellation during an active poll is covered separately.
 #[tokio::test]
 async fn hosted_start_observes_runtime_exit_before_readiness() {
     for terminal_mode in ["exit", "park"] {

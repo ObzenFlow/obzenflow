@@ -13,7 +13,7 @@ use obzenflow_core::event::payloads::system_payload::{
     SystemFeedRole,
 };
 use obzenflow_core::event::provenance::FlowContext;
-use obzenflow_core::event::types::{EventType, SeqNo, WriterId};
+use obzenflow_core::event::types::{SeqNo, WriterId};
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemPayload};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
@@ -46,7 +46,7 @@ fn dual_composite_edge() -> (
         "completed",
         PortDirection::Output,
         checkout,
-        vec!["checkout.completed.v1".to_string()],
+        vec!["checkout.completed".to_string()],
         true,
     )]);
     let audit_subgraph = TopologySubgraphInfo::new(
@@ -64,7 +64,7 @@ fn dual_composite_edge() -> (
         "in",
         PortDirection::Input,
         audit,
-        vec!["checkout.completed.v1".to_string()],
+        vec!["checkout.completed".to_string()],
         true,
     )]);
     let topology = Topology::new_unvalidated(
@@ -93,7 +93,11 @@ async fn contract_result_envelope(upstream: StageId, reader: StageId) -> ChainJo
                 ExecutionPayload::ContractResult {
                     upstream,
                     reader,
-                    selected_event_type: Some(EventType::from("checkout.completed.v1")),
+                    selected_event_type: Some(obzenflow_core::EventDescriptor {
+                        event_kind: obzenflow_core::event::EventKind::Fact,
+                        event_type: "checkout.completed".into(),
+                        payload_schema_version: std::num::NonZeroU32::MIN,
+                    }),
                     feed_role: Some(SystemFeedRole::Input),
                     contract_name: ContractName::from("DeliveryContract"),
                     status: ContractResultStatusLabel::Pending,
@@ -131,7 +135,10 @@ async fn contract_frame_keeps_one_physical_cursor_and_both_composite_aliases() {
 
     assert_eq!(payload["upstream_stage_id"], upstream.to_string());
     assert_eq!(payload["reader_stage_id"], reader.to_string());
-    assert_eq!(payload["selected_event_type"], "checkout.completed.v1");
+    assert_eq!(
+        payload["selected_event_type"],
+        serde_json::json!({"event_kind":"fact", "event_type":"checkout.completed", "payload_schema_version":1})
+    );
     assert_eq!(payload["feed_role"], "input");
     assert_eq!(
         payload["composite_boundaries"],
@@ -180,7 +187,11 @@ async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
                 ExecutionPayload::ContractResult {
                     upstream,
                     reader,
-                    selected_event_type: Some(EventType::from("checkout.completed.v1")),
+                    selected_event_type: Some(obzenflow_core::EventDescriptor {
+                        event_kind: obzenflow_core::event::EventKind::Fact,
+                        event_type: "checkout.completed".into(),
+                        payload_schema_version: std::num::NonZeroU32::MIN,
+                    }),
                     feed_role: Some(SystemFeedRole::Input),
                     contract_name: ContractName::from("DeliveryContract"),
                     status: ContractResultStatusLabel::Pending,

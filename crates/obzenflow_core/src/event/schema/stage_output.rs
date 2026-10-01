@@ -65,10 +65,7 @@ where
     }
 
     fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
-        if let Some(unexpected) = facts
-            .iter()
-            .find(|fact| !T::event_type_matches(fact.event_type.as_str()))
-        {
+        if let Some(unexpected) = facts.iter().find(|fact| !T::matches_fact(fact)) {
             return Err(TypedFactSetError::UnexpectedFact {
                 event_type: unexpected.event_type.clone(),
             });
@@ -289,8 +286,8 @@ mod tests {
         };
         let facts = carrier.into_facts().expect("variant serializes");
         assert_eq!(facts.len(), 2);
-        assert_eq!(facts[0].event_type.as_str(), "stage_output.invalid.v1");
-        assert_eq!(facts[1].event_type.as_str(), "stage_output.cancelled.v1");
+        assert_eq!(facts[0].event_type.as_str(), "stage_output.invalid");
+        assert_eq!(facts[1].event_type.as_str(), "stage_output.cancelled");
     }
 
     #[test]
@@ -403,9 +400,9 @@ mod tests {
         assert_eq!(
             members,
             vec![
-                "stage_output.invalid.v1",
-                "stage_output.cancelled.v1",
-                "stage_output.valid.v1"
+                "stage_output.invalid",
+                "stage_output.cancelled",
+                "stage_output.valid"
             ],
             "the member set deduplicates shared leaves in first-occurrence order"
         );
@@ -414,7 +411,8 @@ mod tests {
     #[test]
     fn sum_of_products_fails_closed_on_bad_groups() {
         let foreign = vec![TypedFact {
-            event_type: crate::event::types::EventType::from("stage_output.unknown.v1"),
+            payload_schema_version: std::num::NonZeroU32::MIN,
+            event_type: crate::event::types::EventType::from("stage_output.unknown"),
             payload: ChainPayload::Fact(serde_json::json!({})),
         }];
         assert!(matches!(

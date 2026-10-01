@@ -296,8 +296,18 @@ struct ExpandHandler {
 impl TransformHandler for ExpandHandler {
     fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![
-            ChainEventFactory::data_event(self.writer_id, "bp_test.expand_out", json!({ "n": 1 })),
-            ChainEventFactory::data_event(self.writer_id, "bp_test.expand_out", json!({ "n": 2 })),
+            ChainEventFactory::data_event(
+                self.writer_id,
+                "bp_test.expand_out",
+                std::num::NonZeroU32::MIN,
+                json!({ "n": 1 }),
+            ),
+            ChainEventFactory::data_event(
+                self.writer_id,
+                "bp_test.expand_out",
+                std::num::NonZeroU32::MIN,
+                json!({ "n": 2 }),
+            ),
         ])
     }
 
@@ -351,6 +361,7 @@ fn generated_continuation(
     let event = ChainEventFactory::data_event(
         WriterId::from(StageId::new()),
         "test.generated.non_quiescent",
+        std::num::NonZeroU32::MIN,
         json!({}),
     );
     let envelope = JournalRecord::new(JournalWriterId::new(), event);
@@ -662,7 +673,12 @@ async fn expand_transform_defers_upstream_ack_until_all_outputs_written() {
     let upstream_writer = registry.writer(s);
     upstream_writer.reserve(1).expect("seed reserve").commit(1);
 
-    let input = ChainEventFactory::data_event(WriterId::from(s), "bp_test.in", json!({}));
+    let input = ChainEventFactory::data_event(
+        WriterId::from(s),
+        "bp_test.in",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     upstream_journal
         .append(input, Default::default())
         .await
@@ -724,7 +740,12 @@ async fn filter_transform_acks_upstream_even_with_zero_outputs() {
     let upstream_writer = registry.writer(s);
     upstream_writer.reserve(1).expect("seed reserve").commit(1);
 
-    let input = ChainEventFactory::data_event(WriterId::from(s), "bp_test.in", json!({}));
+    let input = ChainEventFactory::data_event(
+        WriterId::from(s),
+        "bp_test.in",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     upstream_journal
         .append(input, Default::default())
         .await
@@ -774,7 +795,8 @@ async fn typed_try_map_failure_has_identical_running_and_draining_credit_contrac
             .append(
                 ChainEventFactory::data_event(
                     WriterId::from(s),
-                    FallibleTypedValue::versioned_event_type(),
+                    FallibleTypedValue::event_type_name(),
+                    FallibleTypedValue::payload_schema_version(),
                     json!({ "index": 0 }),
                 ),
                 Default::default(),
@@ -886,6 +908,7 @@ async fn binding_fatal_records_once_and_redacted_in_running_and_draining() {
                 ChainEventFactory::data_event(
                     WriterId::from(s),
                     "test.binding_fatal_input",
+                    std::num::NonZeroU32::MIN,
                     json!({ "value": 1 }),
                 ),
                 Default::default(),
@@ -958,11 +981,11 @@ async fn transport_filtered_data_completes_one_physical_credit_without_handler_d
         s,
         vec![
             crate::messaging::upstream_subscription::SelectedFeedMetadata::new(
-                obzenflow_core::EventType::from("bp_test.selected_a"),
+                crate::testing::causal_fixture::fact_descriptor("bp_test.selected_a", 1),
                 crate::messaging::upstream_subscription::SelectedFeedRole::Input,
             ),
             crate::messaging::upstream_subscription::SelectedFeedMetadata::new(
-                obzenflow_core::EventType::from("bp_test.selected_b"),
+                crate::testing::causal_fixture::fact_descriptor("bp_test.selected_b", 1),
                 crate::messaging::upstream_subscription::SelectedFeedRole::Stream,
             ),
         ],
@@ -980,7 +1003,12 @@ async fn transport_filtered_data_completes_one_physical_credit_without_handler_d
     upstream_writer.reserve(1).expect("seed reserve").commit(1);
     upstream_journal
         .append(
-            ChainEventFactory::data_event(WriterId::from(s), "bp_test.unselected", json!({})),
+            ChainEventFactory::data_event(
+                WriterId::from(s),
+                "bp_test.unselected",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            ),
             Default::default(),
         )
         .await
@@ -1029,7 +1057,12 @@ async fn backpressure_ack_uses_subscription_upstream_stage_not_event_writer_id()
     // WriterId is not required to match the topology upstream stage; it can be preserved
     // across stages for attribution. Backpressure MUST still ack the edge based on which
     // upstream journal produced the event.
-    let input = ChainEventFactory::data_event(WriterId::from(t), "bp_test.in", json!({}));
+    let input = ChainEventFactory::data_event(
+        WriterId::from(t),
+        "bp_test.in",
+        std::num::NonZeroU32::MIN,
+        json!({}),
+    );
     upstream_journal
         .append(input, Default::default())
         .await
@@ -1072,7 +1105,12 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
     ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(t),
+                "bp_test.pending",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            ),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
     );
@@ -1109,7 +1147,12 @@ async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
     ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending2", json!({})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(t),
+                "bp_test.pending2",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            ),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
     );
@@ -1231,7 +1274,12 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
     ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(t),
+                "bp_test.pending",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            ),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
     );
@@ -1312,7 +1360,12 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
     ctx.resources_mut().unwrap().pending_outputs.push_back(
         crate::stages::common::supervision::backpressure_drain::PendingOutput {
             causal: crate::supervised_base::publication::capture(),
-            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
+            event: ChainEventFactory::data_event(
+                WriterId::from(t),
+                "bp_test.pending",
+                std::num::NonZeroU32::MIN,
+                json!({}),
+            ),
             scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         },
     );

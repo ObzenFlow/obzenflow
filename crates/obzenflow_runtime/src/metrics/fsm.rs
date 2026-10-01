@@ -297,9 +297,10 @@ pub struct StageMetrics {
     pub latest_events_accumulated_total: Option<u64>,
     pub latest_events_emitted_total: Option<u64>,
     /// Cumulative committed Data outputs by exact event type.
-    pub latest_data_outputs_by_event_type: HashMap<EventType, u64>,
+    pub latest_data_outputs_by_event_type: HashMap<obzenflow_core::EventDescriptor, u64>,
     /// Cumulative admitted Data inputs by physical upstream and exact type.
-    pub latest_data_inputs_by_upstream_event_type: HashMap<(StageId, EventType), u64>,
+    pub latest_data_inputs_by_upstream_event_type:
+        HashMap<(StageId, obzenflow_core::EventDescriptor), u64>,
     pub latest_errors_total: Option<u64>,
     pub event_loops_total: Option<u64>,
     pub event_loops_with_work_total: Option<u64>,
@@ -388,14 +389,25 @@ impl StageMetrics {
         for count in &accounting.data_outputs_by_event_type {
             let current = self
                 .latest_data_outputs_by_event_type
-                .entry(count.event_type.clone())
+                .entry(obzenflow_core::EventDescriptor {
+                    event_kind: count.event_kind,
+                    event_type: count.event_type.clone(),
+                    payload_schema_version: count.payload_schema_version,
+                })
                 .or_insert(0);
             *current = (*current).max(count.total);
         }
         for count in &accounting.data_inputs_by_upstream_event_type {
             let current = self
                 .latest_data_inputs_by_upstream_event_type
-                .entry((count.upstream, count.event_type.clone()))
+                .entry((
+                    count.upstream,
+                    obzenflow_core::EventDescriptor {
+                        event_kind: count.event_kind,
+                        event_type: count.event_type.clone(),
+                        payload_schema_version: count.payload_schema_version,
+                    },
+                ))
                 .or_insert(0);
             *current = (*current).max(count.total);
         }
@@ -409,17 +421,27 @@ impl BoundaryMetricsView for MetricsStore {
             .and_then(|metrics| {
                 metrics
                     .latest_data_inputs_by_upstream_event_type
-                    .get(&(upstream, event_type.clone()))
+                    .iter()
+                    .filter(|((source, descriptor), _)| {
+                        *source == upstream && descriptor.event_type == *event_type
+                    })
+                    .map(|(_, count)| *count)
+                    .reduce(u64::saturating_add)
             })
-            .copied()
             .unwrap_or(0)
     }
 
     fn data_outputs(&self, member: StageId, event_type: &EventType) -> u64 {
         self.stage_metrics
             .get(&member)
-            .and_then(|metrics| metrics.latest_data_outputs_by_event_type.get(event_type))
-            .copied()
+            .and_then(|metrics| {
+                metrics
+                    .latest_data_outputs_by_event_type
+                    .iter()
+                    .filter(|(descriptor, _)| descriptor.event_type == *event_type)
+                    .map(|(_, count)| *count)
+                    .reduce(u64::saturating_add)
+            })
             .unwrap_or(0)
     }
 
@@ -1775,7 +1797,7 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
-    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryOutcome};
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::{ChainEventFactory, CorrelationId, JournalEvent};
     use obzenflow_core::journal::journal_error::JournalError;
@@ -1996,15 +2018,22 @@ mod tests {
         let mut event = ChainEventFactory::data_event(
             writer_id,
             "test.event",
+            std::num::NonZeroU32::MIN,
             serde_json::json!({"data": "test"}),
         );
         event.set_single_correlation(correlation_id, Some(CorrelationPayload::new(event.id)));
 
         // Simulate what the sink supervisor does when creating a delivery event
-        let payload = DeliveryPayload::success(DeliveryMethod::Noop, Some(1));
-        let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
-            .with_correlation_from(&event)
-            .with_cycle_state_from(&event);
+        let payload = DeliveryOutcome::success(DeliveryMethod::Noop, Some(1));
+        let delivery_event = ChainEventFactory::delivery_event(
+            writer_id,
+            obzenflow_core::event::payloads::delivery_payload::DeliveryPayload {
+                subject: crate::testing::causal_fixture::delivery_subject(event.id),
+                outcome: payload,
+            },
+        )
+        .with_correlation_from(&event)
+        .with_cycle_state_from(&event);
         let delivery_event = delivery_event
             .try_with_composite_activations(event.composite_activations().to_vec())
             .unwrap();
@@ -2030,7 +2059,7 @@ mod tests {
             latest_events_processed_total: Some(42),
             latest_errors_total: Some(3),
             latest_data_outputs_by_event_type: HashMap::from([(
-                EventType::from("checkout.completed.v1"),
+                crate::testing::causal_fixture::fact_descriptor("checkout.completed", 1),
                 5,
             )]),
             event_loops_total: Some(10),
@@ -2170,7 +2199,7 @@ mod tests {
                     name: "completed".to_string(),
                     direction: obzenflow_core::metrics::BoundaryDirection::Outbound,
                     member: stage_id,
-                    payload_event_types: vec![EventType::from("checkout.completed.v1")],
+                    payload_event_types: vec![EventType::from("checkout.completed")],
                 }],
                 edges: vec![obzenflow_core::metrics::CompositeBoundaryEdge {
                     port: "completed".to_string(),

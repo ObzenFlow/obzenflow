@@ -68,7 +68,14 @@ async fn replay_origins_advance_only_with_the_corresponding_admitted_record() {
     use obzenflow_core::event::{CausalFrontier, JournalClock};
 
     let writer = WriterId::from(StageId::new());
-    let event = || ChainEventFactory::data_event(writer, "test.event", serde_json::json!({}));
+    let event = || {
+        ChainEventFactory::data_event(
+            writer,
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        )
+    };
     let first = admitted_fixture(JournalRecord::new(JournalWriterId::new(), event())).await;
     let later_input = admitted_fixture(JournalRecord::new(JournalWriterId::new(), event())).await;
     let next_event = event();
@@ -115,8 +122,12 @@ async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     let archived_writer = WriterId::from(StageId::new());
     let eof = ChainEventFactory::eof_event(archived_writer, true);
 
-    let mut data =
-        ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({"k": "v"}));
+    let mut data = ChainEventFactory::data_event(
+        archived_writer,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({"k": "v"}),
+    );
     data = data.with_new_correlation();
     data.correlation
         .as_mut()
@@ -249,8 +260,12 @@ async fn replay_driver_captures_the_archived_eof_kind() {
 
     for (natural, expected) in [(true, EofKind::Natural), (false, EofKind::Poison)] {
         let archived_writer = WriterId::from(StageId::new());
-        let data =
-            ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({}));
+        let data = ChainEventFactory::data_event(
+            archived_writer,
+            "test.event",
+            std::num::NonZeroU32::MIN,
+            serde_json::json!({}),
+        );
         let eof = ChainEventFactory::eof_event(archived_writer, natural);
         let reader = Box::new(TestReader {
             envelopes: vec![
@@ -278,7 +293,12 @@ async fn replay_driver_captures_no_kind_from_an_archive_with_no_committed_eof() 
     // A killed run's journal ends at the last committed record; a torn final
     // EOF is never parsed (FLOWIP-120q), so both shapes present as no-EOF here.
     let archived_writer = WriterId::from(StageId::new());
-    let data = ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({}));
+    let data = ChainEventFactory::data_event(
+        archived_writer,
+        "test.event",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    );
     let reader = Box::new(TestReader {
         envelopes: vec![JournalRecord::new(JournalWriterId::new(), data)],
         pos: 0,

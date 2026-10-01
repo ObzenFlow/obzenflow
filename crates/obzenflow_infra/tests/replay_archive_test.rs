@@ -114,7 +114,8 @@ async fn write_framed_log_record(dir: &Path, record: &LogRecord<SystemEvent>) {
 #[test]
 fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access() {
     use obzenflow_infra::testing::journal::{
-        audit_archive, corrupt_chain_frame, omit_observations, retain_archive_frames,
+        audit_archive, corrupt_chain_frame, omit_observations,
+        omit_observations_and_export_verified, retain_archive_frames,
     };
 
     let (major, _) = JOURNAL_SCHEMA_VERSION.split_once('.').unwrap();
@@ -153,6 +154,7 @@ fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access(
             let journal = temp.path().join("system.log");
             let sentinel = b"must not be decoded or rewritten";
             std::fs::write(&journal, sentinel).unwrap();
+            let output = temp.path().join("must-not-exist.jsonl");
 
             for (helper, result) in [
                 ("audit", audit_archive(temp.path()).map(|_| ())),
@@ -165,6 +167,16 @@ fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access(
                     "retain",
                     retain_archive_frames(temp.path(), |_, _| panic!("frame predicate reached"))
                         .map(|_| ()),
+                ),
+                (
+                    "omit-and-export",
+                    omit_observations_and_export_verified(
+                        temp.path(),
+                        &Default::default(),
+                        &[],
+                        &output,
+                    )
+                    .map(|_| ()),
                 ),
                 (
                     "corrupt",
@@ -182,6 +194,7 @@ fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access(
                 );
                 assert_eq!(std::fs::read(&journal).unwrap(), sentinel);
                 assert_eq!(std::fs::read(&path).unwrap(), manifest_bytes);
+                assert!(!output.exists());
             }
         }
     }
@@ -190,7 +203,8 @@ fn archive_fixture_helpers_gate_schema_before_manifest_decode_or_journal_access(
 #[tokio::test]
 async fn archive_fixture_helpers_accept_current_schema() {
     use obzenflow_infra::testing::journal::{
-        audit_archive, omit_observations, retain_archive_frames,
+        audit_archive, omit_observations, omit_observations_and_export_verified,
+        retain_archive_frames,
     };
 
     let temp = tempdir().unwrap();
@@ -199,13 +213,35 @@ async fn archive_fixture_helpers_accept_current_schema() {
     assert_eq!(audit_archive(temp.path()).unwrap().records, 1);
     assert_eq!(omit_observations(temp.path(), |_| true).unwrap(), 0);
     assert_eq!(audit_archive(temp.path()).unwrap().records, 1);
+    let output = temp.path().join("current.jsonl");
+    obzenflow_infra::journal::disk::inspect::export_jsonl(temp.path(), Some(&output)).unwrap();
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        omit_observations_and_export_verified(
+            temp.path(),
+            &Default::default(),
+            &expected,
+            &output,
+        )
+        .unwrap(),
+        0
+    );
     assert_eq!(retain_archive_frames(temp.path(), |_, _| false).unwrap(), 1);
     assert_eq!(audit_archive(temp.path()).unwrap().records, 0);
 }
 
 fn write_released_legacy_retry_row(dir: &Path) {
     let writer_id = WriterId::from(obzenflow_core::StageId::new());
-    let event = ChainEventFactory::data_event(writer_id, "fixture.seed", serde_json::json!({}));
+    let event = ChainEventFactory::data_event(
+        writer_id,
+        "fixture.seed",
+        std::num::NonZeroU32::MIN,
+        serde_json::json!({}),
+    );
     let record = JournalRecord::new(JournalWriterId::new(), event);
     let mut frame = serde_json::json!({
         "frame_kind": "record_v2",

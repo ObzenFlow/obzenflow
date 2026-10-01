@@ -27,7 +27,7 @@ use obzenflow_runtime::effects::{
     EffectCommitHandle, EffectContext, EffectCursor, EffectError, EffectOutcomePayload,
     EffectPortResolver, EffectPortSlot, EffectPortSlotSet, EffectRecord, EffectRegistrationBuilder,
     EffectSafety, Effects, IdempotencyKey, LogicalEffectBindingName, Named, NamedEffect,
-    SinkRedeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    SinkRedeliverySafety, TransactionalEffectPort,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -1559,7 +1559,7 @@ fn truncate_stage_before_effect_results(run_dir: &Path, stage_key: &str) {
     // framework-owned reserved event types. An interrupted journal is a physical
     // prefix: stop before the first outcome frame, including every later output.
     // Removing outcomes alone would leave holes in the committed causal chain.
-    let effect_outcome_type = ReplayEffectValue::versioned_event_type();
+    let effect_outcome_type = ReplayEffectValue::event_type_name();
     let reached_outcome = std::cell::Cell::new(false);
     obzenflow_infra::testing::journal::retain_archive_frames(run_dir, |path, records| {
         if path.file_name().and_then(|name| name.to_str()) != Some(stage_journal) {
@@ -1570,7 +1570,9 @@ fn truncate_stage_before_effect_results(run_dir: &Path, stage_key: &str) {
                 .pointer("/envelope/provenance/event/event_type")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|event_type| {
-                    event_type == EFFECT_RECORD_EVENT_TYPE || event_type == effect_outcome_type
+                    obzenflow_core::event::payloads::effect_payload::is_framework_effect_event_type(
+                        event_type,
+                    ) || event_type == effect_outcome_type
                 })
         }) {
             reached_outcome.set(true);
@@ -1617,8 +1619,8 @@ fn stage_id_from_manifest(run_dir: &Path, stage_key: &str) -> StageId {
 }
 
 fn replay_stateful_fact_identities(events: &[ChainEvent]) -> Vec<(String, String)> {
-    let effect_type = ReplayEffectValue::versioned_event_type();
-    let output_type = ReplayOutput::versioned_event_type();
+    let effect_type = ReplayEffectValue::event_type_name();
+    let output_type = ReplayOutput::event_type_name();
     events
         .iter()
         .filter(|event| {
@@ -1654,8 +1656,8 @@ async fn assert_replay_stateful_contract_failure_archive(
             .map(|(_, event_type)| event_type.as_str())
             .collect::<Vec<_>>(),
         vec![
-            ReplayEffectValue::versioned_event_type(),
-            ReplayOutput::versioned_event_type(),
+            ReplayEffectValue::event_type_name(),
+            ReplayOutput::event_type_name(),
         ],
         "both first-input facts must remain durable in their authored order"
     );
@@ -1746,7 +1748,7 @@ fn is_framework_effect_fact(event: &ChainEvent) -> bool {
 
 fn is_domain_effect_outcome_fact(event: &ChainEvent) -> bool {
     event.is_fact()
-        && event.event_type() == ReplayEffectValue::versioned_event_type()
+        && event.event_type() == ReplayEffectValue::event_type_name()
         && event
             .effect_provenance
             .as_ref()
@@ -1756,7 +1758,7 @@ fn is_domain_effect_outcome_fact(event: &ChainEvent) -> bool {
 fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
     match &event.payload {
         ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
-            if event.event_type() == EFFECT_RECORD_EVENT_TYPE
+            if event.event_type() == record.event_type()
                 && event
                     .effect_provenance
                     .as_ref()
@@ -2069,11 +2071,11 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
     }));
     let replay_output_count = effectful_events
         .iter()
-        .filter(|event| event.event_type() == ReplayOutput::versioned_event_type())
+        .filter(|event| event.event_type() == ReplayOutput::event_type_name())
         .count();
     let effect_value_count = effectful_events
         .iter()
-        .filter(|event| event.event_type() == ReplayEffectValue::versioned_event_type())
+        .filter(|event| event.event_type() == ReplayEffectValue::event_type_name())
         .count();
     assert_eq!(replay_output_count, 2);
     assert_eq!(effect_value_count, 2);
@@ -2150,7 +2152,7 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
         .filter(|event| {
             matches!(
                 &event.payload,
-                ChainPayload::Fact(_) if event.event_type() == ReplayOutput::versioned_event_type()
+                ChainPayload::Fact(_) if event.event_type() == ReplayOutput::event_type_name()
             )
         })
         .count();
@@ -2538,7 +2540,7 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
     assert_eq!(
         resumed_stage_events
             .iter()
-            .filter(|event| event.event_type() == ReplayOutput::versioned_event_type())
+            .filter(|event| event.event_type() == ReplayOutput::event_type_name())
             .count(),
         1,
         "resume must journal exactly one emitted output"
@@ -2829,7 +2831,7 @@ async fn effectful_stateful_policy_rejection_authors_flat_domain_fact_live_and_r
         .iter()
         .filter_map(|event| match &event.payload {
             ChainPayload::Execution(ExecutionPayload::EffectRecord(record))
-                if event.event_type() == EFFECT_RECORD_EVENT_TYPE =>
+                if event.event_type() == "effect.execution_rejected" =>
             {
                 Some(record.clone())
             }
@@ -2850,7 +2852,7 @@ async fn effectful_stateful_policy_rejection_authors_flat_domain_fact_live_and_r
     assert_eq!(
         allocation_events
             .iter()
-            .filter(|event| event.event_type() == ReservationFailed::versioned_event_type())
+            .filter(|event| event.event_type() == ReservationFailed::event_type_name())
             .count(),
         2,
         "policy rejection must be accompanied by one flat domain fact"
@@ -3024,12 +3026,12 @@ async fn effectful_stateful_false_one_fact_marker_is_fatal_live_and_under_strict
             .map(|fact| fact.event_type.as_str())
             .collect::<Vec<_>>(),
         vec![
-            ReplayEffectValue::versioned_event_type(),
-            ReplayOutput::versioned_event_type(),
+            ReplayEffectValue::event_type_name(),
+            ReplayOutput::event_type_name(),
         ],
         "the manual marker must be demonstrably false before exercising its runtime backstop"
     );
-    let missing_output_type = ReplayOutput::versioned_event_type();
+    let missing_output_type = ReplayOutput::event_type_name();
 
     let live_journal_base = temp.path().join("live_failure_journals");
     let live_calls = Arc::new(AtomicUsize::new(0));

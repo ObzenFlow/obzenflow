@@ -167,10 +167,7 @@ mod tests {
             .iter()
             .map(|t| t.event_type.to_string())
             .collect();
-        assert_eq!(
-            names,
-            vec!["stage_fact_set.alpha.v1", "stage_fact_set.beta.v1"]
-        );
+        assert_eq!(names, vec!["stage_fact_set.alpha", "stage_fact_set.beta"]);
     }
 
     #[test]
@@ -184,7 +181,7 @@ mod tests {
     fn scalar_payload_is_a_one_member_set() {
         let members = <Alpha as StageFactSet>::member_fact_types();
         assert_eq!(members.len(), 1);
-        assert_eq!(members[0].event_type.as_str(), "stage_fact_set.alpha.v1");
+        assert_eq!(members[0].event_type.as_str(), "stage_fact_set.alpha");
         member_holds::<Alpha, Alpha, _>();
         subset_holds::<Alpha, stage_fact_set![Beta, Alpha], _>();
     }

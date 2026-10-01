@@ -102,7 +102,7 @@ fn consumption_progress_projects_useful_fields_into_a_json_body() {
     let original = serde_json::to_value(&record).unwrap();
     let mut renderer = progress_renderer();
     let text = render_record(&mut renderer, &record);
-    assert!(text.contains("RUNTIME (stage: classify, journal: 2)\ncontrol.consumption_progress ← classify\n⟨2:101⟩\n{\n"), "{text}");
+    assert!(text.contains("RUNTIME (stage: classify, journal: 2)\ncontrol.consumption_progress ← classify\n⟨2:101⟩\npayload schema version: 1\n{\n"), "{text}");
     assert_eq!(
         json_body(&text),
         json!({

@@ -60,6 +60,7 @@ impl StatefulHandler for TimerEmitHandler {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
             "test.timer.emit",
+            std::num::NonZeroU32::MIN,
             json!({ "buffered": state.buffered }),
         )])
     }
@@ -147,8 +148,12 @@ async fn stateful_emit_interval_emits_while_idle() {
 
     // Seed one upstream data event to establish the baseline.
     let upstream_writer = WriterId::from(src);
-    let input_event =
-        ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": 1 }));
+    let input_event = ChainEventFactory::data_event(
+        upstream_writer,
+        "test.input",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": 1 }),
+    );
     src_journal
         .append(input_event, Default::default())
         .await
@@ -234,6 +239,7 @@ impl StatefulHandler for AlwaysEmitHandler {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
             "test.timer.emit",
+            std::num::NonZeroU32::MIN,
             json!({ "buffered": state.buffered }),
         )])
     }
@@ -326,8 +332,12 @@ async fn stateful_emit_interval_advances_under_paused_time() {
 
     // Seed one upstream data event to establish the baseline.
     let upstream_writer = WriterId::from(src);
-    let input_event =
-        ChainEventFactory::data_event(upstream_writer, "test.input", json!({ "seq": 1 }));
+    let input_event = ChainEventFactory::data_event(
+        upstream_writer,
+        "test.input",
+        std::num::NonZeroU32::MIN,
+        json!({ "seq": 1 }),
+    );
     src_journal
         .append(input_event, Default::default())
         .await

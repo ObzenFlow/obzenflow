@@ -3133,7 +3133,7 @@ mod tests {
         assert_eq!(plan.all_feeds().len(), 2);
 
         let reference_type = TypeHintInfo::exact(type_name::<ReferenceEvent>());
-        let reference_key = ReferenceEvent::versioned_event_type();
+        let reference_key = ReferenceEvent::descriptor().to_string();
         let reference_feed = plan
             .all_feeds()
             .iter()
@@ -3145,7 +3145,7 @@ mod tests {
         assert_eq!(reference_feed.selected_payload.type_hint, reference_type);
 
         let stream_type = TypeHintInfo::exact(type_name::<StreamEvent>());
-        let stream_key = StreamEvent::versioned_event_type();
+        let stream_key = StreamEvent::descriptor().to_string();
         let stream_feed = plan
             .all_feeds()
             .iter()
@@ -3157,7 +3157,7 @@ mod tests {
         assert_eq!(stream_feed.selected_payload.type_hint, stream_type);
 
         let join_type = TypeHintInfo::exact(type_name::<JoinedEvent>());
-        let join_output_key = JoinedEvent::versioned_event_type();
+        let join_output_key = JoinedEvent::descriptor().to_string();
         let join_output = plan
             .output_contract(join_id)
             .and_then(|contract| contract.output_by_key(&join_output_key))
@@ -3207,7 +3207,7 @@ mod tests {
         let plan = derive_feed_plan(&topology, &descriptors, &name_to_id, &[]);
         assert_eq!(plan.all_feeds().len(), 1);
 
-        let alternate_key = AlternateEvent::versioned_event_type();
+        let alternate_key = AlternateEvent::descriptor().to_string();
         let feed = &plan.all_feeds()[0];
         assert_eq!(feed.key.upstream_stage, source_id);
         assert_eq!(feed.key.downstream_stage, sink_id);
@@ -3221,7 +3221,7 @@ mod tests {
             .output_contract(source_id)
             .expect("source output contract");
         assert!(contract
-            .output_by_key(&InputEvent::versioned_event_type())
+            .output_by_key(&InputEvent::descriptor().to_string())
             .is_some());
         assert_eq!(
             contract

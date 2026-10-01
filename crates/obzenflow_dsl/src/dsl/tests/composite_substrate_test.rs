@@ -425,7 +425,7 @@ mod tests {
             status_feed.is_some_and(|feed| feed
                 .key
                 .selected_payload_key
-                .starts_with("test.branch.failed")),
+                .eq("fact/test.branch.failed@1")),
             "declared status lane must produce a selected feed keyed by its payload"
         );
     }

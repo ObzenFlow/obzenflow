@@ -65,7 +65,8 @@ use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
     EffectBinding, EffectPortResolutionError, EffectPortResolver, EffectRegistrationBuilder,
-    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety, EFFECT_RECORD_EVENT_TYPE,
+    LogicalEffectBindingName, ResolvedEffectPort, SinkRedeliverySafety,
+    EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -894,15 +895,16 @@ fn stage_writer(run_dir: &Path, stage_key: &str) -> WriterId {
 
 fn is_generated_chunk_output(event: &ChainEvent) -> bool {
     matches!(event.payload, ChainPayload::CompositeData(_))
-        && (AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::event_type_matches(
+        && (AiMapReduceMapInput::<ChunkEnvelope<DigestItem>>::matches_event_type(
             &event.event_type(),
-        ) || AiMapReducePlanningManifest::event_type_matches(&event.event_type())
-            || AiMapReducePlanningFailed::event_type_matches(&event.event_type()))
+        ) || AiMapReducePlanningManifest::matches_event_type(&event.event_type())
+            || AiMapReducePlanningFailed::matches_event_type(&event.event_type()))
 }
 
 fn final_eof_event_type_counts(
     events: &[JournalRecord<ChainPayload>],
-) -> &std::collections::BTreeMap<obzenflow_core::EventType, obzenflow_core::event::types::SeqNo> {
+) -> &std::collections::BTreeMap<obzenflow_core::EventDescriptor, obzenflow_core::event::types::SeqNo>
+{
     events
         .iter()
         .rev()
@@ -924,7 +926,7 @@ fn assert_generated_chunk_authorship(
 ) {
     let seed = seed_events
         .iter()
-        .find(|envelope| DigestSeed::event_type_matches(&envelope.event_type()))
+        .find(|envelope| DigestSeed::matches_event_type(&envelope.event_type()))
         .expect("source journal contains the generated map-reduce seed");
     let chunk_writer = stage_writer(run_dir, "digest__chunk");
     assert_ne!(
@@ -1030,22 +1032,22 @@ async fn assert_zero_chunk_archive(
         expected_excluded_items
     );
 
-    let manifest_key = AiMapReducePlanningManifest::versioned_event_type();
+    let manifest_key = AiMapReducePlanningManifest::descriptor();
     let chunk_eof = final_eof_event_type_counts(&chunk);
     assert_eq!(chunk_eof.len(), 1);
     assert_eq!(
-        chunk_eof.get(&obzenflow_core::EventType::from(manifest_key.clone())),
+        chunk_eof.get(&manifest_key),
         Some(&obzenflow_core::event::types::SeqNo(1)),
         "zero-chunk EOF advertises the one canonical manifest feed row"
     );
     assert!(!chunk_eof
         .keys()
-        .any(|key| key.as_str() == AiMapReducePlanningManifest::EVENT_TYPE));
+        .any(|key| key.event_type.as_str().ends_with(".v1")));
 
     let map_eof = final_eof_event_type_counts(&map);
     assert_eq!(map_eof.len(), 1);
     assert_eq!(
-        map_eof.get(&obzenflow_core::EventType::from(manifest_key)),
+        map_eof.get(&manifest_key),
         Some(&obzenflow_core::event::types::SeqNo(1)),
         "the selected manifest reconciles exactly through the map feed"
     );
@@ -1061,7 +1063,7 @@ async fn assert_zero_chunk_archive(
 
     assert_eq!(
         map.iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         0,
         "zero-chunk jobs allocate no logical map effect cursor"
@@ -1090,7 +1092,7 @@ async fn assert_zero_chunk_archive(
     assert_eq!(
         finalise
             .iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         1,
         "an empty collected value still enters the existing finalise effect once"
@@ -1218,7 +1220,7 @@ fn effect_evidence_ids(envelopes: &[JournalRecord<ChainPayload>]) -> Vec<EventId
     let mut ids = envelopes
         .iter()
         .filter(|envelope| {
-            EffectAttemptStarted::event_type_matches(&envelope.event_type())
+            EffectAttemptStarted::matches_event_type(&envelope.event_type())
                 || chat_completion_reply(&envelope.authored()).is_some()
         })
         .map(|envelope| envelope.envelope.provenance.event.id)
@@ -1539,7 +1541,7 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     assert_eq!(prepare_resolutions.load(Ordering::SeqCst), 0);
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 0);
     assert!(prepare_map.iter().all(|envelope| {
-        !EffectAttemptStarted::event_type_matches(&envelope.event_type())
+        !EffectAttemptStarted::matches_event_type(&envelope.event_type())
             && chat_completion_reply(&envelope.authored()).is_none()
     }));
     assert!(prepare_outputs
@@ -1634,14 +1636,14 @@ async fn generated_map_failure_branches_preserve_their_distinct_durable_contract
     assert_eq!(
         provider_map
             .iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         MAP_CHUNKS
     );
     assert_eq!(
         provider_map
             .iter()
-            .filter(|envelope| envelope.event_type() == EFFECT_RECORD_EVENT_TYPE)
+            .filter(|envelope| envelope.event_type() == "effect.execution_failed")
             .count(),
         MAP_CHUNKS
     );
@@ -1865,14 +1867,14 @@ async fn live_history_replays_without_resolving_or_invoking_chat() {
     assert_eq!(
         live_map
             .iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         expected_map_calls
     );
     assert_eq!(
         live_finalise
             .iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         1
     );
@@ -2188,13 +2190,15 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     assert_eq!(
         in_doubt_map
             .iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         1
     );
     assert!(in_doubt_map.iter().all(|envelope| {
-        envelope.event_type() != EFFECT_RECORD_EVENT_TYPE
-            && chat_completion_reply(&envelope.authored()).is_none()
+        !matches!(
+            &envelope.payload,
+            ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+        ) && chat_completion_reply(&envelope.authored()).is_none()
     }));
 
     let resume_calls = Arc::new(AtomicUsize::new(0));
@@ -2267,7 +2271,7 @@ async fn generated_recovery_abandonment_closes_the_real_composite_without_start_
     );
     let finalise = stage_envelopes(&abandonment_archive, "recovery_digest__finalize").await;
     assert!(!finalise.iter().any(|envelope| {
-        EffectAttemptStarted::event_type_matches(&envelope.event_type())
+        EffectAttemptStarted::matches_event_type(&envelope.event_type())
             || chat_completion_reply(&envelope.authored()).is_some()
     }));
 
@@ -2367,7 +2371,7 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
     assert_eq!(
         active_map
             .iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         1
     );
@@ -2412,7 +2416,7 @@ async fn generated_map_waits_for_all_three_real_edge_credits_before_second_role_
     let map = stage_envelopes(&archive, "credit_digest__map").await;
     assert_eq!(
         map.iter()
-            .filter(|envelope| { EffectAttemptStarted::event_type_matches(&envelope.event_type()) })
+            .filter(|envelope| { EffectAttemptStarted::matches_event_type(&envelope.event_type()) })
             .count(),
         2
     );
@@ -2960,7 +2964,7 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     let starts = generated
         .iter()
         .flat_map(|stage| stage.iter())
-        .filter(|envelope| EffectAttemptStarted::event_type_matches(&envelope.event_type()))
+        .filter(|envelope| EffectAttemptStarted::matches_event_type(&envelope.event_type()))
         .count();
     let completions = generated
         .iter()
@@ -3011,17 +3015,17 @@ async fn one_attempt_ordinal_does_not_claim_downstream_retry_cardinality() {
     assert_eq!(
         direct_data_types,
         std::collections::BTreeMap::from([
-            (AiMapReducePlanningManifest::versioned_event_type(), 1_usize,),
+            (AiMapReducePlanningManifest::event_type_name(), 1_usize,),
             (
-                AiMapReduceTaggedPartial::<DigestPartial>::versioned_event_type(),
+                AiMapReduceTaggedPartial::<DigestPartial>::event_type_name(),
                 manifest.chunk_count,
             ),
-            (EFFECT_RECORD_EVENT_TYPE.to_string(), port_invocations,),
-            (DigestOut::versioned_event_type(), 1),
             (
-                EffectAttemptStarted::versioned_event_type(),
+                EFFECT_EXECUTION_SUCCEEDED_EVENT_TYPE.to_string(),
                 port_invocations,
             ),
+            (DigestOut::event_type_name(), 1),
+            (EffectAttemptStarted::event_type_name(), port_invocations,),
         ]),
         "the one protocol manifest plus three rows per port invocation are the complete Data set; \
          internal downstream retries allocate no ordinal, resilience settlement, or durable row"
@@ -3070,9 +3074,12 @@ async fn resolved_client_target_mismatch_is_fatal_before_start_or_chat() {
     let map = stage_envelopes(&archive, "digest__map").await;
     assert!(
         !map.iter().any(|envelope| {
-            EffectAttemptStarted::event_type_matches(&envelope.event_type())
+            EffectAttemptStarted::matches_event_type(&envelope.event_type())
                 || chat_completion_reply(&envelope.authored()).is_some()
-                || envelope.event_type() == EFFECT_RECORD_EVENT_TYPE
+                || matches!(
+                    &envelope.payload,
+                    ChainPayload::Execution(ExecutionPayload::EffectRecord(_))
+                )
         }),
         "client target validation must precede the attempt boundary"
     );
@@ -3192,7 +3199,7 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
     let map = stage_envelopes(&archive, "digest__map").await;
     let starts = map
         .iter()
-        .filter(|envelope| EffectAttemptStarted::event_type_matches(&envelope.event_type()))
+        .filter(|envelope| EffectAttemptStarted::matches_event_type(&envelope.event_type()))
         .collect::<Vec<_>>();
     assert_eq!(
         starts.len(),
@@ -3202,7 +3209,7 @@ async fn post_start_target_invariant_commits_a_failed_attempt_terminal() {
 
     let failed = map
         .iter()
-        .find(|envelope| envelope.event_type() == EFFECT_RECORD_EVENT_TYPE)
+        .find(|envelope| envelope.event_type() == "effect.execution_failed")
         .expect("post-Start invariant commits a generic failed outcome");
     let ChainPayload::Execution(ExecutionPayload::EffectRecord(record)) = &failed.payload else {
         panic!("effect failure is a typed execution record");
